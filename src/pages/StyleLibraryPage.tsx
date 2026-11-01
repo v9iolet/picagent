@@ -126,7 +126,7 @@ export function StyleLibraryPage({ navigate }: { navigate: (to: string) => void 
 
   return <div className="app-shell style-library-shell">
     <header className="topbar style-library-topbar">
-      <a className="brand-mark" href="/suites/new" onClick={(event) => { event.preventDefault(); navigate("/suites/new"); }} aria-label="返回创建"><span className="brand-glyph">PA</span></a>
+      <a className="brand-mark" href="/suites/new" onClick={(event) => { event.preventDefault(); navigate("/suites/new"); }} aria-label="返回创建"><img src="/logo.png" alt="" width={36} height={36} style={{ objectFit: "contain", flexShrink: 0 }} /></a>
       <div className="topbar-main"><div className="breadcrumb"><span>PicAgent</span><span className="crumb-sep">/</span><strong>风格库</strong></div></div>
       <div className="topbar-actions"><span className="top-status"><span className="status-dot pass" />资源已同步</span><button className="btn btn-ghost" type="button" onClick={() => navigate("/suites/new")}><Icon name="arrow-left" />返回创建</button><button className="icon-btn" type="button" aria-label="当前用户沈">沈</button></div>
     </header>
