@@ -20,10 +20,13 @@ function provider(overrides: Partial<ImageEditProvider> = {}): ImageEditProvider
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 10)); }
 
 test("submission freezes ordered operations and is idempotent", async () => {
-  const repository = new MemoryImageEditorRepository(); const service = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source);
+  const repository = new MemoryImageEditorRepository();
+  let selected: ImageEditProvider | null = provider();
+  const service = new ImageEditorService(repository, async () => selected, new MemoryStorage(), async () => source);
   await service.upsertOperation({ sessionId: "session", operation: operation() });
   await service.upsertOperation({ sessionId: "session", operation: { ...operation("add_text"), operationId: "op-2", summary: "添加标题" } });
   const first = await service.submit({ sessionId: "session", idempotencyKey: "same", sourceCardId: "parent", sourceVersionId: "version-1", summary: "组合编辑" });
+  selected = null;
   const duplicate = await service.submit({ sessionId: "session", idempotencyKey: "same", sourceCardId: "parent", sourceVersionId: "version-1", summary: "组合编辑" });
   assert.equal(first.duplicate, false); assert.equal(duplicate.duplicate, true); assert.equal(duplicate.childTask.id, first.childTask.id); assert.deepEqual(first.snapshot.operations.map((item) => item.operationId), ["op-1", "op-2"]);
   await settle(); const task = await repository.getChildTask(first.childTask.id); const versions = await repository.listVersions(first.childTask.id); assert.equal(task?.currentVersionId, versions[0].id); assert.equal(task?.finalVersionId, null);

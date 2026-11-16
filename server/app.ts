@@ -1,3 +1,7 @@
+import type { ModelCapability } from "../shared/model-settings.js";
+import { GptImageProvider } from "./providers/gpt-image-provider.js";
+import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
+import type { ModelSettings } from "./model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
 import { processGeneratedImage, processImage } from "./image.js";
 import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptStage } from "./prompt-library.js";
@@ -84,7 +88,7 @@ const errorMessages: Record<string, string> = {
   PROMPT_TEMPLATE_NOT_FOUND: "提示词模板未发布或阶段不匹配",
   PLATFORM_NOT_FOUND: "目标平台不在维护表中",
   PROMPT_INPUT_INVALID: "提示词动态字段无效",
-  IMAGE_PROVIDER_NOT_CONFIGURED: "图像生成服务未配置",
+  IMAGE_PROVIDER_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认生图模型",
   IMAGE_PROVIDER_FAILED: "图像生成服务调用失败",
   INVALID_GENERATED_IMAGE: "图像生成服务返回了无效图片",
   INPUT_OBJECT_NOT_FOUND: "原图对象不存在",
@@ -93,7 +97,7 @@ const errorMessages: Record<string, string> = {
   STORAGE_WRITE_FAILED: "生成图片保存失败",
   GENERATION_PERSIST_FAILED: "生成结果保存失败",
   IMAGE_PROVIDER_TIMEOUT: "图像生成服务响应超时",
-  LLM_NOT_CONFIGURED: "DashScope LLM 未配置",
+  LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
   PLAN_REPOSITORY_NOT_CONFIGURED: "计划仓储未配置",
   PLAN_TEMPLATE_NOT_FOUND: "计划模板未发布或阶段不匹配",
   RAG_NOT_CONFIGURED: "商品资料检索未配置",
@@ -111,7 +115,7 @@ const errorMessages: Record<string, string> = {
   CATEGORY_PROMPT_INVALID: "类别提示词输出不符合类别或事实约束",
   CATEGORY_PROMPT_COUNT_MISMATCH: "类别提示词数量与确认数量不一致，请重试",
   CATEGORY_PROMPT_FAILED: "类别提示词生成失败",
-  CATEGORY_PROMPT_LLM_NOT_CONFIGURED: "类别提示词模型未配置",
+  CATEGORY_PROMPT_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
   CATEGORY_PROMPTS_NOT_READY: "类别提示词尚未全部成功，请重试失败类别",
   LLM_PROVIDER_FAILED: "LLM 计划生成失败",
   LLM_TIMEOUT: "计划生成超时，请重试",
@@ -120,7 +124,8 @@ const errorMessages: Record<string, string> = {
   NO_TASKS_TO_GENERATE: "没有可生成的套图任务",
   INVALID_SUITE_TASK: "套图任务不存在",
   INVALID_TASK_BATCH: "生成批次不存在",
-  TASK_IMAGE_PROVIDER_NOT_CONFIGURED: "图像生成服务未配置",
+  TASK_RETRY_INPUT_CHANGED: "任务输入已变更，请提交新的生成",
+  TASK_IMAGE_PROVIDER_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认生图模型",
   TASK_IMAGE_PROVIDER_FAILED: "套图图片生成失败",
   REVERSE_CANVAS_NO_RESULTS: "至少需要一条成功提示词才能进入共享画布",
   REVERSE_WHITE_RESOURCE_REQUIRED: "请先从图片资源库选择产品白底图",
@@ -142,7 +147,7 @@ const errorMessages: Record<string, string> = {
   REVERSE_TEMPLATE_NOT_FOUND: "反推模板未发布或模式不匹配",
   REVERSE_REFERENCE_LIMIT: "一个方案最多上传 16 张参考图",
   REVERSE_REFERENCE_NOT_FOUND: "反推参考图不存在",
-  REVERSE_LLM_NOT_CONFIGURED: "反推模型未配置",
+  REVERSE_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
   REVERSE_OUTPUT_INVALID: "反推模型输出不符合契约",
 };
 
@@ -151,6 +156,7 @@ function fail(code: string, status = 400, message?: string): AppResponse { retur
 function versionView(version: BaseImageVersion) {
   return {
     id: version.id,
+    attemptId: version.attemptId,
     versionNumber: version.versionNumber,
     width: version.width,
     height: version.height,
@@ -166,6 +172,7 @@ function attemptView(attempt: GenerationAttempt) {
     versionNumber: attempt.versionNumber,
     status: attempt.status,
     model: attempt.model,
+    channel: attempt.channel,
     templateVersionId: attempt.promptTemplateVersionId,
     errorCode: attempt.errorCode,
     errorMessage: attempt.errorMessage,
@@ -428,7 +435,25 @@ function taskBatchView(batch: TaskGenerationBatch) { return batch; }
 function taskSlotView(slot: TaskResultSlot) { return slot; }
 function taskVersionView(version: TaskImageVersion) { return version; }
 
-export function createTicket02App(deps: { repository: SuiteRepository; storage: StorageAdapter; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> } }): Ticket02App {
+function llmSource(client: LlmClient) {
+  return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };
+}
+
+export function createTicket02App(deps: { repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> } }): Ticket02App {
+  const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
+  const resolveImage = async () => {
+    const selected = await resolveModel("image");
+    return {
+      provider: selected ? new GptImageProvider(selected.baseUrl, selected.apiKey) : deps.provider,
+      model: selected?.model ?? "gpt-image-2",
+      channel: selected?.source,
+    };
+  };
+  const resolveVision = async () => {
+    const selected = await resolveModel("vision");
+    return selected ? new DashScopeLlmClient(selected.baseUrl, selected.apiKey, selected.model, 300_000, selected.source) : deps.llmClient;
+  };
+
   const uploadIdempotency = new Map<string, InputImage>();
   const categoryPromptRepository = deps.categoryPromptRepository ?? new MemoryCategoryPromptRepository();
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
@@ -555,13 +580,29 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     return visionImages;
   };
 
-  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, retryOfSlotId?: string, sourceVersionIds: Record<string, string> = {}) => {
+  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, failedAttempt?: TaskGenerationAttempt, sourceVersionIds: Record<string, string> = {}) => {
     if (!deps.taskRepository) throw new Error("TASK_REPOSITORY_NOT_CONFIGURED");
+    const existing = (await deps.taskRepository.listBatches(suiteId)).find((batch) => batch.idempotencyKey === idempotencyKey);
+    if (existing) return { batch: existing, duplicate: true };
+    if (failedAttempt && (failedAttempt.contextSnapshot.sourceRevision ?? 0) !== (tasks[0].sourceRevision ?? 0)) {
+      throw new Error("TASK_RETRY_INPUT_CHANGED");
+    }
+    const { provider, model, channel } = await resolveImage();
+    if (deps.modelSettings && !provider) throw new Error("TASK_IMAGE_PROVIDER_NOT_CONFIGURED");
     const now = new Date().toISOString();
     const batch: TaskGenerationBatch = { id: randomUUID(), suiteId, kind, requestedCount: tasks.length, taskIds: tasks.map((task) => task.id), status: "running", idempotencyKey, createdAt: now, startedAt: now, finishedAt: null };
-    const slots: TaskResultSlot[] = tasks.map((task, index) => ({ id: randomUUID(), batchId: batch.id, taskId: task.id, slotOrdinal: index + 1, retryOfSlotId: retryOfSlotId ?? null, status: "generating", selectedVersionId: null, createdAt: now, completedAt: null }));
+    const slots: TaskResultSlot[] = tasks.map((task, index) => ({ id: randomUUID(), batchId: batch.id, taskId: task.id, slotOrdinal: index + 1, retryOfSlotId: failedAttempt?.slotId ?? null, status: "generating", selectedVersionId: null, createdAt: now, completedAt: null }));
     const attempts: TaskGenerationAttempt[] = [];
     for (const [index, task] of tasks.entries()) {
+      const providerName = channel ? "openai-compatible-image" : provider ? "image-provider" : "unconfigured";
+      if (failedAttempt) {
+        attempts.push({
+          ...failedAttempt, id: randomUUID(), slotId: slots[index].id, attemptNo: 1,
+          provider: providerName, model, contextSnapshot: { ...failedAttempt.contextSnapshot, channel, model },
+          status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null,
+        });
+        continue;
+      }
       let sourceKind: "base" | "original" | "library" = "original"; let sourceObjectKey = ""; let sourceBaseVersionId: string | null = null; let sourceInputImageId: string | null = null; let sourceLibraryReferenceId: string | null = null; let sourceResourceVersionId: string | null = null;
       const generationParams = task.generationParams ?? {};
       const materialRefs = Array.isArray(generationParams.productMaterialRefs) ? generationParams.productMaterialRefs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 3) : [];
@@ -608,26 +649,30 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       }
       if (!inputImages.length) inputImages.push({ bytes: (await deps.storage.get(sourceObjectKey))?.bytes ?? Buffer.alloc(0), mimeType: "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: deps.provider ? "image-provider" : "unconfigured", model: "gpt-image-2", endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: generationParams.size ?? "1K", quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: task.globalStyleCard ?? {}, finalPrompt: task.promptDraft, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: task.promptSha256 ?? createHash("sha256").update(task.promptDraft).digest("hex"), contextSnapshot: { suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: task.globalStyleCard ?? {}, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: generationParams.size ?? "1K", quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: task.globalStyleCard ?? {}, finalPrompt: task.promptDraft, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: task.promptSha256 ?? createHash("sha256").update(task.promptDraft).digest("hex"), contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: task.globalStyleCard ?? {}, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
-      for (const attempt of attempts) void executeTaskAttempt(attempt, tasks.find((task) => task.id === attempt.contextSnapshot.suiteTaskId) ?? tasks[attempts.indexOf(attempt)], slots.find((slot) => slot.id === attempt.slotId)!);
+      for (const attempt of attempts) void executeTaskAttempt(attempt, tasks.find((task) => task.id === attempt.contextSnapshot.suiteTaskId) ?? tasks[attempts.indexOf(attempt)], slots.find((slot) => slot.id === attempt.slotId)!, provider);
     }
     return reservation;
   };
 
-  const executeTaskAttempt = async (attempt: TaskGenerationAttempt, task: SuiteTask, slot: TaskResultSlot) => {
+  const executeTaskAttempt = async (attempt: TaskGenerationAttempt, task: SuiteTask, slot: TaskResultSlot, provider: ImageProvider | undefined) => {
     if (!deps.taskRepository) return;
     const finish = new Date().toISOString();
-    if (!deps.provider) { await deps.taskRepository.failAttempt(attempt.id, "TASK_IMAGE_PROVIDER_NOT_CONFIGURED", errorMessages.TASK_IMAGE_PROVIDER_NOT_CONFIGURED, finish); return; }
+    if (!provider) { await deps.taskRepository.failAttempt(attempt.id, "TASK_IMAGE_PROVIDER_NOT_CONFIGURED", errorMessages.TASK_IMAGE_PROVIDER_NOT_CONFIGURED, finish); return; }
     try {
       const source = await deps.storage.get(attempt.sourceObjectKey);
       if (!source) { await deps.taskRepository.failAttempt(attempt.id, "TASK_INVALID_SOURCE", errorMessages.TASK_INVALID_SOURCE, finish); return; }
       const snapshotInputs = Array.isArray(attempt.contextSnapshot.inputImages) ? attempt.contextSnapshot.inputImages as Array<Record<string, unknown>> : [];
       const images = snapshotInputs.length ? (await Promise.all(snapshotInputs.map(async (item) => { const objectKey = typeof item.objectKey === "string" ? item.objectKey : ""; const stored = objectKey ? await deps.storage.get(objectKey) : null; return stored ? { bytes: stored.bytes, mimeType: stored.contentType, filename: String(item.filename ?? "reference.png"), role: String(item.role ?? "reference") } : null; }))).filter((item): item is { bytes: Buffer; mimeType: string; filename: string; role: string } => Boolean(item)) : [{ bytes: source.bytes, mimeType: source.contentType, filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product" }];
-      if (images.length > 1 && deps.provider.supportsMultipleImages === false) { await deps.taskRepository.failAttempt(attempt.id, "TASK_PROVIDER_MULTI_IMAGE_UNSUPPORTED", "当前图片模型不支持多图输入", finish); return; }
-      const generated = await deps.provider.edit({ requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: "gpt-image-2", prompt: task.promptDraft, size: (task.generationParams.size === "2K" || task.generationParams.size === "4K" ? "1K" : "1K"), quality: "medium", n: 1, responseFormat: "b64_json" });
+      if (snapshotInputs.length && images.length !== snapshotInputs.length) {
+        await deps.taskRepository.failAttempt(attempt.id, "TASK_INVALID_SOURCE", errorMessages.TASK_INVALID_SOURCE, finish);
+        return;
+      }
+      if (images.length > 1 && provider.supportsMultipleImages === false) { await deps.taskRepository.failAttempt(attempt.id, "TASK_PROVIDER_MULTI_IMAGE_UNSUPPORTED", "当前图片模型不支持多图输入", finish); return; }
+      const generated = await provider.edit({ requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.finalPrompt), size: (task.generationParams.size === "2K" || task.generationParams.size === "4K" ? "1K" : "1K"), quality: "medium", n: 1, responseFormat: "b64_json" });
       const processed = await processGeneratedImage(generated.bytes);
       const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
       await deps.storage.put({ key: objectKey, bytes: processed.bytes, contentType: processed.mimeType });
@@ -637,7 +682,43 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     }
   };
 
+  const runReverse = async (plan: ReversePlan, ref: ReverseReference, retry: boolean, llmClient: LlmClient | undefined) => {
+    if (!ref.templateVersionId) return fail("REVERSE_TEMPLATE_REQUIRED");
+    if (!llmClient?.generateReversePrompt || !deps.promptRepository) return fail("REVERSE_LLM_NOT_CONFIGURED", 503);
+    const generateReversePrompt = llmClient.generateReversePrompt.bind(llmClient);
+    const template = await observedPromptLoad(deps.promptRepository, ref.templateVersionId, "reverse_prompt"); if (!template || template.applicability.targetType !== plan.mode) return fail("REVERSE_TEMPLATE_NOT_FOUND", 400);
+    const source = await deps.storage.get(ref.objectKey);
+    if (!source) return fail("INPUT_OBJECT_NOT_FOUND", 404);
+    const baselineRef = plan.mode === "detail" ? plan.references.find((item) => item.id === plan.baselineReferenceId && item.id !== ref.id) : undefined;
+    const baseline = baselineRef ? await deps.storage.get(baselineRef.objectKey) : null;
+    const attempt: ReverseAttempt = { id: randomUUID(), referenceId: ref.id, status: "running", retryOfAttemptId: retry ? [...ref.attempts].reverse().find((item) => item.status === "failed")?.id ?? null : null, templateVersionId: template.templateVersionId, mode: plan.mode, baselineReferenceId: plan.baselineReferenceId, requestSummary: { provider: llmClient.provider, model: llmClient.model, channel: llmClient.channel, inputRoles: baseline ? ["reference", "series_color_baseline"] : ["reference"] }, rawOutput: null, errorCode: null, errorMessage: null, promptVersionId: null, createdAt: new Date().toISOString(), completedAt: null }; ref.attempts.push(attempt); await reverseRepository.savePlan({ ...plan, updatedAt: new Date().toISOString() });
+    void (async () => {
+      try {
+        const output = await generateReversePrompt({ template: { body: template.body, userPromptTemplate: template.userPromptTemplate, templateVersionId: template.templateVersionId }, referenceImageId: ref.id, referenceImage: source.bytes, referenceMimeType: ref.mimeType, baselineImage: baseline?.bytes, baselineMimeType: baselineRef?.mimeType, mode: plan.mode });
+        const parsed = typeof output === "string" ? JSON.parse(output) : output; const row = parsed as Record<string, unknown>;
+        if (!row || row.schemaVersion !== "reverse-prompt-v1" || row.referenceImageId !== ref.id || typeof row.prompt !== "string" || !row.prompt.trim()) throw new Error("REVERSE_OUTPUT_INVALID");
+        const generatedPrompt = row.prompt.trim();
+        await withReversePlanWrite(plan.id, async () => {
+          const latest = await reverseRepository.getPlan(plan.id); const latestRef = latest?.references.find((item) => item.id === ref.id); const latestAttempt = latestRef?.attempts.find((item) => item.id === attempt.id);
+          if (!latest || !latestRef || !latestAttempt) return;
+          const version: ReversePromptVersion = { id: randomUUID(), referenceId: ref.id, kind: "model", prompt: generatedPrompt, rawOutput: output, templateVersionId: template.templateVersionId, mode: plan.mode, provider: llmSource(llmClient), createdAt: new Date().toISOString() };
+          latestRef.promptVersions.push(version); latestRef.effectivePromptVersionId = version.id; latestAttempt.status = "succeeded"; latestAttempt.rawOutput = output; latestAttempt.promptVersionId = version.id; latestAttempt.completedAt = new Date().toISOString();
+          await reverseRepository.savePlan({ ...latest, updatedAt: new Date().toISOString() });
+        });
+      } catch (error) {
+        await withReversePlanWrite(plan.id, async () => {
+          const latest = await reverseRepository.getPlan(plan.id); const latestAttempt = latest?.references.find((item) => item.id === ref.id)?.attempts.find((item) => item.id === attempt.id);
+          if (!latest || !latestAttempt) return;
+          latestAttempt.status = "failed"; latestAttempt.errorCode = error instanceof Error ? error.message : "REVERSE_OUTPUT_INVALID"; latestAttempt.errorMessage = latestAttempt.errorCode; latestAttempt.completedAt = new Date().toISOString();
+          await reverseRepository.savePlan({ ...latest, updatedAt: new Date().toISOString() });
+        });
+      }
+    })();
+    return ok({ attemptId: attempt.id }, 202);
+  };
+
   const request = async (method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> => {
+    if (path === "/api/model-settings" || path.startsWith("/api/model-settings/")) return deps.modelSettings ? deps.modelSettings.request(method, path, options.body) : fail("NOT_FOUND", 404);
     if (path.startsWith("/api/image-editor/")) return deps.imageEditorApi ? deps.imageEditorApi.request(method, path, options) : fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
     const reversePlanMatch = path.match(/^\/api\/reverse-plans\/([^/]+)$/);
@@ -685,44 +766,30 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     }
     const reverseRunMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/(run|retry)$/);
     if (reverseRunMatch && method === "POST") {
-      const plan = await reverseRepository.getPlan(reverseRunMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const ref = plan.references.find((item) => item.id === reverseRunMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404); if (!ref.templateVersionId) return fail("REVERSE_TEMPLATE_REQUIRED");
-      if (!deps.llmClient?.generateReversePrompt || !deps.promptRepository) return fail("REVERSE_LLM_NOT_CONFIGURED", 503);
-      const template = await observedPromptLoad(deps.promptRepository, ref.templateVersionId, "reverse_prompt"); if (!template || template.applicability.targetType !== plan.mode) return fail("REVERSE_TEMPLATE_NOT_FOUND", 400);
-      const source = await deps.storage.get(ref.objectKey); if (!source) return fail("INPUT_OBJECT_NOT_FOUND", 404); let baseline: Buffer | undefined; if (plan.mode === "detail" && plan.baselineReferenceId && plan.baselineReferenceId !== ref.id) { const base = plan.references.find((item) => item.id === plan.baselineReferenceId); if (base) baseline = (await deps.storage.get(base.objectKey))?.bytes; }
-      const attempt: ReverseAttempt = { id: randomUUID(), referenceId: ref.id, status: "running", retryOfAttemptId: reverseRunMatch[3] === "retry" ? [...ref.attempts].reverse().find((item) => item.status === "failed")?.id ?? null : null, templateVersionId: template.templateVersionId, mode: plan.mode, baselineReferenceId: plan.baselineReferenceId, requestSummary: { provider: deps.llmClient.provider, model: deps.llmClient.model, inputRoles: baseline ? ["reference", "series_color_baseline"] : ["reference"] }, rawOutput: null, errorCode: null, errorMessage: null, promptVersionId: null, createdAt: new Date().toISOString(), completedAt: null }; ref.attempts.push(attempt); await reverseRepository.savePlan({ ...plan, updatedAt: new Date().toISOString() });
-      void (async () => {
-        try {
-          const output = await deps.llmClient!.generateReversePrompt!({ template: { body: template.body, userPromptTemplate: template.userPromptTemplate, templateVersionId: template.templateVersionId }, referenceImageId: ref.id, referenceImage: source.bytes, baselineImage: baseline, mode: plan.mode });
-          const parsed = typeof output === "string" ? JSON.parse(output) : output; const row = parsed as Record<string, unknown>;
-          if (!row || row.schemaVersion !== "reverse-prompt-v1" || row.referenceImageId !== ref.id || typeof row.prompt !== "string" || !row.prompt.trim()) throw new Error("REVERSE_OUTPUT_INVALID");
-          const generatedPrompt = row.prompt.trim();
-          await withReversePlanWrite(plan.id, async () => {
-            const latest = await reverseRepository.getPlan(plan.id); const latestRef = latest?.references.find((item) => item.id === ref.id); const latestAttempt = latestRef?.attempts.find((item) => item.id === attempt.id);
-            if (!latest || !latestRef || !latestAttempt) return;
-            const version: ReversePromptVersion = { id: randomUUID(), referenceId: ref.id, kind: "model", prompt: generatedPrompt, rawOutput: output, templateVersionId: template.templateVersionId, mode: plan.mode, provider: { name: deps.llmClient!.provider, model: deps.llmClient!.model, isFake: deps.llmClient!.isFake }, createdAt: new Date().toISOString() };
-            latestRef.promptVersions.push(version); latestRef.effectivePromptVersionId = version.id; latestAttempt.status = "succeeded"; latestAttempt.rawOutput = output; latestAttempt.promptVersionId = version.id; latestAttempt.completedAt = new Date().toISOString();
-            await reverseRepository.savePlan({ ...latest, updatedAt: new Date().toISOString() });
-          });
-        } catch (error) {
-          await withReversePlanWrite(plan.id, async () => {
-            const latest = await reverseRepository.getPlan(plan.id); const latestAttempt = latest?.references.find((item) => item.id === ref.id)?.attempts.find((item) => item.id === attempt.id);
-            if (!latest || !latestAttempt) return;
-            latestAttempt.status = "failed"; latestAttempt.errorCode = error instanceof Error ? error.message : "REVERSE_OUTPUT_INVALID"; latestAttempt.errorMessage = latestAttempt.errorCode; latestAttempt.completedAt = new Date().toISOString();
-            await reverseRepository.savePlan({ ...latest, updatedAt: new Date().toISOString() });
-          });
-        }
-      })();
-      return ok({ attemptId: attempt.id }, 202);
+      const llmClient = await resolveVision();
+      return withReversePlanWrite(reverseRunMatch[1], async () => {
+        const plan = await reverseRepository.getPlan(reverseRunMatch[1]);
+        if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
+        const reference = plan.references.find((item) => item.id === reverseRunMatch[2]);
+        return reference ? runReverse(plan, reference, reverseRunMatch[3] === "retry", llmClient) : fail("REVERSE_REFERENCE_NOT_FOUND", 404);
+      });
     }
     const reverseBatchMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/attempts$/);
     if (reverseBatchMatch && method === "POST") {
-      const plan = await reverseRepository.getPlan(reverseBatchMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const results: Array<{ referenceId: string; attemptId?: string; error?: string }> = [];
-      for (const reference of plan.references) {
-        if (!reference.templateVersionId || reference.attempts.some((item) => item.status === "succeeded")) continue;
-        const response = await request("POST", `/api/reverse-plans/${plan.id}/references/${reference.id}/run`, { headers: options.headers }); const data = "data" in response.body ? response.body.data as { attemptId: string } : null;
-        results.push(data ? { referenceId: reference.id, attemptId: data.attemptId } : { referenceId: reference.id, error: "error" in response.body ? response.body.error.code : "REVERSE_OUTPUT_INVALID" });
-      }
-      return ok({ planId: plan.id, attempts: results }, 202);
+      const llmClient = await resolveVision();
+      if (!llmClient?.generateReversePrompt) return fail("REVERSE_LLM_NOT_CONFIGURED", 503);
+      return withReversePlanWrite(reverseBatchMatch[1], async () => {
+        const plan = await reverseRepository.getPlan(reverseBatchMatch[1]);
+        if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
+        const results: Array<{ referenceId: string; attemptId?: string; error?: string }> = [];
+        for (const reference of plan.references) {
+          if (!reference.templateVersionId || reference.attempts.some((item) => item.status === "succeeded" || item.status === "running")) continue;
+          const response = await runReverse(plan, reference, false, llmClient);
+          const data = "data" in response.body ? response.body.data as { attemptId: string } : null;
+          results.push(data ? { referenceId: reference.id, attemptId: data.attemptId } : { referenceId: reference.id, error: "error" in response.body ? response.body.error.code : "REVERSE_OUTPUT_INVALID" });
+        }
+        return ok({ planId: plan.id, attempts: results }, 202);
+      });
     }
     const reverseAttemptMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/attempts\/([^/]+)$/);
     if (reverseAttemptMatch && method === "GET") { const plan = await reverseRepository.getPlan(reverseAttemptMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const found = plan.references.flatMap((item) => item.attempts).find((item) => item.id === reverseAttemptMatch[2]); return found ? ok(found) : fail("REVERSE_REFERENCE_NOT_FOUND", 404); }
@@ -736,7 +803,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const reverseAssetMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/asset$/);
     if (reverseAssetMatch && method === "POST") {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503); const plan = await reverseRepository.getPlan(reverseAssetMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const ref = plan.references.find((item) => item.id === reverseAssetMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404); const prompt = ref.promptVersions.find((item) => item.id === ref.effectivePromptVersionId); if (!prompt) return fail("REVERSE_OUTPUT_INVALID");
-      const result = await deps.libraryRepository.createReverseReferenceAsset({ title: ref.filename, summary: `${plan.mode === "main" ? "主图" : "详情图"}反推资产，不作为商品事实`, objectKey: ref.objectKey, mimeType: ref.mimeType, promptSnapshot: { prompt: prompt.prompt, promptVersionId: prompt.id }, visualStructure: { mode: plan.mode }, source: { reversePlanId: plan.id, referenceId: ref.id, sha256: ref.sha256, templateVersionId: prompt.templateVersionId } }); return ok(result, 201);
+      const result = await deps.libraryRepository.createReverseReferenceAsset({ title: ref.filename, summary: `${plan.mode === "main" ? "主图" : "详情图"}反推资产，不作为商品事实`, objectKey: ref.objectKey, mimeType: ref.mimeType, promptSnapshot: { prompt: prompt.prompt, promptVersionId: prompt.id }, visualStructure: { mode: plan.mode }, source: { reversePlanId: plan.id, referenceId: ref.id, sha256: ref.sha256, templateVersionId: prompt.templateVersionId, provider: prompt.provider } }); return ok(result, 201);
     }
     const reverseCanvasMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/canvas-imports$/);
     if (reverseCanvasMatch && method === "POST") {
@@ -911,7 +978,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       if (!deps.ragClient) return fail("RAG_NOT_CONFIGURED", 503);
-      if (!deps.llmClient) return fail("LLM_NOT_CONFIGURED", 503);
+      const llmClient = await resolveVision();
+      if (!llmClient) return fail("LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(structureMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
       const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
@@ -934,12 +1002,12 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const visionImages = [];
       for (const image of images) { let key = image.originalObjectKey; let source = await deps.storage.get(key); if (image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suite.id, image.id, image.currentBaseVersionId); if (base) { key = base.objectKey; source = await deps.storage.get(key); } } if (!source) return fail("PLAN_INPUT_IMAGE_NOT_FOUND", 409); visionImages.push({ id: image.id, sourceKind: image.currentBaseVersionId ? "base" as const : "original" as const, sourceVersionId: image.currentBaseVersionId, mimeType: source.contentType, bytes: source.bytes }); }
       const createdAt = new Date().toISOString();
-      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: images.flatMap((item) => item.currentBaseVersionId ? [item.currentBaseVersionId] : []), provider: { name: deps.llmClient.provider, model: deps.llmClient.model, isFake: deps.llmClient.isFake }, errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
+      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: images.flatMap((item) => item.currentBaseVersionId ? [item.currentBaseVersionId] : []), provider: llmSource(llmClient), errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
       const reservation = await deps.planRepository.beginAttempt(attempt);
       if (reservation.duplicate) return ok({ attemptId: reservation.attempt.id, status: reservation.attempt.status }, reservation.attempt.status === "running" ? 202 : 200);
       void (async () => {
         try {
-          const raw = await deps.llmClient!.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined });
+          const raw = await llmClient.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined });
           const output = normalizeStructureOutput(raw);
           if (!output) { await deps.planRepository!.failAttempt(attempt.id, "LLM_OUTPUT_SCHEMA_INVALID", errorMessages.LLM_OUTPUT_SCHEMA_INVALID, summarizeOutput(raw)); return; }
           const supplementRef = designerFactsText(validated.value) ? ["human_supplement"] : [];
@@ -996,14 +1064,18 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!snapshot || snapshot.phase !== "structure_plan" || snapshot.confirmationStatus !== "confirmed") return ok({ planSnapshotId: snapshot?.id ?? null, status: "not_ready", requests: [] });
       const requests = await listCategoryRequestsForSnapshot(snapshot);
       const expectedRequestCount = categoryAllocationsForSnapshot(snapshot).length;
-      const status = requests.length < expectedRequestCount || requests.some((request) => request.status === "running") ? "running" : requests.some((request) => request.status === "failed") ? "partial" : requests.length ? "succeeded" : "pending";
+      const current = [...new Map(requests.map((request) => [request.categoryCode, request])).values()];
+      const status = !current.length ? "pending"
+        : current.length < expectedRequestCount || current.some((request) => request.status === "running") ? "running"
+        : current.some((request) => request.status === "failed") ? "partial" : "succeeded";
       return ok({ planSnapshotId: snapshot.id, status, expectedRequestCount, requests: requests.map(categoryRequestView) });
     }
     if (method === "POST" && categoryPromptsMatch) {
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      if (!deps.llmClient) return fail("CATEGORY_PROMPT_LLM_NOT_CONFIGURED", 503);
+      const llmClient = await resolveVision();
+      if (!llmClient) return fail("CATEGORY_PROMPT_LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(categoryPromptsMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
       const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
@@ -1032,7 +1104,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           const request: CategoryPromptRequest = {
             id: randomUUID(), suiteId: suite.id, planSnapshotId: snapshot.id, categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, status: "running", idempotencyKey: requestKey, retryOfRequestId: null,
             templateVersionId: template!.templateVersionId, dynamicInput, humanInput, approvedFactRefs, inputImageIds: snapshot.inputImageIds, baseVersionIds: snapshot.baseVersionIds,
-            provider: { name: deps.llmClient!.provider, model: deps.llmClient!.model, isFake: deps.llmClient!.isFake }, requestSummary: { phase: "category_prompt", categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, planSnapshotId: snapshot.id, templateVersionId: template!.templateVersionId }, responseSummary: null, items: [], errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), completedAt: null,
+            provider: llmSource(llmClient), requestSummary: { phase: "category_prompt", categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, planSnapshotId: snapshot.id, templateVersionId: template!.templateVersionId }, responseSummary: null, items: [], errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), completedAt: null,
           };
           const reservation = await categoryPromptRepository.beginRequest(request);
           if (reservation.duplicate && reservation.request.status !== "running") continue;
@@ -1041,8 +1113,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
              const chunks = snapshot.chunks.filter((chunk) => approvedFactRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, summary: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256, published: true }));
             const visionImages = await loadCategoryVisionImages(suite.id, snapshot, entry.allocation);
             const llmInput: CategoryPromptLlmInput = { requestId: request.id, templateVersionId: template!.templateVersionId, templateBody: template!.body, userPromptTemplate: template!.userPromptTemplate, dynamicInput, humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined, categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, approvedFactRefs };
-            if (!deps.llmClient!.generateCategoryPrompt) throw new Error("CATEGORY_PROMPT_LLM_NOT_CONFIGURED");
-            const raw = await deps.llmClient!.generateCategoryPrompt(llmInput);
+            if (!llmClient.generateCategoryPrompt) throw new Error("CATEGORY_PROMPT_LLM_NOT_CONFIGURED");
+            const raw = await llmClient.generateCategoryPrompt(llmInput);
             const output = normalizeCategoryPromptOutput(raw);
             const summary = summarizeOutput(raw);
             if (!output || output.category !== entry.categoryCode) { await categoryPromptRepository.failRequest(request.id, "CATEGORY_PROMPT_INVALID", errorMessages.CATEGORY_PROMPT_INVALID, summary); continue; }
@@ -1065,7 +1137,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const categoryRetryMatch = path.match(/^\/api\/suites\/([^/]+)(?:\/plan)?\/category-prompts\/([^/]+)\/retry$/);
     if (method === "POST" && categoryRetryMatch) {
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
-      if (!deps.planRepository || !deps.promptRepository || !deps.llmClient) return fail("CATEGORY_PROMPT_LLM_NOT_CONFIGURED", 503);
+      const llmClient = await resolveVision();
+      if (!deps.planRepository || !deps.promptRepository || !llmClient) return fail("CATEGORY_PROMPT_LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(categoryRetryMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
       const snapshot = await deps.planRepository.getLatestSnapshot(suite.id);
@@ -1084,7 +1157,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         ? snapshot.structure.mainAllocation as unknown as Record<string, unknown>
         : snapshot.structure.categoryAllocations.map((item) => item as Record<string, unknown>).find((item) => String(item.category) === previous.categoryCode) ?? null;
       const dynamicInput = categoryPlanInput(snapshot, previous.categoryCode, previous.requestedCount, allocation);
-      const retryRequest: CategoryPromptRequest = { ...previous, id: randomUUID(), status: "running", idempotencyKey: `${idempotencyKey}:${snapshot.id}:${previous.categoryCode}:retry`, retryOfRequestId: previous.id, templateVersionId: template.templateVersionId, dynamicInput, requestSummary: { ...previous.requestSummary, retryOfRequestId: previous.id }, responseSummary: null, items: [], errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), completedAt: null };
+      const retryRequest: CategoryPromptRequest = { ...previous, id: randomUUID(), status: "running", idempotencyKey: `${idempotencyKey}:${snapshot.id}:${previous.categoryCode}:retry`, retryOfRequestId: previous.id, provider: llmSource(llmClient), templateVersionId: template.templateVersionId, dynamicInput, requestSummary: { ...previous.requestSummary, retryOfRequestId: previous.id }, responseSummary: null, items: [], errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), completedAt: null };
       const reservation = await categoryPromptRepository.beginRequest(retryRequest);
       if (reservation.duplicate) return ok(categoryRequestView(reservation.request), reservation.request.status === "running" ? 202 : 200);
       void (async () => {
@@ -1092,8 +1165,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           const approvedFactRefs = retryRequest.approvedFactRefs;
           const chunks = snapshot.chunks.filter((chunk) => approvedFactRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, summary: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256, published: true }));
           const visionImages = await loadCategoryVisionImages(suite.id, snapshot, allocation);
-          if (!deps.llmClient!.generateCategoryPrompt) throw new Error("CATEGORY_PROMPT_LLM_NOT_CONFIGURED");
-          const raw = await deps.llmClient!.generateCategoryPrompt({ requestId: retryRequest.id, templateVersionId: template.templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput, humanInput: retryRequest.humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined, categoryCode: retryRequest.categoryCode, requestedCount: retryRequest.requestedCount, approvedFactRefs });
+          if (!llmClient.generateCategoryPrompt) throw new Error("CATEGORY_PROMPT_LLM_NOT_CONFIGURED");
+          const raw = await llmClient.generateCategoryPrompt({ requestId: retryRequest.id, templateVersionId: template.templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput, humanInput: retryRequest.humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined, categoryCode: retryRequest.categoryCode, requestedCount: retryRequest.requestedCount, approvedFactRefs });
           const output = normalizeCategoryPromptOutput(raw);
           const summary = summarizeOutput(raw);
           if (!output || output.category !== retryRequest.categoryCode) { await categoryPromptRepository.failRequest(retryRequest.id, "CATEGORY_PROMPT_INVALID", errorMessages.CATEGORY_PROMPT_INVALID, summary); return; }
@@ -1118,7 +1191,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       if (!deps.ragClient) return fail("RAG_NOT_CONFIGURED", 503);
-      if (!deps.llmClient) return fail("LLM_NOT_CONFIGURED", 503);
+      const llmClient = await resolveVision();
+      if (!llmClient) return fail("LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(planMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
       const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
@@ -1159,12 +1233,12 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         visionImages.push({ id: image.id, sourceKind, sourceVersionId, mimeType: source.contentType, bytes: source.bytes });
       }
       const createdAt = new Date().toISOString();
-      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: images.flatMap((item) => item.currentBaseVersionId ? [item.currentBaseVersionId] : []), provider: { name: deps.llmClient.provider, model: deps.llmClient.model, isFake: deps.llmClient.isFake }, errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
+      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: images.flatMap((item) => item.currentBaseVersionId ? [item.currentBaseVersionId] : []), provider: llmSource(llmClient), errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
       const reservation = await deps.planRepository.beginAttempt(attempt);
       if (reservation.duplicate) return ok({ attemptId: reservation.attempt.id, status: reservation.attempt.status }, reservation.attempt.status === "running" ? 202 : 200);
       void (async () => {
         let raw: unknown;
-        try { raw = await deps.llmClient!.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined }); }
+        try { raw = await llmClient.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined }); }
         catch (error) { const code = error instanceof Error && error.message === "LLM_TIMEOUT" ? "LLM_TIMEOUT" : "LLM_PROVIDER_FAILED"; await deps.planRepository!.failAttempt(attempt.id, code, errorMessages[code]); return; }
         const normalizedOutput = normalizePlanOutput(raw);
         if (!normalizedOutput || !validPlanOutput(normalizedOutput, template.outputSchema)) { await deps.planRepository!.failAttempt(attempt.id, "LLM_OUTPUT_SCHEMA_INVALID", errorMessages.LLM_OUTPUT_SCHEMA_INVALID, summarizeOutput(raw)); return; }
@@ -1361,7 +1435,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!failed || failed.status !== "failed") return fail("INVALID_TASK_ATTEMPT", 409);
       const slot = await deps.taskRepository.getSlot(failed.slotId); if (!slot) return fail("INVALID_TASK_BATCH", 404);
       const task = await deps.taskRepository.getTask(slot.taskId); if (!task) return fail("INVALID_SUITE_TASK", 404);
-      try { const result = await createTaskBatch(task.suiteId, [task], "retry", idempotencyKey, slot.id); return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202); }
+      try { const result = await createTaskBatch(task.suiteId, [task], "retry", idempotencyKey, failed); return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202); }
       catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
     }
 
@@ -1423,6 +1497,13 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const prompt = renderPromptTemplate(template, validatedInput.value);
       const image = await deps.repository.getInputImage(suiteId, inputImageId);
       if (!image) return fail("INVALID_INPUT_IMAGE", 404);
+      const { provider, model, channel } = await resolveImage();
+      if (deps.modelSettings && !provider) {
+        const previous = (await deps.repository.listGenerationAttempts(suiteId, inputImageId)).find((attempt) => attempt.idempotencyKey === idempotencyKey);
+        if (!previous) return fail("IMAGE_PROVIDER_NOT_CONFIGURED", 503);
+        const version = await deps.repository.getBaseImageVersion(suiteId, inputImageId, previous.baseVersionId);
+        return ok({ attempt: attemptView(previous), version: version ? versionView(version) : null }, previous.status === "running" ? 202 : 200);
+      }
       const createdAt = new Date().toISOString();
       const reservation = await deps.repository.beginBaseGeneration({
         id: randomUUID(),
@@ -1430,7 +1511,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         inputImageId,
         baseVersionId: randomUUID(),
         idempotencyKey,
-        model: "gpt-image-2",
+        model,
+        channel,
         endpoint: "/v1/images/edits",
         prompt,
         promptTemplateVersionId: templateVersionId,
@@ -1444,7 +1526,6 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (reservation.duplicate) {
         return ok({ attempt: attemptView(reservation.attempt), version: reservation.existingVersion ? versionView(reservation.existingVersion) : null }, reservation.attempt.status === "running" ? 202 : 200);
       }
-      const provider = deps.provider;
       if (!provider) {
         await deps.repository.failBaseGeneration(reservation.attempt.id, "IMAGE_PROVIDER_NOT_CONFIGURED", errorMessages.IMAGE_PROVIDER_NOT_CONFIGURED, new Date().toISOString());
         return fail("IMAGE_PROVIDER_NOT_CONFIGURED", 503);
@@ -1482,7 +1563,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
             image: source.bytes,
             imageMimeType: source.contentType,
             imageFilename: source.key.endsWith("generation-input.jpg") ? "generation-input.jpg" : image.originalFilename,
-            model: "gpt-image-2",
+            model: reservation.attempt.model,
             prompt,
             size: "1K",
             quality: "medium",

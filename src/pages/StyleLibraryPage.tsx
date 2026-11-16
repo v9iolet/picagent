@@ -134,6 +134,7 @@ export function StyleLibraryPage({ navigate }: { navigate: (to: string) => void 
       <a className="nav-item" href="/suites/new" onClick={(event) => { event.preventDefault(); navigate("/suites/new"); }}><Icon name="sparkles" /><span>创建</span></a>
       <button className="nav-item" type="button" onClick={() => notify("任务中心接口已预留")}><Icon name="tasks" /><span>任务</span></button>
       <a className="nav-item active" href="/style-library" aria-current="page"><Icon name="library" /><span>风格库</span></a>
+      <a className="nav-item" href="/settings" onClick={(event) => { event.preventDefault(); navigate("/settings"); }}><Icon name="sliders" /><span>配置</span></a>
       <span className="nav-spacer" />
     </aside>
     <main className="workarea styles-layout style-library-workarea">

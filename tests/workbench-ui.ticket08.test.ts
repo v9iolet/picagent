@@ -21,7 +21,7 @@ test("every current base image is connected to every active task", async () => {
 test("task cards carry the global style prefix and generation parameters", async () => {
   const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
   assert.match(source, /styledPrompt\(task, styleGuide\)/);
-  assert.match(source, /modelFor\(task\)/);
+  assert.match(source, /modelFor\(task, version\)/);
   assert.match(source, /ratioFor\(task\)/);
   assert.match(source, /sizeFor\(task\)/);
   assert.match(source, /qualityFor\(task\)/);

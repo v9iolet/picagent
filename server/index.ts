@@ -9,7 +9,7 @@ import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { decodeMultipartFilename, parseMultipartFile } from "./multipart.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
-import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
+import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
 import { PostgresPlanRepository } from "./repositories/postgres-plan-repository.js";
 import { PostgresCategoryPromptRepository } from "./repositories/postgres-category-prompt-repository.js";
 import { PostgresPlatformRepository } from "./repositories/postgres-platform-repository.js";
@@ -39,45 +39,54 @@ try {
   console.warn("MinIO bucket readiness check failed; ask an administrator to create the configured bucket or grant bucket permissions.");
 }
 const storage = new MinioStorage(minio, config.minio.bucket, 300, config.minio.legacyBucket);
-const imageProvider = new GptImageProvider(config.imageGeneration.baseUrl, config.imageGeneration.apiKey, config.imageGeneration.timeoutMs);
-const ocrProvider = config.llm ? new DashScopeOcrProvider(config.llm.baseUrl, config.llm.apiKey, config.llm.model, config.llm.timeoutMs) : undefined;
-const imageEditorProvider: ImageEditProvider = {
-  name: "openai-compatible-image",
-  version: "gpt-image-2",
-  capabilitiesVersion: "v1",
-  capabilities: () => ({
-    imageToImage: process.env.IMAGE_EDITOR_IMAGE_TO_IMAGE !== "false",
-    addText: process.env.IMAGE_EDITOR_ADD_TEXT !== "false",
-    changeText: process.env.IMAGE_EDITOR_CHANGE_TEXT !== "false",
-    redraw: process.env.IMAGE_EDITOR_REDRAW !== "false",
-    erase: process.env.IMAGE_EDITOR_ERASE !== "false",
-    outpaint: process.env.IMAGE_EDITOR_OUTPAINT !== "false",
-    currentVersionInput: process.env.IMAGE_EDITOR_CURRENT_VERSION !== "false",
-  }),
-  edit: async (command, source) => {
-    const structuredInstructions = command.operations.map((operation) => {
-      if (operation.type === "add_text") return `新增文字“${String(operation.payload.text ?? "")}”，区域与样式参数：${JSON.stringify(operation.payload)}`;
-      if (operation.type === "change_text") return `将区域 ${JSON.stringify(operation.payload.region)} 内的原文字“${String(operation.payload.originalText ?? "")}”替换为“${String(operation.payload.newText ?? "")}”，保留原有排版。`;
-      if (operation.type === "outpaint") return `按方向 ${String(operation.payload.direction ?? "all")} 扩展到目标比例 ${String(operation.payload.targetRatio ?? "original")}，保持主体位置与风格。`;
-      if (operation.type === "redraw") return `仅重绘蒙版白色区域，蒙版外保持不变。操作参数：${JSON.stringify(operation.payload)}`;
-      if (operation.type === "erase") return `仅消除蒙版白色区域并修复背景，蒙版外保持不变。操作参数：${JSON.stringify(operation.payload)}`;
-      return String(operation.payload.instruction ?? operation.summary);
-    }).join("\n");
-    const maskedOperations = command.operations.filter((operation) => operation.type === "redraw" || operation.type === "erase");
-    if (maskedOperations.length > 1) throw new Error("MULTIPLE_MASK_OPERATIONS_UNSUPPORTED");
-    const masked = maskedOperations[0];
-    let mask: Buffer | undefined;
-    if (masked) {
-      const metadata = masked.payload.mask;
-      if (!metadata || typeof metadata !== "object" || typeof (metadata as Record<string, unknown>).objectKey !== "string") throw new Error("MASK_SNAPSHOT_REQUIRED");
-      const stored = await storage.get((metadata as Record<string, string>).objectKey);
-      if (!stored || stored.contentType !== "image/png") throw new Error("MASK_OBJECT_NOT_FOUND");
-      mask = stored.bytes;
-    }
-    const result = await imageProvider.edit({ requestId: randomUUID(), flow: "image-editor", endpoint: "/v1/images/edits", image: source.bytes, imageMimeType: source.mimeType, imageFilename: "source.png", model: "gpt-image-2", prompt: `${command.prompt}\n\n结构化编辑指令：\n${structuredInstructions}`, size: "1K", quality: "medium", n: 1, responseFormat: "b64_json", mask, maskMimeType: mask ? "image/png" : undefined, maskFilename: mask ? "mask.png" : undefined });
-    const metadata = await sharp(result.bytes).metadata();
-    return { bytes: result.bytes, mimeType: result.mimeType, width: metadata.width ?? source.width, height: metadata.height ?? source.height };
-  },
+const modelSettings = new ModelSettings(new PostgresModelSettingsRepository(pool));
+const resolveOcrProvider = async () => {
+  const selected = await modelSettings.resolve("vision");
+  return selected ? new DashScopeOcrProvider(selected.baseUrl, selected.apiKey, selected.model, 300_000, selected.source) : null;
+};
+const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> => {
+  const selected = await modelSettings.resolve("image");
+  if (!selected) return null;
+  const imageProvider = new GptImageProvider(selected.baseUrl, selected.apiKey);
+  return {
+    name: "openai-compatible-image",
+    version: selected.model,
+    channel: selected.source,
+    capabilitiesVersion: "v1",
+    capabilities: () => ({
+      imageToImage: process.env.IMAGE_EDITOR_IMAGE_TO_IMAGE !== "false",
+      addText: process.env.IMAGE_EDITOR_ADD_TEXT !== "false",
+      changeText: process.env.IMAGE_EDITOR_CHANGE_TEXT !== "false",
+      redraw: process.env.IMAGE_EDITOR_REDRAW !== "false",
+      erase: process.env.IMAGE_EDITOR_ERASE !== "false",
+      outpaint: process.env.IMAGE_EDITOR_OUTPAINT !== "false",
+      currentVersionInput: process.env.IMAGE_EDITOR_CURRENT_VERSION !== "false",
+    }),
+    edit: async (command, source) => {
+      const structuredInstructions = command.operations.map((operation) => {
+        if (operation.type === "add_text") return `新增文字“${String(operation.payload.text ?? "")}”，区域与样式参数：${JSON.stringify(operation.payload)}`;
+        if (operation.type === "change_text") return `将区域 ${JSON.stringify(operation.payload.region)} 内的原文字“${String(operation.payload.originalText ?? "")}”替换为“${String(operation.payload.newText ?? "")}”，保留原有排版。`;
+        if (operation.type === "outpaint") return `按方向 ${String(operation.payload.direction ?? "all")} 扩展到目标比例 ${String(operation.payload.targetRatio ?? "original")}，保持主体位置与风格。`;
+        if (operation.type === "redraw") return `仅重绘蒙版白色区域，蒙版外保持不变。操作参数：${JSON.stringify(operation.payload)}`;
+        if (operation.type === "erase") return `仅消除蒙版白色区域并修复背景，蒙版外保持不变。操作参数：${JSON.stringify(operation.payload)}`;
+        return String(operation.payload.instruction ?? operation.summary);
+      }).join("\n");
+      const maskedOperations = command.operations.filter((operation) => operation.type === "redraw" || operation.type === "erase");
+      if (maskedOperations.length > 1) throw new Error("MULTIPLE_MASK_OPERATIONS_UNSUPPORTED");
+      const masked = maskedOperations[0];
+      let mask: Buffer | undefined;
+      if (masked) {
+        const metadata = masked.payload.mask;
+        if (!metadata || typeof metadata !== "object" || typeof (metadata as Record<string, unknown>).objectKey !== "string") throw new Error("MASK_SNAPSHOT_REQUIRED");
+        const stored = await storage.get((metadata as Record<string, string>).objectKey);
+        if (!stored || stored.contentType !== "image/png") throw new Error("MASK_OBJECT_NOT_FOUND");
+        mask = stored.bytes;
+      }
+      const result = await imageProvider.edit({ requestId: randomUUID(), flow: "image-editor", endpoint: "/v1/images/edits", image: source.bytes, imageMimeType: source.mimeType, imageFilename: "source.png", model: selected.model, prompt: `${command.prompt}\n\n结构化编辑指令：\n${structuredInstructions}`, size: "1K", quality: "medium", n: 1, responseFormat: "b64_json", mask, maskMimeType: mask ? "image/png" : undefined, maskFilename: mask ? "mask.png" : undefined });
+      const metadata = await sharp(result.bytes).metadata();
+      return { bytes: result.bytes, mimeType: result.mimeType, width: metadata.width ?? source.width, height: metadata.height ?? source.height };
+    },
+  };
 };
 const taskRepository = new PostgresTaskRepository(pool);
 const frozenPrompt = (snapshot: Record<string, unknown> | null | undefined) => {
@@ -106,11 +115,11 @@ const validateImageEditSource = async (sourceCardId: string, sourceVersionId: st
   const result = await pool.query<{ valid: boolean }>(`SELECT EXISTS (SELECT 1 FROM suite_workbench.suite_tasks t JOIN suite_workbench.task_image_versions v ON v.task_id=t.id WHERE t.id=$1 AND v.id=$2) OR EXISTS (SELECT 1 FROM suite_workbench.image_edit_child_tasks c JOIN suite_workbench.image_edit_versions v ON v.child_task_id=c.id WHERE c.id=$1 AND v.id=$2) AS valid`, [sourceCardId, sourceVersionId]);
   return Boolean(result.rows[0]?.valid);
 };
-const imageEditorApi = createImageEditorApi(new ImageEditorService(new PostgresImageEditorRepository(pool), imageEditorProvider, storage, resolveImageSource, ocrProvider, validateImageEditSource));
+const imageEditorApi = createImageEditorApi(new ImageEditorService(new PostgresImageEditorRepository(pool), resolveImageEditorProvider, storage, resolveImageSource, resolveOcrProvider, validateImageEditSource));
 const app = createTicket02App({
   repository: new PostgresSuiteRepository(pool),
   storage,
-  provider: new GptImageProvider(config.imageGeneration.baseUrl, config.imageGeneration.apiKey, config.imageGeneration.timeoutMs),
+  modelSettings,
   promptRepository: new PostgresPromptRepository(pool),
   platformRepository: new PostgresPlatformRepository(pool),
   planRepository: new PostgresPlanRepository(pool),
@@ -120,7 +129,6 @@ const app = createTicket02App({
   libraryRepository: new PostgresLibraryRepository(pool),
   reverseRepository: new PostgresReverseRepository(pool),
   ragClient: new PostgresRagClient(pool),
-  llmClient: config.llm ? new DashScopeLlmClient(config.llm.baseUrl, config.llm.apiKey, config.llm.model, config.llm.timeoutMs) : undefined,
 });
 const staticRoot = resolve(process.cwd(), "dist");
 const staticMime: Record<string, string> = {
@@ -200,8 +208,13 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     response = { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } };
   } else {
     let parsed: unknown; try { parsed = body.length ? JSON.parse(body.toString("utf8")) : undefined; } catch { parsed = undefined; }
-    response = await app.request(req.method ?? "GET", path, { headers: headers as Record<string, string>, body: parsed });
+    const isSettingsWrite = requestUrl.pathname.startsWith("/api/model-settings/") &&
+      (req.method === "POST" || req.method === "PUT" || req.method === "PATCH");
+    response = isSettingsWrite && headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json"
+      ? { status: 415, body: { error: { code: "UNSUPPORTED_MEDIA_TYPE", message: "配置请求必须使用 application/json" }, requestId: "" } }
+      : await app.request(req.method ?? "GET", path, { headers: headers as Record<string, string>, body: parsed });
   }
+  if (requestUrl.pathname.startsWith("/api/model-settings")) res.setHeader("cache-control", "no-store");
   res.statusCode = response.status; res.setHeader("content-type", "application/json; charset=utf-8"); res.end(JSON.stringify(response.body));
 }
 

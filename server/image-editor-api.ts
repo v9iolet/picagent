@@ -4,7 +4,13 @@ import type { ErrorEnvelope, ResponseEnvelope } from "./types.js";
 
 export interface ImageEditorApiResponse { status: number; body: ResponseEnvelope<unknown> | ErrorEnvelope }
 const ok = (data: unknown, status = 200): ImageEditorApiResponse => ({ status, body: { data, requestId: randomUUID() } });
-const fail = (code: string, status = 400): ImageEditorApiResponse => ({ status, body: { error: { code, message: code }, requestId: randomUUID() } });
+const fail = (code: string, status = 400): ImageEditorApiResponse => {
+  if (code === "IMAGE_PROVIDER_NOT_CONFIGURED" || code === "OCR_PROVIDER_UNAVAILABLE") {
+    const purpose = code === "OCR_PROVIDER_UNAVAILABLE" ? "多模态" : "生图";
+    return { status: 503, body: { error: { code, message: `请前往配置 → 偏好设置，选择默认${purpose}模型` }, requestId: randomUUID() } };
+  }
+  return { status, body: { error: { code, message: code }, requestId: randomUUID() } };
+};
 
 export function createImageEditorApi(service: ImageEditorService) {
   return {

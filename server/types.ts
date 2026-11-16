@@ -1,3 +1,4 @@
+import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import type { PromptStage } from "./prompt-library.js";
 
 export type SuiteStatus = "draft" | "in_progress";
@@ -113,7 +114,8 @@ export interface GenerationAttempt {
   versionNumber: number;
   idempotencyKey: string;
   status: GenerationAttemptStatus;
-  model: "gpt-image-2";
+  channel?: ModelChannelSnapshot | null;
+  model: string;
   endpoint: "/v1/images/edits";
   prompt: string;
   promptTemplateVersionId: string;
@@ -147,7 +149,7 @@ export interface ImageEditRequest {
   image: Buffer;
   imageMimeType: string;
   imageFilename: string;
-  model: "gpt-image-2";
+  model: string;
   prompt: string;
   size: "1K";
   quality: "medium";
@@ -179,11 +181,13 @@ export interface CategoryPromptLlmInput extends PlanLlmInput {
   approvedFactRefs: string[];
 }
 export interface PlanVisionImage { id: string; sourceKind: "base" | "original"; sourceVersionId: string | null; mimeType: string; bytes: Buffer }
+export interface LlmModelSnapshot { name: string; model: string; isFake: boolean; channel?: ModelChannelSnapshot }
 export interface LlmClient {
+  channel?: ModelChannelSnapshot;
   provider: string; model: string; isFake: boolean;
   generatePlan(input: PlanLlmInput): Promise<unknown>;
   generateCategoryPrompt?(input: CategoryPromptLlmInput): Promise<unknown>;
-  generateReversePrompt?(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; baselineImage?: Buffer; mode: "main" | "detail" }): Promise<unknown>;
+  generateReversePrompt?(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; referenceMimeType?: string; baselineImage?: Buffer; baselineMimeType?: string; mode: "main" | "detail" }): Promise<unknown>;
 }
 export type PlanAttemptStatus = "running" | "succeeded" | "failed";
 export interface PlanItem {
@@ -234,7 +238,7 @@ export type PlanStructure = StructurePlanV1 | StructurePlanV2;
 export interface PlanSnapshot {
   id: string; suiteId: string; revisionNumber: number; revisionKind: "llm" | "human"; parentSnapshotId: string | null;
   templateVersionId: string; dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>; chunks: PlanChunkSnapshot[];
-  inputImageIds: string[]; baseVersionIds: string[]; provider: { name: string; model: string; isFake: boolean };
+  inputImageIds: string[]; baseVersionIds: string[]; provider: LlmModelSnapshot;
   requestSummary: Record<string, unknown>; rawOutputSummary: Record<string, unknown>; schemaVersion: string; items: PlanItem[]; createdAt: string;
   phase?: "legacy_plan" | "structure_plan";
   confirmationStatus?: "draft" | "confirmed";
@@ -245,7 +249,7 @@ export interface PlanSnapshot {
 export interface PlanAttempt {
   id: string; suiteId: string; idempotencyKey: string; status: PlanAttemptStatus; templateVersionId: string;
   dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>; selectedChunks: RagChunkRef[]; inputImageIds: string[]; baseVersionIds: string[];
-  provider: { name: string; model: string; isFake: boolean }; errorCode: string | null; errorMessage: string | null;
+  provider: LlmModelSnapshot; errorCode: string | null; errorMessage: string | null;
   outputSummary: Record<string, unknown> | null; snapshotId: string | null; createdAt: string; completedAt: string | null;
 }
 export interface PlanRepository {
@@ -288,7 +292,7 @@ export interface CategoryPromptRequest {
   approvedFactRefs: string[];
   inputImageIds: string[];
   baseVersionIds: string[];
-  provider: { name: string; model: string; isFake: boolean };
+  provider: LlmModelSnapshot;
   requestSummary: Record<string, unknown>;
   responseSummary: Record<string, unknown> | null;
   items: CategoryPromptItem[];
@@ -444,7 +448,7 @@ export type ReverseAttemptStatus = "pending" | "running" | "succeeded" | "failed
 export interface ReversePromptVersion {
   id: string; referenceId: string; kind: "model" | "user"; prompt: string;
   rawOutput: unknown; templateVersionId: string; mode: ReverseMode;
-  provider: { name: string; model: string; isFake: boolean }; createdAt: string;
+  provider: LlmModelSnapshot; createdAt: string;
 }
 export interface ReverseAttempt {
   id: string; referenceId: string; status: ReverseAttemptStatus; retryOfAttemptId: string | null;

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { ModelSettingsPage } from "../pages/ModelSettingsPage";
 import { StartPage } from "../pages/StartPage";
 import { BoardPage } from "../pages/BoardPage";
 import { StyleLibraryPage } from "../pages/StyleLibraryPage";
@@ -21,6 +22,7 @@ export function App() {
     window.scrollTo({ top: 0 });
   };
 
+  if (path === "/settings" || path === "/settings/preferences") return <ModelSettingsPage preferences={path.endsWith("/preferences")} navigate={navigate} />;
   if (path.endsWith("/board") && suiteId) return <BoardPage suiteId={suiteId} navigate={navigate} />;
   if (path === "/style-library") return <StyleLibraryPage navigate={navigate} />;
   if (path === "/reverse" || reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;

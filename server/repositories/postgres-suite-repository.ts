@@ -13,7 +13,7 @@ const inputImageColumns = `id, suite_id AS "suiteId", ordinal, original_object_k
   thumbnail_object_key AS "thumbnailObjectKey", sha256, width, height, mime_type AS "mimeType",
   original_filename AS "originalFilename", current_base_version_id AS "currentBaseVersionId", created_at AS "createdAt"`;
 const attemptColumns = `id, suite_id AS "suiteId", input_image_id AS "inputImageId", base_version_id AS "baseVersionId",
-  version_number AS "versionNumber", idempotency_key AS "idempotencyKey", status, model, endpoint, prompt, size,
+  version_number AS "versionNumber", idempotency_key AS "idempotencyKey", status, model, channel_snapshot_json AS channel, endpoint, prompt, size,
   prompt_template_version_id AS "promptTemplateVersionId", dynamic_input_json AS "dynamicInput", quality, n,
   response_format AS "responseFormat", error_code AS "errorCode", error_message AS "errorMessage",
   created_at AS "createdAt", completed_at AS "completedAt"`;
@@ -138,22 +138,22 @@ export class PostgresSuiteRepository implements SuiteRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      const locked = await client.query("SELECT id FROM suite_workbench.input_images WHERE suite_id = $1 AND id = $2 FOR UPDATE", [input.suiteId, input.inputImageId]);
+      if (!locked.rowCount) throw new Error("INVALID_INPUT_IMAGE");
       const existing = await client.query<GenerationAttempt>(`SELECT ${attemptColumns} FROM suite_workbench.generation_attempts WHERE input_image_id = $1 AND idempotency_key = $2`, [input.inputImageId, input.idempotencyKey]);
       if (existing.rowCount) {
         const version = await client.query<BaseImageVersion>(`SELECT ${versionColumns} FROM suite_workbench.base_image_versions WHERE id = $1`, [existing.rows[0].baseVersionId]);
         await client.query("COMMIT");
         return { attempt: existing.rows[0], existingVersion: version.rows[0] ?? null, duplicate: true };
       }
-      const locked = await client.query("SELECT id FROM suite_workbench.input_images WHERE suite_id = $1 AND id = $2 FOR UPDATE", [input.suiteId, input.inputImageId]);
-      if (!locked.rowCount) throw new Error("INVALID_INPUT_IMAGE");
-      const next = await client.query<{ version_number: number }>("SELECT COALESCE(MAX(version_number), 0) + 1 AS version_number FROM suite_workbench.base_image_versions WHERE input_image_id = $1", [input.inputImageId]);
+      const next = await client.query<{ version_number: number }>("SELECT COALESCE(MAX(version_number), 0) + 1 AS version_number FROM suite_workbench.generation_attempts WHERE input_image_id = $1 AND status IN ('running', 'succeeded')", [input.inputImageId]);
       const result = await client.query<GenerationAttempt>(`INSERT INTO suite_workbench.generation_attempts
         (id, suite_id, input_image_id, base_version_id, version_number, idempotency_key, status, model, endpoint, prompt,
-          prompt_template_version_id, dynamic_input_json, size, quality, n, response_format, created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING ${attemptColumns}`,
+          prompt_template_version_id, dynamic_input_json, size, quality, n, response_format, created_at, channel_snapshot_json)
+        VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING ${attemptColumns}`,
       [input.id, input.suiteId, input.inputImageId, input.baseVersionId, next.rows[0].version_number, input.idempotencyKey,
         input.model, input.endpoint, input.prompt, input.promptTemplateVersionId, JSON.stringify(input.dynamicInput), input.size,
-        input.quality, input.n, input.responseFormat, input.createdAt]);
+        input.quality, input.n, input.responseFormat, input.createdAt, input.channel ? JSON.stringify(input.channel) : null]);
       await client.query("COMMIT");
       return { attempt: result.rows[0], existingVersion: null, duplicate: false };
     } catch (error) {

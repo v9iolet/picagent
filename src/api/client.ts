@@ -1,3 +1,5 @@
+import type { ModelChannelInput, ModelChannelSnapshot, ModelPreferences, ModelSettingsView } from "../../shared/model-settings";
+
 export interface ApiImage {
   id: string; suiteId: string; ordinal: number; originalObjectKey: string; thumbnailObjectKey: string;
   sha256: string; width: number; height: number; mimeType: string; originalFilename: string;
@@ -5,10 +7,10 @@ export interface ApiImage {
 }
 export interface ApiSuite { id: string; name: string; status: "draft" | "in_progress"; createdAt: string; updatedAt: string; inputImages: ApiImage[] }
 export interface ApiBaseVersion {
-  id: string; versionNumber: number; width: number; height: number; mimeType: "image/png"; sha256: string; createdAt: string; previewUrl: string;
+  id: string; attemptId: string; versionNumber: number; width: number; height: number; mimeType: "image/png"; sha256: string; createdAt: string; previewUrl: string;
 }
 export interface ApiGenerationAttempt {
-  id: string; versionNumber: number; status: "running" | "succeeded" | "failed"; model: "gpt-image-2";
+  id: string; versionNumber: number; status: "running" | "succeeded" | "failed"; model: string; channel?: ModelChannelSnapshot | null;
   templateVersionId: string;
   errorCode: string | null; errorMessage: string | null; createdAt: string; completedAt: string | null;
 }
@@ -43,10 +45,10 @@ export interface ApiStructurePlan {
   canProceed?:boolean;
 }
 export interface ApiCategoryPromptItem { stableId:string; category:string; title:string; purpose:string; referenceImageIds:string[]; factRefs:string[]; prompt:string; allowsTextOverlay:"platform_default"|"yes"|"no"; textContent:Array<{text:string;source:string}>; aspectRatio:string; suggestedParams:Record<string,unknown> }
-export interface ApiCategoryPromptRequest { id:string; suiteId:string; planSnapshotId:string; categoryCode:string; requestedCount:number; status:"running"|"succeeded"|"failed"; idempotencyKey:string; retryOfRequestId:string|null; templateVersionId:string; provider:{name:string;model:string;isFake:boolean}; requestSummary:Record<string,unknown>; responseSummary:Record<string,unknown>|null; items:ApiCategoryPromptItem[]; errorCode:string|null; errorMessage:string|null; createdAt:string; completedAt:string|null }
+export interface ApiCategoryPromptRequest { id:string; suiteId:string; planSnapshotId:string; categoryCode:string; requestedCount:number; status:"running"|"succeeded"|"failed"; idempotencyKey:string; retryOfRequestId:string|null; templateVersionId:string; provider:{name:string;model:string;isFake:boolean;channel?:ModelChannelSnapshot}; requestSummary:Record<string,unknown>; responseSummary:Record<string,unknown>|null; items:ApiCategoryPromptItem[]; errorCode:string|null; errorMessage:string|null; createdAt:string; completedAt:string|null }
 export interface ApiCategoryPromptState { planSnapshotId:string|null; status:"not_ready"|"pending"|"running"|"partial"|"succeeded"; expectedRequestCount?:number; requests:ApiCategoryPromptRequest[] }
-export interface ApiPlanSnapshot { id:string;revisionNumber:number;revisionKind:"llm"|"human";templateVersionId:string;dynamicInput:Record<string,unknown>;humanInput:Record<string,unknown>;chunks:Array<{sourceChunkId:string;sourceVersion:string;title:string;fieldValues:Record<string,unknown>;sourceKind:string}>;inputImageIds?:string[];provider:{name:string;model:string;isFake:boolean};items:ApiPlanItem[];phase?:"legacy_plan"|"structure_plan";confirmationStatus?:"draft"|"confirmed";confirmedAt?:string|null;structure?:ApiStructurePlan|null;categoryOutputs?:Record<string,{status:string;requestedCount:number;items:ApiCategoryPromptItem[];errorCode?:string|null;errorMessage?:string|null}>;createdAt:string }
-export interface ApiPlanAttempt { id:string;status:"running"|"succeeded"|"failed";provider:{name:string;model:string;isFake:boolean};errorCode:string|null;errorMessage:string|null;snapshot:ApiPlanSnapshot|null }
+export interface ApiPlanSnapshot { id:string;revisionNumber:number;revisionKind:"llm"|"human";templateVersionId:string;dynamicInput:Record<string,unknown>;humanInput:Record<string,unknown>;chunks:Array<{sourceChunkId:string;sourceVersion:string;title:string;fieldValues:Record<string,unknown>;sourceKind:string}>;inputImageIds?:string[];provider:{name:string;model:string;isFake:boolean;channel?:ModelChannelSnapshot};items:ApiPlanItem[];phase?:"legacy_plan"|"structure_plan";confirmationStatus?:"draft"|"confirmed";confirmedAt?:string|null;structure?:ApiStructurePlan|null;categoryOutputs?:Record<string,{status:string;requestedCount:number;items:ApiCategoryPromptItem[];errorCode?:string|null;errorMessage?:string|null}>;createdAt:string }
+export interface ApiPlanAttempt { id:string;status:"running"|"succeeded"|"failed";provider:{name:string;model:string;isFake:boolean;channel?:ModelChannelSnapshot};errorCode:string|null;errorMessage:string|null;snapshot:ApiPlanSnapshot|null }
 export interface ApiPlanState { attempt:ApiPlanAttempt|null;snapshot:ApiPlanSnapshot|null }
 export type ApiTaskStatus = "incomplete"|"pending"|"generating"|"generated"|"refining"|"failed"|"archived";
 export interface ApiTaskVersion { id:string;taskId:string;slotId:string;attemptId:string;versionNumber:number;objectKey:string;processObjectKeys:string[];sha256:string;width:number;height:number;mimeType:string;promptSnapshot:Record<string,unknown>;contextSnapshot:Record<string,unknown>;isCurrent:boolean;isFinal:boolean;createdAt:string;previewUrl:string }
@@ -56,7 +58,7 @@ export interface ApiProductMaterialRef { libraryReferenceId:string; resourceId:s
 export interface ApiSuiteTask { id:string;suiteId:string;planSnapshotId:string|null;planItemId:string|null;ordinal:number;imageType:"main"|"detail";title:string;purpose:string;promptDraft:string;promptRevision:number;sourceInputImageId:string|null;generationParams:Record<string,unknown>;status:ApiTaskStatus;archivedAt:string|null;createdAt:string;updatedAt:string;originKind?:"suite_plan"|"reverse_import";reversePlanId?:string|null;reverseReferenceId?:string|null;reversePromptVersionId?:string|null;reverseTaskGroupId?:string|null;sourceLibraryReferenceId?:string|null;sourceResourceVersionId?:string|null;sourceRevision?:number;versions:ApiTaskVersion[];attempts:ApiTaskAttempt[];slots:ApiTaskSlot[] }
 export interface ApiTaskBatch { id:string;suiteId:string;kind:"batch"|"single"|"retry";requestedCount:number;taskIds:string[];status:"running"|"completed"|"partial"|"failed";idempotencyKey:string;createdAt:string;startedAt:string|null;finishedAt:string|null }
 export interface ApiCanvasLayout { id:string;suiteId:string;layoutVersion:number;viewport:{x:number;y:number;zoom:number};nodes:Array<{nodeId:string;x:number;y:number;width?:number;height?:number;groupKey?:string;hidden?:boolean}>;groups:Array<{groupKey:string;x:number;y:number;width:number;height:number;collapsed?:boolean}>;updatedAt:string }
-export interface ApiWorkbench { suite:ApiSuite;inputImages:ApiImage[];planSnapshot:ApiPlanSnapshot|null;tasks:ApiSuiteTask[];batches:ApiTaskBatch[];imageEditChildren?:Array<{task:Record<string,unknown>;snapshot:Record<string,unknown>|null;attempts:Record<string,unknown>[];versions:Array<{id:string;previewUrl?:string;versionNumber:number;width?:number;height?:number;mimeType?:string;attemptId?:string}>}>;layout:ApiCanvasLayout|null }
+export interface ApiWorkbench { suite:ApiSuite;inputImages:ApiImage[];planSnapshot:ApiPlanSnapshot|null;tasks:ApiSuiteTask[];batches:ApiTaskBatch[];imageEditChildren?:Array<{task:Record<string,unknown>;snapshot:Record<string,unknown>|null;attempts:Array<Record<string,unknown> & { provider?: { name: string; version: string; channel?: ModelChannelSnapshot } }>;versions:Array<{id:string;previewUrl?:string;versionNumber:number;width?:number;height?:number;mimeType?:string;attemptId?:string}>}>;layout:ApiCanvasLayout|null }
 export type ApiLibraryResourceType = "prompt_template"|"input_image"|"base_image"|"task_image_version"|"process_image"|"reverse_reference_asset";
 export interface ApiLibraryResource { id:string;resourceType:ApiLibraryResourceType;title:string;summary:string;mimeType:string|null;previewUrl:string|null;suiteId:string|null;taskId:string|null;imageVersionId:string|null;baseVersionId:string|null;templateVersionId:string|null;resourceVersionId:string;stage:ApiPromptTemplate["stage"]|null;source:Record<string,unknown>;status?:"draft"|"published"|"archived";promptSnapshot?:Record<string,unknown>|null;createdAt:string;updatedAt:string }
 export interface ApiLibraryReference { id:string;suiteId:string;resourceId:string;resourceType:ApiLibraryResourceType;targetType:"plan"|"task";targetId:string;resourceVersionId:string;snapshot:Record<string,unknown>;createdAt:string;createdBy:string|null;archivedAt:string|null }
@@ -87,6 +89,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) throw new Error(payload?.error?.message ?? "请求失败");
   return payload?.data as T;
 }
+
+const settingsPath = "/api/model-settings";
+export const modelSettingsApi = {
+  get: () => request<ModelSettingsView>(settingsPath),
+  saveChannel: (input: ModelChannelInput, id?: string) => request<ModelSettingsView>(settingsPath + "/channels" + (id ? `/${encodeURIComponent(id)}` : ""), {
+    method: id ? "PUT" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+  }),
+  removeChannel: (id: string) => request<ModelSettingsView>(`${settingsPath}/channels/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  savePreferences: (preferences: Partial<ModelPreferences>) => request<ModelSettingsView>(settingsPath + "/preferences", {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(preferences),
+  }),
+};
 
 export const suiteApi = {
   create(name: string) { return request<{ id: string; name: string }>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name }) }); },
@@ -144,11 +158,14 @@ export const suiteApi = {
   updateTask(taskId:string,body:Partial<Pick<ApiSuiteTask,"title"|"purpose"|"promptDraft"|"sourceInputImageId"|"generationParams">>){return request<ApiSuiteTask>(`/api/suite-tasks/${encodeURIComponent(taskId)}`,{method:"PATCH",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify(body)});},
   generateBatch(suiteId:string,taskIds?:string[]){return request<{batchId:string;status:string;requestedCount?:number}>(`/api/suites/${encodeURIComponent(suiteId)}/generation`,{method:"POST",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify(taskIds?{taskIds}:{})});},
   generateTask(taskId:string,promptDraft?:string){return request<{batchId:string;status:string}>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`,{method:"POST",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify(promptDraft===undefined?{}:{promptDraft})});},
+  retryTaskAttempt(attemptId: string) {
+    return request<{ batchId: string }>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`, { method: "POST", headers: { "idempotency-key": createIdempotencyKey() } });
+  },
   getBatch(batchId:string){return request<{batch:ApiTaskBatch;slots:ApiTaskSlot[];attempts:ApiTaskAttempt[]}>(`/api/generation-batches/${encodeURIComponent(batchId)}`);},
   getTaskVersions(taskId:string){return request<{versions:ApiTaskVersion[];attempts:ApiTaskAttempt[]}>(`/api/suite-tasks/${encodeURIComponent(taskId)}/versions`);},
   selectTaskVersion(taskId:string,versionId:string,selection:"current"|"final"){return request<ApiTaskVersion>(`/api/suite-tasks/${encodeURIComponent(taskId)}/versions/${encodeURIComponent(versionId)}/select`,{method:"POST",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify({selection})});},
   retryAttempt(attemptId:string){return request<{batchId:string;status:string}>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`,{method:"POST",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify({})});},
-  imageEditorCapabilities(){return request<{provider:{name:string;version:string;capabilitiesVersion:string};capabilities:Record<string,boolean> }>("/api/image-editor/capabilities");},
+  imageEditorCapabilities(){return request<{provider:{name:string;version:string;capabilitiesVersion:string;channel?:ModelChannelSnapshot} | null;capabilities:Record<string,boolean> }>("/api/image-editor/capabilities");},
   getImageEditDraft(sessionId:string){return request<{sessionId:string;operations:Array<Record<string,unknown>>;summary:string}>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}`);},
   upsertImageEditOperation(sessionId:string, operation:Record<string,unknown>, summary?:string){return request<Record<string,unknown>>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/operations`,{method:"POST",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify({operation,summary})});},
   removeImageEditOperation(sessionId:string, operationId:string){return request<Record<string,unknown>>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(operationId)}`,{method:"DELETE"});},

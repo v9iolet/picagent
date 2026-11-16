@@ -50,7 +50,7 @@ export class MemorySuiteRepository implements SuiteRepository {
       const attempt = this.attempts.get(existingId)!;
       return { attempt, existingVersion: this.versions.get(attempt.baseVersionId) ?? null, duplicate: true };
     }
-    const versionNumber = Math.max(0, ...[...this.versions.values()].filter((version) => version.inputImageId === input.inputImageId).map((version) => version.versionNumber)) + 1;
+    const versionNumber = Math.max(0, ...[...this.attempts.values()].filter((attempt) => attempt.inputImageId === input.inputImageId && attempt.status !== "failed").map((attempt) => attempt.versionNumber)) + 1;
     const attempt: GenerationAttempt = { ...input, versionNumber, status: "running", errorCode: null, errorMessage: null, completedAt: null };
     this.attempts.set(attempt.id, attempt);
     this.generationIdempotency.set(idempotencyScope, attempt.id);
@@ -94,7 +94,7 @@ export class MemorySuiteRepository implements SuiteRepository {
   }
 
   async listGenerationAttempts(suiteId: string, inputImageId: string) {
-    return [...this.attempts.values()].filter((attempt) => attempt.suiteId === suiteId && attempt.inputImageId === inputImageId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return [...this.attempts.values()].reverse().filter((attempt) => attempt.suiteId === suiteId && attempt.inputImageId === inputImageId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   async getBaseImageVersion(suiteId: string, inputImageId: string, versionId: string) {

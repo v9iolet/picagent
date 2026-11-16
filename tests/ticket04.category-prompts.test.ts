@@ -52,6 +52,7 @@ async function waitForStatus(app: Awaited<ReturnType<typeof fixture>>["app"], su
 
 test("requires a confirmed structure plan and generates one request per category", async () => {
   const fixtureData = await fixture((category, count) => output(category, count));
+  assert.equal((await fixtureData.app.request("GET", `/api/suites/${fixtureData.suite.id}/category-prompts`)).body.data.status, "pending");
   const blocked = await fixtureData.app.request("POST", `/api/suites/${fixtureData.suite.id}/category-prompts`, { headers: { "idempotency-key": "blocked" }, body: { planSnapshotId: randomUUID() } });
   assert.equal(blocked.status, 409);
   const started = await fixtureData.app.request("POST", `/api/suites/${fixtureData.suite.id}/category-prompts`, { headers: { "idempotency-key": "start-1" }, body: { planSnapshotId: fixtureData.snapshot.id, templateVersionId: fixtureData.template.templateVersionId } });
@@ -102,6 +103,7 @@ test("wrong count fails only that category and retry does not rebuild successes"
   }
   assert.deepEqual(recovered.requests.filter((item: any) => successfulIds.includes(item.id)).map((item: any) => item.id), successfulIds);
   assert.equal(recovered.requests.filter((item: any) => item.categoryCode === "material_detail").at(-1).status, "succeeded");
+  assert.equal(recovered.status, "succeeded");
 });
 
 test("same category batch idempotency key does not duplicate model calls", async () => {

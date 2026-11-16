@@ -1,3 +1,5 @@
+import { parseProviderJson } from "./provider-json.js";
+import type { ModelChannelSnapshot } from "../../shared/model-settings.js";
 import { randomUUID } from "node:crypto";
 import type { CategoryPromptLlmInput, LlmClient, PlanLlmInput } from "../types.js";
 import { failModelArchive, finishModelArchive, startModelArchive } from "../prompt-archive.js";
@@ -37,9 +39,11 @@ export function buildPlanUserContent(input: PlanLlmInput): VisionContent[] {
 }
 
 export class DashScopeLlmClient implements LlmClient {
-  readonly provider = "dashscope";
+  readonly provider: string;
   readonly isFake = false;
-  constructor(private readonly baseUrl: string, private readonly apiKey: string, readonly model: string, private readonly timeoutMs = 600_000) {}
+  constructor(private readonly baseUrl: string, private readonly apiKey: string, readonly model: string, private readonly timeoutMs = 600_000, readonly channel?: ModelChannelSnapshot) {
+    this.provider = channel ? "openai-compatible" : "dashscope";
+  }
   async generatePlan(input: PlanLlmInput): Promise<unknown> {
     const startedAt = Date.now();
     const flow = input.flow ?? "plan";
@@ -71,25 +75,24 @@ export class DashScopeLlmClient implements LlmClient {
     let archived = false;
     try {
       const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), {
-        method: "POST", signal: controller.signal,
+        method: "POST", redirect: "error", signal: controller.signal,
         headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
         body: JSON.stringify({ model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [
           { role: "system", content: system },
           { role: "user", content: userContent },
         ] }),
       });
-      const responseBody = await response.text();
       if (!response.ok) {
         const error = new Error(`LLM_HTTP_${response.status}`);
-        await failModelArchive(archive, error, { httpStatus: response.status, body: responseBody });
+        await failModelArchive(archive, error, { httpStatus: response.status });
         archived = true;
         throw error;
       }
       let payload: { choices?: Array<{ message?: { content?: string } }>; [key: string]: unknown };
-      try { payload = JSON.parse(responseBody) as typeof payload; }
+      try { payload = parseProviderJson(await response.text(), this.apiKey, "LLM_INVALID_HTTP_RESPONSE") as typeof payload; }
       catch {
         const error = new Error("LLM_INVALID_HTTP_RESPONSE");
-        await failModelArchive(archive, error, { httpStatus: response.status, body: responseBody });
+        await failModelArchive(archive, error, { httpStatus: response.status });
         archived = true;
         throw error;
       }
@@ -101,10 +104,10 @@ export class DashScopeLlmClient implements LlmClient {
         throw error;
       }
       let parsed: unknown;
-      try { parsed = JSON.parse(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); }
+      try { parsed = parseProviderJson(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""), this.apiKey, "LLM_INVALID_JSON_RESPONSE"); }
       catch {
         const error = new Error("LLM_INVALID_JSON_RESPONSE");
-        await failModelArchive(archive, error, { httpStatus: response.status, payload, content });
+        await failModelArchive(archive, error, { httpStatus: response.status });
         archived = true;
         throw error;
       }
@@ -145,19 +148,19 @@ export class DashScopeLlmClient implements LlmClient {
     });
   }
 
-  async generateReversePrompt(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; baselineImage?: Buffer; mode: "main" | "detail" }): Promise<unknown> {
-    const visionImages = [{ id: input.referenceImageId, sourceKind: "reference", mimeType: "image/jpeg", bytes: input.referenceImage }, ...(input.baselineImage ? [{ id: "series-color-baseline", sourceKind: "series_color_baseline", mimeType: "image/jpeg", bytes: input.baselineImage }] : [])];
+  async generateReversePrompt(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; referenceMimeType?: string; baselineImage?: Buffer; baselineMimeType?: string; mode: "main" | "detail" }): Promise<unknown> {
+    const visionImages = [{ id: input.referenceImageId, sourceKind: "reference", mimeType: input.referenceMimeType ?? "image/jpeg", bytes: input.referenceImage }, ...(input.baselineImage ? [{ id: "series-color-baseline", sourceKind: "series_color_baseline", mimeType: input.baselineMimeType ?? "image/jpeg", bytes: input.baselineImage }] : [])];
     const prompt = (input.template.userPromptTemplate || "请根据当前参考图输出结构化反推提示词。模式：{{mode}}。参考图 ID：{{referenceImageId}}。")
       .replaceAll("{{mode}}", input.mode).replaceAll("{{referenceImageId}}", input.referenceImageId);
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const startedAt = Date.now();
     const observation = startGeneration("llm.reverse-prompt", { system: input.template.body, user: prompt, images: visionImages.map(({ id, sourceKind, mimeType, bytes }) => ({ id, sourceKind, mimeType, byteLength: bytes.length })) }, { flow: "reverse-prompt", provider: this.provider, model: this.model, template_version_id: input.template.templateVersionId });
     try {
-      const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), { method: "POST", signal: controller.signal, headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: input.template.body }, { role: "user", content: [{ type: "text", text: prompt }, ...visionImages.map((image) => ({ type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}` } }))] }] }) });
+      const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), { method: "POST", redirect: "error", signal: controller.signal, headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: input.template.body }, { role: "user", content: [{ type: "text", text: prompt }, ...visionImages.map((image) => ({ type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}` } }))] }] }) });
       const body = await response.text(); if (!response.ok) throw new Error(`LLM_HTTP_${response.status}`);
-      const payload = JSON.parse(body) as { choices?: Array<{ message?: { content?: string } }> }; const content = payload.choices?.[0]?.message?.content;
+      const payload = parseProviderJson(body, this.apiKey, "LLM_INVALID_HTTP_RESPONSE") as { choices?: Array<{ message?: { content?: string } }> }; const content = payload.choices?.[0]?.message?.content;
       if (!content) throw new Error("LLM_EMPTY_RESPONSE");
-      const parsed = JSON.parse(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+      const parsed = parseProviderJson(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""), this.apiKey, "LLM_INVALID_JSON_RESPONSE");
       const usage = (payload as unknown as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
       finishObservation(observation, { content: captureText(content), status: "succeeded" }, { http_status: response.status });
       recordModelSuccess("reverse-prompt", this.provider, this.model, Date.now() - startedAt, { input: usage?.prompt_tokens, output: usage?.completion_tokens });

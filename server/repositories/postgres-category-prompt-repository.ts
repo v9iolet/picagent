@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import type { CategoryPromptItem, CategoryPromptRequest, CategoryPromptRepository } from "../types.js";
 
-const columns = `id, suite_id AS "suiteId", plan_snapshot_id AS "planSnapshotId", category_code AS "categoryCode", requested_count AS "requestedCount", status, idempotency_key AS "idempotencyKey", retry_of_request_id AS "retryOfRequestId", template_version_id AS "templateVersionId", dynamic_input_json AS "dynamicInput", human_input_json AS "humanInput", approved_fact_refs_json AS "approvedFactRefs", input_image_ids_json AS "inputImageIds", base_version_ids_json AS "baseVersionIds", jsonb_build_object('name', provider, 'model', model, 'isFake', is_fake) AS provider, request_summary_json AS "requestSummary", response_summary_json AS "responseSummary", output_items_json AS items, error_code AS "errorCode", error_message AS "errorMessage", created_at AS "createdAt", completed_at AS "completedAt"`;
+const columns = `id, suite_id AS "suiteId", plan_snapshot_id AS "planSnapshotId", category_code AS "categoryCode", requested_count AS "requestedCount", status, idempotency_key AS "idempotencyKey", retry_of_request_id AS "retryOfRequestId", template_version_id AS "templateVersionId", dynamic_input_json AS "dynamicInput", human_input_json AS "humanInput", approved_fact_refs_json AS "approvedFactRefs", input_image_ids_json AS "inputImageIds", base_version_ids_json AS "baseVersionIds", jsonb_build_object('name', provider, 'model', model, 'isFake', is_fake, 'channel', channel_snapshot_json) AS provider, request_summary_json AS "requestSummary", response_summary_json AS "responseSummary", output_items_json AS items, error_code AS "errorCode", error_message AS "errorMessage", created_at AS "createdAt", completed_at AS "completedAt"`;
 
 export class PostgresCategoryPromptRepository implements CategoryPromptRepository {
   constructor(private readonly pool: Pool) {}
@@ -21,10 +21,10 @@ export class PostgresCategoryPromptRepository implements CategoryPromptRepositor
     if (existing.rows[0]) return { request: existing.rows[0], duplicate: true };
     try {
       const result = await this.pool.query<CategoryPromptRequest>(
-        `INSERT INTO suite_workbench.plan_category_requests (id,suite_id,plan_snapshot_id,category_code,requested_count,status,idempotency_key,retry_of_request_id,template_version_id,dynamic_input_json,human_input_json,approved_fact_refs_json,input_image_ids_json,base_version_ids_json,provider,model,is_fake,request_summary_json,output_items_json,created_at)
-         VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'[]'::jsonb,$18)
+        `INSERT INTO suite_workbench.plan_category_requests (id,suite_id,plan_snapshot_id,category_code,requested_count,status,idempotency_key,retry_of_request_id,template_version_id,dynamic_input_json,human_input_json,approved_fact_refs_json,input_image_ids_json,base_version_ids_json,provider,model,is_fake,request_summary_json,output_items_json,created_at,channel_snapshot_json)
+         VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'[]'::jsonb,$18,$19)
          RETURNING ${columns}`,
-        [request.id, request.suiteId, request.planSnapshotId, request.categoryCode, request.requestedCount, request.idempotencyKey, request.retryOfRequestId, request.templateVersionId, JSON.stringify(request.dynamicInput), JSON.stringify(request.humanInput), JSON.stringify(request.approvedFactRefs), JSON.stringify(request.inputImageIds), JSON.stringify(request.baseVersionIds), request.provider.name, request.provider.model, request.provider.isFake, JSON.stringify(request.requestSummary), request.createdAt],
+        [request.id, request.suiteId, request.planSnapshotId, request.categoryCode, request.requestedCount, request.idempotencyKey, request.retryOfRequestId, request.templateVersionId, JSON.stringify(request.dynamicInput), JSON.stringify(request.humanInput), JSON.stringify(request.approvedFactRefs), JSON.stringify(request.inputImageIds), JSON.stringify(request.baseVersionIds), request.provider.name, request.provider.model, request.provider.isFake, JSON.stringify(request.requestSummary), request.createdAt, request.provider.channel ? JSON.stringify(request.provider.channel) : null],
       );
       return { request: result.rows[0], duplicate: false };
     } catch (error) {

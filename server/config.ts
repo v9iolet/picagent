@@ -29,10 +29,7 @@ export function loadPostgresConfig() {
 
 export function loadServerConfig() {
   const minioEndpoint = new URL(required("MINIO_ENDPOINT"));
-  const imageGenerationBaseUrl = new URL(required("IMAGE_GENERATION_BASE_URL"));
-  const imageGenerationModel = required("IMAGE_GENERATION_MODEL");
   if (minioEndpoint.pathname !== "/") throw new Error("MINIO_ENDPOINT must not contain a path");
-  if (imageGenerationModel !== "gpt-image-2") throw new Error("IMAGE_GENERATION_MODEL must be gpt-image-2");
   return {
     port: positiveInteger("PORT", 3001),
     postgres: loadPostgresConfig(),
@@ -46,17 +43,5 @@ export function loadServerConfig() {
       bucket: required("MINIO_BUCKET"),
       legacyBucket: process.env.MINIO_LEGACY_BUCKET?.trim() || undefined,
     },
-    imageGeneration: {
-      baseUrl: imageGenerationBaseUrl.toString(),
-      apiKey: required("IMAGE_GENERATION_API_KEY"),
-      model: "gpt-image-2" as const,
-      timeoutMs: positiveInteger("IMAGE_GENERATION_TIMEOUT_MS", 600_000),
-    },
-    llm: process.env.CONTEXT_BASE_URL?.trim() && process.env.CONTEXT_API_KEY?.trim() && process.env.CONTEXT_MODEL?.trim() ? {
-      baseUrl: new URL(process.env.CONTEXT_BASE_URL.trim()).toString(),
-      apiKey: process.env.CONTEXT_API_KEY.trim(),
-      model: process.env.CONTEXT_MODEL.trim(),
-      timeoutMs: positiveInteger("CONTEXT_TIMEOUT_MS", 300_000),
-    } : null,
   };
 }

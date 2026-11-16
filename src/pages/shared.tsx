@@ -31,3 +31,7 @@ export function ImageWithState({
     {state === "error" && <span className="image-state-error" role={retryable ? "button" : undefined} tabIndex={retryable ? 0 : undefined} onClick={retryable ? () => { setAttempt((value) => value + 1); setState("loading"); } : undefined} onKeyDown={retryable ? (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setAttempt((value) => value + 1); setState("loading"); } } : undefined}>{retryable ? "重新加载" : "图片不可用"}</span>}
   </span>;
 }
+
+export function ModelSettingsMessage({ message }: { message: string }) {
+  return <>{message}{message.includes("配置 → 偏好设置") && <> · <a href="/settings/preferences">打开偏好设置</a></>}</>;
+}

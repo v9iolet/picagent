@@ -8,6 +8,9 @@ export class GptImageProvider implements ImageProvider {
   constructor(private readonly baseUrl: string, private readonly apiKey: string, private readonly timeoutMs = 600_000) {}
 
   async edit(request: ImageEditRequest) {
+    const base = new URL(this.baseUrl);
+    if (base.pathname === "/") base.pathname = "/v1";
+    const endpoint = new URL("images/edits", base.href.replace(/\/?$/, "/"));
     const startedAt = Date.now();
     const observation = startGeneration("image.edit", {
       prompt: request.prompt,
@@ -23,7 +26,7 @@ export class GptImageProvider implements ImageProvider {
       provider: "openai-compatible-image",
       model: request.model,
       request: {
-        endpoint: new URL(request.endpoint, this.baseUrl).toString(),
+        endpoint: endpoint.href,
         model: request.model,
         prompt: request.prompt,
         size: request.size,
@@ -49,14 +52,16 @@ export class GptImageProvider implements ImageProvider {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     let responseSummary: unknown;
     try {
-      const response = await fetch(new URL(request.endpoint, this.baseUrl), {
+      const response = await fetch(endpoint, {
+        redirect: "error",
         method: "POST",
         headers: { authorization: `Bearer ${this.apiKey}` },
         body: form,
         signal: controller.signal,
       });
       if (!response.ok) {
-        responseSummary = { httpStatus: response.status, body: await response.text().catch(() => "") };
+        responseSummary = { httpStatus: response.status };
+        await response.body?.cancel().catch(() => undefined);
         throw new Error("IMAGE_PROVIDER_FAILED");
       }
       const payload = await response.json().catch(() => null) as { data?: Array<{ b64_json?: unknown }> } | null;

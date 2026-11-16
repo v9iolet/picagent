@@ -1,3 +1,4 @@
+import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
 import type { StorageAdapter } from "./types.js";
@@ -11,7 +12,10 @@ export interface NormalizedRect { x: number; y: number; width: number; height: n
 export interface NormalizedStroke { mode?: "draw" | "erase"; points: Array<{ x: number; y: number }>; width: number }
 export interface MaskSnapshot { width: number; height: number; mimeType: "image/png"; sha256: string; objectKey: string; feather: number; strokes: NormalizedStroke[] }
 export interface OcrTextBlock { id: string; text: string; confidence: number; bounds: NormalizedRect; rotation: number }
-export interface OcrSnapshot { sourceVersionId: string; status: "succeeded" | "failed"; blocks: OcrTextBlock[]; error?: string }
+interface OcrProviderSnapshot { name: string; version: string; channel?: ModelChannelSnapshot }
+interface EditProviderSnapshot extends OcrProviderSnapshot { capabilitiesVersion: string }
+
+export interface OcrSnapshot { provider?: OcrProviderSnapshot; sourceVersionId: string; status: "succeeded" | "failed"; blocks: OcrTextBlock[]; error?: string }
 export interface OutpaintSpec { direction: "all" | "horizontal" | "vertical" | "left" | "right"; targetRatio: "original" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9"; targetWidth: number; targetHeight: number; anchor: "center" | "left" | "right" }
 
 export interface EditOperation {
@@ -33,7 +37,7 @@ export interface EditSnapshot {
   summary: string;
   sourcePrompt: string;
   operations: ReadonlyArray<EditOperation>;
-  provider: { name: string; version: string; capabilitiesVersion: string };
+  provider: EditProviderSnapshot;
   createdAt: string;
   schemaVersion: "image-edit-snapshot-v1";
 }
@@ -61,7 +65,7 @@ export interface ImageEditAttempt {
   attemptNo: number;
   status: Exclude<EditStatus, "draft" | "queued">;
   command: ImageEditCommand;
-  provider: { name: string; version: string; capabilitiesVersion: string };
+  provider: EditProviderSnapshot;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;
@@ -99,17 +103,12 @@ export interface ImageEditProviderCapabilities {
   ocr?: boolean;
 }
 
-export interface ImageEditProvider {
-  name: string;
-  version: string;
-  capabilitiesVersion: string;
+export interface ImageEditProvider extends EditProviderSnapshot {
   capabilities(): Promise<ImageEditProviderCapabilities> | ImageEditProviderCapabilities;
   edit(command: ImageEditCommand, source: { bytes: Buffer; mimeType: string; width: number; height: number }): Promise<{ bytes: Buffer; mimeType: string; width: number; height: number }>;
 }
 
-export interface OcrProvider {
-  name: string;
-  version: string;
+export interface OcrProvider extends OcrProviderSnapshot {
   recognize(source: ImageSource): Promise<{ blocks: OcrTextBlock[] }>;
 }
 
@@ -152,7 +151,10 @@ async function renderMaskPng(source: Pick<ImageSource, "width" | "height">, stro
   return output.png().toBuffer();
 }
 
+type EditSubmission = { snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt; duplicate: boolean };
+
 export interface ImageEditorRepository {
+  getSubmission(idempotencyKey: string): Promise<EditSubmission | null>;
   getDraft(sessionId: string): Promise<{ sessionId: string; operations: EditOperation[]; summary: string } | null>;
   saveDraft(draft: { sessionId: string; operations: EditOperation[]; summary: string }): Promise<void>;
   getSnapshot(id: string): Promise<EditSnapshot | null>;
@@ -162,8 +164,8 @@ export interface ImageEditorRepository {
   getOcrSnapshot(sessionId: string, sourceVersionId: string): Promise<OcrSnapshot | null>;
   saveOcrSnapshot(sessionId: string, snapshot: OcrSnapshot): Promise<void>;
   getAttempt(id: string): Promise<ImageEditAttempt | null>;
-  submit(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }): Promise<{ snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt; duplicate: boolean }>;
-  appendAttempt?(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }): Promise<{ snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt; duplicate: boolean }>;
+  submit(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }): Promise<EditSubmission>;
+  appendAttempt?(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }): Promise<EditSubmission>;
   completeAttempt(input: { attemptId: string; objectKey: string; sha256: string; width: number; height: number; mimeType: string; completedAt: string }): Promise<{ attempt: ImageEditAttempt; version: ImageEditVersion; childTask: ImageEditChildTask }>;
   failAttempt(attemptId: string, code: string, message: string, completedAt: string): Promise<{ attempt: ImageEditAttempt; childTask: ImageEditChildTask }>;
   listAttempts(childTaskId: string): Promise<ImageEditAttempt[]>;
@@ -188,6 +190,11 @@ export class MemoryImageEditorRepository implements ImageEditorRepository {
   async getOcrSnapshot(sessionId: string, sourceVersionId: string) { const value = this.ocr.get(`${sessionId}:${sourceVersionId}`); return value ? structuredClone(value) : null; }
   async saveOcrSnapshot(sessionId: string, snapshot: OcrSnapshot) { this.ocr.set(`${sessionId}:${snapshot.sourceVersionId}`, structuredClone(snapshot)); }
   async getAttempt(id: string) { const attempt = this.attempts.get(id); return attempt ? structuredClone(attempt) : null; }
+  async getSubmission(idempotencyKey: string) {
+    const old = this.idempotency.get(idempotencyKey);
+    if (!old) return null;
+    return structuredClone({ snapshot: this.snapshots.get(old.snapshotId)!, childTask: this.tasks.get(old.childTaskId)!, attempt: this.attempts.get(old.attemptId)!, duplicate: true });
+  }
   async submit(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }) {
     const old = this.idempotency.get(input.idempotencyKey);
     if (old) return { snapshot: this.snapshots.get(old.snapshotId)!, childTask: this.tasks.get(old.childTaskId)!, attempt: this.attempts.get(old.attemptId)!, duplicate: true };
@@ -229,19 +236,62 @@ export class MemoryImageEditorRepository implements ImageEditorRepository {
   }
 }
 
+function editProviderSnapshot({ name, version, capabilitiesVersion, channel }: ImageEditProvider): EditProviderSnapshot {
+  return { name, version, capabilitiesVersion, channel };
+}
+
 export class ImageEditorService {
-  constructor(private readonly repository: ImageEditorRepository, private readonly provider: ImageEditProvider, private readonly storage: StorageAdapter, private readonly resolveSource: (versionId: string) => Promise<ImageSource | null>, private readonly ocrProvider?: OcrProvider, private readonly validateSource?: (sourceCardId: string, sourceVersionId: string) => Promise<boolean>) {}
-  async capabilities() { return { provider: { name: this.provider.name, version: this.provider.version, capabilitiesVersion: this.provider.capabilitiesVersion }, capabilities: { ...(await this.provider.capabilities()), ocr: Boolean(this.ocrProvider) } }; }
+  constructor(
+    private readonly repository: ImageEditorRepository,
+    private readonly provider: ImageEditProvider | (() => Promise<ImageEditProvider | null>),
+    private readonly storage: StorageAdapter,
+    private readonly resolveSource: (versionId: string) => Promise<ImageSource | null>,
+    private readonly ocrProvider?: OcrProvider | (() => Promise<OcrProvider | null>),
+    private readonly validateSource?: (sourceCardId: string, sourceVersionId: string) => Promise<boolean>,
+  ) {}
+
+  private async requireProvider() {
+    const provider = typeof this.provider === "function" ? await this.provider() : this.provider;
+    if (!provider) throw new Error("IMAGE_PROVIDER_NOT_CONFIGURED");
+    return provider;
+  }
+
+  async capabilities() {
+    const provider = typeof this.provider === "function" ? await this.provider() : this.provider;
+    return {
+      provider: provider ? editProviderSnapshot(provider) : null,
+      capabilities: { ...(await provider?.capabilities()), ocr: Boolean(this.ocrProvider) },
+    };
+  }
+
   async getDraft(sessionId: string) { return this.repository.getDraft(sessionId); }
-  async recognize(sessionId: string, sourceVersionId: string) { if (!this.ocrProvider) throw new Error("OCR_PROVIDER_UNAVAILABLE"); const source = await this.resolveSource(sourceVersionId); if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND"); try { const snapshot: OcrSnapshot = { sourceVersionId, status: "succeeded", blocks: await this.ocrProvider.recognize(source).then((result) => result.blocks) }; await this.repository.saveOcrSnapshot(sessionId, snapshot); return snapshot; } catch (error) { const snapshot: OcrSnapshot = { sourceVersionId, status: "failed", blocks: [], error: error instanceof Error ? error.message : "OCR_FAILED" }; await this.repository.saveOcrSnapshot(sessionId, snapshot); return snapshot; } }
+
+  async recognize(sessionId: string, sourceVersionId: string) {
+    const ocr = typeof this.ocrProvider === "function" ? await this.ocrProvider() : this.ocrProvider;
+    if (!ocr) throw new Error("OCR_PROVIDER_UNAVAILABLE");
+    const source = await this.resolveSource(sourceVersionId);
+    if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND");
+    const provider = { name: ocr.name, version: ocr.version, channel: ocr.channel };
+    let snapshot: OcrSnapshot;
+    try {
+      snapshot = { sourceVersionId, provider, status: "succeeded", blocks: (await ocr.recognize(source)).blocks };
+    } catch (error) {
+      snapshot = { sourceVersionId, provider, status: "failed", blocks: [], error: error instanceof Error ? error.message : "OCR_FAILED" };
+    }
+    await this.repository.saveOcrSnapshot(sessionId, snapshot);
+    return snapshot;
+  }
   async getOcrSnapshot(sessionId: string, sourceVersionId: string) { return this.repository.getOcrSnapshot(sessionId, sourceVersionId); }
   async upsertOperation(input: { sessionId: string; operation: EditOperation; summary?: string }) { const draft = await this.repository.getDraft(input.sessionId) ?? { sessionId: input.sessionId, operations: [], summary: "" }; const index = draft.operations.findIndex((item) => item.operationId === input.operation.operationId); const operations = [...draft.operations]; if (index >= 0) operations[index] = input.operation; else operations.push(input.operation); operations.forEach((item, i) => { item.order = i + 1; }); await this.repository.saveDraft({ ...draft, operations, summary: input.summary ?? draft.summary }); return { sessionId: input.sessionId, operations, summary: input.summary ?? draft.summary }; }
   async removeOperation(sessionId: string, operationId: string) { const draft = await this.repository.getDraft(sessionId); if (!draft) return null; const operations = draft.operations.filter((item) => item.operationId !== operationId).map((item, i) => ({ ...item, order: i + 1 })); await this.repository.saveDraft({ ...draft, operations }); return { ...draft, operations }; }
   async submit(input: { sessionId: string; idempotencyKey: string; sourceCardId: string; sourceVersionId: string; parentVersionId?: string; summary?: string }) {
+    const existing = await this.repository.getSubmission(input.idempotencyKey);
+    if (existing) return existing;
     if (!input.sourceCardId.trim() || !input.sourceVersionId.trim()) throw new Error("EDIT_SOURCE_VERSION_REQUIRED");
     const draft = await this.repository.getDraft(input.sessionId); if (!draft || !draft.operations.length) throw new Error("EDIT_OPERATIONS_REQUIRED");
     if (this.validateSource && !(await this.validateSource(input.sourceCardId, input.sourceVersionId))) throw new Error("EDIT_SOURCE_NOT_FOUND");
     const source = await this.resolveSource(input.sourceVersionId); if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND");
+    const provider = await this.requireProvider();
     const sourcePrompt = source.generationPrompt ?? "";
     const operations = await Promise.all(draft.operations.map(async (operation, i) => {
       const payload = { ...operation.payload };
@@ -253,7 +303,7 @@ export class ImageEditorService {
       }
       return { ...operation, order: i + 1, sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId, parentVersionId: input.parentVersionId ?? input.sourceVersionId, payload };
     }));
-    const caps = await this.provider.capabilities(); this.assertCapabilities(operations, caps); for (const operation of operations) this.validateOperation(operation);
+    const caps = await provider.capabilities(); this.assertCapabilities(operations, caps); for (const operation of operations) this.validateOperation(operation);
     const materialized = await Promise.all(operations.map(async (operation) => {
       const payload = { ...operation.payload };
       if (operation.type === "outpaint") {
@@ -290,14 +340,61 @@ export class ImageEditorService {
       const details = [operation.payload.text, operation.payload.originalText, operation.payload.newText].filter((value) => typeof value === "string" && value.trim()).join(" → ");
       return [operation.summary, details, operationPrompt].filter(Boolean).join("：");
     })].filter(Boolean).join("\n");
-    const snapshot: EditSnapshot = { id: randomUUID(), sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId, parentVersionId: input.parentVersionId ?? input.sourceVersionId, summary, sourcePrompt, operations: structuredClone(materialized), provider: { name: this.provider.name, version: this.provider.version, capabilitiesVersion: this.provider.capabilitiesVersion }, createdAt: new Date().toISOString(), schemaVersion: "image-edit-snapshot-v1" };
+    const snapshot: EditSnapshot = { id: randomUUID(), sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId, parentVersionId: input.parentVersionId ?? input.sourceVersionId, summary, sourcePrompt, operations: structuredClone(materialized), provider: editProviderSnapshot(provider), createdAt: new Date().toISOString(), schemaVersion: "image-edit-snapshot-v1" };
     const taskId = randomUUID(); const now = new Date().toISOString(); const childTask: ImageEditChildTask = { id: taskId, sourceCardId: input.sourceCardId, sourceVersionId: snapshot.sourceVersionId, parentVersionId: snapshot.parentVersionId, snapshotId: snapshot.id, summary: snapshot.summary, status: "generating", currentVersionId: null, finalVersionId: null, errorCode: null, errorMessage: null, createdAt: now, updatedAt: now };
     const attempt: ImageEditAttempt = { id: randomUUID(), childTaskId: taskId, snapshotId: snapshot.id, attemptNo: 1, status: "generating", command: { type: materialized[0].type, sourceVersionId: snapshot.sourceVersionId, prompt, operations: structuredClone(materialized) }, provider: snapshot.provider, errorCode: null, errorMessage: null, createdAt: now, completedAt: null };
-    const result = await this.repository.submit({ idempotencyKey: input.idempotencyKey, snapshot, childTask, attempt }); if (!result.duplicate) void this.execute(result.attempt, snapshot);
+    const result = await this.repository.submit({ idempotencyKey: input.idempotencyKey, snapshot, childTask, attempt }); if (!result.duplicate) void this.execute(result.attempt, provider);
     return result;
   }
-  async retry(attemptId: string, idempotencyKey: string) { const failed = await this.repository.getAttempt(attemptId); if (!failed || failed.status !== "failed") throw new Error("INVALID_IMAGE_EDIT_ATTEMPT"); const task = await this.repository.getChildTask(failed.childTaskId); if (!task) throw new Error("INVALID_IMAGE_EDIT_TASK"); const snapshot = await this.repository.getSnapshot(task.snapshotId); if (!snapshot) throw new Error("INVALID_IMAGE_EDIT_SNAPSHOT"); this.assertCapabilities(snapshot.operations, await this.provider.capabilities()); const oldAttempts = await this.repository.listAttempts(task.id); const attempt: ImageEditAttempt = { ...failed, id: randomUUID(), attemptNo: oldAttempts.length + 1, status: "generating", errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), completedAt: null }; const result = await this.appendAttempt({ idempotencyKey, snapshot, childTask: { ...task, status: "generating", errorCode: null, errorMessage: null, updatedAt: attempt.createdAt }, attempt }); if (!result.duplicate) void this.execute(result.attempt, snapshot); return result; }
-  async regenerate(input: { childTaskId: string; idempotencyKey: string; summary?: string }) { const task = await this.repository.getChildTask(input.childTaskId); if (!task) throw new Error("INVALID_IMAGE_EDIT_TASK"); if (!task.currentVersionId) throw new Error("CURRENT_VERSION_REQUIRED"); const snapshot = await this.repository.getSnapshot(task.snapshotId); if (!snapshot) throw new Error("INVALID_IMAGE_EDIT_SNAPSHOT"); const source = await this.resolveSource(task.currentVersionId); if (!source) throw new Error("CURRENT_VERSION_SOURCE_NOT_FOUND"); const operation: EditOperation = { ...snapshot.operations[0], type: "re_edit", sourceVersionId: task.currentVersionId, parentVersionId: task.currentVersionId, summary: input.summary ?? snapshot.summary }; const command: ImageEditCommand = { type: "re_edit", sourceVersionId: task.currentVersionId, prompt: input.summary ?? snapshot.summary, operations: [operation] }; const caps = await this.provider.capabilities(); if (!caps.currentVersionInput || !caps.imageToImage) throw new Error("IMAGE_EDIT_CURRENT_VERSION_UNSUPPORTED"); const attempts = await this.repository.listAttempts(task.id); const attempt: ImageEditAttempt = { id: randomUUID(), childTaskId: task.id, snapshotId: snapshot.id, attemptNo: attempts.length + 1, status: "generating", command, provider: snapshot.provider, errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), completedAt: null }; const result = await this.appendAttempt({ idempotencyKey: input.idempotencyKey, snapshot, childTask: { ...task, status: "generating", updatedAt: attempt.createdAt }, attempt }); if (!result.duplicate) void this.execute(result.attempt, snapshot); return result; }
+  async retry(attemptId: string, idempotencyKey: string) {
+    const existing = await this.repository.getSubmission(idempotencyKey);
+    if (existing) return existing;
+    const failed = await this.repository.getAttempt(attemptId);
+    if (!failed || failed.status !== "failed") throw new Error("INVALID_IMAGE_EDIT_ATTEMPT");
+    const task = await this.repository.getChildTask(failed.childTaskId);
+    if (!task) throw new Error("INVALID_IMAGE_EDIT_TASK");
+    const snapshot = await this.repository.getSnapshot(task.snapshotId);
+    if (!snapshot) throw new Error("INVALID_IMAGE_EDIT_SNAPSHOT");
+    const provider = await this.requireProvider();
+    this.assertCapabilities(failed.command.operations, await provider.capabilities());
+    const oldAttempts = await this.repository.listAttempts(task.id);
+    const attempt: ImageEditAttempt = {
+      ...failed, id: randomUUID(), attemptNo: oldAttempts.length + 1, status: "generating",
+      provider: editProviderSnapshot(provider), errorCode: null, errorMessage: null,
+      createdAt: new Date().toISOString(), completedAt: null,
+    };
+    const childTask = { ...task, status: "generating" as const, errorCode: null, errorMessage: null, updatedAt: attempt.createdAt };
+    const result = await this.appendAttempt({ idempotencyKey, snapshot, childTask, attempt });
+    if (!result.duplicate) void this.execute(result.attempt, provider);
+    return result;
+  }
+
+  async regenerate(input: { childTaskId: string; idempotencyKey: string; summary?: string }) {
+    const existing = await this.repository.getSubmission(input.idempotencyKey);
+    if (existing) return existing;
+    const task = await this.repository.getChildTask(input.childTaskId);
+    if (!task) throw new Error("INVALID_IMAGE_EDIT_TASK");
+    if (!task.currentVersionId) throw new Error("CURRENT_VERSION_REQUIRED");
+    const snapshot = await this.repository.getSnapshot(task.snapshotId);
+    if (!snapshot) throw new Error("INVALID_IMAGE_EDIT_SNAPSHOT");
+    const provider = await this.requireProvider();
+    const source = await this.resolveSource(task.currentVersionId);
+    if (!source) throw new Error("CURRENT_VERSION_SOURCE_NOT_FOUND");
+    const operation: EditOperation = { ...snapshot.operations[0], type: "re_edit", sourceVersionId: task.currentVersionId, parentVersionId: task.currentVersionId, summary: input.summary ?? snapshot.summary };
+    const command: ImageEditCommand = { type: "re_edit", sourceVersionId: task.currentVersionId, prompt: input.summary ?? snapshot.summary, operations: [operation] };
+    const caps = await provider.capabilities();
+    if (!caps.currentVersionInput || !caps.imageToImage) throw new Error("IMAGE_EDIT_CURRENT_VERSION_UNSUPPORTED");
+    const attempts = await this.repository.listAttempts(task.id);
+    const attempt: ImageEditAttempt = {
+      id: randomUUID(), childTaskId: task.id, snapshotId: snapshot.id, attemptNo: attempts.length + 1,
+      status: "generating", command, provider: editProviderSnapshot(provider), errorCode: null, errorMessage: null,
+      createdAt: new Date().toISOString(), completedAt: null,
+    };
+    const childTask = { ...task, status: "generating" as const, updatedAt: attempt.createdAt };
+    const result = await this.appendAttempt({ idempotencyKey: input.idempotencyKey, snapshot, childTask, attempt });
+    if (!result.duplicate) void this.execute(result.attempt, provider);
+    return result;
+  }
   async selectVersion(childTaskId: string, versionId: string, selection: "current" | "final") { return this.repository.selectVersion(childTaskId, versionId, selection); }
   async getTask(childTaskId: string) { const task = await this.repository.getChildTask(childTaskId); if (!task) return null; return { task, snapshot: await this.repository.getSnapshot(task.snapshotId), attempts: await this.repository.listAttempts(task.id), versions: await this.repository.listVersions(task.id) }; }
   async listTasksBySourceCard(sourceCardId: string) { const tasks = await this.repository.listChildTasksBySourceCard(sourceCardId); return Promise.all(tasks.map(async (task) => ({ task, snapshot: await this.repository.getSnapshot(task.snapshotId), attempts: await this.repository.listAttempts(task.id), versions: await this.repository.listVersions(task.id) }))); }
@@ -335,5 +432,5 @@ export class ImageEditorService {
   }
   private validateRect(rect: Record<string, unknown>) { if (!["x", "y", "width", "height"].every((key) => Number.isFinite(Number(rect[key])))) throw new Error("NORMALIZED_RECT_INVALID"); if (!this.inUnit(Number(rect.x)) || !this.inUnit(Number(rect.y)) || !this.inUnit(Number(rect.width)) || !this.inUnit(Number(rect.height)) || Number(rect.width) <= 0 || Number(rect.height) <= 0 || Number(rect.x) + Number(rect.width) > 1 || Number(rect.y) + Number(rect.height) > 1) throw new Error("NORMALIZED_RECT_INVALID"); }
   private inUnit(value: number) { return Number.isFinite(value) && value >= 0 && value <= 1; }
-  private async execute(attempt: ImageEditAttempt, snapshot: EditSnapshot) { try { const source = await this.resolveSource(attempt.command.sourceVersionId); if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND"); const generated = await this.provider.edit(attempt.command, source); const objectKey = `image-edits/${attempt.childTaskId}/versions/${randomUUID()}.png`; await this.storage.put({ key: objectKey, bytes: generated.bytes, contentType: generated.mimeType }); const sha256 = createHash("sha256").update(generated.bytes).digest("hex"); await this.repository.completeAttempt({ attemptId: attempt.id, objectKey, sha256, width: generated.width, height: generated.height, mimeType: generated.mimeType, completedAt: new Date().toISOString() }); } catch (error) { await this.repository.failAttempt(attempt.id, error instanceof Error ? error.message : "IMAGE_EDIT_FAILED", error instanceof Error ? error.message : "IMAGE_EDIT_FAILED", new Date().toISOString()).catch(() => undefined); } }
+  private async execute(attempt: ImageEditAttempt, provider: ImageEditProvider) { try { const source = await this.resolveSource(attempt.command.sourceVersionId); if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND"); const generated = await provider.edit(attempt.command, source); const objectKey = `image-edits/${attempt.childTaskId}/versions/${randomUUID()}.png`; await this.storage.put({ key: objectKey, bytes: generated.bytes, contentType: generated.mimeType }); const sha256 = createHash("sha256").update(generated.bytes).digest("hex"); await this.repository.completeAttempt({ attemptId: attempt.id, objectKey, sha256, width: generated.width, height: generated.height, mimeType: generated.mimeType, completedAt: new Date().toISOString() }); } catch (error) { await this.repository.failAttempt(attempt.id, error instanceof Error ? error.message : "IMAGE_EDIT_FAILED", error instanceof Error ? error.message : "IMAGE_EDIT_FAILED", new Date().toISOString()).catch(() => undefined); } }
 }

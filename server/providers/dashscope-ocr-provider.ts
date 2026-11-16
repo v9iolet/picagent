@@ -1,19 +1,24 @@
+import { parseProviderJson } from "./provider-json.js";
+import type { ModelChannelSnapshot } from "../../shared/model-settings.js";
 import { randomUUID } from "node:crypto";
 import type { ImageSource, OcrProvider, OcrTextBlock } from "../image-editor.js";
 
 export class DashScopeOcrProvider implements OcrProvider {
-  readonly name = "dashscope-vision-ocr";
+  readonly name: string;
   readonly version: string;
-  constructor(private readonly baseUrl: string, private readonly apiKey: string, private readonly model: string, private readonly timeoutMs = 300_000) { this.version = model; }
+  constructor(private readonly baseUrl: string, private readonly apiKey: string, private readonly model: string, private readonly timeoutMs = 300_000, readonly channel?: ModelChannelSnapshot) {
+    this.name = channel ? "openai-compatible" : "dashscope-vision-ocr";
+    this.version = model;
+  }
   async recognize(source: ImageSource): Promise<{ blocks: OcrTextBlock[] }> {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), { method: "POST", signal: controller.signal, headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: "识别图片中所有可读文字。只返回 JSON：{\"blocks\":[{\"id\":\"string\",\"text\":\"string\",\"confidence\":0到1,\"bounds\":{\"x\":0到1,\"y\":0到1,\"width\":0到1,\"height\":0到1},\"rotation\":数字}]}。坐标以图片左上角为原点并归一化。" }, { role: "user", content: [{ type: "text", text: "请进行 OCR，返回所有文字块。" }, { type: "image_url", image_url: { url: `data:${source.mimeType};base64,${source.bytes.toString("base64")}` } }] }] }) });
+      const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), { method: "POST", redirect: "error", signal: controller.signal, headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: "识别图片中所有可读文字。只返回 JSON：{\"blocks\":[{\"id\":\"string\",\"text\":\"string\",\"confidence\":0到1,\"bounds\":{\"x\":0到1,\"y\":0到1,\"width\":0到1,\"height\":0到1},\"rotation\":数字}]}。坐标以图片左上角为原点并归一化。" }, { role: "user", content: [{ type: "text", text: "请进行 OCR，返回所有文字块。" }, { type: "image_url", image_url: { url: `data:${source.mimeType};base64,${source.bytes.toString("base64")}` } }] }] }) });
       if (!response.ok) throw new Error(`OCR_HTTP_${response.status}`);
-      const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const payload = parseProviderJson(await response.text(), this.apiKey, "OCR_INVALID_HTTP_RESPONSE") as { choices?: Array<{ message?: { content?: string } }> };
       const content = payload.choices?.[0]?.message?.content;
       if (!content) throw new Error("OCR_EMPTY_RESPONSE");
-      const parsed = JSON.parse(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")) as { blocks?: unknown };
+      const parsed = parseProviderJson(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""), this.apiKey, "OCR_INVALID_JSON_RESPONSE") as { blocks?: unknown };
       const blocks: OcrTextBlock[] = Array.isArray(parsed.blocks) ? parsed.blocks.flatMap((item, index) => {
         if (!item || typeof item !== "object") return [];
         const value = item as Record<string, unknown>; const bounds = value.bounds;
