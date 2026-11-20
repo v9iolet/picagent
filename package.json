@@ -8,6 +8,7 @@
     "api": "tsx server/index.ts",
     "import-prompts": "tsx server/import-prompts.ts",
     "seed:validation-rag": "tsx server/seed-validation-rag.ts",
+    "seed:demo": "tsx server/seed-demo.ts",
     "test:ticket05": "tsx --test tests/ticket05.contract.test.ts tests/ticket05.input.test.ts",
     "test:ticket02": "tsx --test tests/ticket02.contract.test.ts tests/ticket02.encoding.test.ts",
     "build": "tsc -b && vite build",

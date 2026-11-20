@@ -5,7 +5,12 @@ export interface ApiImage {
   sha256: string; width: number; height: number; mimeType: string; originalFilename: string;
   currentBaseVersionId: string | null; createdAt: string; originalPreviewUrl: string; thumbnailPreviewUrl: string;
 }
-export interface ApiSuite { id: string; name: string; status: "draft" | "in_progress"; createdAt: string; updatedAt: string; inputImages: ApiImage[] }
+export interface ApiSuite {
+  id: string; name: string; status: "draft" | "in_progress";
+  styleOverride?: string | null; styleOverrideUpdatedAt?: string | null;
+  coverPreviewUrl?: string | null; inputImageCount?: number; taskCount?: number; isDemo?: boolean;
+  createdAt: string; updatedAt: string; inputImages: ApiImage[];
+}
 export interface ApiBaseVersion {
   id: string; attemptId: string; versionNumber: number; width: number; height: number; mimeType: "image/png"; sha256: string; createdAt: string; previewUrl: string;
 }
@@ -21,7 +26,7 @@ export interface ApiPromptInputField {
 }
 export interface ApiPromptTemplate {
   templateId: string; templateVersionId: string; versionNo: number; code: string; name: string;
-  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image"; executionTarget: "llm" | "image_model";
+  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt"; executionTarget: "llm" | "image_model";
   inputSchema: ApiPromptInputField[]; applicability: Record<string, unknown>;
 }
 export interface ApiPromptTemplateCopy extends ApiPromptTemplate { body:string; userPromptTemplate:string; outputSchema?:Record<string,unknown>; status?:"draft"|"published"|"retired" }
@@ -58,7 +63,7 @@ export interface ApiProductMaterialRef { libraryReferenceId:string; resourceId:s
 export interface ApiSuiteTask { id:string;suiteId:string;planSnapshotId:string|null;planItemId:string|null;ordinal:number;imageType:"main"|"detail";title:string;purpose:string;promptDraft:string;promptRevision:number;sourceInputImageId:string|null;generationParams:Record<string,unknown>;status:ApiTaskStatus;archivedAt:string|null;createdAt:string;updatedAt:string;originKind?:"suite_plan"|"reverse_import";reversePlanId?:string|null;reverseReferenceId?:string|null;reversePromptVersionId?:string|null;reverseTaskGroupId?:string|null;sourceLibraryReferenceId?:string|null;sourceResourceVersionId?:string|null;sourceRevision?:number;versions:ApiTaskVersion[];attempts:ApiTaskAttempt[];slots:ApiTaskSlot[] }
 export interface ApiTaskBatch { id:string;suiteId:string;kind:"batch"|"single"|"retry";requestedCount:number;taskIds:string[];status:"running"|"completed"|"partial"|"failed";idempotencyKey:string;createdAt:string;startedAt:string|null;finishedAt:string|null }
 export interface ApiCanvasLayout { id:string;suiteId:string;layoutVersion:number;viewport:{x:number;y:number;zoom:number};nodes:Array<{nodeId:string;x:number;y:number;width?:number;height?:number;groupKey?:string;hidden?:boolean}>;groups:Array<{groupKey:string;x:number;y:number;width:number;height:number;collapsed?:boolean}>;updatedAt:string }
-export interface ApiWorkbench { suite:ApiSuite;inputImages:ApiImage[];planSnapshot:ApiPlanSnapshot|null;tasks:ApiSuiteTask[];batches:ApiTaskBatch[];imageEditChildren?:Array<{task:Record<string,unknown>;snapshot:Record<string,unknown>|null;attempts:Array<Record<string,unknown> & { provider?: { name: string; version: string; channel?: ModelChannelSnapshot } }>;versions:Array<{id:string;previewUrl?:string;versionNumber:number;width?:number;height?:number;mimeType?:string;attemptId?:string}>}>;layout:ApiCanvasLayout|null }
+export interface ApiWorkbench { suite:ApiSuite;inputImages:ApiImage[];planSnapshot:ApiPlanSnapshot|null;tasks:ApiSuiteTask[];batches:ApiTaskBatch[];imageEditChildren?:Array<{task:Record<string,unknown>;snapshot:Record<string,unknown>|null;attempts:Array<Record<string,unknown> & { provider?: { name: string; version: string; channel?: ModelChannelSnapshot } }>;versions:Array<{id:string;previewUrl?:string;versionNumber:number;width?:number;height?:number;mimeType?:string;objectKey?:string;attemptId?:string;createdAt?:string}>}>;layout:ApiCanvasLayout|null;planStyleGuide?:string;styleOverride?:string|null;effectiveStyleGuide?:string }
 export type ApiLibraryResourceType = "prompt_template"|"input_image"|"base_image"|"task_image_version"|"process_image"|"reverse_reference_asset";
 export interface ApiLibraryResource { id:string;resourceType:ApiLibraryResourceType;title:string;summary:string;mimeType:string|null;previewUrl:string|null;suiteId:string|null;taskId:string|null;imageVersionId:string|null;baseVersionId:string|null;templateVersionId:string|null;resourceVersionId:string;stage:ApiPromptTemplate["stage"]|null;source:Record<string,unknown>;status?:"draft"|"published"|"archived";promptSnapshot?:Record<string,unknown>|null;createdAt:string;updatedAt:string }
 export interface ApiLibraryReference { id:string;suiteId:string;resourceId:string;resourceType:ApiLibraryResourceType;targetType:"plan"|"task";targetId:string;resourceVersionId:string;snapshot:Record<string,unknown>;createdAt:string;createdBy:string|null;archivedAt:string|null }
@@ -93,6 +98,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const settingsPath = "/api/model-settings";
 export const modelSettingsApi = {
   get: () => request<ModelSettingsView>(settingsPath),
+  discoverModels: (input: Pick<ModelChannelInput, "baseUrl" | "apiKey"> & { channelId?: string }, signal: AbortSignal) => request<{ modelIds: string[] }>(`${settingsPath}/models`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input), signal,
+  }),
   saveChannel: (input: ModelChannelInput, id?: string) => request<ModelSettingsView>(settingsPath + "/channels" + (id ? `/${encodeURIComponent(id)}` : ""), {
     method: id ? "PUT" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
   }),
@@ -154,6 +162,8 @@ export const suiteApi = {
   savePlan(suiteId:string,items:Array<Pick<ApiPlanItem,"title"|"purpose"|"prompt">>){return request<ApiPlanSnapshot>(`/api/suites/${encodeURIComponent(suiteId)}/plan`,{method:"PATCH",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify({items})});},
   startCreationCheck(suiteId:string){return request<{ready:boolean;planSnapshotId:string;itemCount:number}>(`/api/suites/${encodeURIComponent(suiteId)}/start-creation-check`,{method:"POST",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()}});},
   getWorkbench(suiteId:string){return request<ApiWorkbench>(`/api/suites/${encodeURIComponent(suiteId)}/workbench`);},
+  updateStyleOverride(suiteId:string, styleOverride:string|null){return request<{suite:ApiSuite;planStyleGuide:string;styleOverride:string|null;effectiveStyleGuide:string}>(`/api/suites/${encodeURIComponent(suiteId)}/style-override`,{method:"PATCH",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify({styleOverride})});},
+  deliveryExportUrl(suiteId:string){return `/api/suites/${encodeURIComponent(suiteId)}/delivery/export`;},
   createTasks(suiteId:string,planSnapshotId?:string){return request<{planSnapshotId:string;tasks:ApiSuiteTask[];createdTaskIds:string[]}>(`/api/suites/${encodeURIComponent(suiteId)}/tasks`,{method:"POST",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify(planSnapshotId?{planSnapshotId}:{})});},
   updateTask(taskId:string,body:Partial<Pick<ApiSuiteTask,"title"|"purpose"|"promptDraft"|"sourceInputImageId"|"generationParams">>){return request<ApiSuiteTask>(`/api/suite-tasks/${encodeURIComponent(taskId)}`,{method:"PATCH",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify(body)});},
   generateBatch(suiteId:string,taskIds?:string[]){return request<{batchId:string;status:string;requestedCount?:number}>(`/api/suites/${encodeURIComponent(suiteId)}/generation`,{method:"POST",headers:{"content-type":"application/json","idempotency-key":createIdempotencyKey()},body:JSON.stringify(taskIds?{taskIds}:{})});},

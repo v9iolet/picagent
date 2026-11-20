@@ -80,16 +80,16 @@ test("template copy endpoint returns only a published template from the requeste
 });
 
 test("workbench exposes the unified library with image assets and prompt templates", async () => {
-  const source = await readFile(new URL("../src/pages/BoardPage.tsx", import.meta.url), "utf8");
-  assert.match(source, />风格库<\/button>/);
-  assert.match(source, /图片资产/);
-  assert.match(source, /提示词模板/);
-  assert.match(source, /listLibraryResources/);
-  assert.match(source, /createLibraryReference/);
-  assert.match(source, /process_image/);
-  assert.match(source, /value="base_refine"/);
-  assert.match(source, /value="plan"/);
-  assert.match(source, /value="task_image"/);
-  assert.match(source, /选择资源/);
-  assert.match(source, /实拍原图不适用生成提示词/);
+  const shell = await readFile(new URL("../src/components/AppShell.tsx", import.meta.url), "utf8");
+  const library = await readFile(new URL("../src/pages/StyleLibraryPage.tsx", import.meta.url), "utf8");
+  assert.match(shell, /风格库/);
+  assert.match(shell, /\/style-library/);
+  assert.match(library, /图片资产/);
+  assert.match(library, /提示词模板/);
+  assert.match(library, /listLibraryResources/);
+  assert.match(library, /process_image/);
+  assert.match(library, /base_refine/);
+  assert.match(library, /plan/);
+  assert.match(library, /task_image/);
+  assert.match(library, /原始输入图不适用生成提示词/);
 });

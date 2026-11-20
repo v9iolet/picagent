@@ -2,11 +2,129 @@ import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "re
 import { capabilityLabels, type ModelCapability, type ModelChannel, type ModelChannelInput, type ModelPreferences, type ModelReference, type ModelSettingsView } from "../../shared/model-settings";
 import { modelSettingsApi } from "../api/client";
 import { Icon } from "./shared";
+import { AppShell } from "../components/AppShell";
 import "./ModelSettingsPage.css";
 
 const capabilities = ["image", "vision"] as const;
 const emptyChannel = (): ModelChannelInput => ({ name: "", protocol: "openai-compatible", baseUrl: "", apiKey: "", models: [] });
 const choiceValue = (ref: ModelReference | null) => ref ? JSON.stringify([ref.channelId, ref.modelId]) : "";
+
+function ChannelModelPicker({ models, onPull, onClose, onConfirm }: {
+  models: ModelChannelInput["models"];
+  onPull: (signal: AbortSignal) => Promise<{ modelIds: string[] }>;
+  onClose: () => void;
+  onConfirm: (ids: string[]) => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const pending = useRef<AbortController | null>(null);
+  const [search, setSearch] = useState("");
+  const [manualId, setManualId] = useState("");
+  const [tab, setTab] = useState<"new" | "existing">("new");
+  const [candidates, setCandidates] = useState<string[]>([]);
+  const [selected, setSelected] = useState(new Set<string>());
+  const [pulling, setPulling] = useState(false);
+  const [pulled, setPulled] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    dialog.current?.showModal();
+    return () => pending.current?.abort();
+  }, []);
+
+  const existingIds = models.map(({ id }) => id);
+  const existing = new Set(existingIds);
+  const visibleIds = (tab === "new" ? candidates : existingIds).filter((id) => id.toLowerCase().includes(search.trim().toLowerCase()));
+  const updateSelection = (ids: string[], checked: boolean) => setSelected((current) => {
+    const next = new Set(current);
+    for (const id of ids) {
+      if (checked) next.add(id);
+      else next.delete(id);
+    }
+    return next;
+  });
+
+  const addManual = () => {
+    const id = manualId.trim();
+    if (!id) return;
+    setManualId("");
+    setSearch("");
+    if (existing.has(id)) {
+      setTab("existing");
+      return;
+    }
+    setTab("new");
+    setCandidates((current) => current.includes(id) ? current : [...current, id]);
+    updateSelection([id], true);
+  };
+
+  const pull = async () => {
+    if (pending.current) return;
+    const request = new AbortController();
+    pending.current = request;
+    setPulling(true);
+    setError("");
+    try {
+      const { modelIds } = await onPull(request.signal);
+      setCandidates((current) => [...new Set([...current, ...modelIds.filter((id) => !existing.has(id))])]);
+      setTab("new");
+      setPulled(true);
+    } catch (cause) {
+      if (!request.signal.aborted) setError(cause instanceof Error ? cause.message : "拉取模型列表失败，请手动添加模型");
+    } finally {
+      pending.current = null;
+      if (!request.signal.aborted) setPulling(false);
+    }
+  };
+
+  const checkedCount = visibleIds.filter((id) => selected.has(id)).length;
+  const close = () => {
+    dialog.current?.close();
+    onClose();
+  };
+
+  return <dialog ref={dialog} className="settings-model-picker" aria-labelledby="model-picker-title" onCancel={(event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  }}>
+    <header className="settings-drawer-header">
+      <div className="settings-picker-title"><h2 id="model-picker-title">选择渠道模型</h2><small aria-live="polite">已选 {selected.size} / {candidates.length}</small></div>
+      <button type="button" className="settings-icon-button" onClick={close} aria-label="关闭"><Icon name="x" /></button>
+    </header>
+    <div className="settings-picker-tools">
+      <input type="search" aria-label="搜索模型" placeholder="搜索模型" value={search} onChange={(event) => setSearch(event.target.value)} />
+      <div className="settings-picker-manual">
+        <input aria-label="模型 ID" placeholder="输入模型 ID" value={manualId} onChange={(event) => setManualId(event.target.value)} onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); addManual(); }
+        }} />
+        <button type="button" className="settings-button" disabled={!manualId.trim()} onClick={addManual}>添加</button>
+      </div>
+      <button type="button" className="settings-button" disabled={pulling} onClick={() => void pull()}>{pulling ? "拉取中…" : "拉取模型列表"}</button>
+    </div>
+    {error && <p className="settings-error settings-picker-error" role="alert">{error}</p>}
+    <div className="settings-picker-tabs" role="group" aria-label="模型列表">
+      <button type="button" aria-pressed={tab === "new"} onClick={() => setTab("new")}>待添加的模型 ({candidates.length})</button>
+      <button type="button" aria-pressed={tab === "existing"} onClick={() => setTab("existing")}>已有的模型 ({existingIds.length})</button>
+    </div>
+    <div className="settings-picker-body">
+      {tab === "new" && visibleIds.length > 0 && <div className="settings-picker-selection">
+        <small>当前列表已选 {checkedCount} / {visibleIds.length}</small>
+        <button type="button" className="settings-button" disabled={checkedCount === visibleIds.length} onClick={() => updateSelection(visibleIds, true)}>全选当前列表</button>
+        <button type="button" className="settings-button" disabled={!checkedCount} onClick={() => updateSelection(visibleIds, false)}>取消当前列表</button>
+      </div>}
+      {visibleIds.length > 0 ? <ul className="settings-picker-list">{visibleIds.map((id) => <li key={id}>
+        {tab === "new" ? <label><input type="checkbox" checked={selected.has(id)} onChange={(event) => updateSelection([id], event.target.checked)} /><span>{id}</span></label> : <span>{id}</span>}
+      </li>)}</ul> : <p className="settings-picker-empty" role="status">{search.trim() ? "没有匹配的模型。" : tab === "existing" ? "渠道暂无模型。" : pulling ? "正在拉取模型列表…" : pulled ? "没有新的模型可添加。" : "输入模型 ID 或拉取模型列表。"}</p>}
+    </div>
+    <footer className="settings-drawer-footer">
+      <button type="button" className="settings-button" onClick={close}>取消</button>
+      <button type="button" className="settings-button settings-primary" disabled={!selected.size} onClick={() => {
+        dialog.current?.close();
+        onConfirm(candidates.filter((id) => selected.has(id)));
+      }}>确定</button>
+    </footer>
+  </dialog>;
+}
 
 function ChannelDrawer({ channel, onClose, onSave }: {
   channel: ModelChannel | null;
@@ -19,6 +137,7 @@ function ChannelDrawer({ channel, onClose, onSave }: {
     : emptyChannel());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => { dialog.current?.showModal(); }, []);
 
@@ -31,8 +150,10 @@ function ChannelDrawer({ channel, onClose, onSave }: {
     finally { setSaving(false); }
   };
 
-  const patchModel = (index: number, patch: Partial<ModelChannelInput["models"][number]>) => {
-    setDraft((value) => ({ ...value, models: value.models.map((model, position) => position === index ? { ...model, ...patch } : model) }));
+  const setCapability = (id: string, capability: ModelCapability, checked: boolean) => {
+    setDraft((value) => ({ ...value, models: value.models.map((model) => model.id === id ? {
+      ...model, capabilities: checked ? [...model.capabilities, capability] : model.capabilities.filter((item) => item !== capability),
+    } : model) }));
   };
 
   return <dialog ref={dialog} className="settings-drawer" aria-labelledby="channel-drawer-title" onCancel={(event) => { event.preventDefault(); if (!saving) onClose(); }}>
@@ -51,18 +172,18 @@ function ChannelDrawer({ channel, onClose, onSave }: {
             {channel?.hasApiKey && <small>已配置。接口地址不变时留空可保留原密钥。</small>}
           </label>
           <section aria-labelledby="channel-models-title">
-            <header className="settings-section-head"><h3 id="channel-models-title">渠道模型</h3><button type="button" className="settings-button" onClick={() => setDraft({ ...draft, models: [...draft.models, { id: "", capabilities: [] }] })}>添加模型</button></header>
-            {draft.models.map((model, index) => <fieldset className="settings-model" key={index}>
-              <legend>模型 {index + 1}</legend>
-              <div className="settings-model-input">
-                <label>模型 ID<input required placeholder="填写服务商提供的模型 ID" value={model.id} onChange={(event) => patchModel(index, { id: event.target.value })} /></label>
-                <button type="button" className="settings-button settings-danger" aria-label={`移除模型 ${index + 1}`} onClick={() => setDraft({ ...draft, models: draft.models.filter((_, position) => position !== index) })}>移除</button>
+            <header className="settings-section-head"><h3 id="channel-models-title">渠道模型</h3><button type="button" className="settings-button" aria-haspopup="dialog" onClick={() => setPickerOpen(true)}>添加模型</button></header>
+            {draft.models.length > 0 && <p className="settings-model-hint">每个模型至少选择一种能力。</p>}
+            {draft.models.map((model) => <div role="group" aria-label={model.id} className="settings-model" key={model.id}>
+              <div className="settings-model-heading">
+                <strong>{model.id}</strong>
+                <button type="button" className="settings-button settings-danger" aria-label={`移除模型 ${model.id}`} onClick={() => setDraft((value) => ({ ...value, models: value.models.filter(({ id }) => id !== model.id) }))}>移除</button>
               </div>
               <div className="settings-capabilities">{capabilities.map((capability) => <label key={capability}>
-                <input type="checkbox" checked={model.capabilities.includes(capability)} onChange={(event) => patchModel(index, { capabilities: event.target.checked ? [...model.capabilities, capability] : model.capabilities.filter((value) => value !== capability) })} />
+                <input type="checkbox" checked={model.capabilities.includes(capability)} onChange={(event) => setCapability(model.id, capability, event.target.checked)} />
                 {capabilityLabels[capability]}
               </label>)}</div>
-            </fieldset>)}
+            </div>)}
           </section>
         </fieldset>
         {error && <p className="settings-error" role="alert">{error}</p>}
@@ -72,6 +193,10 @@ function ChannelDrawer({ channel, onClose, onSave }: {
         <button type="submit" className="settings-button settings-primary" disabled={saving}>{saving ? "保存中…" : "保存渠道"}</button>
       </footer>
     </form>
+    {pickerOpen && <ChannelModelPicker models={draft.models} onClose={() => setPickerOpen(false)} onPull={(signal) => modelSettingsApi.discoverModels({ baseUrl: draft.baseUrl, apiKey: draft.apiKey, channelId: channel?.id }, signal)} onConfirm={(ids) => {
+      setDraft((value) => ({ ...value, models: [...value.models, ...ids.map((id) => ({ id, capabilities: [] }))] }));
+      setPickerOpen(false);
+    }} />}
   </dialog>;
 }
 
@@ -144,18 +269,14 @@ export function ModelSettingsPage({ preferences, navigate }: { preferences: bool
     navigate(path);
   };
 
-  return <div className="start-shell">
-    <header className="start-topbar">
-      <a className="start-brand" href="/suites/new" onClick={linkTo("/suites/new")}><img src="/logo.png" alt="" width={36} height={36} /><strong>PicAgent</strong></a>
-      <div className="start-context"><span>内部图片生产</span><i>/</i><strong>配置</strong></div>
-    </header>
-    <aside className="start-sidebar" aria-label="主导航">
-      <a className="start-nav" href="/suites/new" onClick={linkTo("/suites/new")}><Icon name="sparkles" /><span>创建</span></a>
-      <a className="start-nav" href="/style-library" onClick={linkTo("/style-library")}><Icon name="library" /><span>风格库</span></a>
-      <a className="start-nav active" href="/settings" aria-current="page" onClick={linkTo("/settings")}><Icon name="sliders" /><span>配置</span></a>
-      <span className="start-nav-spacer" />
-    </aside>
-    <main className="start-main settings-main">
+  return <AppShell
+    activeNav="settings"
+    navigate={navigate}
+    crumbs={[{ label: "配置", to: "/settings" }, { label: preferences ? "偏好设置" : "模型渠道" }]}
+    statusText={error ? "配置加载异常" : notice || "配置已同步"}
+    statusTone={error ? "error" : "pass"}
+  >
+    <main className="settings-main">
       <h1>配置</h1>
       <nav className="settings-tabs" aria-label="配置页签">
         <a href="/settings" onClick={linkTo("/settings")} aria-current={!preferences ? "page" : undefined}>渠道</a>
@@ -190,5 +311,5 @@ export function ModelSettingsPage({ preferences, navigate }: { preferences: bool
       setError("");
       setNotice("渠道已保存");
     }} />}
-  </div>;
+  </AppShell>;
 }

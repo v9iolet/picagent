@@ -7,6 +7,8 @@ export interface Suite {
   id: string;
   name: string;
   status: SuiteStatus;
+  styleOverride?: string | null;
+  styleOverrideUpdatedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -39,6 +41,7 @@ export interface SuiteRepository {
   createSuite(name: string, idempotencyKey?: string): Promise<Suite>;
   listSuites(): Promise<Suite[]>;
   getSuite(id: string): Promise<Suite | null>;
+  updateSuiteStyleOverride(suiteId: string, styleOverride: string | null): Promise<Suite | null>;
   getInputImages(suiteId: string): Promise<InputImage[]>;
   hasInputImageHash(suiteId: string, sha256: string): Promise<boolean>;
   createInputImage(input: Omit<InputImage, "originalPreviewUrl" | "thumbnailPreviewUrl">, idempotencyKey?: string): Promise<InputImage>;

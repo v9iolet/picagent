@@ -214,6 +214,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       ? { status: 415, body: { error: { code: "UNSUPPORTED_MEDIA_TYPE", message: "配置请求必须使用 application/json" }, requestId: "" } }
       : await app.request(req.method ?? "GET", path, { headers: headers as Record<string, string>, body: parsed });
   }
+  if (response.raw) {
+    const rawHeaders = response.headers as Record<string, string> | undefined;
+    res.statusCode = response.status;
+    for (const [name, value] of Object.entries(rawHeaders ?? {})) res.setHeader(name, value);
+    res.setHeader("content-type", rawHeaders?.["content-type"] ?? "application/octet-stream");
+    res.end(response.raw);
+    return;
+  }
   if (requestUrl.pathname.startsWith("/api/model-settings")) res.setHeader("cache-control", "no-store");
   res.statusCode = response.status; res.setHeader("content-type", "application/json; charset=utf-8"); res.end(JSON.stringify(response.body));
 }

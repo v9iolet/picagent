@@ -1,0 +1,221 @@
+.ba-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.58);
+  backdrop-filter: blur(4px);
+}
+
+.ba-modal {
+  width: min(1040px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid var(--pa-border);
+  background: #fff;
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.28);
+}
+
+.ba-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--pa-border);
+}
+
+.ba-title p {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--pa-accent);
+}
+
+.ba-title h2 {
+  margin: 3px 0 0;
+  font-size: 16px;
+  color: var(--pa-ink);
+}
+
+.ba-title span {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--pa-muted);
+}
+
+.ba-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ba-mode-tabs {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid var(--pa-border);
+  background: var(--pa-bg);
+}
+
+.ba-mode-tabs button {
+  height: 26px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pa-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ba-mode-tabs button.is-active {
+  background: #fff;
+  color: var(--pa-ink);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.ba-close {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--pa-border);
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.ba-close:hover {
+  background: var(--pa-bg);
+}
+
+.ba-body {
+  flex: 1;
+  min-height: 440px;
+  padding: 18px;
+  background: #f1f4f8;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.ba-compare-stage {
+  position: relative;
+  width: min(860px, 100%);
+  height: min(62vh, 560px);
+  border-radius: 12px;
+  overflow: hidden;
+  background: repeating-conic-gradient(#e7ecf2 0% 25%, #f7f9fb 0% 50%) 50% / 18px 18px;
+  border: 1px solid var(--pa-border-strong);
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+
+.ba-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.ba-before-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ba-tag {
+  position: absolute;
+  top: 12px;
+  z-index: 4;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.ba-tag.is-before {
+  left: 12px;
+}
+
+.ba-tag.is-after {
+  right: 12px;
+  background: rgba(37, 99, 235, 0.86);
+}
+
+.ba-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.25);
+  z-index: 5;
+  transform: translateX(-1px);
+  pointer-events: none;
+}
+
+.ba-handle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: #fff;
+  color: var(--pa-ink);
+  border: 2px solid var(--pa-accent);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.22);
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: auto;
+}
+
+.ba-single-stage {
+  width: 100%;
+  height: min(66vh, 600px);
+  display: grid;
+  place-items: center;
+}
+
+.ba-single-stage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
+}
+
+.ba-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-top: 1px solid var(--pa-border);
+  font-size: 11px;
+  color: var(--pa-muted);
+  background: #fff;
+}
+
+.ba-footer strong {
+  color: var(--pa-ink);
+  font-family: var(--font-mono);
+}

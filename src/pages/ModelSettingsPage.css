@@ -1,4 +1,4 @@
-.settings-main { max-width: 1120px; display: grid; gap: 22px; color: var(--start-ink); }
+.settings-main { max-width: 1120px; padding: 28px 34px 52px; display: grid; gap: 22px; color: var(--pa-ink, var(--start-ink)); }
 .settings-main h1 { font-size: 32px; margin: 0; }
 .settings-main h2, .settings-drawer h2 { font-size: 18px; margin: 0; }
 .settings-main h3, .settings-drawer h3 { font-size: 14px; margin: 0; }
@@ -39,10 +39,33 @@
 .settings-icon-button svg { width: 16px; height: 16px; }
 .settings-drawer-body { padding: 22px; overflow: auto; }
 .settings-model { min-width: 0; border: 1px solid var(--start-line); border-radius: 8px; padding: 10px; margin: 0 0 10px; }
-.settings-model legend { font-size: 12px; color: var(--start-muted); padding-inline: 4px; }
-.settings-model-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; }
+.settings-model-hint { margin: 0 0 10px; color: var(--start-muted); font-size: 13px; }
+.settings-model-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; overflow-wrap: anywhere; }
 .settings-capabilities { display: flex; gap: 14px; margin-top: 8px; }
 .settings-capabilities label { display: flex; align-items: center; gap: 5px; font-weight: 400; }
+.settings-model-picker { width: min(800px, calc(100% - 32px)); max-width: none; max-height: calc(100% - 32px); box-sizing: border-box; padding: 0; border: 1px solid var(--start-line); border-radius: 14px; background: white; color: var(--start-ink); box-shadow: 0 20px 60px rgb(18 26 39 / 24%); }
+.settings-model-picker[open] { display: flex; flex-direction: column; }
+.settings-model-picker::backdrop { background: rgb(18 26 39 / 32%); }
+.settings-picker-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+.settings-picker-title small, .settings-picker-selection small, .settings-picker-empty { color: var(--start-muted); }
+.settings-picker-tools { display: flex; align-items: stretch; flex-wrap: wrap; gap: 8px; padding: 16px 22px 12px; }
+.settings-picker-tools > input { flex: 1 1 160px; }
+.settings-picker-manual { flex: 2 1 220px; display: flex; gap: 8px; }
+.settings-picker-manual input { flex: 1; }
+.settings-picker-tools input { min-width: 0; box-sizing: border-box; padding: 8px 10px; background: white; border: 1px solid var(--start-line); border-radius: 8px; font: inherit; }
+.settings-picker-error { margin: 0 22px 8px; }
+.settings-picker-tabs { display: flex; flex-wrap: wrap; gap: 16px; padding-inline: 22px; border-bottom: 1px solid var(--start-line); }
+.settings-picker-tabs button { background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 10px 2px; color: var(--start-muted); font: inherit; cursor: pointer; }
+.settings-picker-tabs button[aria-pressed="true"] { border-color: #d4a414; color: var(--start-ink); font-weight: 600; }
+.settings-picker-body { min-height: 0; overflow: auto; padding: 12px 22px 20px; }
+.settings-picker-selection { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.settings-picker-selection small { flex: 1; }
+.settings-picker-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 6px; list-style: none; margin: 0; padding: 0; }
+.settings-picker-list label, .settings-picker-list li > span { display: flex; align-items: center; gap: 7px; padding: 8px 10px; border-radius: 7px; background: #f5f6f8; overflow-wrap: anywhere; }
+.settings-picker-list label { cursor: pointer; }
+.settings-picker-list input { flex: none; accent-color: #a77b00; }
+.settings-picker-list span { min-width: 0; }
+.settings-picker-empty { margin: 0; padding-block: 24px; text-align: center; }
 .settings-error, .settings-notice { padding: 9px 12px; border-radius: 8px; font-size: 13px; }
 .settings-error { background: #fff1f0; color: #a12727; }
 .settings-notice { background: #ecf9ef; color: #22623a; }

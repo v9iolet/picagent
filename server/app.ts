@@ -8,6 +8,8 @@ import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptS
 import { MemoryCategoryPromptRepository } from "./repositories/memory-category-prompt-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { materializeCategoryPlanItems } from "./suite-task-prompt.js";
+import { applyStyleOverrideToPrompt, resolveDeliverySlots, sanitizeDeliveryName, type DeliveryEditChildLike } from "../shared/workbench-delivery.js";
+import { createZipBuffer } from "./zip.js";
 import type { ImageEditorApiResponse } from "./image-editor-api.js";
 import type {
   BaseImageVersion,
@@ -69,6 +71,8 @@ async function observedPromptLoad(repository: PromptRepository, templateVersionI
 
 const errorMessages: Record<string, string> = {
   INVALID_SUITE_ID: "方案不存在",
+  INVALID_STYLE_OVERRIDE: "画布风格覆盖必须为文本或空值",
+  DELIVERY_EMPTY: "当前方案尚无可交付的图片版本",
   INVALID_INPUT_IMAGE: "原图不存在",
   INVALID_BASE_VERSION: "底图版本不存在",
   EMPTY_NAME: "方案名称不能为空",
@@ -455,6 +459,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
   };
 
   const uploadIdempotency = new Map<string, InputImage>();
+  const styleOverrideIdempotency = new Map<string, { suite: import("./types.js").Suite; planStyleGuide: string; styleOverride: string | null; effectiveStyleGuide: string }>();
   const categoryPromptRepository = deps.categoryPromptRepository ?? new MemoryCategoryPromptRepository();
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
   const reversePlanWrites = new Map<string, Promise<void>>();
@@ -590,6 +595,12 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const { provider, model, channel } = await resolveImage();
     if (deps.modelSettings && !provider) throw new Error("TASK_IMAGE_PROVIDER_NOT_CONFIGURED");
     const now = new Date().toISOString();
+    const [suiteForStyle, latestPlanSnapshot] = await Promise.all([
+      deps.repository.getSuite(suiteId),
+      deps.planRepository ? deps.planRepository.getLatestSnapshot(suiteId) : Promise.resolve(null),
+    ]);
+    const activeStyleOverride = suiteForStyle?.styleOverride?.trim() || null;
+    const planTemplateVersionId = latestPlanSnapshot?.templateVersionId ?? null;
     const batch: TaskGenerationBatch = { id: randomUUID(), suiteId, kind, requestedCount: tasks.length, taskIds: tasks.map((task) => task.id), status: "running", idempotencyKey, createdAt: now, startedAt: now, finishedAt: null };
     const slots: TaskResultSlot[] = tasks.map((task, index) => ({ id: randomUUID(), batchId: batch.id, taskId: task.id, slotOrdinal: index + 1, retryOfSlotId: failedAttempt?.slotId ?? null, status: "generating", selectedVersionId: null, createdAt: now, completedAt: null }));
     const attempts: TaskGenerationAttempt[] = [];
@@ -649,7 +660,15 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       }
       if (!inputImages.length) inputImages.push({ bytes: (await deps.storage.get(sourceObjectKey))?.bytes ?? Buffer.alloc(0), mimeType: "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: generationParams.size ?? "1K", quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: task.globalStyleCard ?? {}, finalPrompt: task.promptDraft, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: task.promptSha256 ?? createHash("sha256").update(task.promptDraft).digest("hex"), contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: task.globalStyleCard ?? {}, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import";
+      const finalPrompt = shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft;
+      const effectiveGlobalStyleCard = shouldApplyStyleOverride
+        ? { ...(task.globalStyleCard ?? {}), promptPrefix: activeStyleOverride, overridden: true }
+        : (task.globalStyleCard ?? {});
+      const effectivePromptSha256 = shouldApplyStyleOverride
+        ? createHash("sha256").update(finalPrompt).digest("hex")
+        : (task.promptSha256 ?? createHash("sha256").update(finalPrompt).digest("hex"));
+      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: generationParams.size ?? "1K", quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
@@ -825,7 +844,42 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!name) return fail("EMPTY_NAME");
       return ok(await deps.repository.createSuite(name, idempotencyKey), 201);
     }
-    if (method === "GET" && path === "/api/suites") return ok(await deps.repository.listSuites());
+    if (method === "GET" && path === "/api/suites") {
+      const suites = await deps.repository.listSuites();
+      const enriched = await Promise.all(suites.map(async (suite) => {
+        const [inputImages, tasks] = await Promise.all([
+          deps.repository.getInputImages(suite.id),
+          deps.taskRepository ? deps.taskRepository.listTasks(suite.id) : Promise.resolve([]),
+        ]);
+        const activeTasks = tasks.filter((task) => task.status !== "archived");
+        let coverPreviewUrl: string | null = null;
+        if (deps.taskRepository && activeTasks.length) {
+          const ordered = [...activeTasks].sort((a, b) => (a.imageType === b.imageType ? a.ordinal - b.ordinal : a.imageType === "main" ? -1 : 1));
+          for (const task of ordered) {
+            const history = await deps.taskRepository.listTaskVersions(task.id);
+            const chosen = history.versions.find((v) => v.isFinal) ?? history.versions.find((v) => v.isCurrent) ?? history.versions[0];
+            if (chosen) {
+              coverPreviewUrl = taskVersionView(chosen).previewUrl;
+              break;
+            }
+          }
+        }
+        if (!coverPreviewUrl && inputImages.length) {
+          const firstWithBase = inputImages.find((img) => img.currentBaseVersionId);
+          coverPreviewUrl = firstWithBase
+            ? `/api/suites/${suite.id}/input-images/${firstWithBase.id}/base-versions/${firstWithBase.currentBaseVersionId}/preview`
+            : inputImages[0].thumbnailPreviewUrl;
+        }
+        return {
+          ...suite,
+          coverPreviewUrl,
+          inputImageCount: inputImages.length,
+          taskCount: activeTasks.length,
+          isDemo: suite.name.includes("演示") || suite.name.includes("Demo"),
+        };
+      }));
+      return ok(enriched);
+    }
     const libraryResourceMatch = path.match(/^\/api\/library\/resources\/([^/]+)$/);
     if (method === "GET" && libraryResourceMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
@@ -1276,6 +1330,155 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
        return ok({ ready:true,planSnapshotId:snapshot.id,itemCount:snapshot.items.length });
     }
 
+    const resolvePlanStyleGuide = (snapshot: PlanSnapshot | null): string => {
+      const card = snapshot?.structure?.globalStyleCard;
+      if (card && typeof card === "object" && typeof (card as Record<string, unknown>).promptPrefix === "string" && String((card as Record<string, unknown>).promptPrefix).trim()) {
+        return String((card as Record<string, unknown>).promptPrefix).trim();
+      }
+      const values = { ...(snapshot?.dynamicInput ?? {}), ...(snapshot?.humanInput ?? {}) } as Record<string, unknown>;
+      for (const key of ["design_style", "style_guide", "styleGuide", "visual_style"]) {
+        if (typeof values[key] === "string" && values[key].trim()) return values[key].trim();
+      }
+      return "沿用计划模板默认风格，保持商品真实外观、光影和品牌一致性。";
+    };
+
+    const loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
+      if (!deps.imageEditorApi) return [];
+      const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
+      if (response.status !== 200 || !("data" in response.body) || !Array.isArray(response.body.data)) return [];
+      const all = response.body.data as DeliveryEditChildLike[];
+      const allowed = new Set(tasks.map((task) => task.id));
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const child of all) {
+          const taskId = typeof child.task?.id === "string" ? child.task.id : "";
+          const sourceCardId = typeof child.task?.sourceCardId === "string" ? child.task.sourceCardId : "";
+          if (taskId && sourceCardId && allowed.has(sourceCardId) && !allowed.has(taskId)) {
+            allowed.add(taskId);
+            changed = true;
+          }
+        }
+      }
+      return all.filter((child) => typeof child.task?.id === "string" && allowed.has(child.task.id));
+    };
+
+    const styleOverrideMatch = path.match(/^\/api\/suites\/([^/]+)\/style-override$/);
+    if (method === "PATCH" && styleOverrideMatch) {
+      if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
+      const scopeKey = `${styleOverrideMatch[1]}:${idempotencyKey}`;
+      const cached = styleOverrideIdempotency.get(scopeKey);
+      if (cached) return ok(cached);
+      const suite = await deps.repository.getSuite(styleOverrideMatch[1]);
+      if (!suite) return fail("INVALID_SUITE_ID", 404);
+      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const rawValue = body.styleOverride;
+      if (rawValue !== null && rawValue !== undefined && typeof rawValue !== "string") return fail("INVALID_STYLE_OVERRIDE");
+      const nextValue = typeof rawValue === "string" && rawValue.trim() ? rawValue.trim() : null;
+      const updated = await deps.repository.updateSuiteStyleOverride(suite.id, nextValue);
+      if (!updated) return fail("INVALID_SUITE_ID", 404);
+      const snapshot = deps.planRepository ? await deps.planRepository.getLatestSnapshot(suite.id) : null;
+      const planStyleGuide = resolvePlanStyleGuide(snapshot);
+      const payload = {
+        suite: updated,
+        planStyleGuide,
+        styleOverride: updated.styleOverride ?? null,
+        effectiveStyleGuide: updated.styleOverride?.trim() || planStyleGuide,
+      };
+      styleOverrideIdempotency.set(scopeKey, payload);
+      return ok(payload);
+    }
+
+    const deliveryExportMatch = path.match(/^\/api\/suites\/([^/]+)\/delivery\/export$/);
+    if (method === "GET" && deliveryExportMatch) {
+      if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
+      const suite = await deps.repository.getSuite(deliveryExportMatch[1]);
+      if (!suite) return fail("INVALID_SUITE_ID", 404);
+      const [snapshot, tasks] = await Promise.all([
+        deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null),
+        deps.taskRepository.listTasks(suite.id),
+      ]);
+      const taskAggregates = await Promise.all(tasks.map(async (task) => {
+        const history = await deps.taskRepository!.listTaskVersions(task.id);
+        return { ...taskView(task), versions: history.versions.map(taskVersionView), attempts: history.attempts.map(taskAttemptView), slots: [] };
+      }));
+      const imageEditChildren = await loadSuiteImageEditChildren(tasks);
+      const slots = resolveDeliverySlots(taskAggregates, imageEditChildren, { defaultTemplateVersionId: snapshot?.templateVersionId ?? null });
+      const deliverable = slots.filter((slot) => slot.sourceRole !== "pending" && slot.exportPath);
+      if (!deliverable.length) return fail("DELIVERY_EMPTY", 400);
+
+      const entries: Array<{ name: string; data: Buffer }> = [];
+      const manifestItems: Array<Record<string, unknown>> = [];
+      for (const slot of deliverable) {
+        let bytes: Buffer | null = null;
+        if (slot.objectKey) {
+          const stored = await deps.storage.get(slot.objectKey);
+          if (stored) bytes = stored.bytes;
+        }
+        if (!bytes) return fail("OBJECT_NOT_FOUND", 404);
+        entries.push({ name: slot.exportPath!, data: bytes });
+        manifestItems.push({
+          exportPath: slot.exportPath,
+          imageType: slot.imageType,
+          ordinal: slot.typeOrdinal,
+          title: slot.title,
+          purpose: slot.purpose,
+          sourceRole: slot.sourceRole,
+          isEditedDerived: slot.isEditedDerived,
+          parentTaskId: slot.parentTaskId,
+          editChildTaskId: slot.editChildTaskId,
+          sourceVersionId: slot.sourceVersionId,
+          versionId: slot.versionId,
+          versionNumber: slot.versionNumber,
+          width: slot.width,
+          height: slot.height,
+          mimeType: slot.mimeType,
+          model: slot.model,
+          channelName: slot.channelName,
+          templateVersionId: slot.templateVersionId,
+          promptText: slot.promptText,
+          promptSnapshot: slot.promptSnapshot,
+        });
+      }
+
+      const planStyleGuide = resolvePlanStyleGuide(snapshot);
+      const manifest = {
+        schemaVersion: "picagent-delivery-manifest-v1",
+        exportedAt: new Date().toISOString(),
+        suite: {
+          id: suite.id,
+          name: suite.name,
+          status: suite.status,
+          planSnapshotId: snapshot?.id ?? null,
+          planStyleGuide,
+          styleOverride: suite.styleOverride ?? null,
+          effectiveStyleGuide: suite.styleOverride?.trim() || planStyleGuide,
+        },
+        summary: {
+          totalSlots: slots.length,
+          exportedCount: manifestItems.length,
+          mainCount: manifestItems.filter((item) => item.imageType === "main").length,
+          detailCount: manifestItems.filter((item) => item.imageType === "detail").length,
+        },
+        items: manifestItems,
+      };
+      entries.push({ name: "manifest.json", data: Buffer.from(JSON.stringify(manifest, null, 2), "utf8") });
+      const zipBuffer = createZipBuffer(entries);
+      const safeSuiteName = sanitizeDeliveryName(suite.name, `suite_${suite.id.slice(0, 8)}`);
+      const asciiFallback = safeSuiteName.replace(/[^\x20-\x7e]/g, "") || `suite_${suite.id.slice(0, 8)}`;
+      const encodedName = encodeURIComponent(`${safeSuiteName}_delivery.zip`);
+      return {
+        status: 200,
+        body: { data: { exportedCount: manifestItems.length }, requestId: randomUUID() },
+        headers: {
+          "content-type": "application/zip",
+          "content-disposition": `attachment; filename="${asciiFallback}_delivery.zip"; filename*=UTF-8''${encodedName}`,
+          "cache-control": "no-store",
+        },
+        raw: zipBuffer,
+      };
+    }
+
     const workbenchMatch = path.match(/^\/api\/suites\/([^/]+)\/workbench$/);
     if (method === "GET" && workbenchMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
@@ -1292,26 +1495,21 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         const history = await deps.taskRepository!.listTaskVersions(task.id);
         return { ...taskView(task), versions: history.versions.map(taskVersionView), attempts: history.attempts.map(taskAttemptView), slots: slots.filter((slot) => slot.taskId === task.id).map(taskSlotView) };
       }));
-      const imageEditChildren = deps.imageEditorApi ? await (async () => {
-        const response = await deps.imageEditorApi!.request("GET", "/api/image-editor/tasks");
-        if (response.status !== 200 || !("data" in response.body) || !Array.isArray(response.body.data)) return [];
-        const all = response.body.data as Array<{ task?: { id?: string; sourceCardId?: string } }>;
-        const allowed = new Set(tasks.map((task) => task.id));
-        let changed = true;
-        while (changed) {
-          changed = false;
-          for (const child of all) {
-            const task = child.task;
-            if (task?.id && task.sourceCardId && allowed.has(task.sourceCardId) && !allowed.has(task.id)) {
-              allowed.add(task.id);
-              changed = true;
-            }
-          }
-        }
-        return all.filter((child) => child.task?.id && allowed.has(child.task.id));
-      })() : [];
+      const imageEditChildren = await loadSuiteImageEditChildren(tasks);
       const layout = await deps.taskRepository.getLayout(suite.id);
-      return ok({ suite, inputImages, planSnapshot: snapshot ? planSnapshotView(snapshot) : null, tasks: taskAggregates, batches: batches.map(taskBatchView), imageEditChildren, layout });
+      const planStyleGuide = resolvePlanStyleGuide(snapshot);
+      return ok({
+        suite,
+        inputImages,
+        planSnapshot: snapshot ? planSnapshotView(snapshot) : null,
+        tasks: taskAggregates,
+        batches: batches.map(taskBatchView),
+        imageEditChildren,
+        layout,
+        planStyleGuide,
+        styleOverride: suite.styleOverride ?? null,
+        effectiveStyleGuide: suite.styleOverride?.trim() || planStyleGuide,
+      });
     }
 
     const createTasksMatch = path.match(/^\/api\/suites\/([^/]+)\/tasks$/);

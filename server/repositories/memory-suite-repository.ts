@@ -20,6 +20,15 @@ export class MemorySuiteRepository implements SuiteRepository {
   }
   async listSuites() { return [...this.suites.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); }
   async getSuite(id: string) { return this.suites.get(id) ?? null; }
+  async updateSuiteStyleOverride(suiteId: string, styleOverride: string | null) {
+    const suite = this.suites.get(suiteId);
+    if (!suite) return null;
+    const now = new Date().toISOString();
+    const cleaned = styleOverride?.trim() ? styleOverride.trim() : null;
+    const updated: Suite = { ...suite, styleOverride: cleaned, styleOverrideUpdatedAt: cleaned ? now : null, updatedAt: now };
+    this.suites.set(suiteId, updated);
+    return updated;
+  }
   async getInputImages(suiteId: string) { return [...this.images.values()].filter((image) => image.suiteId === suiteId).sort((a, b) => a.ordinal - b.ordinal); }
   async getInputImage(suiteId: string, inputImageId: string) { const image = this.images.get(inputImageId); return image?.suiteId === suiteId ? image : null; }
   async hasInputImageHash(suiteId: string, sha256: string) { return [...this.images.values()].some((image) => image.suiteId === suiteId && image.sha256 === sha256); }

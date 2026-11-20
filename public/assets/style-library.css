@@ -9,6 +9,22 @@
 .style-library-nav .nav-item:hover { background:#f5f7f9; color:var(--suite-ink); }
 .style-library-nav .nav-item svg { width:18px; height:18px; }
 .style-library-workarea { inset:68px 0 0 82px; background:#f8fafb; }
+.pa-shell .style-library-workarea { position: static; flex: 1; height: 100%; min-height: 0; }
+.style-template-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
+.style-template-head h3 { margin:0; }
+.style-version-row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 8px; border:1px solid var(--suite-line, #dfe5ed); border-radius:8px; margin-bottom:6px; background:#fbfcfd; }
+.style-version-row.is-selected { border-color:#356fd2; background:#eff5ff; }
+.style-version-select { flex:1; border:0; background:transparent; text-align:left; cursor:pointer; display:flex; flex-direction:column; gap:2px; padding:0; }
+.style-version-select span { font-size:12px; font-weight:600; color:var(--suite-ink, #142033); }
+.style-version-select small { font-size:10px; color:var(--suite-muted, #748095); font-family:var(--font-mono); }
+.style-version-ops { display:flex; gap:6px; }
+.style-version-ops .btn { min-height:26px; padding:0 9px; font-size:11px; }
+.style-draft-fields { display:grid; gap:10px; margin-top:12px; }
+.style-draft-fields label { display:grid; gap:5px; }
+.style-draft-fields label span { font-size:11px; font-weight:600; color:var(--suite-muted, #748095); }
+.style-draft-fields .input, .style-draft-fields .textarea { width:100%; padding:8px 10px; border:1px solid var(--suite-line, #dfe5ed); border-radius:8px; font:inherit; font-size:12px; background:#fff; }
+.style-draft-fields .textarea { resize:vertical; font-family:var(--font-mono); line-height:1.45; }
+.style-readonly-hint { color:var(--suite-muted, #748095); font-size:11px; }
 .style-library-workarea .panel, .style-library-workarea .styles-center { background:#fff; border-color:var(--suite-line); }
 .style-library-workarea .panel-header { height:58px; padding-inline:18px; border-bottom-color:var(--suite-line); }
 .style-library-workarea .style-filter-panel .panel-scroll { background:#fff; }

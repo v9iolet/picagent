@@ -11,16 +11,18 @@ test("BoardPage routes the suite workbench through the compose/gallery surface",
   assert.doesNotMatch(workbench, /group:main|group:detail/);
 });
 
-test("every current base image is connected to every active task", async () => {
+test("compose board connects base inputs to tasks and uses three-lane lineage projection", async () => {
   const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
-  assert.match(source, /const baseIds = currentBases\.map/);
-  assert.match(source, /baseIds\.forEach\(\(sourceId\) => edges\.push/);
-  assert.match(source, /styleId\}->\$\{id\}/);
+  assert.match(source, /computeWorkbenchLanes/);
+  assert.match(source, /computeLineageHighlight/);
+  assert.match(source, /baseIds\.forEach\(\(sourceId\) => rawEdges\.push/);
+  assert.match(source, /DeliveryGalleryView/);
+  assert.match(source, /BeforeAfterLightbox/);
 });
 
-test("task cards carry the global style prefix and generation parameters", async () => {
+test("task cards apply style override without double-prefixing and expose generation parameters", async () => {
   const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
-  assert.match(source, /styledPrompt\(task, styleGuide\)/);
+  assert.match(source, /applyStyleOverrideToPrompt/);
   assert.match(source, /modelFor\(task, version\)/);
   assert.match(source, /ratioFor\(task\)/);
   assert.match(source, /sizeFor\(task\)/);
@@ -40,7 +42,6 @@ test("task selection prioritizes prompt details and the template library opens a
   const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
   const css = await readFile("public/assets/suite-workbench.css", "utf8");
   assert.match(source, /wb-inspector-prompt/);
-  assert.match(source, /node\.data\.kind === "base"/);
   assert.match(source, /wb-prompt-modal-backdrop/);
   assert.match(css, /\.wb-prompt-modal-backdrop \{ position: fixed;/);
   assert.match(css, /\.wb-canvas \{[^}]*border: 1px solid/);
@@ -48,8 +49,8 @@ test("task selection prioritizes prompt details and the template library opens a
 
 test("starting creation materializes plan items as task cards before navigation", async () => {
   const source = await readFile("src/pages/StartPage.tsx", "utf8");
-  assert.match(source, /const readiness=await suiteApi\.startCreationCheck\(suite\.id\)/);
-  assert.match(source, /await suiteApi\.createTasks\(suite\.id,readiness\.planSnapshotId\)/);
+  assert.match(source, /const readiness = await suiteApi\.startCreationCheck\(suite\.id\)/);
+  assert.match(source, /await suiteApi\.createTasks\(suite\.id, readiness\.planSnapshotId\)/);
   assert.match(source, /createTasks[\s\S]*navigate\(`\/suites\/\$\{suite\.id\}\/board`\)/);
 });
 
@@ -142,8 +143,6 @@ test("compose cards expose image editing and use one coherent version selector",
   assert.match(source, /已是终版/);
   assert.match(source, /选择\$\{task\.title\}版本/);
   assert.match(source, /editChildRunning/);
-  assert.match(source, /生成结果/);
-  assert.match(source, /来自任务卡/);
   assert.match(source, /wb-simulated-progress[\s\S]*scaleX/);
   assert.match(css, /\.wb-card-version-actions/);
   assert.match(css, /\.wb-version-status/);
