@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt"] as const;
+export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt", "listing_copy"] as const;
 export type PromptStage = (typeof PROMPT_STAGES)[number];
 export type PromptVersionStatus = "draft" | "published" | "retired";
 
@@ -56,6 +56,11 @@ export interface PromptTemplateRuntime extends PromptTemplatePublic {
 }
 
 const V11_STAGE_CONTRACTS = {
+  listing_copy: {
+    code: "general.listing-copy",
+    schemaVersion: "listing-copy-v1",
+    requiredInputKeys: ["platform", "target_market", "output_language", "selling_points", "listing_copy_rules", "image_ids"],
+  },
   structure_plan: {
     code: "general.structure-plan",
     schemaVersion: "suite-structure-plan-v2",
@@ -69,7 +74,7 @@ const V11_STAGE_CONTRACTS = {
 } as const;
 
 export function validatePromptTemplateContract(record: Pick<PromptTemplateRecord, "code" | "kind" | "stage" | "executionTarget" | "inputSchema" | "outputSchema" | "body">): void {
-  if (record.stage !== "structure_plan" && record.stage !== "category_prompt") return;
+  if (record.stage !== "structure_plan" && record.stage !== "category_prompt" && record.stage !== "listing_copy") return;
   const contract = V11_STAGE_CONTRACTS[record.stage];
   if (record.code !== contract.code) throw new Error(`V1.1 template code must be ${contract.code}`);
   if (record.kind !== "planner" || record.executionTarget !== "llm") throw new Error(`V1.1 template ${record.code} must be an llm planner`);

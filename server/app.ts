@@ -1,3 +1,5 @@
+import { createListingCopyApi } from "./listing-copy-api.js";
+import { MemoryListingRepository, type ListingRepository } from "./listing-copy.js";
 import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../shared/model-settings.js";
 import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
@@ -476,7 +478,7 @@ function llmSource(client: LlmClient) {
   return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };
 }
 
-export function createTicket02App(deps: { repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> } }): Ticket02App {
+export function createTicket02App(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> } }): Ticket02App {
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
   const resolveImage = async () => {
     const selected = await resolveModel("image");
@@ -496,6 +498,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
   const styleOverrideIdempotency = new Map<string, { suite: import("./types.js").Suite; planStyleGuide: string; styleOverride: string | null; effectiveStyleGuide: string }>();
   const categoryPromptRepository = deps.categoryPromptRepository ?? new MemoryCategoryPromptRepository();
   const pipelineRepository = deps.pipelineRepository ?? new MemoryPipelineRepository();
+  const listingRepository = deps.listingRepository ?? new MemoryListingRepository();
+  const listing = createListingCopyApi({ jobs: listingRepository, suites: deps.repository, storage: deps.storage, pipelines: pipelineRepository, plans: deps.planRepository, platforms: deps.platformRepository, prompts: deps.promptRepository, vision: resolveVision });
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
   const reversePlanWrites = new Map<string, Promise<void>>();
   const withReversePlanWrite = async <T>(planId: string, action: () => Promise<T>): Promise<T> => {
@@ -883,6 +887,10 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!rawSnapshot || rawSnapshot.confirmationStatus !== "confirmed") throw new Error("STRUCTURE_PLAN_FAILED");
       await pipelineRepository.updateRun(run.id, { structureSnapshotId: rawSnapshot.id, updatedAt: new Date().toISOString() });
 
+      if (config.listingCopy === true) {
+        void listing.startPipeline(run.id, suiteId, config, images).catch(() => console.error("Could not start listing copy for pipeline", run.id));
+      }
+
       let taskRows: SuiteTask[] = [];
       const canReuseTasks = Boolean(run.taskIds?.length) && !["base_refining"].includes(resumePhase);
       if (canReuseTasks && deps.taskRepository) {
@@ -934,6 +942,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
   };
 
   const request = async (method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> => {
+    if (/^\/api\/listing-copies(?:[/?]|$)/.test(path)) return listing.request(method, path, options.body);
     if (path === "/api/model-settings" || path.startsWith("/api/model-settings/")) return deps.modelSettings ? deps.modelSettings.request(method, path, options.body) : fail("NOT_FOUND", 404);
     if (method === "POST" && path === "/api/image-editor/translate-text") {
       const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
@@ -1082,7 +1091,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const actualOther = snapshot?.structure && isStructurePlanV2(snapshot.structure) ? snapshot.structure.categoryAllocations.filter((item) => otherCodes.has(item.category) && item.count > 0).reduce((sum, item) => sum + item.count, 0) : 0;
       const planning = snapshot?.structure && isStructurePlanV2(snapshot.structure) ? { snapshot: planSnapshotView(snapshot), notGeneratedReasons: cards.length > 0 && actualOther < otherLimit ? snapshot.structure.categoryAllocations.filter((item) => otherCodes.has(item.category) && item.count === 0 && item.missingFacts.length > 0).map((item) => ({ category: item.category, reasons: item.missingFacts })) : [] } : { snapshot: snapshot ? planSnapshotView(snapshot) : null, notGeneratedReasons: [] };
       const total = cards.length; const done = cards.filter((card) => card.sourceRole !== "pending").length;
-      return ok({ suite, pipeline, inputImages, planning, cards, progress: { total, completed: done, percent: total ? Math.round(done / total * 100) : 0 }, batches });
+      const listingCopy = pipeline?.config.listingCopy === true ? await listingRepository.summary(pipeline.id) : null;
+      return ok({ suite, pipeline, listingCopy, inputImages, planning, cards, progress: { total, completed: done, percent: total ? Math.round(done / total * 100) : 0 }, batches });
     }
     const feedMatch = path.match(/^\/api\/suites\/feed(?:\?(.*))?$/);
     if (method === "GET" && feedMatch) {

@@ -64,8 +64,8 @@ export class DashScopeLlmClient implements LlmClient {
     const userContent = buildPlanUserContent(input);
     const userPrompt = userContent[0].type === "text" ? userContent[0].text : "";
     const archive = await startModelArchive({
-      type: input.flow === "category-prompt" ? "multimodal-category-prompt" : "multimodal-plan",
-      flow: input.flow === "category-prompt" ? "category-prompt" : "plan",
+      type: flow === "listing-copy" ? "multimodal-listing-copy" : input.flow === "category-prompt" ? "multimodal-category-prompt" : "multimodal-plan",
+      flow,
       requestId,
       provider: this.provider,
       model: this.model,
