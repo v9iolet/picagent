@@ -6,6 +6,7 @@ import {
   SUITE_IMAGE_LIMITS,
   type SuiteCategoryGroupCode,
 } from "../../../shared/suite-categories";
+import { SUPPORTED_OUTPUT_LANGUAGES } from "../../../shared/workbench-delivery";
 import { refinement, totalImages, type Config } from "./studio";
 
 interface Props {
@@ -39,15 +40,16 @@ export function ConfigPanel({
   function select(
     label: string,
     key: "targetMarket" | "outputLanguage" | "aspectRatio" | "size",
-    choices: string[],
+    choices: readonly (string | { value: string; label: string })[],
   ) {
     return (
       <label>
         {label}
         <select aria-label={label} value={c[key]} onChange={(e) => update({ [key]: e.target.value })}>
-          {choices.map((v) => (
-            <option key={v}>{v}</option>
-          ))}
+          {choices.map((choice) => {
+            const { value, label } = typeof choice === "string" ? { value: choice, label: choice } : choice;
+            return <option key={value} value={value}>{label}</option>;
+          })}
         </select>
       </label>
     );
@@ -122,7 +124,7 @@ export function ConfigPanel({
               </select>
             </label>
             {select("目标市场", "targetMarket", ["美国", "中国", "英国", "德国", "法国", "日本", "其他"])}
-            {select("语言", "outputLanguage", ["中文", "英语", "日语", "德语", "法语", "西班牙语"])}
+            {select("语言", "outputLanguage", SUPPORTED_OUTPUT_LANGUAGES)}
             {select("比例", "aspectRatio", options.aspectRatios)}
             {select("分辨率", "size", options.sizes)}
           </div>

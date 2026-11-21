@@ -62,7 +62,9 @@
   gap: 8px;
 }
 .ss-tools a {
-  padding: 10px 2px;
+  white-space: nowrap;
+  text-align: center;
+  padding: 10px 0;
   border-radius: 8px;
   display: grid;
   justify-items: center;

@@ -5,7 +5,7 @@ import {
   type ApiPlatformProfile,
   type ApiSuite,
 } from "../../api/client";
-import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
+import { SUPPORTED_OUTPUT_LANGUAGES, type ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { defaultImageOptions, type ModelSettingsView } from "../../../shared/model-settings";
 import {
   SMART_SUITE_STRUCTURE_PRESET,
@@ -29,7 +29,7 @@ export interface Config {
 export const initialConfig: Config = {
   platform: "",
   targetMarket: "美国",
-  outputLanguage: "英语",
+  outputLanguage: SUPPORTED_OUTPUT_LANGUAGES[0].value,
   aspectRatio: "1:1",
   size: "1K",
   sellingPoints: "",

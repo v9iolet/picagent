@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { suiteApi, type ApiPlatformProfile, type ApiWorkbench } from "../../api/client";
-import { SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
+import { SUITE_CATEGORY_GROUPS, SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { DeliveryGalleryView } from "../DeliveryGalleryView";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
@@ -13,6 +13,7 @@ const phases: Record<string, string> = {
   image_generating: "逐张出图",
   done: "完成",
 };
+const auxiliaryCategories = new Set<string>(SUITE_CATEGORY_GROUPS.other.categories);
 const statuses: Record<string, string> = {
   running: "生成中",
   completed: "已完成",
@@ -31,6 +32,39 @@ type Props = {
   onActivate: (id: string) => void;
   navigate: (path: string) => void;
 };
+const editStatus = async (job: string) =>
+  ((await suiteApi.getImageEditTask(job)).task as { status: string }).status;
+const retryStatus = async (job: string) => (await suiteApi.getBatch(job)).batch.status;
+
+// Each invocation owns the timer and completion state of a single job.
+function useResultJob(
+  job: string, readStatus: (job: string) => Promise<string>, success: readonly string[], suiteId: string,
+  refresh: Props["refresh"], setJob: (id: string) => void, notify: (text: string) => void,
+) {
+  useEffect(() => {
+    if (!job) return;
+    let live = true;
+    async function poll() {
+      try {
+        const status = await readStatus(job);
+        if (!live) return;
+        if (status === "running" || status === "generating") {
+          timer = setTimeout(poll, 3000);
+          return;
+        }
+        await refresh(suiteId);
+        if (live)
+          notify(success.includes(status) ? "图片已更新" : "图片生成失败，可在创作板查看详情。");
+      } catch (error) {
+        if (live) notify(message(error));
+      }
+      if (live) setJob("");
+    }
+    let timer = setTimeout(poll, 1000);
+    return () => { live = false; clearTimeout(timer); };
+  }, [job, readStatus, success, suiteId, refresh, setJob, notify]);
+}
+
 export function BatchResults({
   state: s,
   profiles,
@@ -72,43 +106,8 @@ export function BatchResults({
       setBusy(false);
     }
   };
-  useEffect(() => {
-    if (!editJob && !retryJob) return;
-    let live = true,
-      timer: ReturnType<typeof setTimeout>;
-    async function poll() {
-      try {
-        let status: string;
-        if (editJob) {
-          const { task } = await suiteApi.getImageEditTask(editJob);
-          status = (task as { status: string }).status;
-        } else {
-          status = (await suiteApi.getBatch(retryJob)).batch.status;
-        }
-        if (!live) return;
-        if (["running", "generating"].includes(status)) {
-          timer = setTimeout(() => void poll(), 3000);
-          return;
-        }
-        await refresh(id);
-        if (live)
-          setNotice(
-            ["completed", "succeeded"].includes(status) ? "图片已更新" : "图片生成失败，可在创作板查看详情。",
-          );
-      } catch (e) {
-        if (live) setNotice(message(e));
-      }
-      if (live) {
-        setEditJob("");
-        setRetryJob("");
-      }
-    }
-    timer = setTimeout(() => void poll(), 1000);
-    return () => {
-      live = false;
-      clearTimeout(timer);
-    };
-  }, [editJob, retryJob, id, refresh]);
+  useResultJob(editJob, editStatus, ["completed", "succeeded"], id, refresh, setEditJob, setNotice);
+  useResultJob(retryJob, retryStatus, ["completed", "succeeded"], id, refresh, setRetryJob, setNotice);
   const resume = (action: string, fields?: object) =>
     void act(async () => {
       await studioApi.resume(id, action, fields);
@@ -129,7 +128,7 @@ export function BatchResults({
     });
   const selected = ready.map((card) => card.parentTaskId).filter((task) => picked.includes(task));
   const structure = s.planning.snapshot?.structure,
-    missing = structure?.categoryAllocations.filter((a) => a.count > 0 && a.missingFacts.length) ?? [];
+    missing = structure?.categoryAllocations.filter((a) => a.missingFacts.some((fact) => fact.trim())) ?? [];
   const originals = s.inputImages[0];
   return (
     <section className="ss-batch" role="region" aria-label="生成批次">
@@ -234,7 +233,8 @@ export function BatchResults({
           <small>
             {[
               ...(structure?.mainAllocation?.missingFacts ?? []),
-              ...missing.flatMap((a) => a.missingFacts),
+              ...missing.filter((a) => a.count !== 0 || !auxiliaryCategories.has(a.category))
+                .flatMap((a) => a.missingFacts.filter((fact) => fact.trim())),
             ].join("；")}
           </small>
           <textarea
@@ -383,7 +383,7 @@ export function BatchResults({
         <StudioDialog title="货架预览导出" wide close={() => setGallery(null)}>
           <DeliveryGalleryView
             workbench={gallery}
-            effectiveStyleGuide={gallery.suite.styleOverride ?? ""}
+            effectiveStyleGuide={gallery.effectiveStyleGuide ?? gallery.suite.styleOverride ?? ""}
             onPreview={(card) => {
               if (card.previewUrl) setPreview({ title: card.title, url: card.previewUrl });
             }}

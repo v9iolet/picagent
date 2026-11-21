@@ -357,3 +357,32 @@ test("商品套图：空态、静默草稿、平台联动、七张实图与选�
     false,
   );
 });
+
+test("零张欠配：卖点图和场景图都显示缺失事实并允许置零续跑", async (t) => {
+  const fixture = await offlineStudio();
+  t.after(fixture.close);
+  const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  page.setDefaultTimeout(4000);
+  const id = 'paused-review';
+  await page.route(`**/api/suites/${id}/studio-state`, route => route.fulfill({json:{data:{
+    suite:{id,name:'暂停的批次',createdAt:'2026-11-21T09:00:00Z'},
+    pipeline:{status:'waiting_human_input',currentPhase:'structure_planning',config:{mode:'custom'}},
+    inputImages:[],cards:[],progress:{completed:0,total:0,percent:0},
+    planning:{notGeneratedReasons:[],snapshot:{structure:{categoryAllocations:[
+      {category:'feature_benefit',count:0,missingFacts:['缺少材质信息']},
+      {category:'lifestyle_use',count:0,missingFacts:['缺少使用场景']},
+      {category:'size_scale',count:0,missingFacts:['辅助图尺寸未提供']},
+    ]}}},
+  }}}));
+  await page.goto(fixture.url+`create/suite/${id}`);
+  const batch=page.getByRole('region',{name:'生成批次'});
+  await batch.getByText('补充商品事实后继续',{exact:true}).waitFor();
+  assert.match(await batch.innerText(),/缺少材质信息/);
+  assert.match(await batch.innerText(),/缺少使用场景/);
+  assert.doesNotMatch(await batch.innerText(),/辅助图尺寸未提供/);
+  for (const group of ['卖点图','场景图']) {
+    assert.equal(await batch.getByRole('button',{name:`将${group}改为 0 张并继续`}).isVisible(),true);
+  }
+});
