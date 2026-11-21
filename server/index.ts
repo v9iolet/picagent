@@ -1,3 +1,4 @@
+import { PostgresListingRepository } from "./repositories/postgres-listing-copy-repository.js";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -7,7 +8,7 @@ import { Pool } from "pg";
 import { createTicket02App } from "./app.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
-import { decodeMultipartFilename, parseMultipartFile } from "./multipart.js";
+import { dispatchInputImageUpload, parseMultipartFile } from "./multipart.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
 import { resolveImageSize } from "../shared/model-settings.js";
@@ -147,6 +148,7 @@ const app = createTicket02App({
   planRepository: new PostgresPlanRepository(pool),
   categoryPromptRepository: new PostgresCategoryPromptRepository(pool),
   taskRepository,
+  listingRepository: new PostgresListingRepository(pool),
   pipelineRepository: new PostgresPipelineRepository(pool),
   imageEditorApi,
   libraryRepository: new PostgresLibraryRepository(pool),
@@ -180,27 +182,17 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   const path = requestUrl.pathname + requestUrl.search;
   const headers = req.headers as Record<string, string | undefined>;
   let response;
-  if (req.method === "POST" && path.endsWith("/input-images")) {
-    const suiteId = path.split("/")[3];
-    const contentType = headers["content-type"] ?? "";
-    const boundary = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/)?.[1] ?? contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/)?.[2];
-    if (!boundary) response = { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "上传请求格式无效" }, requestId: "" } };
-    else {
-      const raw = body.toString("latin1"); const part = raw.split(`--${boundary}`).find((value) => value.includes("filename="));
-      const match = part?.match(/(?:filename\*=[^']*''([^;\r\n]+)|filename="([^"]+)")[\s\S]*?Content-Type:\s*([^\r\n]+)[\r\n]+\r\n([\s\S]*?)\r\n$/i);
-      if (!match) response = { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "未找到图片文件" }, requestId: "" } };
-      else {
-        const encodedFilename = match[1];
-        const filename = decodeMultipartFilename(encodedFilename, match[2]);
-        response = await app.upload(suiteId, { filename, mimeType: match[3], bytes: Buffer.from(match[4], "latin1"), idempotencyKey: headers["idempotency-key"] });
-      }
-    }
+  const upload = req.method === "POST" ? await dispatchInputImageUpload(app, requestUrl.pathname, body, headers) : null;
+  if (upload) {
+    response = upload;
   } else if (req.method === "POST" && /^\/api\/reverse-plans\/[^/]+\/references$/.test(path)) {
     const parsed = parseMultipartFile(body, headers["content-type"] ?? "");
     if (!parsed) response = { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "未找到图片文件" }, requestId: "" } };
     else {
       response = await app.request("POST", path, { headers: headers as Record<string, string>, body: { filename: parsed.filename, mimeType: parsed.mimeType, bytesBase64: parsed.bytes.toString("base64") } });
     }
+  } else if (req.method === "GET" && /^\/api\/listing-copies\/[^/]+\/input-images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname)) {
+    response = await app.request("GET", requestUrl.pathname);
   } else if (req.method === "GET" && path.includes("/preview")) {
     const inputMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/preview\/(original|thumbnail)$/);
     const baseMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/base-versions\/([^/]+)\/preview$/);
