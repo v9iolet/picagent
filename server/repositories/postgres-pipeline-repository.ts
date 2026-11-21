@@ -1,15 +1,40 @@
 import type { Pool } from "pg";
-import type { PipelineRepository, SuitePipelineRun } from "../types.js";
+import type { PipelineRepository, SuitePipelinePhase, SuitePipelineRun } from "../types.js";
 
-const cols = `id,suite_id AS "suiteId",idempotency_key AS "idempotencyKey",status,current_phase AS "currentPhase" ,resume_count AS "resumeCount",last_resume_key AS "lastResumeKey",structure_snapshot_id AS "structureSnapshotId",task_ids_json AS "taskIds",config_json AS config,error_code AS "errorCode",error_message AS "errorMessage",created_at AS "createdAt",updated_at AS "updatedAt",completed_at AS "completedAt"`;
+const cols = `id,suite_id AS "suiteId",idempotency_key AS "idempotencyKey",status,current_phase AS "currentPhase",resume_count AS "resumeCount",last_resume_key AS "lastResumeKey",resume_keys_json AS "resumeKeys",structure_snapshot_id AS "structureSnapshotId",task_ids_json AS "taskIds",config_json AS config,error_code AS "errorCode",error_message AS "errorMessage",created_at AS "createdAt",updated_at AS "updatedAt",completed_at AS "completedAt"`;
 
 export class PostgresPipelineRepository implements PipelineRepository {
   constructor(private readonly pool: Pool) {}
   async createRun(run: SuitePipelineRun) {
+    const result = await this.pool.query<SuitePipelineRun>(
+      `INSERT INTO suite_workbench.suite_pipeline_runs
+        (id,suite_id,idempotency_key,status,current_phase,resume_count,last_resume_key,structure_snapshot_id,task_ids_json,config_json,error_code,error_message,created_at,updated_at,completed_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+       ON CONFLICT DO NOTHING RETURNING ${cols}`,
+      [run.id, run.suiteId, run.idempotencyKey, run.status, run.currentPhase, run.resumeCount ?? 0, run.lastResumeKey ?? null,
+        run.structureSnapshotId ?? null, JSON.stringify(run.taskIds ?? []), JSON.stringify(run.config), run.errorCode, run.errorMessage, run.createdAt, run.updatedAt, run.completedAt],
+    );
+    if (result.rows[0]) return { run: result.rows[0], duplicate: false };
     const found = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 AND idempotency_key=$2`, [run.suiteId, run.idempotencyKey]);
     if (found.rows[0]) return { run: found.rows[0], duplicate: true };
-    const result = await this.pool.query<SuitePipelineRun>(`INSERT INTO suite_workbench.suite_pipeline_runs (id,suite_id,idempotency_key,status,current_phase,resume_count,last_resume_key,structure_snapshot_id,task_ids_json,config_json,error_code,error_message,created_at,updated_at,completed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING ${cols}`, [run.id,run.suiteId,run.idempotencyKey,run.status,run.currentPhase,run.resumeCount ?? 0,run.lastResumeKey ?? null,run.structureSnapshotId ?? null,JSON.stringify(run.taskIds ?? []),JSON.stringify(run.config),run.errorCode,run.errorMessage,run.createdAt,run.updatedAt,run.completedAt]);
-    return { run: result.rows[0], duplicate: false };
+    throw new Error("PIPELINE_ALREADY_RUNNING");
+  }
+  async resumeRun(previous: SuitePipelineRun, key: string, phase: SuitePipelinePhase, config: SuitePipelineRun["config"]) {
+    try {
+      const result = await this.pool.query<SuitePipelineRun>(
+        `UPDATE suite_workbench.suite_pipeline_runs
+         SET status='running', current_phase=$2, config_json=$3, resume_count=resume_count+1,
+             last_resume_key=$4, resume_keys_json=resume_keys_json || jsonb_build_array($4::text),
+             error_code=NULL, error_message=NULL, completed_at=NULL, updated_at=now()
+         WHERE id=$1 AND status=$5 AND resume_count=$6 AND NOT (resume_keys_json ? $4)
+         RETURNING ${cols}`,
+        [previous.id, phase, JSON.stringify(config), key, previous.status, previous.resumeCount ?? 0],
+      );
+      return result.rows[0] ?? null;
+    } catch (error) {
+      if (error instanceof Error && "constraint" in error && error.constraint === "suite_pipeline_runs_one_running") return null;
+      throw error;
+    }
   }
   async getRun(id: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE id=$1`, [id]); return result.rows[0] ?? null; }
   async getLatestRun(suiteId: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 ORDER BY created_at DESC LIMIT 1`, [suiteId]); return result.rows[0] ?? null; }

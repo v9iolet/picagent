@@ -39,7 +39,11 @@ CREATE TABLE IF NOT EXISTS suite_workbench.suite_pipeline_runs (
   UNIQUE (suite_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS suite_pipeline_runs_suite_created_idx ON suite_workbench.suite_pipeline_runs(suite_id, created_at DESC);
-ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS resume_count integer NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX IF NOT EXISTS suite_pipeline_runs_one_running ON suite_workbench.suite_pipeline_runs(suite_id) WHERE status = 'running';
+ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS resume_count integer NOT NULL DEFAULT 0 CHECK (resume_count >= 0);
 ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS last_resume_key text;
+ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS resume_keys_json jsonb NOT NULL DEFAULT '[]'::jsonb;
+UPDATE suite_workbench.suite_pipeline_runs SET resume_keys_json = jsonb_build_array(last_resume_key)
+WHERE last_resume_key IS NOT NULL AND resume_keys_json = '[]'::jsonb;
 ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS structure_snapshot_id uuid REFERENCES suite_workbench.plan_snapshots(id) ON DELETE SET NULL;
 ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS task_ids_json jsonb NOT NULL DEFAULT '[]'::jsonb;
