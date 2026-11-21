@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ModelSettingsPage } from "../pages/ModelSettingsPage";
-import { StartPage } from "../pages/StartPage";
+import { SuiteStudioPage } from "../pages/SuiteStudioPage";
 import { BoardPage } from "../pages/BoardPage";
 import { ImageAssetsPage } from "../pages/ImageAssetsPage";
 import { PromptTemplatesPage } from "../pages/PromptTemplatesPage";
@@ -23,6 +23,14 @@ export function App() {
     window.scrollTo({ top: 0 });
   };
 
+  const legacy = path.match(/^\/suites\/([^/]+)\/?$/);
+  const canonical = legacy ? (legacy[1] === "new" ? "/create/suite" : `/create/suite/${legacy[1]}`) : path === "/" ? "/create/suite" : path;
+  useEffect(() => {
+    if (path === canonical) return;
+    window.history.replaceState({}, "", canonical);
+    setPath(canonical);
+  }, [path, canonical]);
+
   if (path === "/settings" || path === "/settings/preferences") return <ModelSettingsPage preferences={path.endsWith("/preferences")} navigate={navigate} />;
   if (path.endsWith("/board") && suiteId) return <BoardPage suiteId={suiteId} navigate={navigate} />;
   if (path === "/assets") return <ImageAssetsPage navigate={navigate} />;
@@ -32,5 +40,5 @@ export function App() {
     return tab === "templates" ? <PromptTemplatesPage navigate={navigate} /> : <ImageAssetsPage navigate={navigate} />;
   }
   if (path === "/reverse" || reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;
-  return <StartPage suiteId={suiteId} navigate={navigate} />;
+  return <SuiteStudioPage suiteId={canonical.match(/^\/create\/suite\/([^/]+)\/?$/)?.[1]} navigate={navigate} />;
 }
