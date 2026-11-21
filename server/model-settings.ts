@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { capabilityLabels, type ChannelModel, type ModelCapability, type ModelChannelInput, type ModelChannelSnapshot, type ModelPreferences, type ModelSettingsView } from "../shared/model-settings.js";
+import { capabilityLabels, defaultImageOptions, type ImageOptions, type ChannelModel, type ModelCapability, type ModelChannelInput, type ModelChannelSnapshot, type ModelPreferences, type ModelSettingsView } from "../shared/model-settings.js";
 import { parseProviderJson } from "./providers/provider-json.js";
 
 interface StoredChannel extends ModelChannelInput { id: string }
@@ -51,6 +51,15 @@ function resolveApiKey(input: unknown, baseUrl: string, previous?: StoredChannel
   return apiKey;
 }
 
+function validateImageOptions(value: unknown): ImageOptions {
+  const options = object(value);
+  const validList = (items: unknown, pattern: RegExp): items is string[] => Array.isArray(items) && items.length > 0 && items.every((item) => typeof item === "string" && pattern.test(item));
+  if (!validList(options.sizes, /^(1K|2K|4K)$/) || !validList(options.aspectRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/) || (options.sizeMode !== "tier" && options.sizeMode !== "pixels")) {
+    throw new SettingsError("INVALID_IMAGE_OPTIONS", "请配置非空的分辨率档位（1K/2K/4K）、有效比例和尺寸模式");
+  }
+  return { sizes: [...new Set(options.sizes)], aspectRatios: [...new Set(options.aspectRatios)], sizeMode: options.sizeMode };
+}
+
 function validateChannel(value: unknown): ModelChannelInput {
   const body = object(value);
   const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -67,7 +76,7 @@ function validateChannel(value: unknown): ModelChannelInput {
       model.capabilities.some((value: unknown) => value !== "image" && value !== "vision")) {
       throw new SettingsError("INVALID_CHANNEL_MODELS", "同一渠道的模型 ID 必须非空且唯一，每个模型至少选择一种能力");
     }
-    models.set(id, { id, capabilities: [...new Set<ModelCapability>(model.capabilities)] });
+    models.set(id, { id, capabilities: [...new Set<ModelCapability>(model.capabilities)], ...(model.imageOptions === undefined ? {} : { imageOptions: validateImageOptions(model.imageOptions) }) });
   }
   const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
   return { name, protocol: body.protocol, baseUrl, apiKey, models: [...models.values()] };
@@ -103,7 +112,10 @@ export class ModelSettings {
     const channel = state.channels.find((item) => item.id === ref?.channelId);
     if (!ref || !channel?.apiKey || !channel.models.some((model) => model.id === ref.modelId && model.capabilities.includes(capability))) return null;
     const source: ModelChannelSnapshot = { channelId: channel.id, channelName: channel.name, baseUrl: channel.baseUrl };
-    return { model: ref.modelId, apiKey: channel.apiKey, baseUrl: providerBaseUrl(channel.baseUrl), source };
+    const model = channel.models.find((model) => model.id === ref.modelId)!;
+    return { model: ref.modelId, apiKey: channel.apiKey, baseUrl: providerBaseUrl(channel.baseUrl), source,
+      ...(capability === "image" ? { imageOptions: model.imageOptions ?? defaultImageOptions(model.id) } : {}),
+    };
   }
 
   async request(method: string, path: string, input: unknown) {
