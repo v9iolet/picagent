@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
-import { capabilityLabels, type ModelCapability, type ModelChannel, type ModelChannelInput, type ModelPreferences, type ModelReference, type ModelSettingsView } from "../../shared/model-settings";
+import { capabilityLabels, defaultImageOptions, type ImageOptions, type ModelCapability, type ModelChannel, type ModelChannelInput, type ModelPreferences, type ModelReference, type ModelSettingsView } from "../../shared/model-settings";
 import { modelSettingsApi } from "../api/client";
 import { Icon } from "./shared";
 import { AppShell } from "../components/AppShell";
@@ -8,6 +8,23 @@ import "./ModelSettingsPage.css";
 const capabilities = ["image", "vision"] as const;
 const emptyChannel = (): ModelChannelInput => ({ name: "", protocol: "openai-compatible", baseUrl: "", apiKey: "", models: [] });
 const choiceValue = (ref: ModelReference | null) => ref ? JSON.stringify([ref.channelId, ref.modelId]) : "";
+
+function ImageOptionsFields({ options, onChange }: { options: ImageOptions; onChange: (options: ImageOptions) => void }) {
+  const [ratios, setRatios] = useState(options.aspectRatios.join(", "));
+  return <div className="settings-fields" role="group" aria-label="生图尺寸能力">
+    <div>支持的分辨率档位<div className="settings-capabilities">{["1K", "2K", "4K"].map((size) => <label key={size}>
+      <input type="checkbox" checked={options.sizes.includes(size)} onChange={(event) => onChange({ ...options, sizes: event.target.checked ? [...options.sizes, size] : options.sizes.filter((item) => item !== size) })} />{size}
+    </label>)}</div></div>
+    <label>支持的比例<input required value={ratios} placeholder="1:1, 2:3, 3:2" onChange={(event) => {
+      setRatios(event.target.value);
+      onChange({ ...options, aspectRatios: event.target.value.split(/[,，\s]+/).filter(Boolean) });
+    }} /></label>
+    <label>尺寸模式<select value={options.sizeMode} onChange={(event) => onChange({ ...options, sizeMode: event.target.value as ImageOptions["sizeMode"] })}>
+      <option value="tier">档位（tier）</option><option value="pixels">像素（pixels）</option>
+    </select></label>
+    <small>{options.sizeMode === "tier" ? "比例由模型尽量遵循。" : "按比例和档位换算像素；请仅配置当前渠道支持的比例。"}账号分组上限需自行确认，4K 出图更慢、费用更高。</small>
+  </div>;
+}
 
 function ChannelModelPicker({ models, onPull, onClose, onConfirm }: {
   models: ModelChannelInput["models"];
@@ -153,6 +170,7 @@ function ChannelDrawer({ channel, onClose, onSave }: {
   const setCapability = (id: string, capability: ModelCapability, checked: boolean) => {
     setDraft((value) => ({ ...value, models: value.models.map((model) => model.id === id ? {
       ...model, capabilities: checked ? [...model.capabilities, capability] : model.capabilities.filter((item) => item !== capability),
+      ...(capability === "image" && checked ? { imageOptions: model.imageOptions ?? defaultImageOptions(model.id) } : {}),
     } : model) }));
   };
 
@@ -183,6 +201,7 @@ function ChannelDrawer({ channel, onClose, onSave }: {
                 <input type="checkbox" checked={model.capabilities.includes(capability)} onChange={(event) => setCapability(model.id, capability, event.target.checked)} />
                 {capabilityLabels[capability]}
               </label>)}</div>
+              {model.capabilities.includes("image") && <ImageOptionsFields options={model.imageOptions ?? defaultImageOptions(model.id)} onChange={(imageOptions) => setDraft((value) => ({ ...value, models: value.models.map((item) => item.id === model.id ? { ...item, imageOptions } : item) }))} />}
             </div>)}
           </section>
         </fieldset>

@@ -157,7 +157,7 @@ export interface ImageEditRequest {
   imageFilename: string;
   model: string;
   prompt: string;
-  size: "1K";
+  size: string;
   quality: "medium";
   n: 1;
   responseFormat: "b64_json";

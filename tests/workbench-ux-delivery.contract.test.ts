@@ -455,3 +455,88 @@ test("cross-border image text translation, custom canvas tasks, batch param sync
   const deleteAgain = await app.request("DELETE", `/api/suites/${suiteId}`);
   assert.equal(deleteAgain.status, 404);
 });
+
+test("task generation sends selected pixel size, freezes retries, and applies changed params only to new attempts", async () => {
+  const taskRepository = new MemoryTaskRepository();
+  const png = await tinyPng({ r: 50, g: 90, b: 130 });
+  const sizes: string[] = [];
+  const app = createTicket02App({
+    repository: new MemorySuiteRepository(), taskRepository, storage: new MemoryStorage(),
+    provider: { async edit(request) { sizes.push(request.size); throw new Error("IMAGE_SIZE_UNSUPPORTED"); } },
+  });
+  const suiteId = (await app.request("POST", "/api/suites", { body: { name: "尺寸冻结" } })).body.data.id;
+  await app.upload(suiteId, { filename: "product.png", mimeType: "image/png", bytes: png });
+  const task = (await app.request("POST", "/api/suites/" + suiteId + "/tasks/custom", {
+    headers: { "idempotency-key": "size-task" },
+    body: { title: "细节图", promptDraft: "展示细节", imageType: "detail", generationParams: { size: "2K", ratio: "2:3" } },
+  })).body.data;
+  const generate = (key: string) => app.request("POST", "/api/suite-tasks/" + task.id + "/generation", { headers: { "idempotency-key": key } });
+  assert.equal((await generate("size-first")).status, 202);
+  await settle();
+  const first = (await taskRepository.listTaskVersions(task.id)).attempts[0];
+  assert.equal(first.requestSummary.size, "2048x3072");
+  assert.deepEqual(sizes, ["2048x3072"]);
+  assert.equal(first.errorCode, "IMAGE_SIZE_UNSUPPORTED");
+  assert.equal(first.errorMessage, "当前账号分组不支持该分辨率");
+  await app.request("PATCH", "/api/suite-tasks/" + task.id, { body: { generationParams: { size: "1K", ratio: "3:2" } } });
+  assert.equal((await app.request("POST", "/api/generation-attempts/" + first.id + "/retry", { headers: { "idempotency-key": "size-retry" } })).status, 202);
+  await settle();
+  assert.deepEqual(sizes, ["2048x3072", "2048x3072"]);
+  assert.equal((await generate("size-new")).status, 202);
+  await settle();
+  assert.deepEqual(sizes, ["2048x3072", "2048x3072", "1536x1024"]);
+  assert.equal((await taskRepository.getAttempt(first.id))?.requestSummary.size, "2048x3072");
+});
+
+test("changing task params while an attempt is reserved cannot change the dispatched size", async () => {
+  const taskRepository = new MemoryTaskRepository();
+  const beginBatch = taskRepository.beginBatch.bind(taskRepository);
+  let reservedTaskId = "";
+  taskRepository.beginBatch = async (input) => {
+    const result = await beginBatch(input);
+    await taskRepository.updateTask(reservedTaskId, { generationParams: { size: "4K", ratio: "1:1" } });
+    return result;
+  };
+  const png = await tinyPng({ r: 10, g: 30, b: 70 });
+  const sizes: string[] = [];
+  const app = createTicket02App({
+    repository: new MemorySuiteRepository(), taskRepository, storage: new MemoryStorage(),
+    provider: { async edit(request) { sizes.push(request.size); return { bytes: png, mimeType: "image/png" }; } },
+  });
+  const suiteId = (await app.request("POST", "/api/suites", { body: { name: "保留已提交尺寸" } })).body.data.id;
+  await app.upload(suiteId, { filename: "product.png", mimeType: "image/png", bytes: png });
+  const task = (await app.request("POST", "/api/suites/" + suiteId + "/tasks/custom", {
+    headers: { "idempotency-key": "reserved-size-task" }, body: { title: "商品图", promptDraft: "保持商品", generationParams: { size: "1K", ratio: "2:3" } },
+  })).body.data;
+  reservedTaskId = task.id;
+  assert.equal((await app.request("POST", "/api/suite-tasks/" + task.id + "/generation", { headers: { "idempotency-key": "reserved-size" } })).status, 202);
+  await settle();
+  assert.deepEqual(sizes, ["1024x1536"]);
+  assert.equal((await taskRepository.getTask(task.id))?.generationParams.size, "4K");
+  assert.equal((await taskRepository.listTaskVersions(task.id)).attempts[0].requestSummary.size, "1024x1536");
+});
+
+test("a tier-only image model dispatches the selected tier without pixel conversion", async (t) => {
+  const { ModelSettings } = await import("../server/model-settings.js");
+  const settings = new ModelSettings({
+    read: async () => ({ channels: [{ id: "tier-channel", name: "档位渠道", protocol: "openai-compatible", baseUrl: "https://example.test/v1", apiKey: "dummy-tier-key", models: [{ id: "custom-image", capabilities: ["image"], imageOptions: { sizes: ["1K", "2K"], aspectRatios: ["1:1", "3:4"], sizeMode: "tier" } }] }], preferences: { image: { channelId: "tier-channel", modelId: "custom-image" }, vision: null } }),
+    update: async () => { throw new Error("not used"); },
+  });
+  const taskRepository = new MemoryTaskRepository();
+  const png = await tinyPng({ r: 20, g: 60, b: 100 });
+  const sizes: FormDataEntryValue[] = [];
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    sizes.push((init.body as FormData).get("size")!);
+    return new Response(JSON.stringify({ data: [{ b64_json: png.toString("base64") }] }));
+  });
+  const app = createTicket02App({ repository: new MemorySuiteRepository(), taskRepository, storage: new MemoryStorage(), modelSettings: settings });
+  const suiteId = (await app.request("POST", "/api/suites", { body: { name: "档位透传" } })).body.data.id;
+  await app.upload(suiteId, { filename: "product.png", mimeType: "image/png", bytes: png });
+  const task = (await app.request("POST", "/api/suites/" + suiteId + "/tasks/custom", {
+    headers: { "idempotency-key": "tier-task" }, body: { title: "商品图", promptDraft: "保持商品", generationParams: { size: "2K", ratio: "3:4" } },
+  })).body.data;
+  assert.equal((await app.request("POST", "/api/suite-tasks/" + task.id + "/generation", { headers: { "idempotency-key": "tier-generate" } })).status, 202);
+  await settle();
+  assert.deepEqual(sizes, ["2K"]);
+  assert.equal((await taskRepository.listTaskVersions(task.id)).attempts[0].requestSummary.size, "2K");
+});

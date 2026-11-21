@@ -10,6 +10,7 @@ import { runMigrations } from "./migrations.js";
 import { decodeMultipartFilename, parseMultipartFile } from "./multipart.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
+import { resolveImageSize } from "../shared/model-settings.js";
 import { PostgresPlanRepository } from "./repositories/postgres-plan-repository.js";
 import { PostgresCategoryPromptRepository } from "./repositories/postgres-category-prompt-repository.js";
 import { PostgresPlatformRepository } from "./repositories/postgres-platform-repository.js";
@@ -82,7 +83,27 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
         if (!stored || stored.contentType !== "image/png") throw new Error("MASK_OBJECT_NOT_FOUND");
         mask = stored.bytes;
       }
-      const result = await imageProvider.edit({ requestId: randomUUID(), flow: "image-editor", endpoint: "/v1/images/edits", image: source.bytes, imageMimeType: source.mimeType, imageFilename: "source.png", model: selected.model, prompt: `${command.prompt}\n\n结构化编辑指令：\n${structuredInstructions}`, size: "1K", quality: "medium", n: 1, responseFormat: "b64_json", mask, maskMimeType: mask ? "image/png" : undefined, maskFilename: mask ? "mask.png" : undefined });
+      // 编辑子卡可继续派生；沿血缘找到源任务版本，优先复用该次出图冻结的最终尺寸。
+      const sourceSize = await pool.query<{ size: string | null; generationParams: Record<string, unknown>; imageType: string }>(
+        `WITH RECURSIVE lineage(version_id) AS (
+          SELECT $1::text
+          UNION
+          SELECT c.source_version_id FROM lineage l
+          JOIN suite_workbench.image_edit_versions ev ON ev.id::text=l.version_id
+          JOIN suite_workbench.image_edit_child_tasks c ON c.id=ev.child_task_id
+        )
+        SELECT a.request_summary_json->>'size' AS size, t.generation_params_json AS "generationParams", t.image_type AS "imageType"
+        FROM lineage l JOIN suite_workbench.task_image_versions v ON v.id::text=l.version_id
+        JOIN suite_workbench.suite_tasks t ON t.id=v.task_id
+        JOIN suite_workbench.task_generation_attempts a ON a.id=v.attempt_id LIMIT 1`,
+        [command.sourceVersionId],
+      );
+      const original = sourceSize.rows[0];
+      const params = original?.generationParams ?? {};
+      const size = original?.size || (original && selected.imageOptions
+        ? resolveImageSize(typeof params.size === "string" ? params.size : "1K", typeof params.ratio === "string" ? params.ratio : original.imageType === "main" ? "1:1" : "3:4", selected.imageOptions.sizeMode)
+        : "1K");
+      const result = await imageProvider.edit({ requestId: randomUUID(), flow: "image-editor", endpoint: "/v1/images/edits", image: source.bytes, imageMimeType: source.mimeType, imageFilename: "source.png", model: selected.model, prompt: `${command.prompt}\n\n结构化编辑指令：\n${structuredInstructions}`, size, quality: "medium", n: 1, responseFormat: "b64_json", mask, maskMimeType: mask ? "image/png" : undefined, maskFilename: mask ? "mask.png" : undefined });
       const metadata = await sharp(result.bytes).metadata();
       return { bytes: result.bytes, mimeType: result.mimeType, width: metadata.width ?? source.width, height: metadata.height ?? source.height };
     },

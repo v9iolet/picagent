@@ -1,4 +1,4 @@
-import type { ModelCapability } from "../shared/model-settings.js";
+import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../shared/model-settings.js";
 import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
@@ -98,6 +98,7 @@ const errorMessages: Record<string, string> = {
   INVALID_IMAGE: "文件不是有效图片",
   MIME_MISMATCH: "图片真实类型与声明类型不一致",
   IMAGE_TOO_LARGE: "图片文件超过 12MB 限制",
+  IMAGE_SIZE_UNSUPPORTED: "当前账号分组不支持该分辨率",
   IMAGE_DIMENSIONS_TOO_LARGE: "图片尺寸超过限制",
   MISSING_IDEMPOTENCY_KEY: "生成请求缺少幂等键",
   INVALID_PROMPT_STAGE: "提示词阶段无效",
@@ -481,6 +482,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       provider: selected ? new GptImageProvider(selected.baseUrl, selected.apiKey) : deps.provider,
       model: selected?.model ?? "gpt-image-2",
       channel: selected?.source,
+      imageOptions: selected?.imageOptions ?? defaultImageOptions(selected?.model ?? "gpt-image-2"),
     };
   };
   const resolveVision = async () => {
@@ -622,7 +624,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     if (failedAttempt && (failedAttempt.contextSnapshot.sourceRevision ?? 0) !== (tasks[0].sourceRevision ?? 0)) {
       throw new Error("TASK_RETRY_INPUT_CHANGED");
     }
-    const { provider, model, channel } = await resolveImage();
+    const { provider, model, channel, imageOptions } = await resolveImage();
     if (deps.modelSettings && !provider) throw new Error("TASK_IMAGE_PROVIDER_NOT_CONFIGURED");
     const now = new Date().toISOString();
     const [suiteForStyle, latestPlanSnapshot] = await Promise.all([
@@ -698,7 +700,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const effectivePromptSha256 = shouldApplyStyleOverride
         ? createHash("sha256").update(finalPrompt).digest("hex")
         : (task.promptSha256 ?? createHash("sha256").update(finalPrompt).digest("hex"));
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: generationParams.size ?? "1K", quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
@@ -721,13 +723,14 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         return;
       }
       if (images.length > 1 && provider.supportsMultipleImages === false) { await deps.taskRepository.failAttempt(attempt.id, "TASK_PROVIDER_MULTI_IMAGE_UNSUPPORTED", "当前图片模型不支持多图输入", finish); return; }
-      const generated = await provider.edit({ requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.finalPrompt), size: (task.generationParams.size === "2K" || task.generationParams.size === "4K" ? "1K" : "1K"), quality: "medium", n: 1, responseFormat: "b64_json" });
+      const generated = await provider.edit({ requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality: "medium", n: 1, responseFormat: "b64_json" });
       const processed = await processGeneratedImage(generated.bytes);
       const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
       await deps.storage.put({ key: objectKey, bytes: processed.bytes, contentType: processed.mimeType });
       await deps.taskRepository.completeAttempt({ attemptId: attempt.id, slotId: slot.id, taskId: task.id, objectKey, processObjectKeys: [], sha256: processed.sha256, width: processed.width, height: processed.height, mimeType: processed.mimeType, completedAt: new Date().toISOString() });
     } catch (error) {
-      await deps.taskRepository.failAttempt(attempt.id, error instanceof Error && error.message.includes("TIMEOUT") ? "TASK_IMAGE_PROVIDER_TIMEOUT" : "TASK_IMAGE_PROVIDER_FAILED", errorMessages.TASK_IMAGE_PROVIDER_FAILED, new Date().toISOString()).catch(() => undefined);
+      const code = error instanceof Error && error.message === "IMAGE_SIZE_UNSUPPORTED" ? "IMAGE_SIZE_UNSUPPORTED" : error instanceof Error && error.message.includes("TIMEOUT") ? "TASK_IMAGE_PROVIDER_TIMEOUT" : "TASK_IMAGE_PROVIDER_FAILED";
+      await deps.taskRepository.failAttempt(attempt.id, code, errorMessages[code], new Date().toISOString()).catch(() => undefined);
     }
   };
 

@@ -8,6 +8,7 @@ import { createTicket02App } from "../server/app.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { ModelSettings, type ModelSettingsState } from "../server/model-settings.js";
+import { resolveImageSize } from "../shared/model-settings.js";
 
 const path = "/api/model-settings";
 const channel = {
@@ -159,4 +160,53 @@ test("updates the two default preferences independently and protects their chann
 
   assert.deepEqual((await preferences({ image: null })).body.data.preferences, { image: null, vision });
   assert.equal((await api.request("DELETE", imageChannelPath)).status, 200);
+});
+
+test("image options round-trip through channels and resolve with legacy model defaults", async () => {
+  const { api, settings } = setup();
+  const imageOptions = { sizes: ["1K", "2K"], aspectRatios: ["1:1", "2:3"], sizeMode: "pixels" };
+  const created = await api.request("POST", path + "/channels", { body: {
+    ...channel, models: [{ id: "gpt-image-2.5-flare-special", capabilities: ["image"], imageOptions }],
+  } });
+  const saved = created.body.data.channels[0];
+  assert.deepEqual(saved.models[0].imageOptions, imageOptions);
+  await api.request("PATCH", path + "/preferences", { body: { image: { channelId: saved.id, modelId: saved.models[0].id } } });
+  assert.deepEqual((await settings.resolve("image"))?.imageOptions, imageOptions);
+  assert.deepEqual((await api.request("GET", path)).body.data.channels[0].models[0].imageOptions, imageOptions);
+  await api.request("PUT", path + "/channels/" + saved.id, { body: {
+    ...channel, models: [{ id: saved.models[0].id, capabilities: ["image"] }],
+  } });
+  assert.deepEqual((await settings.resolve("image"))?.imageOptions, {
+    sizes: ["1K", "2K", "4K"], aspectRatios: ["1:1", "2:3", "3:2"], sizeMode: "pixels",
+  });
+  await api.request("PATCH", path + "/preferences", { body: { image: null } });
+  await api.request("PUT", path + "/channels/" + saved.id, { body: channel });
+  await api.request("PATCH", path + "/preferences", { body: { image: { channelId: saved.id, modelId: "shared-model" } } });
+  assert.deepEqual((await settings.resolve("image"))?.imageOptions, {
+    sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "tier",
+  });
+});
+
+test("invalid image options are rejected without losing the saved capability configuration", async () => {
+  const { api } = setup();
+  for (const imageOptions of [
+    { sizes: [], aspectRatios: ["1:1"], sizeMode: "pixels" },
+    { sizes: ["8K"], aspectRatios: ["1:1"], sizeMode: "pixels" },
+    { sizes: ["1K"], aspectRatios: ["0:3"], sizeMode: "pixels" },
+    { sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "unknown" },
+  ]) {
+    assert.equal((await api.request("POST", path + "/channels", { body: { ...channel, models: [{ ...channel.models[0], imageOptions }] } })).status, 400);
+  }
+  assert.deepEqual((await api.request("GET", path)).body.data.channels, []);
+});
+
+test("pixel conversion reproduces measured dimensions and caps the square 4K baseline at 2880", () => {
+  assert.equal(resolveImageSize("1K", "1:1", "pixels"), "1024x1024");
+  assert.equal(resolveImageSize("1K", "2:3", "pixels"), "1024x1536");
+  assert.equal(resolveImageSize("1K", "3:2", "pixels"), "1536x1024");
+  assert.equal(resolveImageSize("2K", "1:1", "pixels"), "2048x2048");
+  assert.equal(resolveImageSize("4K", "1:1", "pixels"), "2880x2880");
+  assert.equal(resolveImageSize("2K", "3:4", "tier"), "2K");
+  assert.throws(() => resolveImageSize("8K", "1:1", "pixels"), /IMAGE_SIZE_UNSUPPORTED/);
+  assert.throws(() => resolveImageSize("1K", "0:1", "pixels"), /IMAGE_SIZE_UNSUPPORTED/);
 });

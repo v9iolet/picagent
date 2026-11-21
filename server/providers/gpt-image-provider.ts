@@ -3,6 +3,42 @@ import type { ImageEditRequest, ImageProvider } from "../types.js";
 import { failModelArchive, finishModelArchive, startModelArchive } from "../prompt-archive.js";
 import { failObservation, finishObservation, logObservation, recordImageFailure, recordImageSuccess, startGeneration } from "../observability.js";
 
+async function readErrorBody(response: Response, apiKey: string): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (length < 2048) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = next.value.subarray(0, 2048 - length);
+      chunks.push(chunk);
+      length += chunk.byteLength;
+    }
+  } catch { /* 读取失败仍保留 HTTP 错误，不外泄异常原文。 */ }
+  finally { await reader.cancel().catch(() => undefined); }
+  let text = Buffer.concat(chunks).toString("utf8");
+  if (apiKey) {
+    text = text.split(apiKey).join("[REDACTED]");
+    // 截断点可能落在反射密钥内部；同样移除末尾的密钥前缀。
+    for (let count = Math.min(apiKey.length - 1, text.length); count > 0; count -= 1) {
+      if (text.endsWith(apiKey.slice(0, count))) { text = text.slice(0, -count) + "[REDACTED]"; break; }
+    }
+  }
+  const redacted = text.replace(/\bBearer\s+[^\s"<>]+/gi, "Bearer [REDACTED]")
+    .replace(/\bsk-[\w-]+/g, "[REDACTED]")
+    .replace(/("(?:api[_-]?key|authorization|token|secret|password)"\s*:\s*")[^"]*/gi, "$1[REDACTED]");
+  let result = "";
+  let bytes = 0;
+  for (const char of redacted) {
+    bytes += Buffer.byteLength(char);
+    if (bytes > 2048) break;
+    result += char;
+  }
+  return result;
+}
+
 export class GptImageProvider implements ImageProvider {
   readonly supportsMultipleImages = true;
   constructor(private readonly baseUrl: string, private readonly apiKey: string, private readonly timeoutMs = 600_000) {}
@@ -60,9 +96,11 @@ export class GptImageProvider implements ImageProvider {
         signal: controller.signal,
       });
       if (!response.ok) {
-        responseSummary = { httpStatus: response.status };
-        await response.body?.cancel().catch(() => undefined);
-        throw new Error("IMAGE_PROVIDER_FAILED");
+        const errorBody = await readErrorBody(response, this.apiKey);
+        responseSummary = { httpStatus: response.status, errorBody };
+        // 保守启发式，01 未实测到超限错误；仅在 4xx 且响应提到尺寸时识别。
+        const sizeUnsupported = response.status >= 400 && response.status < 500 && /\bsize\b|resolution|分辨率|尺寸/i.test(errorBody);
+        throw new Error(sizeUnsupported ? "IMAGE_SIZE_UNSUPPORTED" : "IMAGE_PROVIDER_FAILED");
       }
       const payload = await response.json().catch(() => null) as { data?: Array<{ b64_json?: unknown }> } | null;
       const encoded = payload?.data?.[0]?.b64_json;
@@ -78,7 +116,7 @@ export class GptImageProvider implements ImageProvider {
     } catch (error) {
       const normalized = error instanceof DOMException && error.name === "AbortError"
         ? new Error("IMAGE_PROVIDER_TIMEOUT")
-        : error instanceof Error && error.message === "INVALID_PROVIDER_RESPONSE"
+        : error instanceof Error && ["INVALID_PROVIDER_RESPONSE", "IMAGE_SIZE_UNSUPPORTED"].includes(error.message)
           ? error
           : new Error("IMAGE_PROVIDER_FAILED");
       await failModelArchive(archive, normalized, responseSummary);
