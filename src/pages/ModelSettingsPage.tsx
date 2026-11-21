@@ -170,7 +170,7 @@ function ChannelDrawer({ channel, onClose, onSave }: {
   const setCapability = (id: string, capability: ModelCapability, checked: boolean) => {
     setDraft((value) => ({ ...value, models: value.models.map((model) => model.id === id ? {
       ...model, capabilities: checked ? [...model.capabilities, capability] : model.capabilities.filter((item) => item !== capability),
-      ...(capability === "image" && checked ? { imageOptions: model.imageOptions ?? defaultImageOptions(model.id) } : {}),
+      ...(capability === "image" ? { imageOptions: checked ? model.imageOptions ?? defaultImageOptions(model.id) : undefined } : {}),
     } : model) }));
   };
 
