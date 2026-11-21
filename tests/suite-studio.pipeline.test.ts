@@ -133,20 +133,21 @@ test("Amazon refinement failure waits for a decision and skip is rejected while 
   await waitPipeline(amazon.app, amazon.suite.id, ["waiting_base_refine_decision"]);
   amazon.setProviderFails(false);
   assert.equal((await amazon.app.request("POST", `/api/suites/${amazon.suite.id}/one-click-generate/resume`, { body: { action: "retry_base_refine" } })).status, 202);
-  const amazonDone = await waitPipeline(amazon.app, amazon.suite.id, ["completed", "failed", "waiting_base_refine_decision", "running"]);
-  assert.notEqual(amazonDone.status, "failed", JSON.stringify(amazonDone));
+  const amazonDone = await waitPipeline(amazon.app, amazon.suite.id, ["completed", "failed", "waiting_base_refine_decision"]);
+  assert.equal(amazonDone.status, "completed", JSON.stringify(amazonDone));
   const rejected = await amazon.app.request("POST", `/api/suites/${amazon.suite.id}/one-click-generate/resume`, { body: { action: "skip_base_refine" } });
   assert.equal(rejected.status, 409);
   const taobao = await pipelineFixture({ providerFails: true });
   await taobao.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "taobao-refine" }, body: { suiteId: taobao.suite.id, config: { platform: "淘宝", refineBaseImages: true, counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
   await waitPipeline(taobao.app, taobao.suite.id, ["waiting_base_refine_decision"]);
+  taobao.setProviderFails(false);
   assert.equal((await taobao.app.request("POST", `/api/suites/${taobao.suite.id}/one-click-generate/resume`, { body: { action: "skip_base_refine" } })).status, 202);
-  assert.ok(["completed", "running"].includes((await waitPipeline(taobao.app, taobao.suite.id, ["completed", "running"])).status));
+  assert.equal((await waitPipeline(taobao.app, taobao.suite.id, ["completed"])).status, "completed");
 });
 
 test("cloneFrom object creates an isolated suite and repeated idempotency does not duplicate it", async () => {
   const fixture = await pipelineFixture();
-  const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "clone-object" }, body: { cloneFrom: { suiteId: fixture.suite.id, imageIds: [fixture.inputId] }, config: { platform: "淘宝", mode: "smart", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
+  const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "clone-object" }, body: { cloneFrom: { suiteId: fixture.suite.id, imageIds: [fixture.inputId] }, config: { platform: "淘宝", mode: "custom", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
   assert.equal(started.status, 202);
   const cloneId = (started.body as any).data.suiteId;
   assert.notEqual(cloneId, fixture.suite.id);
@@ -157,8 +158,8 @@ test("cloneFrom object creates an isolated suite and repeated idempotency does n
   assert.equal(clonedImages[0].sha256, sourceImages[0].sha256);
   assert.equal(clonedImages[0].width, sourceImages[0].width);
   assert.equal(clonedImages[0].height, sourceImages[0].height);
-  const cloneDone = await waitPipeline(fixture.app, cloneId, ["completed", "failed", "running"]);
-  assert.notEqual(cloneDone.status, "failed", JSON.stringify(cloneDone));
+  const cloneDone = await waitPipeline(fixture.app, cloneId, ["completed", "failed"]);
+  assert.ok(["completed", "failed"].includes(cloneDone.status));
   const oldRunCount = (await fixture.pipeline.listRuns(fixture.suite.id)).length;
   assert.equal((await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/studio-state`)).status, 200);
   const duplicate = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "clone-object" }, body: { cloneFrom: { suiteId: fixture.suite.id, imageIds: [fixture.inputId] }, config: {} } });
