@@ -265,8 +265,8 @@ export interface SuitePipelineRun {
   idempotencyKey: string;
   status: SuitePipelineStatus;
   currentPhase: SuitePipelinePhase;
-  stage?: SuitePipelinePhase;
   resumeCount?: number;
+  lastResumeKey?: string | null;
   structureSnapshotId?: string | null;
   taskIds?: string[];
   config: Record<string, unknown>;
@@ -281,7 +281,7 @@ export interface PipelineRepository {
   getRun(id: string): Promise<SuitePipelineRun | null>;
   getLatestRun(suiteId: string): Promise<SuitePipelineRun | null>;
   listRuns(suiteId: string): Promise<SuitePipelineRun[]>;
-  updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "stage" | "resumeCount" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>): Promise<SuitePipelineRun | null>;
+  updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>): Promise<SuitePipelineRun | null>;
 }
 export interface PlanAttempt {
   id: string; suiteId: string; idempotencyKey: string; status: PlanAttemptStatus; templateVersionId: string;

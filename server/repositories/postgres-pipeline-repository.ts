@@ -1,26 +1,26 @@
 import type { Pool } from "pg";
 import type { PipelineRepository, SuitePipelineRun } from "../types.js";
 
-const cols = `id,suite_id AS "suiteId",idempotency_key AS "idempotencyKey",status,current_phase AS "currentPhase",stage,resume_count AS "resumeCount",structure_snapshot_id AS "structureSnapshotId",task_ids_json AS "taskIds",config_json AS config,error_code AS "errorCode",error_message AS "errorMessage",created_at AS "createdAt",updated_at AS "updatedAt",completed_at AS "completedAt"`;
+const cols = `id,suite_id AS "suiteId",idempotency_key AS "idempotencyKey",status,current_phase AS "currentPhase" ,resume_count AS "resumeCount",last_resume_key AS "lastResumeKey",structure_snapshot_id AS "structureSnapshotId",task_ids_json AS "taskIds",config_json AS config,error_code AS "errorCode",error_message AS "errorMessage",created_at AS "createdAt",updated_at AS "updatedAt",completed_at AS "completedAt"`;
 
 export class PostgresPipelineRepository implements PipelineRepository {
   constructor(private readonly pool: Pool) {}
   async createRun(run: SuitePipelineRun) {
     const found = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 AND idempotency_key=$2`, [run.suiteId, run.idempotencyKey]);
     if (found.rows[0]) return { run: found.rows[0], duplicate: true };
-    const result = await this.pool.query<SuitePipelineRun>(`INSERT INTO suite_workbench.suite_pipeline_runs (id,suite_id,idempotency_key,status,current_phase,stage,resume_count,structure_snapshot_id,task_ids_json,config_json,error_code,error_message,created_at,updated_at,completed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING ${cols}`, [run.id,run.suiteId,run.idempotencyKey,run.status,run.currentPhase,run.stage ?? run.currentPhase,run.resumeCount ?? 0,run.structureSnapshotId ?? null,JSON.stringify(run.taskIds ?? []),JSON.stringify(run.config),run.errorCode,run.errorMessage,run.createdAt,run.updatedAt,run.completedAt]);
+    const result = await this.pool.query<SuitePipelineRun>(`INSERT INTO suite_workbench.suite_pipeline_runs (id,suite_id,idempotency_key,status,current_phase,resume_count,last_resume_key,structure_snapshot_id,task_ids_json,config_json,error_code,error_message,created_at,updated_at,completed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING ${cols}`, [run.id,run.suiteId,run.idempotencyKey,run.status,run.currentPhase,run.resumeCount ?? 0,run.lastResumeKey ?? null,run.structureSnapshotId ?? null,JSON.stringify(run.taskIds ?? []),JSON.stringify(run.config),run.errorCode,run.errorMessage,run.createdAt,run.updatedAt,run.completedAt]);
     return { run: result.rows[0], duplicate: false };
   }
   async getRun(id: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE id=$1`, [id]); return result.rows[0] ?? null; }
   async getLatestRun(suiteId: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 ORDER BY created_at DESC LIMIT 1`, [suiteId]); return result.rows[0] ?? null; }
   async listRuns(suiteId: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 ORDER BY created_at DESC`, [suiteId]); return result.rows; }
-  async updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "stage" | "resumeCount" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>) {
+  async updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>) {
     const fields: string[] = []; const values: unknown[] = []; let n = 1;
     const add = (column: string, value: unknown) => { fields.push(`${column}=$${n++}`); values.push(value); };
     if (patch.status !== undefined) add("status", patch.status);
-    if (patch.currentPhase !== undefined) { add("current_phase", patch.currentPhase); add("stage", patch.currentPhase); }
-    if (patch.stage !== undefined && patch.currentPhase === undefined) add("stage", patch.stage);
+    if (patch.currentPhase !== undefined) add("current_phase", patch.currentPhase);
     if (patch.resumeCount !== undefined) add("resume_count", patch.resumeCount);
+    if (patch.lastResumeKey !== undefined) add("last_resume_key", patch.lastResumeKey);
     if (patch.structureSnapshotId !== undefined) add("structure_snapshot_id", patch.structureSnapshotId);
     if (patch.taskIds !== undefined) add("task_ids_json", JSON.stringify(patch.taskIds));
     if (patch.config !== undefined) add("config_json", JSON.stringify(patch.config));
