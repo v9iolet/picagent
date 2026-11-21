@@ -8,11 +8,13 @@ export function StudioDialog({
   close,
   children,
   wide = false,
+  className = "",
 }: {
   title: string;
   close: () => void;
   children: ReactNode;
   wide?: boolean;
+  className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -23,7 +25,7 @@ export function StudioDialog({
   return (
     <dialog
       ref={ref}
-      className={"ss-dialog" + (wide ? " wide" : "")}
+      className={`ss-dialog${wide ? " wide" : ""} ${className}`.trim()}
       aria-label={title}
       onCancel={(e) => {
         e.preventDefault();

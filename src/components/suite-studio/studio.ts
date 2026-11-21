@@ -1,6 +1,7 @@
 import {
   createIdempotencyKey,
   type ApiImage,
+  type ApiListingSummary,
   type ApiPlanSnapshot,
   type ApiPlatformProfile,
   type ApiSuite,
@@ -78,6 +79,7 @@ export interface Pipeline {
 export interface StudioState {
   suite: ApiSuite;
   pipeline: Pipeline | null;
+  listingCopy: ApiListingSummary | null;
   inputImages: ApiImage[];
   cards: ResolvedDeliverySlot[];
   planning: {
