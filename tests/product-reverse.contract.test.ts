@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createTicket02App } from "../server/app.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
@@ -78,4 +79,10 @@ test("successful reverse results import as an idempotent task group and preserve
   const imported = await api.request("POST", `/api/reverse-plans/${planId}/canvas-imports`, { headers: { "idempotency-key": "canvas-import" }, body: { name: "反推套图" } }); assert.equal(imported.status, 201); const suiteId = (imported.body as any).data.suiteId; assert.equal((imported.body as any).data.taskIds.length, 1);
   const duplicate = await api.request("POST", `/api/reverse-plans/${planId}/canvas-imports`, { headers: { "idempotency-key": "canvas-import" }, body: { name: "反推套图" } }); assert.equal(duplicate.status, 200); assert.equal((duplicate.body as any).data.duplicate, true);
   const workbench = await api.request("GET", `/api/suites/${suiteId}/workbench`); const task = (workbench.body as any).data.tasks.find((item: any) => item.originKind === "reverse_import"); assert.ok(task); assert.equal(task.planSnapshotId, null); assert.equal(task.reversePlanId, planId); assert.equal(task.reverseReferenceId, refId);
+});
+
+test("ReversePage copies FileList into an array before resetting file input value", async () => {
+  const source = await readFile("src/pages/ReversePage.tsx", "utf8");
+  assert.match(source, /const files = Array\.from\(event\.target\.files \?\? \[\]\);\s*event\.target\.value = "";/);
+  assert.doesNotMatch(source, /const files = event\.target\.files;\s*event\.target\.value = "";/);
 });

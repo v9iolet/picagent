@@ -43,6 +43,47 @@ test("maintains shared channels and keeps saved credentials out of responses", a
   assert.equal((await api.request("DELETE", endpoint)).body.data.channels.length, 0);
 });
 
+test("discovers unique model IDs using the draft endpoint without saving the channel", async (t) => {
+  const { api } = setup();
+  const calls: Array<[string | undefined, string | undefined, string | undefined]> = [];
+  const upstream = http.createServer((req, res) => {
+    calls.push([req.method, req.url, req.headers.authorization]);
+    if (req.url === "/unsupported/models") return res.writeHead(404).end();
+    if (req.url === "/redirect/models") return res.writeHead(302, { location: "/v1/models" }).end();
+    if (req.url === "/reflected/models") return res.end(JSON.stringify({ data: [{ id: req.headers.authorization }] }));
+    return res.end(JSON.stringify({ data: [{ id: "image-test" }, { id: "vision-test" }, { id: "image-test" }] }));
+  }).listen(0, "127.0.0.1");
+  t.after(() => upstream.close());
+  await once(upstream, "listening");
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+  const root = `http://127.0.0.1:${address.port}`;
+  const discover = (baseUrl: string, apiKey: string, channelId?: string) =>
+    api.request("POST", path + "/models", { body: { baseUrl, apiKey, channelId } });
+
+  const draft = await discover(root, "draft-token");
+  assert.equal(draft.status, 200);
+  assert.deepEqual(draft.body.data, { modelIds: ["image-test", "vision-test"] });
+  assert.deepEqual((await api.request("GET", path)).body.data.channels, []);
+  const saved = await api.request("POST", path + "/channels", { body: { ...channel, baseUrl: `${root}/gateway/v2`, apiKey: "stored-token" } });
+  const channelId = saved.body.data.channels[0].id;
+  assert.deepEqual((await discover(`${root}/gateway/v2/`, "", channelId)).body.data, draft.body.data);
+  assert.equal((await discover(`${root}/elsewhere`, "", channelId)).status, 400);
+  assert.equal((await discover(`${root}/unsupported`, "draft-token")).body.error.code, "MODEL_LIST_UNSUPPORTED");
+  assert.equal((await discover(`${root}/redirect`, "draft-token")).status, 502);
+  const reflected = await discover(`${root}/reflected`, "draft-token");
+  assert.equal(reflected.body.error.code, "INVALID_MODEL_LIST");
+  assert.doesNotMatch(JSON.stringify(reflected.body), /draft-token/);
+  assert.deepEqual(calls, [
+    ["GET", "/v1/models", "Bearer draft-token"],
+    ["GET", "/gateway/v2/models", "Bearer stored-token"],
+    ["GET", "/unsupported/models", "Bearer draft-token"],
+    ["GET", "/redirect/models", "Bearer draft-token"],
+    ["GET", "/reflected/models", "Bearer draft-token"],
+  ]);
+  assert.deepEqual((await api.request("GET", path)).body.data.channels[0].models, channel.models);
+});
+
 test("base refinement uses the selected channel, retains its source, and switches for new submissions", async (t) => {
   const { settings } = setup();
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");

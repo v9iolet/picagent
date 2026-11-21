@@ -262,7 +262,7 @@ function planAttemptView(attempt: PlanAttempt, snapshot: PlanSnapshot | null) {
 }
 
 function planSnapshotView(snapshot: PlanSnapshot) {
-  return { id:snapshot.id,suiteId:snapshot.suiteId,revisionNumber:snapshot.revisionNumber,revisionKind:snapshot.revisionKind,parentSnapshotId:snapshot.parentSnapshotId,templateVersionId:snapshot.templateVersionId,dynamicInput:snapshot.dynamicInput,humanInput:snapshot.humanInput,chunks:snapshot.chunks.map(({content:_content,...chunk})=>chunk),inputImageIds:snapshot.inputImageIds,baseVersionIds:snapshot.baseVersionIds,provider:snapshot.provider,schemaVersion:snapshot.schemaVersion,items:snapshot.items,phase:snapshot.phase ?? "legacy_plan",confirmationStatus:snapshot.confirmationStatus ?? "confirmed",confirmedAt:snapshot.confirmedAt ?? null,structure:snapshot.structure ?? null,categoryOutputs:snapshot.categoryOutputs ?? {},createdAt:snapshot.createdAt };
+  return { id: snapshot.id, suiteId: snapshot.suiteId, revisionNumber: snapshot.revisionNumber, revisionKind: snapshot.revisionKind, parentSnapshotId: snapshot.parentSnapshotId, templateVersionId: snapshot.templateVersionId, dynamicInput: snapshot.dynamicInput, humanInput: snapshot.humanInput, chunks: snapshot.chunks.map(({ content: _content, ...chunk }) => chunk), inputImageIds: snapshot.inputImageIds, baseVersionIds: snapshot.baseVersionIds, provider: snapshot.provider, schemaVersion: snapshot.schemaVersion, items: snapshot.items, phase: snapshot.phase ?? "legacy_plan", confirmationStatus: snapshot.confirmationStatus ?? "confirmed", confirmedAt: snapshot.confirmedAt ?? null, structure: snapshot.structure ?? null, categoryOutputs: snapshot.categoryOutputs ?? {}, createdAt: snapshot.createdAt };
 }
 
 const DETAIL_CATEGORY_CODES = new Set(["appearance_angles", "lifestyle_use", "feature_benefit", "material_detail", "size_scale", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"]);
@@ -1040,8 +1040,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
       const template = await deps.promptRepository.getPublishedVersion(templateVersionId, "structure_plan");
       if (!template) return fail("PLAN_TEMPLATE_NOT_FOUND", 404);
-       const rawInput = body.dynamicInput && typeof body.dynamicInput === "object" && !Array.isArray(body.dynamicInput) ? body.dynamicInput as Record<string, unknown> : {};
-       const dynamicInput = { ...rawInput, selected_detail_categories: Array.isArray(rawInput.selected_detail_categories) ? JSON.stringify(rawInput.selected_detail_categories) : rawInput.selected_detail_categories, category_requirements: rawInput.category_requirements && typeof rawInput.category_requirements === "object" ? JSON.stringify(rawInput.category_requirements) : rawInput.category_requirements };
+      const rawInput = body.dynamicInput && typeof body.dynamicInput === "object" && !Array.isArray(body.dynamicInput) ? body.dynamicInput as Record<string, unknown> : {};
+      const dynamicInput = { ...rawInput, selected_detail_categories: Array.isArray(rawInput.selected_detail_categories) ? JSON.stringify(rawInput.selected_detail_categories) : rawInput.selected_detail_categories, category_requirements: rawInput.category_requirements && typeof rawInput.category_requirements === "object" ? JSON.stringify(rawInput.category_requirements) : rawInput.category_requirements };
       const validated = validateDynamicInput(template.inputSchema, dynamicInput);
       if (!validated.ok) return fail("PROMPT_INPUT_INVALID", 400, validated.message);
       const platformValue = typeof validated.value.platform === "string" ? validated.value.platform.trim() : "";
@@ -1066,7 +1066,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           if (!output) { await deps.planRepository!.failAttempt(attempt.id, "LLM_OUTPUT_SCHEMA_INVALID", errorMessages.LLM_OUTPUT_SCHEMA_INVALID, summarizeOutput(raw)); return; }
           const supplementRef = designerFactsText(validated.value) ? ["human_supplement"] : [];
           let validationError: string | null = null; try { validationError = validateStructureOutput(output, { ...validated.value, selected_detail_categories: JSON.parse(String(validated.value.selected_detail_categories)), category_requirements: JSON.parse(String(validated.value.category_requirements)) }, attempt.inputImageIds, [...chunks.map((chunk) => chunk.id), ...supplementRef]); } catch { validationError = "input_json"; }
-           if (validationError) { await deps.planRepository!.failAttempt(attempt.id, "STRUCTURE_PLAN_INVALID", errorMessages.STRUCTURE_PLAN_INVALID, summarizeOutput(raw, { validationError })); return; }
+          if (validationError) { await deps.planRepository!.failAttempt(attempt.id, "STRUCTURE_PLAN_INVALID", errorMessages.STRUCTURE_PLAN_INVALID, summarizeOutput(raw, { validationError })); return; }
           const latest = await deps.planRepository!.getLatestSnapshot(suite.id);
           const snapshot: PlanSnapshot = { id: randomUUID(), suiteId: suite.id, revisionNumber: (latest?.revisionNumber ?? 0) + 1, revisionKind: "llm", parentSnapshotId: latest?.id ?? null, templateVersionId, dynamicInput: validated.value, humanInput, chunks: chunks.map((chunk) => ({ sourceChunkId: chunk.id, sourceVersion: chunk.version, title: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256 })), inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, provider: attempt.provider, requestSummary: { phase: "structure_plan", templateVersionId }, rawOutputSummary: summarizeOutput(raw), schemaVersion: output.schemaVersion, items: [], phase: "structure_plan", confirmationStatus: "draft", confirmedAt: null, structure: { status: output.status, mainAllocation: output.mainAllocation, detailImageCount: output.detailImageCount, categoryAllocations: output.categoryAllocations, globalStyleCard: output.globalStyleCard }, createdAt: new Date().toISOString() };
           await deps.planRepository!.completeAttempt(attempt.id, snapshot);
@@ -1121,7 +1121,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const current = [...new Map(requests.map((request) => [request.categoryCode, request])).values()];
       const status = !current.length ? "pending"
         : current.length < expectedRequestCount || current.some((request) => request.status === "running") ? "running"
-        : current.some((request) => request.status === "failed") ? "partial" : "succeeded";
+          : current.some((request) => request.status === "failed") ? "partial" : "succeeded";
       return ok({ planSnapshotId: snapshot.id, status, expectedRequestCount, requests: requests.map(categoryRequestView) });
     }
     if (method === "POST" && categoryPromptsMatch) {
@@ -1133,11 +1133,11 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const suite = await deps.repository.getSuite(categoryPromptsMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
       const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
-       const snapshotId = typeof body.planSnapshotId === "string" ? body.planSnapshotId : undefined;
-       const requestedSnapshot = snapshotId ? await deps.planRepository.getSnapshot(snapshotId) : await deps.planRepository.getLatestSnapshot(suite.id);
-       const snapshot = requestedSnapshot ? await resolveCategorySourceSnapshot(requestedSnapshot) : null;
-       if (!snapshot || snapshot.suiteId !== suite.id || snapshot.phase !== "structure_plan" || snapshot.confirmationStatus !== "confirmed" || !isStructurePlanV2(snapshot.structure) || snapshot.structure.status !== "READY_FOR_REVIEW") return fail("CATEGORY_PROMPT_NOT_CONFIRMED", 409);
-       const allocations = categoryAllocationsForSnapshot(snapshot);
+      const snapshotId = typeof body.planSnapshotId === "string" ? body.planSnapshotId : undefined;
+      const requestedSnapshot = snapshotId ? await deps.planRepository.getSnapshot(snapshotId) : await deps.planRepository.getLatestSnapshot(suite.id);
+      const snapshot = requestedSnapshot ? await resolveCategorySourceSnapshot(requestedSnapshot) : null;
+      if (!snapshot || snapshot.suiteId !== suite.id || snapshot.phase !== "structure_plan" || snapshot.confirmationStatus !== "confirmed" || !isStructurePlanV2(snapshot.structure) || snapshot.structure.status !== "READY_FOR_REVIEW") return fail("CATEGORY_PROMPT_NOT_CONFIRMED", 409);
+      const allocations = categoryAllocationsForSnapshot(snapshot);
       if (!allocations.length) return fail("STRUCTURE_PLAN_INVALID", 409);
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
       let template = templateVersionId ? await deps.promptRepository.getPublishedVersion(templateVersionId, "category_prompt") : null;
@@ -1146,14 +1146,14 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         template = published ? await deps.promptRepository.getPublishedVersion(published.templateVersionId, "category_prompt") : null;
       }
       if (!template) return fail("CATEGORY_PROMPT_TEMPLATE_NOT_FOUND", 404);
-       const humanInput = snapshot.humanInput;
+      const humanInput = snapshot.humanInput;
       const platformValue = typeof snapshot.dynamicInput.platform === "string" ? snapshot.dynamicInput.platform.trim() : "";
       const platformProfile = platformValue && deps.platformRepository ? await deps.platformRepository.find(platformValue) : null;
       if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
       const run = async () => {
         for (const entry of allocations) {
           const dynamicInput = categoryPlanInput(snapshot, entry.categoryCode, entry.requestedCount, entry.allocation);
-           const approvedFactRefs = entry.allocation && Array.isArray(entry.allocation.factRefs) ? entry.allocation.factRefs.map(String) : [];
+          const approvedFactRefs = entry.allocation && Array.isArray(entry.allocation.factRefs) ? entry.allocation.factRefs.map(String) : [];
           const requestKey = `${idempotencyKey}:${snapshot.id}:${entry.categoryCode}`;
           const request: CategoryPromptRequest = {
             id: randomUUID(), suiteId: suite.id, planSnapshotId: snapshot.id, categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, status: "running", idempotencyKey: requestKey, retryOfRequestId: null,
@@ -1164,7 +1164,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           if (reservation.duplicate && reservation.request.status !== "running") continue;
           if (reservation.duplicate) continue;
           try {
-             const chunks = snapshot.chunks.filter((chunk) => approvedFactRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, summary: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256, published: true }));
+            const chunks = snapshot.chunks.filter((chunk) => approvedFactRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, summary: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256, published: true }));
             const visionImages = await loadCategoryVisionImages(suite.id, snapshot, entry.allocation);
             const llmInput: CategoryPromptLlmInput = { requestId: request.id, templateVersionId: template!.templateVersionId, templateBody: template!.body, userPromptTemplate: template!.userPromptTemplate, dynamicInput, humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined, categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, approvedFactRefs };
             if (!llmClient.generateCategoryPrompt) throw new Error("CATEGORY_PROMPT_LLM_NOT_CONFIGURED");
@@ -1310,24 +1310,24 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!latest) return fail("INVALID_PLAN_SNAPSHOT", 404);
       const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
       if (!Array.isArray(body.items) || !validPlanOutput({ schemaVersion: "suite-plan-v1", items: body.items }, { items: { properties: { imageType: {} } } })) return fail("LLM_OUTPUT_SCHEMA_INVALID");
-      const items = body.items as Array<{ imageType?: "main" | "detail"; title:string;purpose:string;prompt:string }>;
-      const snapshot: PlanSnapshot = { ...latest, id: randomUUID(), revisionNumber: latest.revisionNumber + 1, revisionKind: "human", parentSnapshotId: latest.id, items: items.map((item,index)=>({id:randomUUID(),ordinal:index+1,imageType:item.imageType ?? "main",title:item.title,purpose:item.purpose,prompt:item.prompt})), createdAt:new Date().toISOString() };
+      const items = body.items as Array<{ imageType?: "main" | "detail"; title: string; purpose: string; prompt: string }>;
+      const snapshot: PlanSnapshot = { ...latest, id: randomUUID(), revisionNumber: latest.revisionNumber + 1, revisionKind: "human", parentSnapshotId: latest.id, items: items.map((item, index) => ({ id: randomUUID(), ordinal: index + 1, imageType: item.imageType ?? "main", title: item.title, purpose: item.purpose, prompt: item.prompt })), createdAt: new Date().toISOString() };
       return ok(planSnapshotView(await deps.planRepository.appendRevision(snapshot)));
     }
     const startCheckMatch = path.match(/^\/api\/suites\/([^/]+)\/start-creation-check$/);
     if (method === "POST" && startCheckMatch) {
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
-      const [images,snapshot] = await Promise.all([deps.repository.getInputImages(startCheckMatch[1]),deps.planRepository.getLatestSnapshot(startCheckMatch[1])]);
+      const [images, snapshot] = await Promise.all([deps.repository.getInputImages(startCheckMatch[1]), deps.planRepository.getLatestSnapshot(startCheckMatch[1])]);
       if (!images.length) return fail("INVALID_INPUT_IMAGE");
-      if (images.some((image)=>!image.currentBaseVersionId)) return fail("BASE_IMAGE_REQUIRED");
+      if (images.some((image) => !image.currentBaseVersionId)) return fail("BASE_IMAGE_REQUIRED");
       if (!snapshot) return fail("INVALID_PLAN_SNAPSHOT");
-       if (snapshot.phase === "structure_plan" && snapshot.confirmationStatus === "confirmed") {
-         const items = materializeCategoryPlanItems(snapshot, await listCategoryRequestsForSnapshot(snapshot));
-         if (!items) return fail("CATEGORY_PROMPTS_NOT_READY", 409);
-         return ok({ ready: true, planSnapshotId: snapshot.id, itemCount: items.length });
-       }
-       if (!snapshot.items.length) return fail("INVALID_PLAN_SNAPSHOT");
-       return ok({ ready:true,planSnapshotId:snapshot.id,itemCount:snapshot.items.length });
+      if (snapshot.phase === "structure_plan" && snapshot.confirmationStatus === "confirmed") {
+        const items = materializeCategoryPlanItems(snapshot, await listCategoryRequestsForSnapshot(snapshot));
+        if (!items) return fail("CATEGORY_PROMPTS_NOT_READY", 409);
+        return ok({ ready: true, planSnapshotId: snapshot.id, itemCount: items.length });
+      }
+      if (!snapshot.items.length) return fail("INVALID_PLAN_SNAPSHOT");
+      return ok({ ready: true, planSnapshotId: snapshot.id, itemCount: snapshot.items.length });
     }
 
     const resolvePlanStyleGuide = (snapshot: PlanSnapshot | null): string => {
@@ -1521,16 +1521,16 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const snapshotId = typeof body.planSnapshotId === "string" ? body.planSnapshotId : undefined;
       let snapshot = snapshotId ? await deps.planRepository.getSnapshot(snapshotId) : await deps.planRepository.getLatestSnapshot(suite.id);
       if (!snapshot || snapshot.suiteId !== suite.id) return fail("INVALID_PLAN_SNAPSHOT", 409);
-       if (snapshot.phase === "structure_plan" && snapshot.confirmationStatus === "confirmed") {
-         const requests = await listCategoryRequestsForSnapshot(snapshot);
-         const items = materializeCategoryPlanItems(snapshot, requests);
-         if (!items) return fail("CATEGORY_PROMPTS_NOT_READY", 409);
-         if (!samePlanItems(snapshot.items, items)) {
-           const sourceSnapshot = await resolveCategorySourceSnapshot(snapshot);
-           const next: PlanSnapshot = { ...snapshot, id: randomUUID(), revisionNumber: snapshot.revisionNumber + 1, revisionKind: "human", parentSnapshotId: snapshot.id, items, categoryOutputs: Object.fromEntries(requests.map((request) => [request.categoryCode, { status: request.status, requestedCount: request.requestedCount, items: request.items as unknown as Record<string, unknown>[], errorCode: request.errorCode, errorMessage: request.errorMessage }])), requestSummary: { ...snapshot.requestSummary, phase: "task_materialization", sourceSnapshotId: sourceSnapshot.id }, createdAt: new Date().toISOString() };
-            snapshot = await appendMaterializedSnapshot(next, items);
-         }
-       }
+      if (snapshot.phase === "structure_plan" && snapshot.confirmationStatus === "confirmed") {
+        const requests = await listCategoryRequestsForSnapshot(snapshot);
+        const items = materializeCategoryPlanItems(snapshot, requests);
+        if (!items) return fail("CATEGORY_PROMPTS_NOT_READY", 409);
+        if (!samePlanItems(snapshot.items, items)) {
+          const sourceSnapshot = await resolveCategorySourceSnapshot(snapshot);
+          const next: PlanSnapshot = { ...snapshot, id: randomUUID(), revisionNumber: snapshot.revisionNumber + 1, revisionKind: "human", parentSnapshotId: snapshot.id, items, categoryOutputs: Object.fromEntries(requests.map((request) => [request.categoryCode, { status: request.status, requestedCount: request.requestedCount, items: request.items as unknown as Record<string, unknown>[], errorCode: request.errorCode, errorMessage: request.errorMessage }])), requestSummary: { ...snapshot.requestSummary, phase: "task_materialization", sourceSnapshotId: sourceSnapshot.id }, createdAt: new Date().toISOString() };
+          snapshot = await appendMaterializedSnapshot(next, items);
+        }
+      }
       if (!snapshot.items.length) return fail("INVALID_PLAN_SNAPSHOT", 409);
       const result = await deps.taskRepository.createTasksFromSnapshot(suite.id, snapshot, await deps.repository.getInputImages(suite.id));
       return ok({ planSnapshotId: snapshot.id, tasks: result.tasks, createdTaskIds: result.created.map((task) => task.id) }, result.created.length ? 201 : 200);

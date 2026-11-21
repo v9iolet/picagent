@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { capabilityLabels, type ChannelModel, type ModelCapability, type ModelChannelInput, type ModelChannelSnapshot, type ModelPreferences, type ModelSettingsView } from "../shared/model-settings.js";
+import { parseProviderJson } from "./providers/provider-json.js";
 
 interface StoredChannel extends ModelChannelInput { id: string }
 
@@ -25,20 +26,38 @@ function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function normalizeBaseUrl(value: unknown) {
+  try {
+    if (typeof value !== "string") throw new Error();
+    const url = new URL(value.trim());
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
+    return url.href.replace(/\/+$/, "");
+  } catch {
+    throw new SettingsError("INVALID_MODEL_CHANNEL_URL", "请填写不含凭据、查询参数和片段的 HTTP(S) 接口地址");
+  }
+}
+
+function providerBaseUrl(baseUrl: string) {
+  const url = new URL(baseUrl);
+  if (url.pathname === "/") url.pathname = "/v1";
+  return url.href;
+}
+
+function resolveApiKey(input: unknown, baseUrl: string, previous?: StoredChannel) {
+  const submitted = typeof input === "string" ? input.trim() : "";
+  if (submitted && !/^[!-~]+$/.test(submitted)) throw new SettingsError("INVALID_MODEL_CHANNEL_KEY", "API Key 格式无效");
+  const apiKey = submitted || (previous?.baseUrl === baseUrl ? previous.apiKey : "");
+  if (!apiKey) throw new SettingsError("MODEL_CHANNEL_KEY_REQUIRED", "新增渠道或变更接口地址时，请填写 API Key");
+  return apiKey;
+}
+
 function validateChannel(value: unknown): ModelChannelInput {
   const body = object(value);
   const name = typeof body.name === "string" ? body.name.trim() : "";
   if (!name || body.protocol !== "openai-compatible") {
     throw new SettingsError("INVALID_MODEL_CHANNEL", "请填写渠道名称并选择 OpenAI 兼容协议");
   }
-  let url: URL;
-  try {
-    if (typeof body.baseUrl !== "string") throw new Error();
-    url = new URL(body.baseUrl.trim());
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
-  } catch {
-    throw new SettingsError("INVALID_MODEL_CHANNEL_URL", "请填写不含凭据、查询参数和片段的 HTTP(S) 接口地址");
-  }
+  const baseUrl = normalizeBaseUrl(body.baseUrl);
   if (!Array.isArray(body.models)) throw new SettingsError("INVALID_CHANNEL_MODELS", "请填写渠道模型列表");
   const models = new Map<string, ChannelModel>();
   for (const entry of body.models) {
@@ -51,8 +70,7 @@ function validateChannel(value: unknown): ModelChannelInput {
     models.set(id, { id, capabilities: [...new Set<ModelCapability>(model.capabilities)] });
   }
   const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
-  if (apiKey && !/^[!-~]+$/.test(apiKey)) throw new SettingsError("INVALID_MODEL_CHANNEL_KEY", "API Key 格式无效");
-  return { name, protocol: body.protocol, baseUrl: url.href.replace(/\/+$/, ""), apiKey, models: [...models.values()] };
+  return { name, protocol: body.protocol, baseUrl, apiKey, models: [...models.values()] };
 }
 
 function assertReferences(state: ModelSettingsState, status: 400 | 409) {
@@ -85,19 +103,63 @@ export class ModelSettings {
     const channel = state.channels.find((item) => item.id === ref?.channelId);
     if (!ref || !channel?.apiKey || !channel.models.some((model) => model.id === ref.modelId && model.capabilities.includes(capability))) return null;
     const source: ModelChannelSnapshot = { channelId: channel.id, channelName: channel.name, baseUrl: channel.baseUrl };
-    const url = new URL(channel.baseUrl);
-    if (url.pathname === "/") url.pathname = "/v1";
-    return { model: ref.modelId, apiKey: channel.apiKey, baseUrl: url.href, source };
+    return { model: ref.modelId, apiKey: channel.apiKey, baseUrl: providerBaseUrl(channel.baseUrl), source };
   }
 
   async request(method: string, path: string, input: unknown) {
     const requestId = randomUUID();
     try {
-      const result = await this.handleRequest(method, path, input);
-      return { status: method === "POST" ? 201 : 200, body: { data: view(result), requestId } };
+      const discovering = method === "POST" && path === "/api/model-settings/models";
+      const data = discovering ? await this.discoverModels(input) : view(await this.handleRequest(method, path, input));
+      return { status: method === "POST" && !discovering ? 201 : 200, body: { data, requestId } };
     } catch (error) {
       if (!(error instanceof SettingsError)) throw error;
       return { status: error.status, body: { error: { code: error.code, message: error.message }, requestId } };
+    }
+  }
+
+  private async discoverModels(input: unknown) {
+    const body = object(input);
+    const baseUrl = normalizeBaseUrl(body.baseUrl);
+    const previous = typeof body.channelId === "string"
+      ? (await this.repository.read()).channels.find(({ id }) => id === body.channelId)
+      : undefined;
+    if (body.channelId !== undefined && !previous) throw new SettingsError("MODEL_CHANNEL_NOT_FOUND", "渠道不存在", 404);
+    const apiKey = resolveApiKey(body.apiKey, baseUrl, previous);
+    const signal = AbortSignal.timeout(15_000);
+    const unavailable = new SettingsError("MODEL_LIST_UNAVAILABLE", "无法拉取模型列表，请检查接口地址或手动添加模型", 502);
+    const invalid = new SettingsError("INVALID_MODEL_LIST", "上游返回的模型列表格式无效，请手动添加模型", 502);
+    try {
+      const response = await fetch(`${providerBaseUrl(baseUrl).replace(/\/+$/, "")}/models`, {
+        headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
+        redirect: "error",
+        signal,
+      });
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => undefined);
+        if (response.status === 401 || response.status === 403) {
+          throw new SettingsError("MODEL_LIST_AUTH_FAILED", "上游拒绝访问模型列表，请检查 API Key 或手动添加模型", 502);
+        }
+        if (response.status === 404 || response.status === 405) {
+          throw new SettingsError("MODEL_LIST_UNSUPPORTED", "上游未提供模型列表，请检查接口地址或手动添加模型", 502);
+        }
+        throw unavailable;
+      }
+      const text = await response.text();
+      let payload: { data?: unknown } | null;
+      try { payload = parseProviderJson(text, apiKey, invalid.code) as typeof payload; }
+      catch { throw invalid; }
+      if (!Array.isArray(payload?.data)) throw invalid;
+      const ids = new Set<string>();
+      for (const model of payload.data) {
+        if (typeof model?.id === "string" && model.id.trim()) ids.add(model.id.trim());
+      }
+      if (payload.data.length && !ids.size) throw invalid;
+      return { modelIds: [...ids] };
+    } catch (error) {
+      if (error instanceof SettingsError) throw error;
+      if (signal.aborted) throw new SettingsError("MODEL_LIST_TIMEOUT", "拉取模型列表超时，请重试或手动添加模型", 504);
+      throw unavailable;
     }
   }
 
@@ -131,8 +193,7 @@ export class ModelSettings {
       const previous = state.channels[index];
       if (!creating && !previous) throw new SettingsError("MODEL_CHANNEL_NOT_FOUND", "渠道不存在", 404);
       if (submitted) {
-        const apiKey = submitted.apiKey || (previous?.baseUrl === submitted.baseUrl ? previous.apiKey : "");
-        if (!apiKey) throw new SettingsError("MODEL_CHANNEL_KEY_REQUIRED", "新增渠道或变更接口地址时，请填写 API Key");
+        const apiKey = resolveApiKey(submitted.apiKey, submitted.baseUrl, previous);
         const channel = { ...submitted, id: previous?.id ?? randomUUID(), apiKey };
         if (creating) state.channels.push(channel);
         else state.channels[index] = channel;
