@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { DETAIL_CATEGORIES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_IMAGE_LIMITS } from "../../shared/suite-categories.js";
 import { SUPPORTED_OUTPUT_LANGUAGES } from "../../shared/workbench-delivery";
 import { suiteApi, type ApiBaseHistory, type ApiCategoryPromptState, type ApiImage, type ApiPlanSnapshot, type ApiPlatformProfile, type ApiPromptInputField, type ApiPromptTemplate, type ApiSuite, type ApiStructurePlan } from "../api/client";
 import { AppShell } from "../components/AppShell";
@@ -21,12 +22,6 @@ const OPTION_LABELS: Record<string, string> = {
   detail_only: "仅详情页",
 };
 
-const DETAIL_CATEGORIES = [
-  ["appearance_angles", "多角度外观图"], ["lifestyle_use", "生活场景图"], ["feature_benefit", "信息卖点图"], ["material_detail", "细节特写图"],
-  ["size_scale", "尺寸规格图"], ["included_items", "配件全家福"], ["compatibility_application", "适配与应用图"], ["variant_bundle", "组合与变体图"],
-  ["packaging_unboxing", "包装与开箱图"], ["care_instruction", "使用与维护图"],
-] as const;
-const DETAIL_CATEGORY_NAMES: Record<string, string> = { main: "主图组", ...Object.fromEntries(DETAIL_CATEGORIES) };
 const RECENT_PAGE_SIZE = 6;
 
 type BriefInput = {
@@ -1053,9 +1048,9 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                         <span>{images.length} 张商品图</span>
                       </header>
                       <div className="start-structure-controls">
-                        <label className="start-field"><span>主图总数</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min="1" value={structureInput.main_image_count} onChange={(event) => setStructureInput((value) => ({ ...value, main_image_count: Number(event.target.value) }))} /></label>
-                        <label className="start-field"><span>详情图最少数量</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min="0" value={structureInput.detail_image_count_min} onChange={(event) => setStructureInput((value) => ({ ...value, detail_image_count_min: Number(event.target.value) }))} /></label>
-                        <label className="start-field"><span>详情图最多数量</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min="0" value={structureInput.detail_image_count_max} onChange={(event) => setStructureInput((value) => ({ ...value, detail_image_count_max: Number(event.target.value) }))} /></label>
+                        <label className="start-field"><span>主图总数</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min={SUITE_IMAGE_LIMITS.main.min} max={SUITE_IMAGE_LIMITS.main.max} value={structureInput.main_image_count} onChange={(event) => setStructureInput((value) => ({ ...value, main_image_count: Number(event.target.value) }))} /></label>
+                        <label className="start-field"><span>详情图最少数量</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min={SUITE_IMAGE_LIMITS.detail.min} max={SUITE_IMAGE_LIMITS.detail.max} value={structureInput.detail_image_count_min} onChange={(event) => setStructureInput((value) => ({ ...value, detail_image_count_min: Number(event.target.value) }))} /></label>
+                        <label className="start-field"><span>详情图最多数量</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min={SUITE_IMAGE_LIMITS.detail.min} max={SUITE_IMAGE_LIMITS.detail.max} value={structureInput.detail_image_count_max} onChange={(event) => setStructureInput((value) => ({ ...value, detail_image_count_max: Number(event.target.value) }))} /></label>
                       </div>
                       <div className="start-category-grid">
                         {DETAIL_CATEGORIES.map(([code, label]) => (
@@ -1202,7 +1197,7 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                     <div className="start-structure-total">
                       <span>详情图最终总数</span>
                       {structureSnapshot?.confirmationStatus !== "confirmed" ? (
-                        <input aria-label="详情图最终总数" type="number" min="0" value={structure.detailImageCount} onChange={(event) => updateStructure((currentValue) => ({ ...currentValue, detailImageCount: Number(event.target.value) }))} />
+                        <input aria-label="详情图最终总数" type="number" min={SUITE_IMAGE_LIMITS.detail.min} max={SUITE_IMAGE_LIMITS.detail.max} value={structure.detailImageCount} onChange={(event) => updateStructure((currentValue) => ({ ...currentValue, detailImageCount: Number(event.target.value) }))} />
                       ) : (
                         <strong>{structure.detailImageCount}</strong>
                       )}

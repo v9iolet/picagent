@@ -1,4 +1,5 @@
 import type { ModelCapability } from "../shared/model-settings.js";
+import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
 import type { ModelSettings } from "./model-settings.js";
@@ -278,8 +279,25 @@ function planSnapshotView(snapshot: PlanSnapshot) {
   return { id: snapshot.id, suiteId: snapshot.suiteId, revisionNumber: snapshot.revisionNumber, revisionKind: snapshot.revisionKind, parentSnapshotId: snapshot.parentSnapshotId, templateVersionId: snapshot.templateVersionId, dynamicInput: snapshot.dynamicInput, humanInput: snapshot.humanInput, chunks: snapshot.chunks.map(({ content: _content, ...chunk }) => chunk), inputImageIds: snapshot.inputImageIds, baseVersionIds: snapshot.baseVersionIds, provider: snapshot.provider, schemaVersion: snapshot.schemaVersion, items: snapshot.items, phase: snapshot.phase ?? "legacy_plan", confirmationStatus: snapshot.confirmationStatus ?? "confirmed", confirmedAt: snapshot.confirmedAt ?? null, structure: snapshot.structure ?? null, categoryOutputs: snapshot.categoryOutputs ?? {}, createdAt: snapshot.createdAt };
 }
 
-const DETAIL_CATEGORY_CODES = new Set(["appearance_angles", "lifestyle_use", "feature_benefit", "material_detail", "size_scale", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"]);
 type StructureOutput = StructurePlanV2 & { schemaVersion: "suite-structure-plan-v2" };
+
+function parseCategoryGroups(value: unknown): SuiteCategoryGroups | null {
+  const parsed = parseStructureJsonValue(value, null);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const groups = parsed as Record<string, unknown>;
+  if (Object.keys(groups).length !== Object.keys(SUITE_CATEGORY_GROUPS).length) return null;
+  for (const [code, definition] of Object.entries(SUITE_CATEGORY_GROUPS)) {
+    const raw = groups[code];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const group = raw as Record<string, unknown>;
+    if (group.mode !== definition.mode || !Number.isInteger(group.count) || Number(group.count) < 0) return null;
+    if (!Array.isArray(group.categories) || group.categories.length !== definition.categories.length || new Set(group.categories).size !== definition.categories.length || !definition.categories.every((category) => (group.categories as unknown[]).includes(category))) return null;
+  }
+  const result = groups as SuiteCategoryGroups;
+  const detailCount = result.selling_points.count + result.lifestyle.count + result.other.count;
+  if (result.main.count < SUITE_IMAGE_LIMITS.main.min || result.main.count > SUITE_IMAGE_LIMITS.main.max || detailCount > SUITE_IMAGE_LIMITS.detail.max || detailCount + result.main.count > SUITE_IMAGE_LIMITS.total.max) return null;
+  return result;
+}
 
 function normalizeStructureAllocation(value: unknown, main = false): StructureAllocation | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -320,13 +338,17 @@ function normalizeStructureOutput(value: unknown): StructureOutput | null {
 }
 
 function validateStructureOutput(output: StructureOutput, input: Record<string, unknown>, imageIds: string[], factIds: string[] = []): string | null {
+  const groups = input.category_groups ? parseCategoryGroups(input.category_groups) : null;
+  if (input.category_groups && !groups) return "category_groups";
+  const waitingForFacts = groups !== null && output.status === "NEEDS_HUMAN_INPUT";
   const min = Number(input.detail_image_count_min); const max = Number(input.detail_image_count_max);
-  if (!Number.isInteger(output.mainAllocation.count) || output.mainAllocation.count !== Number(input.main_image_count)) return "main_image_count";
+  if (!Number.isInteger(output.mainAllocation.count) || (!waitingForFacts && output.mainAllocation.count !== Number(input.main_image_count))) return "main_image_count";
   if (output.mainAllocation.sourceImageIds.some((id) => !imageIds.includes(id))) return "main:sourceImageIds";
   if (output.mainAllocation.factRefs.some((id) => !factIds.includes(id))) return "main:factRefs";
-  if (!Number.isInteger(output.detailImageCount) || output.detailImageCount < min || output.detailImageCount > max) return "detail_image_count_range";
-  const selectedValue = Array.isArray(input.selected_detail_categories) ? input.selected_detail_categories : JSON.parse(String(input.selected_detail_categories ?? "[]"));
-  const requirementsValue = input.category_requirements && typeof input.category_requirements === "object" ? input.category_requirements : JSON.parse(String(input.category_requirements ?? "{}"));
+  if (!Number.isInteger(output.detailImageCount) || output.detailImageCount < (waitingForFacts ? 0 : min) || output.detailImageCount > max) return "detail_image_count_range";
+  const groupCategories = groups ? Object.values(groups).flatMap((group) => group.categories.filter((code) => code !== "main")) : null;
+  const selectedValue = groupCategories ?? (Array.isArray(input.selected_detail_categories) ? input.selected_detail_categories : JSON.parse(String(input.selected_detail_categories ?? "[]")));
+  const requirementsValue = groupCategories ? Object.fromEntries(groupCategories.map((code) => [code, "optional"])) : input.category_requirements && typeof input.category_requirements === "object" ? input.category_requirements : JSON.parse(String(input.category_requirements ?? "{}"));
   const selected = new Set((Array.isArray(selectedValue) ? selectedValue : []).map(String));
   const requirements = new Map<string, "required" | "optional">(Object.entries(requirementsValue as Record<string, unknown>).map(([key, value]) => [key, value === "required" ? "required" : "optional"]));
   const seen = new Set<string>(); let total = 0;
@@ -338,7 +360,16 @@ function validateStructureOutput(output: StructureOutput, input: Record<string, 
     if (row.factRefs.some((id) => !factIds.includes(id))) return `${row.category}:factRefs`;
     total += row.count; seen.add(row.category);
   }
-  if (selected.size !== seen.size || total !== output.detailImageCount) return "category_total";
+  if (selected.size !== seen.size || (!waitingForFacts && total !== output.detailImageCount)) return "category_total";
+  if (groups) {
+    if (total > max || total > SUITE_IMAGE_LIMITS.detail.max || output.detailImageCount > SUITE_IMAGE_LIMITS.detail.max || output.mainAllocation.count + Math.max(total, output.detailImageCount) > SUITE_IMAGE_LIMITS.total.max) return "group:total";
+    for (const [code, group] of Object.entries(groups)) {
+      const allocations = code === "main" ? [output.mainAllocation] : output.categoryAllocations.filter((row) => group.categories.includes(row.category));
+      const count = allocations.reduce((sum, row) => sum + row.count, 0);
+      if (group.mode === "exact" && count !== group.count && (!waitingForFacts || count > group.count || !allocations.some((row) => row.missingFacts.some((fact) => fact.trim())))) return `group:${code}`;
+      if (group.mode === "max" && (count > group.count || allocations.some((row) => row.count > 1))) return `group:${code}`;
+    }
+  }
   return null;
 }
 
@@ -351,20 +382,6 @@ function parseStructureJsonValue(value: unknown, fallback: unknown): unknown {
   if (typeof value !== "string") return fallback;
   try { return JSON.parse(value); } catch { return fallback; }
 }
-
-const DETAIL_CATEGORY_NAMES: Record<string, string> = {
-  main: "主图",
-  appearance_angles: "多角度外观图",
-  lifestyle_use: "生活场景图",
-  feature_benefit: "信息卖点图",
-  material_detail: "细节特写图",
-  size_scale: "尺寸规格图",
-  included_items: "配件全家福",
-  compatibility_application: "适配与应用图",
-  variant_bundle: "组合与变体图",
-  packaging_unboxing: "包装与开箱图",
-  care_instruction: "使用与维护图",
-};
 
 function normalizeCategoryPromptOutput(value: unknown): { schemaVersion: "suite-category-prompt-v1"; category: string; items: CategoryPromptItem[] } | null {
   const parsed = parseJsonLike(value);
@@ -540,7 +557,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const sourceImageIds = allocation && Array.isArray(allocation.sourceImageIds) ? allocation.sourceImageIds.map(String) : snapshot.inputImageIds;
     const categoryName = DETAIL_CATEGORY_NAMES[categoryCode] ?? categoryCode;
     const universalInput: Record<string, unknown> = {};
-    for (const key of ["platform", "output_language", "product_name", "product_category", "brand", "target_market_country", "platform_text_rule", "text_strategy", "emphasis_requirements", "design_constraints"]) {
+    for (const key of ["platform", "output_language", "product_name", "product_category", "brand", "target_market_country", "aspect_ratio", "main_image_background", "platform_text_rule", "text_strategy", "emphasis_requirements", "design_constraints"]) {
       if (snapshot.dynamicInput[key] !== undefined) universalInput[key] = snapshot.dynamicInput[key];
     }
     const facts = designerFactsText(snapshot.dynamicInput);
@@ -1085,6 +1102,15 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const dynamicInput = { ...rawInput, selected_detail_categories: Array.isArray(rawInput.selected_detail_categories) ? JSON.stringify(rawInput.selected_detail_categories) : rawInput.selected_detail_categories, category_requirements: rawInput.category_requirements && typeof rawInput.category_requirements === "object" ? JSON.stringify(rawInput.category_requirements) : rawInput.category_requirements };
       const validated = validateDynamicInput(template.inputSchema, dynamicInput);
       if (!validated.ok) return fail("PROMPT_INPUT_INVALID", 400, validated.message);
+      if (validated.value.category_groups) {
+        const groups = parseCategoryGroups(validated.value.category_groups);
+        const min = Number(validated.value.detail_image_count_min);
+        const max = Number(validated.value.detail_image_count_max);
+        if (!groups || groups.main.count !== Number(validated.value.main_image_count) || !Number.isInteger(min) || !Number.isInteger(max) || min < SUITE_IMAGE_LIMITS.detail.min || min > max || max > SUITE_IMAGE_LIMITS.detail.max) return fail("PROMPT_INPUT_INVALID", 400, "分组数量配置无效");
+        const categories = Object.values(groups).flatMap((group) => group.categories.filter((code) => code !== "main"));
+        validated.value.selected_detail_categories = JSON.stringify(categories);
+        validated.value.category_requirements = JSON.stringify(Object.fromEntries(categories.map((code) => [code, "optional"])));
+      }
       const platformValue = typeof validated.value.platform === "string" ? validated.value.platform.trim() : "";
       const platformProfile = platformValue && deps.platformRepository ? await deps.platformRepository.find(platformValue) : null;
       if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
