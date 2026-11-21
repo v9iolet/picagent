@@ -53,3 +53,26 @@ test("V1.1 contract validator rejects a wrong stage/code pairing", () => {
     body: "suite-structure-plan-v2",
   }), /template code/);
 });
+
+test("grouped planning versions publish through the existing lifecycle and preserve historical versions", async () => {
+  for (const stage of ["structure-plan", "category-prompt"]) {
+    const oldPath = `prompt/normalized/general-${stage}.md`;
+    const newPath = `prompt/normalized/general-${stage}-groups.md`;
+    const oldRecord = parseNormalizedPromptMarkdown(await readFile(oldPath, "utf8"), oldPath);
+    const newRecord = parseNormalizedPromptMarkdown(await readFile(newPath, "utf8"), newPath);
+    validatePromptTemplateContract(newRecord);
+    assert.equal(newRecord.code, oldRecord.code);
+    assert.notEqual(newRecord.templateVersionId, oldRecord.templateVersionId);
+    for (const key of ["aspect_ratio", "main_image_background", "target_market_country", ...(stage === "structure-plan" ? ["category_groups"] : [])]) {
+      assert.equal(newRecord.inputSchema.find((field) => field.key === key)?.required, false, key);
+    }
+    assert.equal(newRecord.inputSchema.some((field) => field.key === "target_market"), false);
+    const prompts = new MemoryPromptRepository();
+    const [oldVersion, newVersion] = await prompts.importRecords([oldRecord, newRecord]);
+    await prompts.publishVersion(oldVersion.templateVersionId);
+    await prompts.publishVersion(newVersion.templateVersionId);
+    assert.equal((await prompts.listPublished(newVersion.stage))[0].templateVersionId, newVersion.templateVersionId);
+    assert.equal((await prompts.getVersion(oldVersion.templateVersionId))?.body, oldRecord.body);
+    assert.equal((await prompts.listVersions(oldVersion.templateId)).length, 2);
+  }
+});

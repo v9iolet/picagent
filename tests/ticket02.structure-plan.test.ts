@@ -8,6 +8,7 @@ import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { structurePlanDynamicInput } from "../src/features/plan/plan-input.js";
 import type { PlanSnapshot } from "../server/types.js";
+import { DEFAULT_SUITE_CATEGORY_GROUPS, SMART_SUITE_STRUCTURE_PRESET } from "../shared/suite-categories.js";
 
 const image = Buffer.from("image");
 const dynamicInput = {
@@ -82,18 +83,19 @@ test("structure plan request preserves V1.1 brief fields without legacy aliases"
   assert.equal("forbidden_content" in input, false);
 });
 
-async function setup(llmOutput: unknown = output, plans = new MemoryPlanRepository()) {
+async function setup(llmOutput: unknown = output, plans = new MemoryPlanRepository(), templatePath = "prompt/normalized/general-structure-plan.md") {
   const repository = new MemorySuiteRepository();
   const storage = new MemoryStorage();
   const prompts = new MemoryPromptRepository();
-  const template = parseNormalizedPromptMarkdown(await (await import("node:fs/promises")).readFile("prompt/normalized/general-structure-plan.md", "utf8"), "prompt/normalized/general-structure-plan.md");
+  const template = parseNormalizedPromptMarkdown(await (await import("node:fs/promises")).readFile(templatePath, "utf8"), templatePath);
   const [published] = await prompts.importRecords([template]);
   await prompts.publishVersion(published.templateVersionId);
   const suite = await repository.createSuite("结构计划");
   await repository.createInputImage({ id: "img-1", suiteId: suite.id, ordinal: 1, originalObjectKey: `suites/${suite.id}/img-1`, thumbnailObjectKey: `suites/${suite.id}/img-1-thumb`, sha256: "a".repeat(64), width: 1, height: 1, mimeType: "image/png", originalFilename: "product.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
   await storage.put({ key: `suites/${suite.id}/img-1`, bytes: image, contentType: "image/png" });
-  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: plans, llmClient: { provider: "fake", model: "structure", isFake: true, async generatePlan() { return llmOutput; } } });
-  return { app, suite, template, plans };
+  const inputs: Record<string, unknown>[] = [];
+  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: plans, llmClient: { provider: "fake", model: "structure", isFake: true, async generatePlan(input) { inputs.push(input.dynamicInput); return llmOutput; } } });
+  return { app, suite, template, plans, inputs };
 }
 
 async function wait(app: Awaited<ReturnType<typeof setup>>["app"], id: string) {
@@ -204,4 +206,155 @@ test("structure plan accepts designer-entered product facts from emphasis requir
   assert.equal(terminal.snapshot.dynamicInput.human_supplement, "");
   assert.equal(terminal.snapshot.dynamicInput.emphasis_requirements, input.emphasis_requirements);
   assert.deepEqual(terminal.snapshot.structure.mainAllocation.factRefs, ["human_supplement"]);
+});
+
+const groupedCategories = ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"];
+const categoryGroups = {
+  main: { categories: ["main"], mode: "exact", count: 1 },
+  selling_points: { categories: ["feature_benefit", "material_detail"], mode: "exact", count: 3 },
+  lifestyle: { categories: ["lifestyle_use"], mode: "exact", count: 2 },
+  other: { categories: groupedCategories.slice(3), mode: "max", count: 1 },
+};
+const groupedInput = {
+  ...dynamicInput,
+  detail_image_count_min: 5,
+  detail_image_count_max: 6,
+  selected_detail_categories: groupedCategories,
+  category_requirements: Object.fromEntries(groupedCategories.map((category) => [category, "required"])),
+  category_groups: JSON.stringify(categoryGroups),
+};
+function groupedOutput() {
+  return {
+    ...structuredClone(output),
+    detailImageCount: 5,
+    categoryAllocations: groupedCategories.map((category) => ({
+      category, requirement: "optional", count: category === "feature_benefit" ? 3 : category === "lifestyle_use" ? 2 : 0,
+      reason: "按商品事实分配", sourceImageIds: ["img-1"], factRefs: ["human_supplement"], missingFacts: category === "size_scale" ? ["未提供尺寸参数，未生成尺寸图"] : [],
+    })),
+  };
+}
+async function generateGrouped(modelOutput = groupedOutput(), input = groupedInput) {
+  const fixture = await setup(modelOutput, new MemoryPlanRepository(), "prompt/normalized/general-structure-plan-groups.md");
+  const started = await fixture.app.request("POST", `/api/suites/${fixture.suite.id}/structure-plan`, { headers: { "idempotency-key": "grouped" }, body: { templateVersionId: fixture.template.templateVersionId, dynamicInput: input } });
+  assert.equal(started.status, 202, JSON.stringify(started.body));
+  return { ...fixture, terminal: await wait(fixture.app, (started.body as any).data.attemptId) };
+}
+
+test("group exact allocation accepts 3+0 selling points and missing optional facts without pausing", async () => {
+  const fixture = await generateGrouped();
+  assert.equal(fixture.terminal.status, "succeeded");
+  assert.equal(fixture.terminal.snapshot.structure.status, "READY_FOR_REVIEW");
+  assert.deepEqual(JSON.parse(String(fixture.inputs[0].category_requirements)), Object.fromEntries(groupedCategories.map((category) => [category, "optional"])));
+  const confirmed = await fixture.app.request("POST", `/api/suites/${fixture.suite.id}/structure-plan/confirm`, { body: { structure: fixture.terminal.snapshot.structure } });
+  assert.equal(confirmed.status, 200);
+});
+
+test("group planning rejects exact underallocation, overallocation, max overflow and duplicate auxiliary images", async () => {
+  for (const [name, counts] of [
+    ["exact underallocation", { feature_benefit: 2 }],
+    ["exact overallocation", { feature_benefit: 4 }],
+    ["max group overflow", { comparison: 1, included_items: 1 }],
+    ["same max category twice", { comparison: 2 }],
+  ] as const) {
+    const candidate = groupedOutput();
+    for (const row of candidate.categoryAllocations) row.count = counts[row.category as keyof typeof counts] ?? row.count;
+    candidate.detailImageCount = candidate.categoryAllocations.reduce((sum, row) => sum + row.count, 0);
+    const fixture = await generateGrouped(candidate, { ...groupedInput, detail_image_count_min: 0, detail_image_count_max: 10 });
+    assert.equal(fixture.terminal.status, "failed", name);
+    assert.equal(fixture.terminal.errorCode, "STRUCTURE_PLAN_INVALID", name);
+  }
+});
+
+test("NEEDS_HUMAN_INPUT permits exact shortages only with missing facts and skips minimum and total equality", async () => {
+  for (const mainMissing of [false, true]) {
+    const candidate = groupedOutput();
+    candidate.status = "NEEDS_HUMAN_INPUT";
+    if (mainMissing) {
+      candidate.mainAllocation.count = 0;
+      candidate.mainAllocation.missingFacts = ["缺少商品正面参考"];
+    } else {
+      const row = candidate.categoryAllocations.find((row) => row.category === "feature_benefit")!;
+      row.count = 1;
+      row.missingFacts = ["缺少核心卖点事实"];
+      candidate.detailImageCount = 4; // 已分配 3 张，等待补录后再完成规划。
+    }
+    const fixture = await generateGrouped(candidate);
+    assert.equal(fixture.terminal.status, "succeeded", mainMissing ? "main group" : "selling points");
+    const confirmed = await fixture.app.request("POST", `/api/suites/${fixture.suite.id}/structure-plan/confirm`, { body: { structure: fixture.terminal.snapshot.structure } });
+    assert.equal(confirmed.status, 409);
+    assert.equal((confirmed.body as any).error.code, "STRUCTURE_PLAN_NEEDS_INPUT");
+  }
+});
+
+test("group confirmation preserves the optional category contract and revalidates locked counts", async () => {
+  for (const mutate of [
+    (structure: any) => { structure.categoryAllocations[0].requirement = "required"; },
+    (structure: any) => { structure.categoryAllocations.pop(); },
+    (structure: any) => { structure.categoryAllocations[0].count = 2; structure.detailImageCount = 4; },
+  ]) {
+    const fixture = await generateGrouped();
+    const structure = structuredClone(fixture.terminal.snapshot.structure);
+    mutate(structure);
+    const response = await fixture.app.request("POST", `/api/suites/${fixture.suite.id}/structure-plan/confirm`, { body: { structure } });
+    assert.equal(response.status, 409);
+    assert.equal((response.body as any).error.code, "STRUCTURE_PLAN_INVALID");
+  }
+});
+
+test("waiting grouped plans reject unexplained shortages, overflow and upper-bound violations", async () => {
+  for (const [name, mutate, max] of [
+    ["missing facts absent", (candidate: any) => { candidate.categoryAllocations[0].count = 1; }, 6],
+    ["missing facts blank", (candidate: any) => { candidate.categoryAllocations[0].count = 1; candidate.categoryAllocations[0].missingFacts = ["  "]; }, 6],
+    ["facts belong to another group", (candidate: any) => { candidate.categoryAllocations[0].count = 1; candidate.categoryAllocations[2].missingFacts = ["缺少场景事实"]; }, 6],
+    ["exact overflow despite missing facts", (candidate: any) => { candidate.categoryAllocations[0].count = 4; candidate.categoryAllocations[0].missingFacts = ["缺少事实"]; }, 6],
+    ["actual count exceeds detail max", (candidate: any) => { candidate.detailImageCount = 2; }, 2],
+  ] as const) {
+    const candidate = groupedOutput();
+    candidate.status = "NEEDS_HUMAN_INPUT";
+    mutate(candidate);
+    const fixture = await generateGrouped(candidate, { ...groupedInput, detail_image_count_min: 0, detail_image_count_max: max });
+    assert.equal(fixture.terminal.status, "failed", name);
+    assert.equal(fixture.terminal.errorCode, "STRUCTURE_PLAN_INVALID", name);
+  }
+});
+
+test("grouped requests enforce shared image limits and reject malformed group definitions before calling the model", async () => {
+  const invalidInputs = [
+    { category_groups: "{" },
+    { category_groups: "[]" },
+    { category_groups: JSON.stringify({ ...categoryGroups, main: { ...categoryGroups.main, count: 0 } }) },
+    { category_groups: JSON.stringify({ ...categoryGroups, main: { ...categoryGroups.main, count: 6 } }) },
+    { category_groups: JSON.stringify({ ...categoryGroups, selling_points: { ...categoryGroups.selling_points, count: 8 } }) },
+    { category_groups: JSON.stringify({ ...categoryGroups, main: { ...categoryGroups.main, count: 5 }, selling_points: { ...categoryGroups.selling_points, count: 5 } }) },
+    { category_groups: JSON.stringify({ ...categoryGroups, other: { ...categoryGroups.other, mode: "exact" } }) },
+    { category_groups: JSON.stringify({ ...categoryGroups, other: { ...categoryGroups.other, categories: ["comparison", "comparison"] } }) },
+    { category_groups: JSON.stringify({ ...categoryGroups, other: { ...categoryGroups.other, count: 1.5 } }) },
+    { main_image_count: 2 },
+    { detail_image_count_min: -1 },
+    { detail_image_count_max: 11 },
+    { detail_image_count_min: 7, detail_image_count_max: 6 },
+  ];
+  for (const patch of invalidInputs) {
+    const fixture = await setup(groupedOutput(), new MemoryPlanRepository(), "prompt/normalized/general-structure-plan-groups.md");
+    const response = await fixture.app.request("POST", `/api/suites/${fixture.suite.id}/structure-plan`, { headers: { "idempotency-key": "bad-group-input" }, body: { templateVersionId: fixture.template.templateVersionId, dynamicInput: { ...groupedInput, ...patch } } });
+    assert.equal(response.status, 400, JSON.stringify(patch));
+    assert.equal((response.body as any).error.code, "PROMPT_INPUT_INVALID");
+    assert.equal(fixture.inputs.length, 0);
+  }
+});
+
+test("shared custom defaults and smart matching allow factual auxiliary images below the requested upper bound", async () => {
+  const candidate = groupedOutput();
+  candidate.categoryAllocations[0].count = 1;
+  candidate.categoryAllocations[1].count = 2;
+  candidate.categoryAllocations.find((row) => row.category === "comparison")!.count = 1;
+  candidate.detailImageCount = 6;
+  const custom = await generateGrouped(candidate, { ...groupedInput, category_groups: JSON.stringify(DEFAULT_SUITE_CATEGORY_GROUPS) });
+  assert.equal(custom.terminal.status, "succeeded");
+  const smartInput = { ...dynamicInput, ...SMART_SUITE_STRUCTURE_PRESET, selected_detail_categories: groupedCategories };
+  const smart = await setup(groupedOutput(), new MemoryPlanRepository(), "prompt/normalized/general-structure-plan-groups.md");
+  const started = await smart.app.request("POST", `/api/suites/${smart.suite.id}/structure-plan`, { headers: { "idempotency-key": "smart" }, body: { templateVersionId: smart.template.templateVersionId, dynamicInput: smartInput } });
+  const terminal = await wait(smart.app, (started.body as any).data.attemptId);
+  assert.equal(terminal.status, "succeeded");
+  assert.equal(terminal.snapshot.structure.detailImageCount, 5);
 });
