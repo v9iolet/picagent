@@ -13,7 +13,7 @@ import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { readFile } from "node:fs/promises";
 import sharp from "sharp";
 
-async function pipelineFixture(options: { planStatus?: "READY_FOR_REVIEW" | "NEEDS_HUMAN_INPUT"; missingFacts?: boolean; providerFails?: boolean; platform?: string } = {}) {
+async function pipelineFixture(options: { planStatus?: "READY_FOR_REVIEW" | "NEEDS_HUMAN_INPUT"; missingFacts?: boolean; maxMissingFacts?: boolean; providerFails?: boolean; platform?: string } = {}) {
   const repository = new MemorySuiteRepository();
   const storage = new MemoryStorage();
   const prompts = new MemoryPromptRepository();
@@ -29,13 +29,15 @@ async function pipelineFixture(options: { planStatus?: "READY_FOR_REVIEW" | "NEE
   const thumbKey = `suites/${suite.id}/inputs/${inputId}/thumbnail`;
   await storage.put({ key: originalKey, bytes, contentType: "image/png" });
   await storage.put({ key: thumbKey, bytes, contentType: "image/png" });
+  await storage.put({ key: originalKey.replace(/\/original$/, "/generation-input.jpg"), bytes, contentType: "image/jpeg" });
   await repository.createInputImage({ id: inputId, suiteId: suite.id, ordinal: 1, originalObjectKey: originalKey, thumbnailObjectKey: thumbKey, sha256: randomUUID().replaceAll("-", "").padEnd(64, "0"), width: 16, height: 16, mimeType: "image/png", originalFilename: "商品.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
   const pipeline = new MemoryPipelineRepository();
+  let providerFails = Boolean(options.providerFails);
   let factsSubmitted = false;
   let planCalls = 0;
-  const planOutput = () => { const missing = options.missingFacts && !factsSubmitted && planCalls++ === 0; return { schemaVersion: "suite-structure-plan-v2", status: missing ? "NEEDS_HUMAN_INPUT" : options.planStatus ?? "READY_FOR_REVIEW", mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [inputId], factRefs: [], missingFacts: missing ? ["尺寸"] : [] }, detailImageCount: 0, categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({ category, requirement: "optional", count: 0, reason: "", sourceImageIds: [inputId], factRefs: [], missingFacts: missing && category === "feature_benefit" ? ["材质"] : [] })), globalStyleCard: { promptPrefix: "统一" } }; };
-  const app = createTicket02App({ repository, storage, pipelineRepository: pipeline, promptRepository: prompts, planRepository: new MemoryPlanRepository(), categoryPromptRepository: new MemoryCategoryPromptRepository(), taskRepository: new MemoryTaskRepository(), provider: { edit: async () => { if (options.providerFails) throw new Error("IMAGE_PROVIDER_FAILED"); return { bytes, mimeType: "image/png" }; } }, platformRepository: { find: async (value: string) => ({ code: value, name: value, marketScope: "domestic", mainImageBackground: value === "Amazon" ? "pure_white_required" : "flexible", mainImageStrategy: "", galleryStrategy: "", textStrategy: "", modelStrategy: "", sourceNote: "", sortOrder: 1 }), listEnabled: async () => [] }, llmClient: { provider: "fake", model: "fake", isFake: true, async generatePlan() { return planOutput(); }, async generateCategoryPrompt(input) { return { schemaVersion: "suite-category-prompt-v1", category: input.categoryCode, items: Array.from({ length: input.requestedCount }, (_, index) => ({ stableId: `${input.categoryCode}-${index}`, category: input.categoryCode, title: "图片", purpose: "展示商品", referenceImageIds: [inputId], factRefs: [], prompt: "生成", allowsTextOverlay: "no", textContent: [], aspectRatio: "1:1", suggestedParams: {} })) }; } } });
-  return { app, repository, storage, prompts, pipeline, suite, inputId, bytes, submitFacts: () => { factsSubmitted = true; } };
+  const planOutput = () => { const missing = options.missingFacts && !factsSubmitted && planCalls++ === 0; return { schemaVersion: "suite-structure-plan-v2", status: missing ? "NEEDS_HUMAN_INPUT" : options.planStatus ?? "READY_FOR_REVIEW", mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [inputId], factRefs: [], missingFacts: missing ? ["尺寸"] : [] }, detailImageCount: 0, categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({ category, requirement: "optional", count: category === "comparison" && options.maxMissingFacts ? 0 : 0, reason: "", sourceImageIds: [inputId], factRefs: [], missingFacts: missing && category === "feature_benefit" ? ["材质"] : category === "comparison" && options.maxMissingFacts ? ["缺少对比事实"] : [] })), globalStyleCard: { promptPrefix: "统一" } }; };
+  const app = createTicket02App({ repository, storage, pipelineRepository: pipeline, promptRepository: prompts, planRepository: new MemoryPlanRepository(), categoryPromptRepository: new MemoryCategoryPromptRepository(), taskRepository: new MemoryTaskRepository(), provider: { edit: async () => { if (providerFails) throw new Error("IMAGE_PROVIDER_FAILED"); return { bytes, mimeType: "image/png" }; } }, platformRepository: { find: async (value: string) => ({ code: value, name: value, marketScope: "domestic", mainImageBackground: value === "Amazon" ? "pure_white_required" : "flexible", mainImageStrategy: "", galleryStrategy: "", textStrategy: "", modelStrategy: "", sourceNote: "", sortOrder: 1 }), listEnabled: async () => [] }, llmClient: { provider: "fake", model: "fake", isFake: true, async generatePlan() { return planOutput(); }, async generateCategoryPrompt(input) { return { schemaVersion: "suite-category-prompt-v1", category: input.categoryCode, items: Array.from({ length: input.requestedCount }, (_, index) => ({ stableId: `${input.categoryCode}-${index}`, category: input.categoryCode, title: "图片", purpose: "展示商品", referenceImageIds: [inputId], factRefs: [], prompt: "生成", allowsTextOverlay: "no", textContent: [], aspectRatio: "1:1", suggestedParams: {} })) }; } } });
+  return { app, repository, storage, prompts, pipeline, suite, inputId, bytes, submitFacts: () => { factsSubmitted = true; }, setProviderFails: (value: boolean) => { providerFails = value; } };
 }
 
 async function waitPipeline(app: ReturnType<typeof createTicket02App>, suiteId: string, statuses = ["completed", "failed", "partial_failed", "waiting_human_input", "waiting_base_refine_decision"] as string[]) {
@@ -95,6 +97,8 @@ test("custom 1/3/2/1 runs end to end and freezes ratio, size, auto confirmation,
   assert.equal((state.body as any).data.planning.snapshot.confirmationMode, "auto");
   assert.equal((state.body as any).data.cards.length, 7);
   assert.ok((state.body as any).data.cards.every((card: any) => card.sourceRole !== "pending"));
+  const workbench = await app.request("GET", `/api/suites/${suite.id}/workbench`);
+  assert.ok((workbench.body as any).data.tasks.every((task: any) => task.generationParams.ratio === "3:4" && task.generationParams.size === "2K"));
 });
 
 test("exact missing facts pauses and submit_missing_facts resumes the same run", async () => {
@@ -105,13 +109,13 @@ test("exact missing facts pauses and submit_missing_facts resumes the same run",
   fixture.submitFacts();
   const resumed = await fixture.app.request("POST", `/api/suites/${fixture.suite.id}/one-click-generate/resume`, { body: { action: "submit_missing_facts", supplementText: "材质为铝合金", counts: { selling_points: 0 } } });
   assert.equal(resumed.status, 202);
-  const done = await waitPipeline(fixture.app, fixture.suite.id, ["completed", "failed", "waiting_human_input"]);
+  const done = await waitPipeline(fixture.app, fixture.suite.id, ["completed"]);
   assert.equal(done.id, waiting.id);
   assert.notEqual(done.status, "failed");
 });
 
 test("max group can generate fewer images and studio state reports missing reasons after cards exist", async () => {
-  const fixture = await pipelineFixture();
+  const fixture = await pipelineFixture({ maxMissingFacts: true });
   const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "max-group" }, body: { suiteId: fixture.suite.id, config: { platform: "淘宝", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 1 } } } });
   assert.equal(started.status, 202);
   await waitPipeline(fixture.app, fixture.suite.id, ["completed"]);
@@ -119,30 +123,47 @@ test("max group can generate fewer images and studio state reports missing reaso
   assert.equal(state.status, 200);
   assert.ok(Array.isArray((state.body as any).data.cards));
   assert.ok(Array.isArray((state.body as any).data.planning.notGeneratedReasons));
+  assert.ok((state.body as any).data.planning.notGeneratedReasons.some((item: any) => item.category === "comparison" && item.reasons.includes("缺少对比事实")));
 });
 
 test("Amazon refinement failure waits for a decision and skip is rejected while flexible platforms may skip", async () => {
   const amazon = await pipelineFixture({ providerFails: true, platform: "Amazon" });
-  const started = await amazon.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "amazon-refine" }, body: { suiteId: amazon.suite.id, config: { platform: "Amazon", refineBaseImages: true, counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
+  const started = await amazon.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "amazon-refine" }, body: { suiteId: amazon.suite.id, config: { platform: "Amazon", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
   assert.equal(started.status, 202);
   await waitPipeline(amazon.app, amazon.suite.id, ["waiting_base_refine_decision"]);
+  amazon.setProviderFails(false);
+  assert.equal((await amazon.app.request("POST", `/api/suites/${amazon.suite.id}/one-click-generate/resume`, { body: { action: "retry_base_refine" } })).status, 202);
+  const amazonDone = await waitPipeline(amazon.app, amazon.suite.id, ["completed", "failed", "waiting_base_refine_decision", "running"]);
+  assert.notEqual(amazonDone.status, "failed", JSON.stringify(amazonDone));
   const rejected = await amazon.app.request("POST", `/api/suites/${amazon.suite.id}/one-click-generate/resume`, { body: { action: "skip_base_refine" } });
   assert.equal(rejected.status, 409);
   const taobao = await pipelineFixture({ providerFails: true });
   await taobao.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "taobao-refine" }, body: { suiteId: taobao.suite.id, config: { platform: "淘宝", refineBaseImages: true, counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
   await waitPipeline(taobao.app, taobao.suite.id, ["waiting_base_refine_decision"]);
   assert.equal((await taobao.app.request("POST", `/api/suites/${taobao.suite.id}/one-click-generate/resume`, { body: { action: "skip_base_refine" } })).status, 202);
+  assert.ok(["completed", "running"].includes((await waitPipeline(taobao.app, taobao.suite.id, ["completed", "running"])).status));
 });
 
 test("cloneFrom object creates an isolated suite and repeated idempotency does not duplicate it", async () => {
   const fixture = await pipelineFixture();
-  const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "clone-object" }, body: { cloneFrom: { suiteId: fixture.suite.id, imageIds: [fixture.inputId] }, config: { platform: "淘宝", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
+  const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "clone-object" }, body: { cloneFrom: { suiteId: fixture.suite.id, imageIds: [fixture.inputId] }, config: { platform: "淘宝", mode: "smart", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
   assert.equal(started.status, 202);
   const cloneId = (started.body as any).data.suiteId;
   assert.notEqual(cloneId, fixture.suite.id);
-  assert.equal((await fixture.repository.getInputImages(cloneId)).length, 1);
+  const clonedImages = await fixture.repository.getInputImages(cloneId);
+  const sourceImages = await fixture.repository.getInputImages(fixture.suite.id);
+  assert.equal(clonedImages.length, 1);
+  assert.match(clonedImages[0].originalObjectKey, new RegExp(`suites/${cloneId}/`));
+  assert.equal(clonedImages[0].sha256, sourceImages[0].sha256);
+  assert.equal(clonedImages[0].width, sourceImages[0].width);
+  assert.equal(clonedImages[0].height, sourceImages[0].height);
+  const cloneDone = await waitPipeline(fixture.app, cloneId, ["completed", "failed", "running"]);
+  assert.notEqual(cloneDone.status, "failed", JSON.stringify(cloneDone));
+  const oldRunCount = (await fixture.pipeline.listRuns(fixture.suite.id)).length;
+  assert.equal((await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/studio-state`)).status, 200);
   const duplicate = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "clone-object" }, body: { cloneFrom: { suiteId: fixture.suite.id, imageIds: [fixture.inputId] }, config: {} } });
   assert.equal((duplicate.body as any).data.suiteId, cloneId);
+  assert.equal((await fixture.pipeline.listRuns(fixture.suite.id)).length, oldRunCount);
 });
 
 test("interrupted pipeline resumes on the original run and repeated resume is not blocked by idempotency", async () => {
@@ -169,5 +190,5 @@ test("feed excludes empty drafts, paginates by created time, and export honors t
   assert.equal((feed.body as any).data.items[0].suite.id, fixture.suite.id);
   const state = await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/studio-state`);
   const taskId = (state.body as any).data.cards[0]?.parentTaskId;
-  if (taskId) assert.ok([200, 400].includes((await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/delivery/export?taskIds=${taskId}`)).status));
+  if (taskId) assert.equal((await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/delivery/export?taskIds=${taskId}`)).status, 200);
 });

@@ -496,8 +496,6 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
   const styleOverrideIdempotency = new Map<string, { suite: import("./types.js").Suite; planStyleGuide: string; styleOverride: string | null; effectiveStyleGuide: string }>();
   const categoryPromptRepository = deps.categoryPromptRepository ?? new MemoryCategoryPromptRepository();
   const pipelineRepository = deps.pipelineRepository ?? new MemoryPipelineRepository();
-  const pipelineExecutors = new Map<string, () => Promise<void>>();
-  const pipelineConfigs = new Map<string, Record<string, unknown>>();
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
   const reversePlanWrites = new Map<string, Promise<void>>();
   const withReversePlanWrite = async <T>(planId: string, action: () => Promise<T>): Promise<T> => {
@@ -774,8 +772,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     return ok({ attemptId: attempt.id }, 202);
   };
 
-  let loadSuiteImageEditChildren: (tasks: SuiteTask[]) => Promise<DeliveryEditChildLike[]>;
-  loadSuiteImageEditChildren = async (tasks) => {
+  const loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
     if (!deps.imageEditorApi) return [];
     const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
     if (response.status !== 200 || !("data" in response.body) || !Array.isArray(response.body.data)) return [];
@@ -887,14 +884,18 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       }
       if (!suite) suite = await deps.repository.createSuite(productNameFor(config, []), `${idempotencyKey}:suite`, "suite_studio");
       const now = new Date().toISOString();
-      const runReservation = await pipelineRepository.createRun({ id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", currentPhase: "base_refining", config, errorCode: null, errorMessage: null, createdAt: now, updatedAt: now, completedAt: null });
-      if (runReservation.duplicate) return ok({ suiteId: suite.id, pipeline: runReservation.run }, runReservation.run.status === "running" ? 202 : 200);
+      const existingRunId = typeof body.runId === "string" ? body.runId : "";
+      const existingRun = existingRunId ? await pipelineRepository.getRun(existingRunId) : null;
+      const runReservation = existingRun ? { run: existingRun, duplicate: false } : await pipelineRepository.createRun({ id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", currentPhase: "base_refining", stage: "base_refining", resumeCount: 0, structureSnapshotId: null, taskIds: [], config, errorCode: null, errorMessage: null, createdAt: now, updatedAt: now, completedAt: null });
+      if (!existingRun && runReservation.duplicate) return ok({ suiteId: suite.id, pipeline: runReservation.run }, runReservation.run.status === "running" ? 202 : 200);
       const run = runReservation.run;
+      if (existingRun) await pipelineRepository.updateRun(run.id, { status: "running", config, errorCode: null, errorMessage: null, updatedAt: now });
       const executePipeline = async () => {
         try {
           const persistedRun = await pipelineRepository.getRun(run.id);
           if (persistedRun) Object.assign(run, persistedRun);
           const resumePhase = run.currentPhase;
+          const executionKey = `${run.idempotencyKey}:r${run.resumeCount ?? 0}`;
           const images = await deps.repository.getInputImages(suite!.id);
           const platform = typeof config.platform === "string" && deps.platformRepository ? await deps.platformRepository.find(config.platform) : null;
           if (typeof config.platform === "string" && deps.platformRepository && !platform) throw new Error("PLATFORM_NOT_FOUND");
@@ -907,14 +908,14 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
               const refineOne = async () => {
                 while (queue.length) {
                   const image = queue.shift()!;
-                  const response = await request("POST", `/api/suites/${suite!.id}/input-images/${image.id}/base-generation`, { headers: { "idempotency-key": `${idempotencyKey}:base:${image.id}` }, body: { templateVersionId: baseTemplate.templateVersionId, dynamicInput: { source_image_ids: image.id, background_target: platform?.mainImageBackground === "pure_white_required" ? "纯白背景 RGB 255，无文字、Logo、水印或装饰" : "干净白底或浅色背景" } } });
+                  const response = await request("POST", `/api/suites/${suite!.id}/input-images/${image.id}/base-generation`, { headers: { "idempotency-key": `${executionKey}:base:${image.id}` }, body: { templateVersionId: baseTemplate.templateVersionId, dynamicInput: { source_image_ids: image.id, background_target: platform?.mainImageBackground === "pure_white_required" ? "纯白背景 RGB 255，无文字、Logo、水印或装饰" : "干净白底或浅色背景" } } });
                   if (response.status >= 400) throw new Error("BASE_REFINE_FAILED");
                   const attemptId = "data" in response.body && response.body.data && typeof response.body.data === "object" ? String(((response.body.data as Record<string, unknown>).attempt as Record<string, unknown> | undefined)?.id ?? "") : "";
                   if (attemptId) await waitUntil(() => deps.repository.listGenerationAttempts(suite!.id, image.id), (attempts) => attempts.some((attempt) => attempt.id === attemptId && attempt.status !== "running"));
                 }
               };
               await Promise.all([refineOne(), refineOne()]);
-              const failed = (await Promise.all(images.map(async (image) => { const attempts = await deps.repository.listGenerationAttempts(suite!.id, image.id); return attempts[0]; }))).find((attempt) => attempt?.status === "failed");
+              const failed = (await Promise.all(images.map(async (image) => { const attempts = await deps.repository.listGenerationAttempts(suite!.id, image.id); return attempts.find((attempt) => attempt.idempotencyKey === `${executionKey}:base:${image.id}`); }))).find((attempt) => attempt?.status === "failed");
               if (failed) { await pipelineRepository.updateRun(run.id, { status: "waiting_base_refine_decision", currentPhase: "base_refining", errorCode: failed.errorCode ?? "BASE_REFINE_FAILED", errorMessage: failed.errorMessage ?? "白底精修失败", updatedAt: new Date().toISOString() }); return; }
             }
           }
@@ -935,7 +936,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
             main_image_count: mainCount, detail_image_count_min: 0, detail_image_count_max: smart ? 6 : details,
             ...(smart ? { selected_detail_categories: JSON.stringify(smartCategories), category_requirements: JSON.stringify(Object.fromEntries(smartCategories.map((code) => [code, "optional"]))) } : { category_groups: JSON.stringify(groups), selected_detail_categories: JSON.stringify(smartCategories), category_requirements: JSON.stringify(Object.fromEntries(smartCategories.map((code) => [code, "optional"]))) }),
           };
-          const planResponse = await request("POST", `/api/suites/${suite!.id}/structure-plan`, { headers: { "idempotency-key": `${idempotencyKey}:structure` }, body: { templateVersionId: structureTemplate.templateVersionId, dynamicInput, humanInput: {} } });
+          const planResponse = await request("POST", `/api/suites/${suite!.id}/structure-plan`, { headers: { "idempotency-key": `${executionKey}:structure` }, body: { templateVersionId: structureTemplate.templateVersionId, dynamicInput, humanInput: {} } });
           if (planResponse.status >= 400) throw new Error("STRUCTURE_PLAN_FAILED");
           const planAttemptId = "data" in planResponse.body && typeof planResponse.body.data === "object" && planResponse.body.data ? String((planResponse.body.data as Record<string, unknown>).attemptId ?? "") : "";
           if (!planAttemptId) throw new Error("STRUCTURE_PLAN_FAILED");
@@ -951,8 +952,10 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
             const confirmed: PlanSnapshot = { ...rawSnapshot, id: randomUUID(), revisionNumber: rawSnapshot.revisionNumber + 1, revisionKind: "human", parentSnapshotId: rawSnapshot.id, confirmationStatus: "confirmed", confirmationMode: "auto", confirmedAt: new Date().toISOString(), createdAt: new Date().toISOString() };
             await appendConfirmedSnapshot(confirmed);
           }
+          const persistedSnapshot = await deps.planRepository?.getLatestSnapshot(suite!.id);
+          if (persistedSnapshot) await pipelineRepository.updateRun(run.id, { structureSnapshotId: persistedSnapshot.id, updatedAt: new Date().toISOString() });
           await pipelineRepository.updateRun(run.id, { currentPhase: "category_prompting", updatedAt: new Date().toISOString() });
-          const categoryResponse = await request("POST", `/api/suites/${suite!.id}/category-prompts`, { headers: { "idempotency-key": `${idempotencyKey}:categories` }, body: {} });
+          const categoryResponse = await request("POST", `/api/suites/${suite!.id}/category-prompts`, { headers: { "idempotency-key": `${executionKey}:categories` }, body: {} });
           if (categoryResponse.status >= 400) throw new Error("CATEGORY_PROMPT_FAILED");
           const categoryState = await waitUntil(() => request("GET", `/api/suites/${suite!.id}/category-prompts`), (response) => response.status === 200 && "data" in response.body && typeof response.body.data === "object" && response.body.data !== null && ["succeeded", "partial"].includes(String((response.body.data as Record<string, unknown>).status)));
           if (!("data" in categoryState.body) || String((categoryState.body.data as Record<string, unknown>).status) !== "succeeded") throw new Error("CATEGORY_PROMPT_FAILED");
@@ -960,6 +963,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           if (tasksResponse.status >= 400) throw new Error("TASK_MATERIALIZATION_FAILED");
           if (deps.taskRepository && "data" in tasksResponse.body && tasksResponse.body.data && typeof tasksResponse.body.data === "object") {
             const taskRows = Array.isArray((tasksResponse.body.data as Record<string, unknown>).tasks) ? (tasksResponse.body.data as Record<string, unknown>).tasks as Array<Record<string, unknown>> : [];
+            await pipelineRepository.updateRun(run.id, { taskIds: taskRows.flatMap((row) => typeof row.id === "string" ? [row.id] : []), updatedAt: new Date().toISOString() });
             for (const row of taskRows) {
               const taskId = typeof row.id === "string" ? row.id : "";
               if (!taskId) continue;
@@ -968,7 +972,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
             }
           }
           await pipelineRepository.updateRun(run.id, { currentPhase: "image_generating", updatedAt: new Date().toISOString() });
-          const generationResponse = await request("POST", `/api/suites/${suite!.id}/generation`, { headers: { "idempotency-key": `${idempotencyKey}:images` }, body: {} });
+          const generationResponse = await request("POST", `/api/suites/${suite!.id}/generation`, { headers: { "idempotency-key": `${executionKey}:images` }, body: {} });
           if (generationResponse.status >= 400) throw new Error("IMAGE_GENERATION_FAILED");
           await waitUntil(() => request("GET", `/api/suites/${suite!.id}/workbench`), (response) => {
             if (response.status !== 200 || !("data" in response.body) || !response.body.data || typeof response.body.data !== "object") return false;
@@ -984,8 +988,6 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           await pipelineRepository.updateRun(run.id, { status: "failed", errorCode: error instanceof Error ? error.message : "PIPELINE_FAILED", errorMessage: error instanceof Error ? error.message : "一键生成失败", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
         }
       };
-      pipelineExecutors.set(run.id, executePipeline);
-      pipelineConfigs.set(run.id, config);
       void executePipeline();
       return ok({ suiteId: suite.id, pipeline: run }, 202);
     }
@@ -1014,12 +1016,12 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         current.config = { ...current.config, ...(supplement === undefined ? {} : { sellingPoints: supplement }), counts: nextCounts };
       }
       if (!["retry_base_refine", "skip_base_refine", "submit_missing_facts", "resume_after_interrupt"].includes(action)) return fail("INVALID_PIPELINE_ACTION", 400);
-      const updated = await pipelineRepository.updateRun(current.id, { status: "running", currentPhase: action === "resume_after_interrupt" ? current.currentPhase : "base_refining", config: current.config, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() });
+      const nextResumeCount = (current.resumeCount ?? 0) + 1;
+      const updated = await pipelineRepository.updateRun(current.id, { status: "running", resumeCount: nextResumeCount, currentPhase: action === "resume_after_interrupt" ? current.currentPhase : "base_refining", config: current.config, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() });
       if (!updated) return fail("PIPELINE_NOT_FOUND", 404);
-      const execute = pipelineExecutors.get(current.id);
-      if (execute) { const savedConfig = pipelineConfigs.get(current.id); if (savedConfig) { Object.keys(savedConfig).forEach((key) => delete savedConfig[key]); Object.assign(savedConfig, current.config); } void execute(); }
-      else await pipelineRepository.updateRun(current.id, { status: "failed", errorCode: "PIPELINE_EXECUTOR_UNAVAILABLE", errorMessage: "服务重启后请重新提交流水线", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
-      return ok({ suiteId: suite.id, pipeline: updated }, 202);
+      const restarted = await request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": `${current.id}:resume:${nextResumeCount}` }, body: { suiteId: suite.id, runId: current.id, config: current.config } });
+      if (restarted.status >= 400) return restarted;
+      return ok({ suiteId: suite.id, pipeline: "data" in restarted.body ? (restarted.body as any).data?.pipeline ?? updated : updated }, 202);
     }
     const studioStateMatch = path.match(/^\/api\/suites\/([^/]+)\/studio-state$/);
     if (method === "GET" && studioStateMatch) {
@@ -1663,27 +1665,6 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         if (typeof values[key] === "string" && values[key].trim()) return values[key].trim();
       }
       return "沿用计划模板默认风格，保持商品真实外观、光影和品牌一致性。";
-    };
-
-    loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
-      if (!deps.imageEditorApi) return [];
-      const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
-      if (response.status !== 200 || !("data" in response.body) || !Array.isArray(response.body.data)) return [];
-      const all = response.body.data as DeliveryEditChildLike[];
-      const allowed = new Set(tasks.map((task) => task.id));
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const child of all) {
-          const taskId = typeof child.task?.id === "string" ? child.task.id : "";
-          const sourceCardId = typeof child.task?.sourceCardId === "string" ? child.task.sourceCardId : "";
-          if (taskId && sourceCardId && allowed.has(sourceCardId) && !allowed.has(taskId)) {
-            allowed.add(taskId);
-            changed = true;
-          }
-        }
-      }
-      return all.filter((child) => typeof child.task?.id === "string" && allowed.has(child.task.id));
     };
 
     const styleOverrideMatch = path.match(/^\/api\/suites\/([^/]+)\/style-override$/);

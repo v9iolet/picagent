@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS suite_workbench.suite_pipeline_runs (
   idempotency_key text NOT NULL,
   status text NOT NULL CHECK (status IN ('running', 'waiting_base_refine_decision', 'waiting_human_input', 'completed', 'partial_failed', 'failed')),
   current_phase text NOT NULL CHECK (current_phase IN ('base_refining', 'structure_planning', 'category_prompting', 'image_generating', 'done')),
+  stage text NOT NULL DEFAULT 'base_refining' CHECK (stage IN ('base_refining', 'structure_planning', 'category_prompting', 'image_generating', 'done')),
+  resume_count integer NOT NULL DEFAULT 0 CHECK (resume_count >= 0),
+  structure_snapshot_id uuid REFERENCES suite_workbench.plan_snapshots(id) ON DELETE SET NULL,
+  task_ids_json jsonb NOT NULL DEFAULT '[]'::jsonb,
   config_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   error_code text,
   error_message text,
@@ -35,3 +39,7 @@ CREATE TABLE IF NOT EXISTS suite_workbench.suite_pipeline_runs (
   UNIQUE (suite_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS suite_pipeline_runs_suite_created_idx ON suite_workbench.suite_pipeline_runs(suite_id, created_at DESC);
+ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS stage text NOT NULL DEFAULT 'base_refining';
+ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS resume_count integer NOT NULL DEFAULT 0;
+ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS structure_snapshot_id uuid REFERENCES suite_workbench.plan_snapshots(id) ON DELETE SET NULL;
+ALTER TABLE suite_workbench.suite_pipeline_runs ADD COLUMN IF NOT EXISTS task_ids_json jsonb NOT NULL DEFAULT '[]'::jsonb;

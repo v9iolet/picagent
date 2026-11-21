@@ -15,7 +15,7 @@ export class MemoryPipelineRepository implements PipelineRepository {
   async getRun(id: string) { return this.runs.get(id) ?? null; }
   async getLatestRun(suiteId: string) { return (await this.listRuns(suiteId))[0] ?? null; }
   async listRuns(suiteId: string) { return [...this.runs.values()].filter((run) => run.suiteId === suiteId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }
-  async updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>) {
+  async updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "stage" | "resumeCount" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>) {
     const current = this.runs.get(id);
     if (!current) return null;
     const next = { ...current, ...patch };
