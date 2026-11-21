@@ -200,8 +200,10 @@ test("套图上传不截获文案 multipart；首图建立隐藏草稿，可预�
   assert.ok(img.originalObjectKey.startsWith(`listing-copies/${job.id}/inputs/${img.id}/`));
   const original = await f.app.request("GET", `${path}/input-images/${img.id}/preview/original`);
   assert.deepEqual(original.raw, f.bytes);
+  assert.equal(original.headers?.["cache-control"], "private, max-age=60");
   const thumb = await f.app.request("GET", `${path}/input-images/${img.id}/preview/thumbnail`);
   assert.equal(thumb.headers?.["content-type"], "image/jpeg");
+  assert.equal(thumb.headers?.["cache-control"], "private, max-age=60");
   for (let i = 1; i < 6; i++) await send(path + "/input-images");
   assert.equal(
     (
@@ -220,7 +222,7 @@ test("套图上传不截获文案 multipart；首图建立隐藏草稿，可预�
   assert.equal((await f.repository.getInputImages(suite.id)).length, 1);
 });
 
-test("流水线在文案仍运行时完成出图；文案失败不改变批次完成状态，可复用批次独立生成", async () => {
+async function pipelineFixture(overrides: Record<string, unknown> = {}) {
   let release!: () => void;
   const pending = new Promise<void>((resolve) => {
     release = resolve;
@@ -305,6 +307,7 @@ test("流水线在文案仍运行时完成出图；文案失败不改变批次�
     outputLanguage: "中文",
     sellingPoints: "白色杯子",
     counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 },
+    ...overrides,
   };
   data(
     await f.app.request("POST", "/api/suites/one-click-generate", {
@@ -314,10 +317,15 @@ test("流水线在文案仍运行时完成出图；文案失败不改变批次�
     202,
   );
   const state = () => f.req("GET", `/api/suites/${suite.id}/studio-state`);
+  return { f, state, suite, release, imageCalls: () => imageCalls, copyCalls: () => copyCalls };
+}
+
+test("流水线在文案仍运行时完成出图；文案失败不改变批次完成状态，可复用批次独立生成", async () => {
+  const { f, state, suite, release, imageCalls, copyCalls } = await pipelineFixture();
   try {
     const completed = await eventual(state, (s) => s.pipeline.status === "completed");
-    assert.equal(imageCalls, 1);
-    assert.equal(copyCalls, 1);
+    assert.equal(imageCalls(), 1);
+    assert.equal(copyCalls(), 1);
     assert.equal(completed.listingCopy.status, "running");
     assert.equal(completed.listingCopy.sourceSuiteId, suite.id);
     assert.equal(completed.progress.completed, 1);
@@ -325,7 +333,9 @@ test("流水线在文案仍运行时完成出图；文案失败不改变批次�
     release();
   }
   const failed = await eventual(state, (s) => s.listingCopy?.status === "failed");
-  assert.equal(failed.pipeline.status, "completed");
+  // studio-state reads pipeline before listingCopy. Inspect a fresh snapshot after the failure settles.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal((await state()).pipeline.status, "completed");
   assert.equal(failed.listingCopy.errorCode, "LISTING_TITLE_TOO_LONG");
   const independent = await f.req("POST", root, { sourceSuiteId: suite.id, generate: true }, 202);
   const job = await eventual(
@@ -338,4 +348,85 @@ test("流水线在文案仍运行时完成出图；文案失败不改变批次�
   assert.equal(job.inputImages[0].id, (await f.repository.getInputImages(suite.id))[0].id);
   await f.req("DELETE", `${root}/${job.id}`);
   assert.ok(await f.storage.get(job.inputImages[0].originalObjectKey));
+});
+
+test("套图配置含 null 时可见文案失败，出图完成且不调用文案模型", async () => {
+  const { state, suite, release, imageCalls, copyCalls } = await pipelineFixture({ targetMarket: null });
+  release();
+  await eventual(state, (s) => s.pipeline.status === "completed");
+  const { listingCopy } = await eventual(state, (s) => s.listingCopy?.status === "failed");
+  assert.equal(listingCopy.sourceSuiteId, suite.id);
+  assert.equal(listingCopy.errorCode, "INVALID_LISTING_CONFIG");
+  assert.equal((await state()).pipeline.status, "completed");
+  assert.equal(copyCalls(), 0);
+  assert.equal(imageCalls(), 1);
+});
+
+test("复用历史计划时非法 dynamicInput 留下可修正并重试的失败任务", async () => {
+  const f = await fixture(async () => content, {
+    planRepository: {
+      async getLatestSnapshot() {
+        return { dynamicInput: { platform: "amazon", human_supplement: null } };
+      },
+    },
+  });
+  const suite = await f.repository.createSuite("历史套图");
+  data(
+    await f.app.upload(suite.id, { filename: "cup.png", mimeType: "image/png", bytes: f.bytes, idempotencyKey: "old" }),
+    201,
+  );
+  const started = await f.req("POST", root, { sourceSuiteId: suite.id, generate: true }, 202);
+  const path = `${root}/${started.id}`;
+  const failed = await eventual(
+    () => f.req("GET", path),
+    (j) => j.status === "failed",
+  );
+  assert.equal(failed.errorCode, "INVALID_LISTING_CONFIG");
+  assert.equal(failed.sourceSuiteId, suite.id);
+  await f.req("POST", path + "/regenerate", { sellingPoints: "白色" }, 202);
+  assert.equal(
+    (
+      await eventual(
+        () => f.req("GET", path),
+        (j) => j.status === "succeeded",
+      )
+    ).versions.length,
+    1,
+  );
+});
+
+test("空分页参数使用默认值，显式零上限仍无效", async () => {
+  const f = await fixture(async () => content);
+  assert.deepEqual(await f.req("GET", root + "?limit=&offset="), { items: [], limit: 20, offset: 0 });
+  assert.equal((await f.app.request("GET", root + "?limit=0&offset=0")).status, 400);
+});
+
+test("运行中文案的未知子路径返回 404，合法冲突写入仍返回 409", async () => {
+  let release!: () => void;
+  const pending = new Promise<void>((r) => {
+    release = r;
+  });
+  const f = await fixture(async () => {
+    await pending;
+    return content;
+  });
+  const job = await f.upload("draft"),
+    path = `${root}/${job.id}`;
+  await f.req("POST", path + "/generate", { platform: "amazon" }, 202);
+  try {
+    for (const [method, suffix] of [
+      ["GET", "/unknown"],
+      ["POST", "/generate/extra"],
+      ["DELETE", "//wrong"],
+    ]) {
+      assert.equal((await f.app.request(method, path + suffix)).status, 404);
+    }
+    assert.equal((await f.app.request("DELETE", path)).status, 409);
+  } finally {
+    release();
+  }
+  await eventual(
+    () => f.req("GET", path),
+    (j) => j.status === "succeeded",
+  );
 });
