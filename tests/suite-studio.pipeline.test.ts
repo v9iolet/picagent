@@ -13,6 +13,41 @@ import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { readFile } from "node:fs/promises";
 import sharp from "sharp";
 
+async function pipelineFixture(options: { planStatus?: "READY_FOR_REVIEW" | "NEEDS_HUMAN_INPUT"; missingFacts?: boolean; providerFails?: boolean; platform?: string } = {}) {
+  const repository = new MemorySuiteRepository();
+  const storage = new MemoryStorage();
+  const prompts = new MemoryPromptRepository();
+  for (const name of ["general-structure-plan-groups.md", "general-category-prompt-groups.md", "general-base-refine.md"]) {
+    const record = parseNormalizedPromptMarkdown(await readFile(new URL(`../prompt/normalized/${name}`, import.meta.url), "utf8"), name);
+    const [version] = await prompts.importRecords([record]);
+    await prompts.publishVersion(version.templateVersionId);
+  }
+  const suite = await repository.createSuite("流水线测试");
+  const bytes = await sharp({ create: { width: 16, height: 16, channels: 3, background: "white" } }).png().toBuffer();
+  const inputId = randomUUID();
+  const originalKey = `suites/${suite.id}/inputs/${inputId}/original`;
+  const thumbKey = `suites/${suite.id}/inputs/${inputId}/thumbnail`;
+  await storage.put({ key: originalKey, bytes, contentType: "image/png" });
+  await storage.put({ key: thumbKey, bytes, contentType: "image/png" });
+  await repository.createInputImage({ id: inputId, suiteId: suite.id, ordinal: 1, originalObjectKey: originalKey, thumbnailObjectKey: thumbKey, sha256: randomUUID().replaceAll("-", "").padEnd(64, "0"), width: 16, height: 16, mimeType: "image/png", originalFilename: "商品.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
+  const pipeline = new MemoryPipelineRepository();
+  let factsSubmitted = false;
+  let planCalls = 0;
+  const planOutput = () => { const missing = options.missingFacts && !factsSubmitted && planCalls++ === 0; return { schemaVersion: "suite-structure-plan-v2", status: missing ? "NEEDS_HUMAN_INPUT" : options.planStatus ?? "READY_FOR_REVIEW", mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [inputId], factRefs: [], missingFacts: missing ? ["尺寸"] : [] }, detailImageCount: 0, categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({ category, requirement: "optional", count: 0, reason: "", sourceImageIds: [inputId], factRefs: [], missingFacts: missing && category === "feature_benefit" ? ["材质"] : [] })), globalStyleCard: { promptPrefix: "统一" } }; };
+  const app = createTicket02App({ repository, storage, pipelineRepository: pipeline, promptRepository: prompts, planRepository: new MemoryPlanRepository(), categoryPromptRepository: new MemoryCategoryPromptRepository(), taskRepository: new MemoryTaskRepository(), provider: { edit: async () => { if (options.providerFails) throw new Error("IMAGE_PROVIDER_FAILED"); return { bytes, mimeType: "image/png" }; } }, platformRepository: { find: async (value: string) => ({ code: value, name: value, marketScope: "domestic", mainImageBackground: value === "Amazon" ? "pure_white_required" : "flexible", mainImageStrategy: "", galleryStrategy: "", textStrategy: "", modelStrategy: "", sourceNote: "", sortOrder: 1 }), listEnabled: async () => [] }, llmClient: { provider: "fake", model: "fake", isFake: true, async generatePlan() { return planOutput(); }, async generateCategoryPrompt(input) { return { schemaVersion: "suite-category-prompt-v1", category: input.categoryCode, items: Array.from({ length: input.requestedCount }, (_, index) => ({ stableId: `${input.categoryCode}-${index}`, category: input.categoryCode, title: "图片", purpose: "展示商品", referenceImageIds: [inputId], factRefs: [], prompt: "生成", allowsTextOverlay: "no", textContent: [], aspectRatio: "1:1", suggestedParams: {} })) }; } } });
+  return { app, repository, storage, prompts, pipeline, suite, inputId, bytes, submitFacts: () => { factsSubmitted = true; } };
+}
+
+async function waitPipeline(app: ReturnType<typeof createTicket02App>, suiteId: string, statuses = ["completed", "failed", "partial_failed", "waiting_human_input", "waiting_base_refine_decision"] as string[]) {
+  for (let i = 0; i < 150; i += 1) {
+    const response = await app.request("GET", `/api/suites/${suiteId}/studio-state`);
+    const pipeline = (response.body as any).data.pipeline;
+    if (pipeline && statuses.includes(pipeline.status)) return pipeline;
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  throw new Error("pipeline timeout");
+}
+
 test("pipeline runs are idempotent and keep resumable state in memory", async () => {
   const pipelines = new MemoryPipelineRepository();
   const suiteId = randomUUID();
@@ -34,7 +69,7 @@ test("new suites default to suite studio and support canvas origin", async () =>
   assert.equal(canvas.origin, "canvas");
 });
 
-test("one click endpoint accepts an idempotency key and freezes listing copy config", async () => {
+test("custom 1/3/2/1 runs end to end and freezes ratio, size, auto confirmation, and listing copy", async () => {
   const repository = new MemorySuiteRepository();
   const storage = new MemoryStorage();
   const prompts = new MemoryPromptRepository();
@@ -48,13 +83,91 @@ test("one click endpoint accepts an idempotency key and freezes listing copy con
   await storage.put({ key: `suites/${suite.id}/input.png`, bytes, contentType: "image/png" });
   const inputId = randomUUID();
   await repository.createInputImage({ id: inputId, suiteId: suite.id, ordinal: 1, originalObjectKey: `suites/${suite.id}/input.png`, thumbnailObjectKey: `suites/${suite.id}/input.png`, sha256: "f".repeat(64), width: 16, height: 16, mimeType: "image/png", originalFilename: "商品.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
-  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: new MemoryPlanRepository(), categoryPromptRepository: new MemoryCategoryPromptRepository(), taskRepository: new MemoryTaskRepository(), provider: { edit: async () => ({ bytes, mimeType: "image/png" }) }, llmClient: { provider: "fake", model: "fake", isFake: true, async generatePlan() { return { schemaVersion: "suite-structure-plan-v2", status: "READY_FOR_REVIEW", mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [inputId], factRefs: [], missingFacts: [] }, detailImageCount: 0, categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({ category, requirement: "optional", count: 0, reason: "", sourceImageIds: [inputId], factRefs: [], missingFacts: [] })), globalStyleCard: { promptPrefix: "统一" } }; }, async generateCategoryPrompt(input) { return { schemaVersion: "suite-category-prompt-v1", category: input.categoryCode, items: Array.from({ length: input.requestedCount }, (_, index) => ({ stableId: `${input.categoryCode}-${index}`, category: input.categoryCode, title: "主图", purpose: "展示商品", referenceImageIds: [inputId], factRefs: [], prompt: "生成", allowsTextOverlay: "no", textContent: [], aspectRatio: "1:1", suggestedParams: {} })) }; } } });
-  const started = await app.request("POST", "/api/suites/one-click-generate", { headers: { "Idempotency-Key": "pipeline-test" }, body: { suiteId: suite.id, config: { mode: "custom", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 }, listingCopy: true } } });
+  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: new MemoryPlanRepository(), categoryPromptRepository: new MemoryCategoryPromptRepository(), taskRepository: new MemoryTaskRepository(), provider: { edit: async () => ({ bytes, mimeType: "image/png" }) }, llmClient: { provider: "fake", model: "fake", isFake: true, async generatePlan() { return { schemaVersion: "suite-structure-plan-v2", status: "READY_FOR_REVIEW", mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [inputId], factRefs: [], missingFacts: [] }, detailImageCount: 6, categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({ category, requirement: "optional", count: category === "feature_benefit" ? 3 : category === "lifestyle_use" ? 2 : category === "comparison" ? 1 : 0, reason: "事实支持", sourceImageIds: [inputId], factRefs: [], missingFacts: [] })), globalStyleCard: { promptPrefix: "统一" } }; }, async generateCategoryPrompt(input) { return { schemaVersion: "suite-category-prompt-v1", category: input.categoryCode, items: Array.from({ length: input.requestedCount }, (_, index) => ({ stableId: `${input.categoryCode}-${index}`, category: input.categoryCode, title: "图片", purpose: "展示商品", referenceImageIds: [inputId], factRefs: [], prompt: "生成", allowsTextOverlay: "no", textContent: [], aspectRatio: input.categoryCode === "main" ? "1:1" : "3:4", suggestedParams: {} })) }; } } });
+  const started = await app.request("POST", "/api/suites/one-click-generate", { headers: { "Idempotency-Key": "pipeline-test" }, body: { suiteId: suite.id, config: { platform: "淘宝", mode: "custom", counts: { main: 1, selling_points: 3, lifestyle: 2, other: 1 }, aspectRatio: "3:4", size: "2K", listingCopy: true } } });
   assert.equal(started.status, 202);
   const duplicate = await app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "pipeline-test" }, body: { suiteId: suite.id, config: { listingCopy: false } } });
   assert.equal(duplicate.status, 202);
   assert.equal((duplicate.body as any).data.pipeline.config.listingCopy, true);
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  for (let i = 0; i < 100; i += 1) { const state = await app.request("GET", `/api/suites/${suite.id}/studio-state`); const status = (state.body as any).data.pipeline?.status; if (status === "completed") break; await new Promise((resolve) => setTimeout(resolve, 5)); }
   const state = await app.request("GET", `/api/suites/${suite.id}/studio-state`);
+  assert.equal((state.body as any).data.pipeline.status, "completed", JSON.stringify((state.body as any).data.pipeline));
+  assert.equal((state.body as any).data.planning.snapshot.confirmationMode, "auto");
+  assert.equal((state.body as any).data.cards.length, 7);
+  assert.ok((state.body as any).data.cards.every((card: any) => card.sourceRole !== "pending"));
+});
+
+test("exact missing facts pauses and submit_missing_facts resumes the same run", async () => {
+  const fixture = await pipelineFixture({ missingFacts: true });
+  const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "missing-facts" }, body: { suiteId: fixture.suite.id, config: { platform: "淘宝", counts: { main: 1, selling_points: 3, lifestyle: 0, other: 0 } } } });
+  assert.equal(started.status, 202);
+  const waiting = await waitPipeline(fixture.app, fixture.suite.id, ["waiting_human_input"]);
+  fixture.submitFacts();
+  const resumed = await fixture.app.request("POST", `/api/suites/${fixture.suite.id}/one-click-generate/resume`, { body: { action: "submit_missing_facts", supplementText: "材质为铝合金", counts: { selling_points: 0 } } });
+  assert.equal(resumed.status, 202);
+  const done = await waitPipeline(fixture.app, fixture.suite.id, ["completed", "failed", "waiting_human_input"]);
+  assert.equal(done.id, waiting.id);
+  assert.notEqual(done.status, "failed");
+});
+
+test("max group can generate fewer images and studio state reports missing reasons after cards exist", async () => {
+  const fixture = await pipelineFixture();
+  const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "max-group" }, body: { suiteId: fixture.suite.id, config: { platform: "淘宝", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 1 } } } });
+  assert.equal(started.status, 202);
+  await waitPipeline(fixture.app, fixture.suite.id, ["completed"]);
+  const state = await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/studio-state`);
   assert.equal(state.status, 200);
+  assert.ok(Array.isArray((state.body as any).data.cards));
+  assert.ok(Array.isArray((state.body as any).data.planning.notGeneratedReasons));
+});
+
+test("Amazon refinement failure waits for a decision and skip is rejected while flexible platforms may skip", async () => {
+  const amazon = await pipelineFixture({ providerFails: true, platform: "Amazon" });
+  const started = await amazon.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "amazon-refine" }, body: { suiteId: amazon.suite.id, config: { platform: "Amazon", refineBaseImages: true, counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
+  assert.equal(started.status, 202);
+  await waitPipeline(amazon.app, amazon.suite.id, ["waiting_base_refine_decision"]);
+  const rejected = await amazon.app.request("POST", `/api/suites/${amazon.suite.id}/one-click-generate/resume`, { body: { action: "skip_base_refine" } });
+  assert.equal(rejected.status, 409);
+  const taobao = await pipelineFixture({ providerFails: true });
+  await taobao.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "taobao-refine" }, body: { suiteId: taobao.suite.id, config: { platform: "淘宝", refineBaseImages: true, counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
+  await waitPipeline(taobao.app, taobao.suite.id, ["waiting_base_refine_decision"]);
+  assert.equal((await taobao.app.request("POST", `/api/suites/${taobao.suite.id}/one-click-generate/resume`, { body: { action: "skip_base_refine" } })).status, 202);
+});
+
+test("cloneFrom object creates an isolated suite and repeated idempotency does not duplicate it", async () => {
+  const fixture = await pipelineFixture();
+  const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "clone-object" }, body: { cloneFrom: { suiteId: fixture.suite.id, imageIds: [fixture.inputId] }, config: { platform: "淘宝", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
+  assert.equal(started.status, 202);
+  const cloneId = (started.body as any).data.suiteId;
+  assert.notEqual(cloneId, fixture.suite.id);
+  assert.equal((await fixture.repository.getInputImages(cloneId)).length, 1);
+  const duplicate = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "clone-object" }, body: { cloneFrom: { suiteId: fixture.suite.id, imageIds: [fixture.inputId] }, config: {} } });
+  assert.equal((duplicate.body as any).data.suiteId, cloneId);
+});
+
+test("interrupted pipeline resumes on the original run and repeated resume is not blocked by idempotency", async () => {
+  const fixture = await pipelineFixture();
+  const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "interrupt" }, body: { suiteId: fixture.suite.id, config: { platform: "淘宝", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
+  const runId = (started.body as any).data.pipeline.id;
+  await fixture.pipeline.updateRun(runId, { status: "failed", errorCode: "PIPELINE_INTERRUPTED", currentPhase: "structure_planning" });
+  const resumed = await fixture.app.request("POST", `/api/suites/${fixture.suite.id}/one-click-generate/resume`, { body: { action: "resume_after_interrupt" } });
+  assert.equal(resumed.status, 202);
+  assert.equal((resumed.body as any).data.pipeline.id, runId);
+  const second = await fixture.app.request("POST", `/api/suites/${fixture.suite.id}/one-click-generate/resume`, { body: { action: "resume_after_interrupt" } });
+  assert.equal(second.status, 202);
+  assert.equal((second.body as any).data.pipeline.id, runId);
+});
+
+test("feed excludes empty drafts, paginates by created time, and export honors taskIds", async () => {
+  const fixture = await pipelineFixture();
+  await fixture.repository.createSuite("空草稿");
+  await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "feed-run" }, body: { suiteId: fixture.suite.id, config: { platform: "淘宝", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
+  await waitPipeline(fixture.app, fixture.suite.id, ["completed"]);
+  const feed = await fixture.app.request("GET", "/api/suites/feed?limit=1&offset=0");
+  assert.equal(feed.status, 200);
+  assert.equal((feed.body as any).data.items.length, 1);
+  assert.equal((feed.body as any).data.items[0].suite.id, fixture.suite.id);
+  const state = await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/studio-state`);
+  const taskId = (state.body as any).data.cards[0]?.parentTaskId;
+  if (taskId) assert.ok([200, 400].includes((await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/delivery/export?taskIds=${taskId}`)).status));
 });

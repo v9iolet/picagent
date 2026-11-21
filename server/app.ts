@@ -496,6 +496,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
   const styleOverrideIdempotency = new Map<string, { suite: import("./types.js").Suite; planStyleGuide: string; styleOverride: string | null; effectiveStyleGuide: string }>();
   const categoryPromptRepository = deps.categoryPromptRepository ?? new MemoryCategoryPromptRepository();
   const pipelineRepository = deps.pipelineRepository ?? new MemoryPipelineRepository();
+  const pipelineExecutors = new Map<string, () => Promise<void>>();
+  const pipelineConfigs = new Map<string, Record<string, unknown>>();
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
   const reversePlanWrites = new Map<string, Promise<void>>();
   const withReversePlanWrite = async <T>(planId: string, action: () => Promise<T>): Promise<T> => {
@@ -772,6 +774,24 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     return ok({ attemptId: attempt.id }, 202);
   };
 
+  let loadSuiteImageEditChildren: (tasks: SuiteTask[]) => Promise<DeliveryEditChildLike[]>;
+  loadSuiteImageEditChildren = async (tasks) => {
+    if (!deps.imageEditorApi) return [];
+    const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
+    if (response.status !== 200 || !("data" in response.body) || !Array.isArray(response.body.data)) return [];
+    const all = response.body.data as DeliveryEditChildLike[];
+    const allowed = new Set(tasks.map((task) => task.id));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const child of all) {
+        const taskId = typeof child.task?.id === "string" ? child.task.id : "";
+        const sourceCardId = typeof child.task?.sourceCardId === "string" ? child.task.sourceCardId : "";
+        if (taskId && sourceCardId && allowed.has(sourceCardId) && !allowed.has(taskId)) { allowed.add(taskId); changed = true; }
+      }
+    }
+    return all.filter((child) => typeof child.task?.id === "string" && allowed.has(child.task.id));
+  };
   const request = async (method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> => {
     if (path === "/api/model-settings" || path.startsWith("/api/model-settings/")) return deps.modelSettings ? deps.modelSettings.request(method, path, options.body) : fail("NOT_FOUND", 404);
     if (method === "POST" && path === "/api/image-editor/translate-text") {
@@ -824,7 +844,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const buildCategoryGroups = (config: Record<string, unknown>) => {
       const raw = config.counts && typeof config.counts === "object" && !Array.isArray(config.counts) ? config.counts as Record<string, unknown> : {};
       const value = (key: string, fallback: number) => Number.isInteger(Number(raw[key])) ? Math.max(0, Number(raw[key])) : fallback;
-      const sellingPoints = raw.selling_points !== undefined ? value("selling_points", 3) : (raw.feature_benefit !== undefined || raw.material_detail !== undefined ? value("feature_benefit", 0) + value("material_detail", 0) : 3);
+      const sellingPoints = raw.selling_points !== undefined ? value("selling_points", 3) : raw.sellingPoint !== undefined ? value("sellingPoint", 3) : (raw.feature_benefit !== undefined || raw.material_detail !== undefined ? value("feature_benefit", 0) + value("material_detail", 0) : 3);
       return {
         main: { categories: ["main"], mode: "exact", count: value("main", value("main_image_count", 1)) },
         selling_points: { categories: ["feature_benefit", "material_detail"], mode: "exact", count: sellingPoints },
@@ -832,9 +852,9 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         other: { categories: ["comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"], mode: "max", count: value("other", 1) },
       };
     };
-    const cloneSuiteInputs = async (sourceSuiteId: string, targetSuiteId: string) => {
+    const cloneSuiteInputs = async (sourceSuiteId: string, targetSuiteId: string, selectedImageIds?: Set<string>) => {
       const images = await deps.repository.getInputImages(sourceSuiteId);
-      for (const image of images) {
+      for (const image of images.filter((item) => !selectedImageIds || selectedImageIds.has(item.id))) {
         const id = randomUUID();
         const originalKey = `suites/${targetSuiteId}/inputs/${id}/original`;
         const thumbnailKey = `suites/${targetSuiteId}/inputs/${id}/thumbnail`;
@@ -855,13 +875,15 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
       const config = body.config && typeof body.config === "object" && !Array.isArray(body.config) ? { ...(body.config as Record<string, unknown>) } : {};
-      const sourceId = typeof body.cloneFrom === "string" ? body.cloneFrom : typeof body.suiteId === "string" ? body.suiteId : null;
+      const cloneSpec = body.cloneFrom && typeof body.cloneFrom === "object" && !Array.isArray(body.cloneFrom) ? body.cloneFrom as Record<string, unknown> : null;
+      const sourceId = typeof body.cloneFrom === "string" ? body.cloneFrom : typeof cloneSpec?.suiteId === "string" ? cloneSpec.suiteId : typeof body.suiteId === "string" ? body.suiteId : null;
       let suite = sourceId ? await deps.repository.getSuite(sourceId) : null;
       if (sourceId && !suite) return fail("INVALID_SUITE_ID", 404);
-      if (typeof body.cloneFrom === "string") {
+      if (typeof body.cloneFrom === "string" || cloneSpec) {
         const source = suite!;
         suite = await deps.repository.createSuite(productNameFor(config, await deps.repository.getInputImages(source.id)), `${idempotencyKey}:suite`, "suite_studio");
-        if (!(await deps.repository.getInputImages(suite.id)).length) await cloneSuiteInputs(source.id, suite.id);
+        const imageIds = cloneSpec && Array.isArray(cloneSpec.imageIds) ? new Set(cloneSpec.imageIds.filter((id): id is string => typeof id === "string")) : undefined;
+        if (!(await deps.repository.getInputImages(suite.id)).length) await cloneSuiteInputs(source.id, suite.id, imageIds);
       }
       if (!suite) suite = await deps.repository.createSuite(productNameFor(config, []), `${idempotencyKey}:suite`, "suite_studio");
       const now = new Date().toISOString();
@@ -870,18 +892,29 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const run = runReservation.run;
       const executePipeline = async () => {
         try {
+          const persistedRun = await pipelineRepository.getRun(run.id);
+          if (persistedRun) Object.assign(run, persistedRun);
+          const resumePhase = run.currentPhase;
           const images = await deps.repository.getInputImages(suite!.id);
           const platform = typeof config.platform === "string" && deps.platformRepository ? await deps.platformRepository.find(config.platform) : null;
           if (typeof config.platform === "string" && deps.platformRepository && !platform) throw new Error("PLATFORM_NOT_FOUND");
           const refineRequired = platform?.mainImageBackground === "pure_white_required" || config.refineBaseImages === true || (platform?.mainImageBackground === "white_preferred" && config.refineBaseImages !== false);
-          if (refineRequired && deps.promptRepository) {
+          if (resumePhase === "base_refining" && refineRequired && deps.promptRepository) {
             const [baseTemplate] = await deps.promptRepository.listPublished("base_refine");
             if (baseTemplate) {
-              await Promise.all(images.filter((image) => !image.currentBaseVersionId).map(async (image) => {
-                const response = await request("POST", `/api/suites/${suite!.id}/input-images/${image.id}/base-generation`, { headers: { "idempotency-key": `${idempotencyKey}:base:${image.id}` }, body: { templateVersionId: baseTemplate.templateVersionId, dynamicInput: { platform: config.platform ?? "", main_image_background: platform?.mainImageBackground ?? "flexible" } } });
-                if (response.status >= 400) throw new Error("BASE_REFINE_FAILED");
-              }));
-              const failed = (await Promise.all(images.map((image) => deps.repository.listGenerationAttempts(suite!.id, image.id)))).flat().find((attempt) => attempt.status === "failed");
+              const pending = images.filter((image) => !image.currentBaseVersionId);
+              const queue = [...pending];
+              const refineOne = async () => {
+                while (queue.length) {
+                  const image = queue.shift()!;
+                  const response = await request("POST", `/api/suites/${suite!.id}/input-images/${image.id}/base-generation`, { headers: { "idempotency-key": `${idempotencyKey}:base:${image.id}` }, body: { templateVersionId: baseTemplate.templateVersionId, dynamicInput: { source_image_ids: image.id, background_target: platform?.mainImageBackground === "pure_white_required" ? "纯白背景 RGB 255，无文字、Logo、水印或装饰" : "干净白底或浅色背景" } } });
+                  if (response.status >= 400) throw new Error("BASE_REFINE_FAILED");
+                  const attemptId = "data" in response.body && response.body.data && typeof response.body.data === "object" ? String(((response.body.data as Record<string, unknown>).attempt as Record<string, unknown> | undefined)?.id ?? "") : "";
+                  if (attemptId) await waitUntil(() => deps.repository.listGenerationAttempts(suite!.id, image.id), (attempts) => attempts.some((attempt) => attempt.id === attemptId && attempt.status !== "running"));
+                }
+              };
+              await Promise.all([refineOne(), refineOne()]);
+              const failed = (await Promise.all(images.map(async (image) => { const attempts = await deps.repository.listGenerationAttempts(suite!.id, image.id); return attempts[0]; }))).find((attempt) => attempt?.status === "failed");
               if (failed) { await pipelineRepository.updateRun(run.id, { status: "waiting_base_refine_decision", currentPhase: "base_refining", errorCode: failed.errorCode ?? "BASE_REFINE_FAILED", errorMessage: failed.errorMessage ?? "白底精修失败", updatedAt: new Date().toISOString() }); return; }
             }
           }
@@ -893,12 +926,14 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           const smart = config.mode === "smart";
           const groups = buildCategoryGroups(config);
           const details = Object.values(groups).filter((group) => group.categories[0] !== "main").reduce((sum, group) => sum + group.count, 0);
+          const smartCategories = [...DETAIL_CATEGORY_CODES];
+          const mainCount = groups.main.count;
           const dynamicInput: Record<string, unknown> = {
             platform: config.platform ?? "", target_market_country: config.targetMarket ?? "", output_language: config.outputLanguage ?? "中文", product_name: productNameFor(config, images),
             human_supplement: typeof config.sellingPoints === "string" ? config.sellingPoints : "", emphasis_requirements: typeof config.sellingPoints === "string" ? config.sellingPoints : "",
             aspect_ratio: config.aspectRatio ?? "1:1", main_image_background: platform?.mainImageBackground ?? "flexible",
-            main_image_count: 1, detail_image_count_min: 0, detail_image_count_max: smart ? 6 : details, category_groups: JSON.stringify(smart ? { ...groups, selling_points: { ...groups.selling_points, count: 0 }, lifestyle: { ...groups.lifestyle, count: 0 }, other: { ...groups.other, count: 6 } } : groups),
-            selected_detail_categories: [], category_requirements: {},
+            main_image_count: mainCount, detail_image_count_min: 0, detail_image_count_max: smart ? 6 : details,
+            ...(smart ? { selected_detail_categories: JSON.stringify(smartCategories), category_requirements: JSON.stringify(Object.fromEntries(smartCategories.map((code) => [code, "optional"]))) } : { category_groups: JSON.stringify(groups), selected_detail_categories: JSON.stringify(smartCategories), category_requirements: JSON.stringify(Object.fromEntries(smartCategories.map((code) => [code, "optional"]))) }),
           };
           const planResponse = await request("POST", `/api/suites/${suite!.id}/structure-plan`, { headers: { "idempotency-key": `${idempotencyKey}:structure` }, body: { templateVersionId: structureTemplate.templateVersionId, dynamicInput, humanInput: {} } });
           if (planResponse.status >= 400) throw new Error("STRUCTURE_PLAN_FAILED");
@@ -914,7 +949,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
             const missing = Boolean(structure && (structure.status !== "READY_FOR_REVIEW" || structure.mainAllocation.missingFacts.length || structure.categoryAllocations.some((item) => item.count > 0 && item.missingFacts.length)));
             if (missing) { await pipelineRepository.updateRun(run.id, { status: "waiting_human_input", currentPhase: "structure_planning", errorCode: "MISSING_FACTS", errorMessage: "请补充卖点或调整分组数量", updatedAt: new Date().toISOString() }); return; }
             const confirmed: PlanSnapshot = { ...rawSnapshot, id: randomUUID(), revisionNumber: rawSnapshot.revisionNumber + 1, revisionKind: "human", parentSnapshotId: rawSnapshot.id, confirmationStatus: "confirmed", confirmationMode: "auto", confirmedAt: new Date().toISOString(), createdAt: new Date().toISOString() };
-            await deps.planRepository.appendRevision(confirmed);
+            await appendConfirmedSnapshot(confirmed);
           }
           await pipelineRepository.updateRun(run.id, { currentPhase: "category_prompting", updatedAt: new Date().toISOString() });
           const categoryResponse = await request("POST", `/api/suites/${suite!.id}/category-prompts`, { headers: { "idempotency-key": `${idempotencyKey}:categories` }, body: {} });
@@ -940,11 +975,17 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
             const batches = (response.body.data as { batches?: unknown }).batches;
             return Array.isArray(batches) && batches.every((batch) => Boolean(batch && typeof batch === "object" && ["completed", "partial", "failed"].includes(String((batch as Record<string, unknown>).status))));
           });
-          await pipelineRepository.updateRun(run.id, { status: "completed", currentPhase: "done", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+          const finalWorkbench = await request("GET", `/api/suites/${suite!.id}/workbench`);
+          const finalBatches = "data" in finalWorkbench.body && finalWorkbench.body.data && typeof finalWorkbench.body.data === "object" && Array.isArray((finalWorkbench.body.data as Record<string, unknown>).batches) ? (finalWorkbench.body.data as Record<string, unknown>).batches as Array<Record<string, unknown>> : [];
+          const hasFailed = finalBatches.some((batch) => batch.status === "failed");
+          const hasPartial = finalBatches.some((batch) => batch.status === "partial");
+          await pipelineRepository.updateRun(run.id, { status: hasFailed && !hasPartial ? "failed" : hasPartial || hasFailed ? "partial_failed" : "completed", currentPhase: "done", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
         } catch (error) {
           await pipelineRepository.updateRun(run.id, { status: "failed", errorCode: error instanceof Error ? error.message : "PIPELINE_FAILED", errorMessage: error instanceof Error ? error.message : "一键生成失败", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
         }
       };
+      pipelineExecutors.set(run.id, executePipeline);
+      pipelineConfigs.set(run.id, config);
       void executePipeline();
       return ok({ suiteId: suite.id, pipeline: run }, 202);
     }
@@ -963,14 +1004,22 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       }
       if (action === "retry_base_refine") current.config = { ...current.config, refineBaseImages: true };
       if (action === "submit_missing_facts") {
-        const supplement = typeof body.sellingPoints === "string" ? body.sellingPoints : typeof body.humanSupplement === "string" ? body.humanSupplement : "";
-        current.config = { ...current.config, sellingPoints: supplement, counts: body.counts ?? current.config.counts };
+        const supplement = typeof body.supplementText === "string" ? body.supplementText : typeof body.sellingPoints === "string" ? body.sellingPoints : typeof body.humanSupplement === "string" ? body.humanSupplement : undefined;
+        const previousCounts = current.config.counts && typeof current.config.counts === "object" && !Array.isArray(current.config.counts) ? current.config.counts as Record<string, unknown> : {};
+        const nextCounts = body.counts && typeof body.counts === "object" && !Array.isArray(body.counts) ? { ...previousCounts, ...(body.counts as Record<string, unknown>) } : { ...previousCounts };
+        if (Array.isArray(body.removedCategories)) for (const category of body.removedCategories.filter((value): value is string => typeof value === "string")) {
+          if (category === "feature_benefit" || category === "material_detail") nextCounts.selling_points = 0;
+          else if (category === "lifestyle_use") nextCounts.lifestyle = 0;
+        }
+        current.config = { ...current.config, ...(supplement === undefined ? {} : { sellingPoints: supplement }), counts: nextCounts };
       }
       if (!["retry_base_refine", "skip_base_refine", "submit_missing_facts", "resume_after_interrupt"].includes(action)) return fail("INVALID_PIPELINE_ACTION", 400);
       const updated = await pipelineRepository.updateRun(current.id, { status: "running", currentPhase: action === "resume_after_interrupt" ? current.currentPhase : "base_refining", config: current.config, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() });
       if (!updated) return fail("PIPELINE_NOT_FOUND", 404);
-      const restarted = await request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": `${current.id}:resume` }, body: { suiteId: suite.id, config: current.config } });
-      return ok({ suiteId: suite.id, pipeline: "data" in restarted.body ? (restarted.body as any).data?.pipeline ?? updated : updated }, 202);
+      const execute = pipelineExecutors.get(current.id);
+      if (execute) { const savedConfig = pipelineConfigs.get(current.id); if (savedConfig) { Object.keys(savedConfig).forEach((key) => delete savedConfig[key]); Object.assign(savedConfig, current.config); } void execute(); }
+      else await pipelineRepository.updateRun(current.id, { status: "failed", errorCode: "PIPELINE_EXECUTOR_UNAVAILABLE", errorMessage: "服务重启后请重新提交流水线", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+      return ok({ suiteId: suite.id, pipeline: updated }, 202);
     }
     const studioStateMatch = path.match(/^\/api\/suites\/([^/]+)\/studio-state$/);
     if (method === "GET" && studioStateMatch) {
@@ -978,11 +1027,15 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const suite = await deps.repository.getSuite(studioStateMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
       const [inputImages, pipeline, snapshot, tasks, batches, slots] = await Promise.all([deps.repository.getInputImages(suite.id), pipelineRepository.getLatestRun(suite.id), deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null), deps.taskRepository.listTasks(suite.id), deps.taskRepository.listBatches(suite.id), deps.taskRepository.listSlots(suite.id)]);
-      const cards = await Promise.all(tasks.filter((task) => task.status !== "archived").map(async (task) => { const history = await deps.taskRepository!.listTaskVersions(task.id); return { ...task, versions: history.versions, attempts: history.attempts, slots: slots.filter((slot) => slot.taskId === task.id) }; }));
+      const activeTasks = tasks.filter((task) => task.status !== "archived");
+      const taskAggregates = await Promise.all(activeTasks.map(async (task) => { const history = await deps.taskRepository!.listTaskVersions(task.id); return { ...taskView(task), versions: history.versions.map(taskVersionView), attempts: history.attempts.map(taskAttemptView), slots: slots.filter((slot) => slot.taskId === task.id).map(taskSlotView) }; }));
+      const imageEditChildren = await loadSuiteImageEditChildren(activeTasks);
+      const cards = resolveDeliverySlots(taskAggregates, imageEditChildren, { defaultTemplateVersionId: snapshot?.templateVersionId ?? null });
       const otherLimit = pipeline?.config && typeof pipeline.config === "object" ? pipeline.config.mode === "smart" ? 6 : pipeline.config.counts && typeof pipeline.config.counts === "object" ? Number((pipeline.config.counts as Record<string, unknown>).other ?? 0) : 0 : 0;
-      const actualDetail = cards.filter((card) => card.imageType === "detail").length;
-      const planning = snapshot?.structure && isStructurePlanV2(snapshot.structure) ? { snapshot: planSnapshotView(snapshot), notGeneratedReasons: actualDetail < otherLimit ? snapshot.structure.categoryAllocations.filter((item) => item.count === 0 && item.missingFacts.length > 0).map((item) => ({ category: item.category, reasons: item.missingFacts })) : [] } : { snapshot: snapshot ? planSnapshotView(snapshot) : null, notGeneratedReasons: [] };
-      const total = cards.length; const done = cards.filter((card) => card.status === "generated").length;
+      const otherCodes = new Set<string>(SUITE_CATEGORY_GROUPS.other.categories as readonly string[]);
+      const actualOther = snapshot?.structure && isStructurePlanV2(snapshot.structure) ? snapshot.structure.categoryAllocations.filter((item) => otherCodes.has(item.category) && item.count > 0).reduce((sum, item) => sum + item.count, 0) : 0;
+      const planning = snapshot?.structure && isStructurePlanV2(snapshot.structure) ? { snapshot: planSnapshotView(snapshot), notGeneratedReasons: cards.length > 0 && actualOther < otherLimit ? snapshot.structure.categoryAllocations.filter((item) => otherCodes.has(item.category) && item.count === 0 && item.missingFacts.length > 0).map((item) => ({ category: item.category, reasons: item.missingFacts })) : [] } : { snapshot: snapshot ? planSnapshotView(snapshot) : null, notGeneratedReasons: [] };
+      const total = cards.length; const done = cards.filter((card) => card.sourceRole !== "pending").length;
       return ok({ suite, pipeline, inputImages, planning, cards, progress: { total, completed: done, percent: total ? Math.round(done / total * 100) : 0 }, batches });
     }
     const feedMatch = path.match(/^\/api\/suites\/feed(?:\?(.*))?$/);
@@ -997,6 +1050,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         if (first && deps.taskRepository) thumbnail = (await deps.taskRepository.listTaskVersions(first.id)).versions.find((version) => version.isFinal) ?? (await deps.taskRepository.listTaskVersions(first.id)).versions[0] ?? null;
         eligible.push({ suite, pipeline, card: thumbnail ? { taskId: first!.id, previewUrl: thumbnail.previewUrl, title: first!.title } : null });
       }
+      eligible.sort((a, b) => b.suite.createdAt.localeCompare(a.suite.createdAt));
       return ok({ items: eligible.slice(offset, offset + limit), total: eligible.length, limit, offset });
     }
     const reversePlanMatch = path.match(/^\/api\/reverse-plans\/([^/]+)$/);
@@ -1611,7 +1665,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       return "沿用计划模板默认风格，保持商品真实外观、光影和品牌一致性。";
     };
 
-    const loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
+    loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
       if (!deps.imageEditorApi) return [];
       const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
       if (response.status !== 200 || !("data" in response.body) || !Array.isArray(response.body.data)) return [];

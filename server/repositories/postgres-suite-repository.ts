@@ -58,7 +58,7 @@ export class PostgresSuiteRepository implements SuiteRepository {
   }
 
   async listSuites() {
-    const result = await this.pool.query<Suite>("SELECT id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 30");
+    const result = await this.pool.query<Suite>("SELECT id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE deleted_at IS NULL ORDER BY created_at DESC");
     return result.rows;
   }
 
