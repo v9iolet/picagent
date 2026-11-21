@@ -474,6 +474,10 @@ function taskBatchView(batch: TaskGenerationBatch) { return batch; }
 function taskSlotView(slot: TaskResultSlot) { return slot; }
 function taskVersionView(version: TaskImageVersion) { return version; }
 
+function isProductImageResource(resource: { resourceType: string }) {
+  return resource.resourceType === "base_image" || resource.resourceType === "input_image";
+}
+
 function llmSource(client: LlmClient) {
   return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };
 }
@@ -657,21 +661,25 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       const generationParams = task.generationParams ?? {};
       const materialRefs = Array.isArray(generationParams.productMaterialRefs) ? generationParams.productMaterialRefs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 3) : [];
       const inputImages: Array<{ bytes: Buffer; mimeType: string; filename: string; role: string; objectKey: string; resourceId?: string; resourceVersionId?: string; libraryReferenceId?: string }> = [];
-      if (materialRefs.length && deps.libraryRepository) {
+      const currentTaskVersionId = sourceVersionIds[task.id];
+      if (!currentTaskVersionId && materialRefs.length && deps.libraryRepository) {
         const references = await deps.libraryRepository.listReferences(suiteId, "task", task.id);
         for (const [materialIndex, material] of materialRefs.entries()) {
           const referenceId = typeof material.libraryReferenceId === "string" ? material.libraryReferenceId : "";
           const reference = references.find((item) => item.id === referenceId);
           const source = reference?.snapshot.source as Record<string, unknown> | undefined;
-          if (!reference || reference.resourceType !== "base_image" || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
+          if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
           const stored = await deps.storage.get(source.objectKey);
           if (!stored) throw new Error("TASK_INVALID_SOURCE");
           inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: `product-${materialIndex + 1}.png`, role: materialIndex === 0 ? "product_primary" : "product_detail", objectKey: source.objectKey, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, libraryReferenceId: reference.id });
         }
         const first = inputImages[0];
-        if (first) { sourceKind = "library"; sourceObjectKey = (references.find((item) => item.id === first.libraryReferenceId)?.snapshot.source as Record<string, unknown>)?.objectKey as string; sourceLibraryReferenceId = first.libraryReferenceId ?? null; sourceResourceVersionId = first.resourceVersionId ?? null; sourceBaseVersionId = first.resourceVersionId ?? null; }
+        if (first) {
+          const reference = references.find((item) => item.id === first.libraryReferenceId);
+          sourceKind = "library"; sourceObjectKey = first.objectKey; sourceLibraryReferenceId = first.libraryReferenceId ?? null; sourceResourceVersionId = first.resourceVersionId ?? null;
+          sourceBaseVersionId = typeof reference?.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
+        }
       }
-      const currentTaskVersionId = sourceVersionIds[task.id];
       if (currentTaskVersionId) {
         const history = await deps.taskRepository.listTaskVersions(task.id);
         const current = history.versions.find((version) => version.id === currentTaskVersionId && version.isCurrent);
@@ -683,21 +691,25 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       } else if (!inputImages.length && task.sourceLibraryReferenceId && deps.libraryRepository) {
         const reference = (await deps.libraryRepository.listReferences(suiteId, "task", task.id)).find((item) => item.id === task.sourceLibraryReferenceId);
         const source = reference?.snapshot.source as Record<string, unknown> | undefined;
-        if (!reference || reference.resourceType !== "base_image" || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
+        if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
         sourceKind = "library"; sourceObjectKey = source.objectKey; sourceLibraryReferenceId = reference.id; sourceResourceVersionId = reference.resourceVersionId;
         sourceBaseVersionId = typeof reference.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
       } else if (!inputImages.length) {
-        const image = await deps.repository.getInputImage(suiteId, task.sourceInputImageId ?? "");
+        if (!task.sourceInputImageId) throw new Error("TASK_INVALID_SOURCE");
+        const image = await deps.repository.getInputImage(suiteId, task.sourceInputImageId);
         if (!image) throw new Error("TASK_INVALID_SOURCE");
         sourceKind = "original"; sourceObjectKey = image.originalObjectKey; sourceInputImageId = image.id;
         if (image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId); if (base) { sourceKind = "base"; sourceObjectKey = base.objectKey; sourceBaseVersionId = base.id; } }
+      }
+      if (!inputImages.length) {
+        const stored = await deps.storage.get(sourceObjectKey);
+        inputImages.push({ bytes: stored?.bytes ?? Buffer.alloc(0), mimeType: stored?.contentType ?? "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
       }
       if (task.originKind === "reverse_import" && generationParams.explosiveReferenceEnabled !== false && task.reversePlanId && task.reverseReferenceId) {
         const ref = await reverseRepository.getPlan(task.reversePlanId).then((plan) => plan?.references.find((item) => item.id === task.reverseReferenceId));
         const stored = ref ? await deps.storage.get(ref.objectKey) : null;
         if (stored) inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: "explosive-reference.png", role: "explosive_reference", objectKey: ref?.objectKey ?? "" });
       }
-      if (!inputImages.length) inputImages.push({ bytes: (await deps.storage.get(sourceObjectKey))?.bytes ?? Buffer.alloc(0), mimeType: "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
       const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import";
       const finalPrompt = shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft;
@@ -1203,7 +1215,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
       let suite = typeof body.targetSuiteId === "string" ? await deps.repository.getSuite(body.targetSuiteId) : null;
       if (typeof body.targetSuiteId === "string" && !suite) return fail("INVALID_SUITE_ID", 404);
-      if (!suite) suite = await deps.repository.createSuite(typeof body.name === "string" && body.name.trim() ? body.name.trim() : `爆品图反推 ${new Date().toISOString().slice(0, 10)}`, `${idempotencyKey}:suite`);
+      if (!suite) suite = await deps.repository.createSuite(typeof body.name === "string" && body.name.trim() ? body.name.trim() : `爆品图反推 ${new Date().toISOString().slice(0, 10)}`, `${idempotencyKey}:suite`, "canvas");
       const taskGroupId = typeof body.taskGroupId === "string" ? body.taskGroupId : randomUUID();
       const result = await deps.taskRepository.createReverseTasks({ suiteId: suite.id, reversePlanId: plan.id, taskGroupId, mode: plan.mode, idempotencyKey, items: items.map(({ reference, prompt }) => ({ referenceId: reference.id, ordinal: reference.ordinal, filename: reference.filename, promptVersionId: prompt.id, prompt: prompt.prompt })) });
       return ok({ suiteId: suite.id, taskGroupId: result.created[0]?.reverseTaskGroupId ?? taskGroupId, taskIds: result.created.map((task) => task.id), duplicate: result.duplicate }, result.duplicate ? 200 : 201);
@@ -1215,7 +1227,9 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       const origin = body.origin === "canvas" ? "canvas" : "suite_studio";
       return ok(await deps.repository.createSuite(name, idempotencyKey, origin), 201);
     }
-    if (method === "GET" && path === "/api/suites") {
+    const suiteListMatch = path.match(/^\/api\/suites(?:\?(.*))?$/);
+    if (method === "GET" && suiteListMatch) {
+      const canvasOnly = new URLSearchParams(suiteListMatch[1]).get("view") === "canvas";
       const suites = await deps.repository.listSuites();
       const enriched = await Promise.all(suites.map(async (suite) => {
         const [inputImages, tasks] = await Promise.all([
@@ -1249,7 +1263,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
           isDemo: suite.name.includes("演示") || suite.name.includes("Demo"),
         };
       }));
-      return ok(enriched);
+      return ok(canvasOnly ? enriched.filter((suite) => suite.origin === "canvas" || suite.taskCount > 0) : enriched);
     }
     const libraryResourceMatch = path.match(/^\/api\/library\/resources\/([^/]+)$/);
     if (method === "GET" && libraryResourceMatch) {
@@ -1710,6 +1724,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     }
 
     const resolvePlanStyleGuide = (snapshot: PlanSnapshot | null): string => {
+      if (!snapshot) return "未设置";
       const card = snapshot?.structure?.globalStyleCard;
       if (card && typeof card === "object" && typeof (card as Record<string, unknown>).promptPrefix === "string" && String((card as Record<string, unknown>).promptPrefix).trim()) {
         return String((card as Record<string, unknown>).promptPrefix).trim();
@@ -2000,7 +2015,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
         deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null),
         deps.repository.getInputImages(suite.id),
       ]);
-      const sourceInputImageId = typeof body.sourceInputImageId === "string" && inputImages.some((img) => img.id === body.sourceInputImageId)
+      const sourceInputImageId = body.sourceInputImageId === null ? null : typeof body.sourceInputImageId === "string" && inputImages.some((img) => img.id === body.sourceInputImageId)
         ? body.sourceInputImageId
         : (inputImages[0]?.id ?? null);
       const generationParams = body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)
@@ -2073,10 +2088,27 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     if (method === "PATCH" && updateTaskMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
-      const patch: Record<string, unknown> = {};
-      for (const key of ["title", "purpose", "promptDraft", "sourceInputImageId", "status"] as const) if (typeof body[key] === "string") patch[key] = body[key];
-      if (body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)) patch.generationParams = body.generationParams;
-      const task = await deps.taskRepository.updateTask(updateTaskMatch[1], patch as never);
+      const patch: Parameters<TaskRepository["updateTask"]>[1] = {};
+      for (const key of ["title", "purpose", "promptDraft"] as const) if (typeof body[key] === "string") patch[key] = body[key];
+      if (typeof body.status === "string") patch.status = body.status as SuiteTask["status"];
+      if (body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)) patch.generationParams = body.generationParams as Record<string, unknown>;
+      if (typeof body.sourceInputImageId === "string") {
+        const current = await deps.taskRepository.getTask(updateTaskMatch[1]);
+        if (!current) return fail("INVALID_SUITE_TASK", 404);
+        const images = await deps.repository.getInputImages(current.suiteId);
+        if (!images.some((image) => image.id === body.sourceInputImageId) || current.status === "generating" || current.status === "archived") return fail("TASK_INVALID_SOURCE", 409);
+        patch.sourceInputImageId = body.sourceInputImageId;
+        if (current.sourceInputImageId !== patch.sourceInputImageId || current.sourceLibraryReferenceId) {
+          patch.sourceRevision = (current.sourceRevision ?? 0) + 1;
+          patch.sourceLibraryReferenceId = null;
+          patch.sourceResourceVersionId = null;
+          const params = { ...current.generationParams, ...patch.generationParams };
+          delete params.productMaterialRefs;
+          patch.generationParams = params;
+        }
+        if (current.status === "incomplete" || current.status === "failed") patch.status = "pending";
+      }
+      const task = await deps.taskRepository.updateTask(updateTaskMatch[1], patch);
       return task ? ok(task) : fail("INVALID_SUITE_TASK", 404);
     }
 
@@ -2085,13 +2117,14 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       if (!deps.taskRepository || !deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       const task = await deps.taskRepository.getTask(whiteResourceMatch[1]); if (!task) return fail("INVALID_SUITE_TASK", 404);
+      if (task.status === "generating" || task.status === "archived") return fail("TASK_INVALID_SOURCE", 409);
       const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
       const resourceIds = Array.isArray(body.resourceIds) ? body.resourceIds.filter((item): item is string => typeof item === "string") : typeof body.resourceId === "string" ? [body.resourceId] : [];
       if (!resourceIds.length) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       if (resourceIds.length > 3) return fail("REVERSE_WHITE_RESOURCE_LIMIT", 409);
       const resources = await Promise.all(resourceIds.map((id) => deps.libraryRepository!.getResource(id)));
       if (resources.some((resource) => !resource)) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
-      if (resources.some((resource) => resource!.resourceType !== "base_image" || resource!.status !== "published")) return fail("LIBRARY_RESOURCE_FORBIDDEN", 403);
+      if (resources.some((resource) => !isProductImageResource(resource!) || resource!.status !== "published")) return fail("LIBRARY_RESOURCE_FORBIDDEN", 403);
       try {
         const existing = await deps.libraryRepository.listReferences(task.suiteId, "task", task.id);
         const references = [];
@@ -2102,10 +2135,10 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
           if (typeof source?.objectKey !== "string") throw new Error("LIBRARY_RESOURCE_NOT_FOUND");
           (result.reference as typeof result.reference & { order?: number }).order = index + 1;
         }
-        for (const stale of existing.filter((reference) => reference.resourceType === "base_image" && !resourceIds.includes(reference.resourceId))) await deps.libraryRepository.archiveReference(task.suiteId, stale.id);
-        const productMaterialRefs = references.map((reference, index) => ({ libraryReferenceId: reference.id, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, order: index + 1, title: String((reference.snapshot as Record<string, unknown>).title ?? "产品白底图"), previewUrl: typeof (reference.snapshot as Record<string, unknown>).previewUrl === "string" ? (reference.snapshot as Record<string, unknown>).previewUrl : `/api/library/resources/${encodeURIComponent(reference.resourceId)}/preview` }));
+        for (const stale of existing.filter((reference) => isProductImageResource(reference) && !resourceIds.includes(reference.resourceId))) await deps.libraryRepository.archiveReference(task.suiteId, stale.id);
+        const productMaterialRefs = references.map((reference, index) => ({ libraryReferenceId: reference.id, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, order: index + 1, title: String(reference.snapshot.title ?? "商品参考图"), previewUrl: typeof reference.snapshot.previewUrl === "string" ? reference.snapshot.previewUrl : `/api/library/resources/${encodeURIComponent(reference.resourceId)}/preview` }));
         const first = references[0];
-        const updated = await deps.taskRepository.updateTask(task.id, { sourceLibraryReferenceId: first.id, sourceResourceVersionId: first.resourceVersionId, sourceRevision: (task.sourceRevision ?? 0) + 1, generationParams: { ...task.generationParams, productMaterialRefs } as Record<string, unknown>, status: "pending" });
+        const updated = await deps.taskRepository.updateTask(task.id, { sourceInputImageId: null, sourceLibraryReferenceId: first.id, sourceResourceVersionId: first.resourceVersionId, sourceRevision: (task.sourceRevision ?? 0) + 1, generationParams: { ...task.generationParams, productMaterialRefs }, status: "pending" });
         const duplicate = references.every((reference) => existing.some((item) => item.id === reference.id));
         return ok({ task: updated, references, reference: first, duplicate }, duplicate ? 200 : 201);
       } catch (error) { const code = error instanceof Error ? error.message : "LIBRARY_RESOURCE_FORBIDDEN"; return fail(code, code === "LIBRARY_RESOURCE_NOT_FOUND" ? 404 : 403); }
@@ -2152,7 +2185,9 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       try {
         const history = await deps.taskRepository.listTaskVersions(task.id);
         const currentVersion = history.versions.find((version) => version.isCurrent);
-        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, currentVersion ? { [task.id]: currentVersion.id } : {});
+        const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);
+        const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (current?.sourceRevision ?? 0);
+        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, currentVersion && sourceUnchanged ? { [task.id]: currentVersion.id } : {});
         return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
       }
       catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }

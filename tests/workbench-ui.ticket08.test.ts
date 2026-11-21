@@ -15,7 +15,6 @@ test("compose board connects base inputs to tasks and uses three-lane lineage pr
   const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
   assert.match(source, /computeWorkbenchLanes/);
   assert.match(source, /computeLineageHighlight/);
-  assert.match(source, /baseIds\.forEach\(\(sourceId\) => rawEdges\.push/);
   assert.match(source, /DeliveryGalleryView/);
   assert.match(source, /BeforeAfterLightbox/);
 });

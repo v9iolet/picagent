@@ -184,7 +184,7 @@ export function BatchResults({
               >
                 重命名
               </button>
-              <button onClick={() => navigate(`/suites/${id}/board`)}>进入创作板精修</button>
+              <button onClick={() => navigate(`/create/canvas/${id}`)}>进入创作板精修</button>
               <button onClick={() => void act(async () => setGallery(await suiteApi.getWorkbench(id)))}>
                 货架预览导出
               </button>

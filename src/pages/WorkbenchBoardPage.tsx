@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { applyNodeChanges, Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, type Edge, type Node, type NodeProps, type Viewport, useNodesState, useReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { defaultImageOptions } from "../../shared/model-settings";
 import {
   applyStyleOverrideToPrompt,
   computeLineageHighlight,
@@ -35,6 +36,8 @@ type BoardData = {
   beforeLabel?: string;
   styleGuide?: string;
   styleOverridden?: boolean;
+  freeStyle?: boolean;
+  originalImage?: boolean;
   referenceCount?: number;
   displayPrompt?: string;
   lineage?: string;
@@ -66,6 +69,12 @@ const readParam = (task: ApiSuiteTask, key: string, fallback: string) => {
 const ratioFor = (task: ApiSuiteTask) => readParam(task, "ratio", task.imageType === "detail" ? "3:4" : "1:1");
 const sizeFor = (task: ApiSuiteTask) => readParam(task, "size", "1K");
 const qualityFor = (task: ApiSuiteTask) => readParam(task, "quality", "medium");
+const missingReferenceHint = "请先绑定商品参考图";
+const hasTaskReference = (task: ApiSuiteTask) => Boolean(task.sourceInputImageId || task.sourceLibraryReferenceId);
+const parameterOptions = (options: string[], value: string) => <>
+  {!options.includes(value) && <option value={value} disabled>{value}（当前值）</option>}
+  {options.map((option) => <option key={option}>{option}</option>)}
+</>;
 const versionGenerationPrompt = (version: ApiTaskVersion, fallback = "") => {
   const snapshot = version.promptSnapshot ?? {};
   const value = snapshot.finalPrompt ?? snapshot.prompt;
@@ -79,6 +88,7 @@ function modelFor(task: ApiSuiteTask, version?: ApiTaskVersion) {
 }
 
 const fallbackPlanStyle = (workbench: ApiWorkbench) => {
+  if (!workbench.planSnapshot) return "未设置";
   if (workbench.planStyleGuide?.trim()) return workbench.planStyleGuide.trim();
   const card = workbench.planSnapshot?.structure?.globalStyleCard;
   if (card && typeof card.promptPrefix === "string" && card.promptPrefix.trim()) return card.promptPrefix.trim();
@@ -123,14 +133,14 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
         <div className="wb-card-topline">
           <span className="wb-card-kicker">STYLE GUIDE</span>
           <span className={`wb-card-state ${data.styleOverridden ? "is-override" : "is-active"}`}>
-            {data.styleOverridden ? "已覆盖原计划" : "原计划风格"}
+            {data.freeStyle ? "自由风格" : data.styleOverridden ? "已覆盖原计划" : "原计划风格"}
           </span>
         </div>
         <h3>全局风格卡</h3>
         <p>{data.styleGuide}</p>
         <div className="wb-card-note">
           <Icon name="check" />
-          {data.styleOverridden ? "仅作用于后续新提交生图，不篡改历史快照" : "已按计划冻结；点击编辑可前向微调"}
+          {data.styleOverridden ? "仅作用于后续新提交生图，不篡改历史快照" : data.freeStyle ? "风格可编辑" : "已按计划冻结；点击编辑可前向微调"}
         </div>
         <button type="button" className="wb-link-button nodrag nopan" onClick={(event) => { event.stopPropagation(); onEditStyle(); }}>编辑</button>
       </article>
@@ -141,7 +151,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
     return (
       <article className={`wb-card wb-base-card ${highlightClass}`}>
         <Handle type="source" position={Position.Right} />
-        <span className="wb-card-kicker">{data.kind === "reverse-ref" ? "REFERENCE IMAGE" : "BASE IMAGE"}</span>
+        <span className="wb-card-kicker">{data.kind === "reverse-ref" ? "REFERENCE IMAGE" : data.originalImage ? "ORIGINAL IMAGE" : "BASE IMAGE"}</span>
         <button className="wb-image-button nodrag nopan" type="button" onClick={(event) => { event.stopPropagation(); if (data.imageUrl) onPreview({ url: data.imageUrl, title: data.title, subtitle: data.subtitle }); }}>
           <ImageWithState src={data.imageUrl} alt={data.title} loading="lazy" retryable={false} />
         </button>
@@ -155,6 +165,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
   if (!task) return null;
   const version = availableVersions.find((item) => item.id === selectedVersionId) ?? data.version;
   const model = modelFor(task, version);
+  const missingReference = !data.isEditChild && !hasTaskReference(task);
 
   return (
     <article className={`wb-card wb-task-card ${data.isEditChild ? "wb-edit-child-card" : ""} ${highlightClass}`} onClick={() => onSelect(task, id)}>
@@ -205,7 +216,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
         <span>{qualityFor(task)}</span>
       </div>
       <div className="wb-task-actions nodrag nopan">
-        <button type="button" className="wb-card-generate" disabled={task.status === "generating"} onClick={(event) => { event.stopPropagation(); onGenerate(task); }}>
+        <button type="button" className="wb-card-generate" disabled={missingReference || task.status === "generating"} title={missingReference ? missingReferenceHint : undefined} onClick={(event) => { event.stopPropagation(); onGenerate(task); }}>
           <Icon name="sparkles" />生成
         </button>
         <button type="button" disabled={task.status === "generating" || (!version && task.status !== "failed")} onClick={(event) => { event.stopPropagation(); onRegenerate(task); }}>
@@ -215,6 +226,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
           <Icon name="edit" />编辑图片
         </button>
       </div>
+      {missingReference && <small>{missingReferenceHint}</small>}
       {version && (
         <div className="wb-card-version-actions nodrag nopan">
           <select aria-label={`选择${task.title}版本`} value={version.id} onClick={(event) => event.stopPropagation()} onChange={(event) => setSelectedVersionId(event.target.value)}>
@@ -341,20 +353,22 @@ function projectComposeGraph(
     .filter((task) => task.status !== "archived" && (task.originKind === "reverse_import" || !workbench.planSnapshot || task.planSnapshotId === workbench.planSnapshot.id))
     .slice()
     .sort((left, right) => (left.imageType !== right.imageType ? (left.imageType === "main" ? -1 : 1) : left.ordinal - right.ordinal));
-  const currentBases = workbench.inputImages.filter((image) => image.currentBaseVersionId);
+  const materialsByInputId = new Map(workbench.inputImages.map((image) => [image.id, {
+    image,
+    id: image.currentBaseVersionId ? `base:${image.currentBaseVersionId}` : `input:${image.id}`,
+  }]));
   const reverseMaterials = new Map<string, { resourceId: string; resourceVersionId: string; title: string; previewUrl: string }>();
   active.forEach((task) => {
     const refs = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
-    refs.forEach((ref) => reverseMaterials.set(ref.resourceVersionId, { resourceId: ref.resourceId, resourceVersionId: ref.resourceVersionId, title: ref.title ?? "产品白底图", previewUrl: ref.previewUrl ?? `/api/library/resources/${encodeURIComponent(ref.resourceId)}/preview` }));
+    refs.forEach((ref) => reverseMaterials.set(ref.resourceVersionId, { resourceId: ref.resourceId, resourceVersionId: ref.resourceVersionId, title: ref.title ?? "商品参考图", previewUrl: ref.previewUrl ?? `/api/library/resources/${encodeURIComponent(ref.resourceId)}/preview` }));
   });
 
   const versionLookup = buildVersionLookup(workbench);
   const styleId = "style:global";
-  const baseIds = currentBases.map((image) => `base:${image.currentBaseVersionId}`);
 
   // 1. Collect lane items
   const laneItems: LaneLayoutItem[] = [{ id: styleId, kind: "style" }];
-  currentBases.forEach((image) => laneItems.push({ id: `base:${image.currentBaseVersionId}`, kind: "base" }));
+  materialsByInputId.forEach(({ id }) => laneItems.push({ id, kind: "base" }));
   [...reverseMaterials.values()].forEach((material) => laneItems.push({ id: `library-base:${material.resourceVersionId}`, kind: "base" }));
   const reverseRefSeen = new Set<string>();
   active.forEach((task) => {
@@ -387,7 +401,8 @@ function projectComposeGraph(
     if (task.originKind === "reverse_import" && task.reversePlanId && task.reverseReferenceId) {
       rawEdges.push({ id: `reverse-ref:${task.reverseReferenceId}->${id}`, source: `reverse-ref:${task.reverseReferenceId}`, target: id, type: "default" });
     }
-    baseIds.forEach((sourceId) => rawEdges.push({ id: `${sourceId}->${id}`, source: sourceId, target: id, type: "default", animated: task.status === "generating" }));
+    const sourceId = task.sourceInputImageId ? materialsByInputId.get(task.sourceInputImageId)?.id : undefined;
+    if (sourceId && !task.sourceLibraryReferenceId) rawEdges.push({ id: `${sourceId}->${id}`, source: sourceId, target: id, type: "default", animated: task.status === "generating" });
     const materialRefs = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
     materialRefs.forEach((ref) => rawEdges.push({ id: `library-base:${ref.resourceVersionId}->${id}`, source: `library-base:${ref.resourceVersionId}`, target: id, type: "default", animated: task.status === "generating" }));
     if (selectedNodeId === styleId) {
@@ -464,23 +479,24 @@ function projectComposeGraph(
       title: "全局风格卡",
       styleGuide: effectiveStyleGuide,
       styleOverridden: Boolean(styleOverride),
+      freeStyle: !workbench.planSnapshot,
       ...nodeHighlightProps(styleId, "style"),
       ...handlers,
     },
     draggable: true,
   });
 
-  currentBases.forEach((image) => {
-    const id = `base:${image.currentBaseVersionId}`;
+  materialsByInputId.forEach(({ id, image }) => {
     nodes.push({
       id,
       type: "boardCard",
       position: positions.get(id) ?? { x: 32, y: 260 },
       data: {
         kind: "base",
-        title: `白底图 ${image.ordinal}`,
-        subtitle: `${image.width} × ${image.height}`,
-        imageUrl: `/api/suites/${workbench.suite.id}/input-images/${image.id}/base-versions/${image.currentBaseVersionId}/preview`,
+        title: `${image.currentBaseVersionId ? "白底图" : "原图"} ${image.ordinal}`,
+        subtitle: image.currentBaseVersionId ? `${image.width} × ${image.height}` : image.originalFilename,
+        imageUrl: image.currentBaseVersionId ? `/api/suites/${workbench.suite.id}/input-images/${image.id}/base-versions/${image.currentBaseVersionId}/preview` : image.originalPreviewUrl,
+        originalImage: !image.currentBaseVersionId,
         ...nodeHighlightProps(id, "base"),
         ...handlers,
       },
@@ -497,7 +513,8 @@ function projectComposeGraph(
       data: {
         kind: "base",
         title: material.title,
-        subtitle: `资源库白底图 · ${material.resourceVersionId.slice(0, 8)}`,
+        subtitle: `图片库 · ${material.resourceVersionId.slice(0, 8)}`,
+        originalImage: material.resourceId.startsWith("input:"),
         imageUrl: material.previewUrl,
         ...nodeHighlightProps(id, "base"),
         ...handlers,
@@ -523,7 +540,8 @@ function projectComposeGraph(
         task,
         version: currentVersion,
         imageUrl: currentVersion?.previewUrl,
-        referenceCount: currentBases.length || workbench.inputImages.length,
+        referenceCount: Array.isArray(task.generationParams?.productMaterialRefs) && task.generationParams.productMaterialRefs.length > 0
+          ? task.generationParams.productMaterialRefs.length : hasTaskReference(task) ? 1 : 0,
         displayPrompt,
         ...nodeHighlightProps(id, "task", task, false),
         ...handlers,
@@ -650,22 +668,28 @@ function PromptLibraryButton({ onNotify }: { onNotify: (message: string) => void
 }
 
 function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; onBound: () => Promise<void>; onNotify: (message: string) => void }) {
-  const [items, setItems] = useState<ApiLibraryResource[]>([]);
+  const [items, setItems] = useState<ApiLibraryResource[] | null>(null);
   const [selected, setSelected] = useState<ApiProductMaterialRef[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const bound = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
 
   useEffect(() => {
-    if (task.originKind !== "reverse_import") return;
-    suiteApi.listLibraryResources({ resourceType: "base_image", status: "published", pageSize: 100 }).then((result) => setItems(result.items)).catch(() => onNotify("白底图资源加载失败"));
-  }, [task.id, task.originKind, onNotify]);
+    if (!open) return;
+    let active = true;
+    Promise.all((["base_image", "input_image"] as const).map((resourceType) => suiteApi.listLibraryResources({ resourceType, status: "published", pageSize: 100 })))
+      .then((results) => { if (active) setItems(results.flatMap((result) => result.items)); })
+      .catch(() => { if (active) setLoadError(true); });
+    return () => { active = false; };
+  }, [open]);
 
-  useEffect(() => {
-    const refs = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
-    setSelected(refs.slice().sort((a, b) => a.order - b.order));
-  }, [task.id, task.generationParams]);
-
-  if (task.originKind !== "reverse_import") return null;
+  const show = () => {
+    setSelected(bound.slice().sort((a, b) => a.order - b.order));
+    setItems(null);
+    setLoadError(false);
+    setOpen(true);
+  };
   const toggle = (item: ApiLibraryResource) => setSelected((current) => current.some((ref) => ref.resourceId === item.id) ? current.filter((ref) => ref.resourceId !== item.id) : current.length >= 3 ? current : [...current, { libraryReferenceId: "", resourceId: item.id, resourceVersionId: item.resourceVersionId, order: current.length + 1, title: item.title, previewUrl: item.previewUrl ?? `/api/library/resources/${encodeURIComponent(item.id)}/preview` }]);
   const move = (index: number, delta: number) => setSelected((current) => {
     const next = current.slice();
@@ -681,9 +705,9 @@ function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; 
       await suiteApi.bindWhiteResources(task.id, selected.map((item) => item.resourceId));
       await onBound();
       setOpen(false);
-      onNotify(task.sourceRevision ? "已更换白底图并创建新的任务源版本" : "白底图已绑定");
+      onNotify("已绑定图片库参考图");
     } catch {
-      onNotify("白底图绑定失败");
+      onNotify("参考图绑定失败");
     } finally {
       setLoading(false);
     }
@@ -691,27 +715,27 @@ function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; 
   return (
     <>
       <div className="wb-inspector-field">
-        <span>产品白底图</span>
-        <div className="wb-material-summary">{selected.length ? selected.map((item, index) => <span key={item.resourceId}>{index + 1}. {item.title ?? item.resourceId.slice(0, 8)}</span>) : <small>尚未绑定，最多选择 3 张</small>}</div>
-        <button type="button" className="wb-primary-action" onClick={() => setOpen(true)}>添加产品白底图</button>
-        <small>{selected.length ? `已冻结 ${selected.length} 个资源版本 · 源版本 ${task.sourceRevision ?? 1}` : "从图片资源库选择已发布白底图"}</small>
+        <span>图片库参考图</span>
+        {bound.length > 0 && <div className="wb-material-summary">{bound.map((item, index) => <span key={item.resourceId}>{index + 1}. {item.title ?? item.resourceId.slice(0, 8)}</span>)}</div>}
+        <button type="button" className="wb-link-button" disabled={task.status === "generating"} onClick={show}>从图片库选择</button>
       </div>
       {open && (
         <div className="wb-prompt-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
-          <section className="wb-prompt-modal wb-white-picker" role="dialog" aria-modal="true" aria-label="选择产品白底图">
+          <section className="wb-prompt-modal wb-white-picker" role="dialog" aria-modal="true" aria-label="选择图片库参考图">
             <div className="wb-prompt-popover-head">
-              <div><span className="wb-modal-eyebrow">PRODUCT MATERIALS</span><strong>选择产品白底图</strong><small>最多 3 张，按顺序作为主图和补充角度</small></div>
-              <button type="button" aria-label="关闭白底图选择器" onClick={() => setOpen(false)}><Icon name="x" /></button>
+              <div><span className="wb-modal-eyebrow">PRODUCT MATERIALS</span><strong>选择图片库参考图</strong><small>最多 3 张，按顺序作为主图和补充角度</small></div>
+              <button type="button" aria-label="关闭图片库选择器" onClick={() => setOpen(false)}><Icon name="x" /></button>
             </div>
+            {loadError ? <p role="alert">图片库加载失败</p> : !items ? <p role="status">正在加载图片库…</p> : !items.length && <p>暂无已发布的原图或白底图</p>}
             <div className="wb-white-picker-grid">
-              {items.map((item) => {
+              {items?.map((item) => {
                 const active = selected.some((ref) => ref.resourceId === item.id);
                 return (
-                  <button type="button" key={item.id} className={`wb-white-picker-item ${active ? "is-selected" : ""}`} onClick={() => toggle(item)}>
+                  <button type="button" key={item.id} aria-pressed={active} disabled={loading || (!active && selected.length >= 3)} className={`wb-white-picker-item ${active ? "is-selected" : ""}`} onClick={() => toggle(item)}>
                     <span className="wb-picker-check">{active ? "✓" : ""}</span>
                     {item.previewUrl && <img src={item.previewUrl} alt={item.title} />}
                     <strong>{item.title}</strong>
-                    <small>版本 {item.resourceVersionId.slice(0, 8)}</small>
+                    <small>{item.resourceType === "base_image" ? "白底图" : "原图"} · {item.resourceVersionId.slice(0, 8)}</small>
                   </button>
                 );
               })}
@@ -1423,11 +1447,15 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
   const [editor, setEditor] = useState<{ task: ApiSuiteTask; version: ApiTaskVersion } | null>(null);
   const [compareTaskId, setCompareTaskId] = useState<string | null>(null);
   const [customTaskOpen, setCustomTaskOpen] = useState(false);
+  const uploadInput = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [savingTaskInput, setSavingTaskInput] = useState(false);
   const [styleDrawerOpen, setStyleDrawerOpen] = useState(false);
   const [styleDraft, setStyleDraft] = useState("");
   const [savingStyle, setSavingStyle] = useState(false);
   const [toast, setToast] = useState("");
   const [defaultImageModel, setDefaultImageModel] = useState<string | null | undefined>(undefined);
+  const [imageOptions, setImageOptions] = useState(() => defaultImageOptions("gpt-image-2"));
   const [promptDraft, setPromptDraft] = useState("");
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
   const latestWorkbench = useRef<ApiWorkbench | null>(null);
@@ -1458,6 +1486,8 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
       modelSettingsApi.get().then(({ channels, preferences }) => {
         const channel = channels.find((item) => item.id === preferences.image?.channelId);
         setDefaultImageModel(channel && preferences.image ? `${channel.name} · ${preferences.image.modelId}` : null);
+        const model = channel?.models.find((item) => item.id === preferences.image?.modelId && item.capabilities.includes("image"));
+        setImageOptions(model?.imageOptions ?? defaultImageOptions(model?.id ?? "gpt-image-2"));
       }).catch(() => setDefaultImageModel(undefined));
     };
     loadDefault();
@@ -1498,7 +1528,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
   const openStyleDrawer = useCallback(() => {
     const currentWb = latestWorkbench.current;
     const override = currentWb?.styleOverride ?? currentWb?.suite.styleOverride ?? "";
-    const plan = currentWb ? fallbackPlanStyle(currentWb) : "";
+    const plan = currentWb?.planSnapshot ? fallbackPlanStyle(currentWb) : "";
     setStyleDraft(override || plan);
     setStyleDrawerOpen(true);
   }, []);
@@ -1574,7 +1604,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
       await suiteApi.updateStyleOverride(suiteId, nextValue);
       setStyleDrawerOpen(false);
       await reload();
-      notify(nextValue ? "已保存画布风格覆盖，仅作用于后续新提交生成" : "已恢复为原计划冻结风格");
+      notify(nextValue ? "已保存画布风格覆盖，仅作用于后续新提交生成" : workbench?.planSnapshot ? "已恢复为原计划冻结风格" : "已清除画布风格");
     } catch (error) {
       notify(error instanceof Error ? error.message : "风格覆盖保存失败");
     } finally {
@@ -1582,11 +1612,39 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
     }
   };
 
-  const updateTaskParams = async (patch: Record<string, unknown>) => {
+  const saveTaskInput = async (patch: Parameters<typeof suiteApi.updateTask>[1], success: string) => {
     if (!selectedTask || selectedIsImageEditChild) return;
-    await suiteApi.updateTask(selectedTask.id, { generationParams: { ...selectedTask.generationParams, ...patch } });
-    await reload();
-    notify("已保存当前卡片参数");
+    setSavingTaskInput(true);
+    try {
+      await suiteApi.updateTask(selectedTask.id, patch);
+      await reload();
+      notify(success);
+    } finally {
+      setSavingTaskInput(false);
+    }
+  };
+
+  const updateTaskParams = (patch: Record<string, unknown>) => saveTaskInput({ generationParams: { ...selectedTask?.generationParams, ...patch } }, "已保存当前卡片参数");
+
+  const uploadProductImages = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!files.length) return;
+    setUploading(true);
+    let uploaded = 0;
+    try {
+      const firstOrdinal = Math.max(0, ...(latestWorkbench.current?.inputImages ?? []).map((image) => image.ordinal)) + 1;
+      for (const file of files) {
+        await suiteApi.upload(suiteId, file, firstOrdinal + uploaded);
+        uploaded += 1;
+      }
+      notify(`已上传 ${uploaded} 张商品图`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "商品图上传失败");
+    } finally {
+      if (uploaded) await reload().catch(() => notify("商品图已上传，画布刷新失败"));
+      setUploading(false);
+    }
   };
 
   const savePrompt = async () => {
@@ -1643,7 +1701,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
     if (!workbench) return;
     const tasks = workbench.tasks.filter((task) => {
       if (task.status === "archived") return false;
-      if (task.originKind === "reverse_import" && !task.sourceLibraryReferenceId) return false;
+      if (!hasTaskReference(task)) return false;
       if (onlyUnfinished) return task.status === "pending" || task.status === "failed";
       return true;
     });
@@ -1713,7 +1771,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
   const activeTasks = workbench?.tasks.filter((task) => task.status !== "archived") ?? [];
   const mainTaskCount = activeTasks.filter((task) => task.imageType === "main").length;
   const detailTaskCount = activeTasks.filter((task) => task.imageType === "detail").length;
-  const unfinishedTasks = activeTasks.filter((task) => (task.status === "pending" || task.status === "failed") && (task.originKind !== "reverse_import" || task.sourceLibraryReferenceId));
+  const unfinishedTasks = activeTasks.filter((task) => (task.status === "pending" || task.status === "failed") && hasTaskReference(task));
   const failedTaskCount = activeTasks.filter((task) => task.status === "failed").length;
   const editChildCount = workbench?.imageEditChildren?.length ?? 0;
   const isGenerating = activeTasks.some((task) => task.status === "generating") || Boolean(workbench?.imageEditChildren?.some((child) => String(child.task.status) === "generating"));
@@ -1726,13 +1784,16 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
 
   if (!workbench) {
     return (
-      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "创建", to: "/suites/new" }, { label: "套图工作台" }]} statusText="正在恢复套图工作台…" statusTone="running">
-        <div className="flow-loading">正在恢复套图工作台…</div>
+      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "生图画布", to: "/create/canvas" }]} statusText={toast || "正在加载画布…"} statusTone={toast ? "error" : "running"}>
+        <div className="flow-loading">{toast || "正在加载画布…"}</div>
       </AppShell>
     );
   }
 
   const currentVersion = selectedTask?.versions.find((version) => version.isCurrent) ?? selectedTask?.versions[0];
+  const isFreeCanvas = workbench.suite.origin === "canvas";
+  const returnPath = isFreeCanvas ? "/create/canvas" : `/create/suite/${suiteId}`;
+  const missingReference = Boolean(selectedTask && !selectedIsImageEditChild && !hasTaskReference(selectedTask));
   const appliesStyleOverride = Boolean(styleOverride && selectedTask && !selectedIsImageEditChild && selectedTask.originKind !== "reverse_import");
   const effectiveInspectorPrompt = selectedTask
     ? (selectedIsImageEditChild
@@ -1746,7 +1807,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
       activeNav="create"
       navigate={navigate}
       fullHeight
-      crumbs={[{ label: "创建", to: "/suites/new" }, { label: workbench.suite.name, to: `/suites/${suiteId}` }, { label: mode === "compose" ? "创作板" : "成品展示板" }]}
+      crumbs={[{ label: isFreeCanvas ? "生图画布" : "商品套图", to: returnPath }, { label: workbench.suite.name }, { label: mode === "compose" ? "创作板" : "成品展示板" }]}
       statusText={isGenerating ? "模型生成中…" : "已保存"}
       statusTone={isGenerating ? "running" : "pass"}
       centerSlot={
@@ -1756,8 +1817,8 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
         </div>
       }
       rightSlot={
-        <button type="button" className="pa-topbar-btn" onClick={() => navigate(`/suites/${suiteId}`)}>
-          返回规划
+        <button type="button" className="pa-topbar-btn" onClick={() => navigate(returnPath)}>
+          {isFreeCanvas ? "返回画布列表" : "返回套图"}
         </button>
       }
     >
@@ -1780,13 +1841,15 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                   </span>
                 </div>
                 <div className="wb-canvas-actions">
+                  <input ref={uploadInput} type="file" aria-label="上传商品图" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={(event) => void uploadProductImages(event)} />
+                  <button type="button" className="wb-upload-product" disabled={uploading} onClick={() => uploadInput.current?.click()}><Icon name="image" />{uploading ? "上传中…" : "上传商品图"}</button>
                   <button type="button" onClick={() => setCustomTaskOpen(true)}>+ 新建任务卡</button>
                   {unfinishedTasks.length > 0 ? (
                     <button type="button" className="wb-primary-action" disabled={isGenerating} onClick={() => generateAll(true).catch((error) => notify(error instanceof Error ? error.message : "批量生成提交失败"))}>
                       {isGenerating ? "生成中…" : `生成待完成 (${unfinishedTasks.length})`}
                     </button>
                   ) : (
-                    <button type="button" className="wb-primary-action" disabled={isGenerating} onClick={() => generateAll(false).catch((error) => notify(error instanceof Error ? error.message : "批量生成提交失败"))}>
+                    <button type="button" className="wb-primary-action" disabled={isGenerating || !activeTasks.some(hasTaskReference)} onClick={() => generateAll(false).catch((error) => notify(error instanceof Error ? error.message : "批量生成提交失败"))}>
                       {isGenerating ? "生成中…" : "重新生成全部"}
                     </button>
                   )}
@@ -1875,7 +1938,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
               </div>
               <div className="wb-mode-explainer">
                 <span>当前模式</span>
-                <strong>{selectedTask?.originKind === "reverse_import" ? "爆品图反推任务组" : "套图模式"}</strong>
+                <strong>{isFreeCanvas ? "自由画布" : "套图模式"}</strong>
                 <p>同一画布中统一管理参考图、白底图、任务提示词、编辑血缘子卡和版本快照。</p>
               </div>
               <div className="wb-reference-strip">
@@ -1905,7 +1968,18 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                       <textarea value={promptDraft} onChange={(event) => setPromptDraft(event.target.value)} />
                     </label>
                   )}
-                  <WhiteResourcePicker task={selectedTask} onBound={reload} onNotify={notify} />
+                  {!selectedIsImageEditChild && (
+                    <>
+                      <label className="wb-inspector-field">
+                        <span>商品参考图</span>
+                        <select value={selectedTask.sourceInputImageId ?? ""} disabled={!workbench.inputImages.length || savingTaskInput || selectedTask.status === "generating"} onChange={(event) => saveTaskInput({ sourceInputImageId: event.target.value }, "已绑定商品参考图").catch(() => notify("商品图绑定失败"))}>
+                          <option value="" disabled>{selectedTask.sourceLibraryReferenceId ? "已绑定图片库参考图" : "未绑定商品图"}</option>
+                          {workbench.inputImages.map((image) => <option key={image.id} value={image.id}>{image.currentBaseVersionId ? "白底图" : "原图"} {image.ordinal} · {image.originalFilename}</option>)}
+                        </select>
+                      </label>
+                      <WhiteResourcePicker key={selectedTask.id} task={selectedTask} onBound={reload} onNotify={notify} />
+                    </>
+                  )}
                   {selectedTask.originKind === "reverse_import" && (
                     <label className="wb-inspector-field wb-checkbox-field">
                       <span>爆品图参考</span>
@@ -1915,8 +1989,8 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                   )}
                   {!selectedIsImageEditChild && (
                     <>
-                      <label className="wb-inspector-field"><span>比例</span><select value={ratioFor(selectedTask)} onChange={(event) => updateTaskParams({ ratio: event.target.value }).catch(() => notify("比例保存失败"))}><option>1:1</option><option>3:4</option><option>4:3</option><option>9:16</option><option>16:9</option></select></label>
-                      <label className="wb-inspector-field"><span>尺寸</span><select value={sizeFor(selectedTask)} onChange={(event) => updateTaskParams({ size: event.target.value }).catch(() => notify("尺寸保存失败"))}><option>1K</option><option>2K</option><option>4K</option></select></label>
+                      <label className="wb-inspector-field"><span>比例</span><select value={ratioFor(selectedTask)} disabled={savingTaskInput} onChange={(event) => updateTaskParams({ ratio: event.target.value }).catch(() => notify("比例保存失败"))}>{parameterOptions(imageOptions.aspectRatios, ratioFor(selectedTask))}</select></label>
+                      <label className="wb-inspector-field"><span>分辨率</span><select value={sizeFor(selectedTask)} disabled={savingTaskInput} onChange={(event) => updateTaskParams({ size: event.target.value }).catch(() => notify("分辨率保存失败"))}>{parameterOptions(imageOptions.sizes, sizeFor(selectedTask))}</select></label>
                       <label className="wb-inspector-field"><span>清晰度</span><select value={qualityFor(selectedTask)} onChange={(event) => updateTaskParams({ quality: event.target.value }).catch(() => notify("清晰度保存失败"))}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
                       <div className="wb-batch-sync-row">
                         <button type="button" onClick={() => batchSyncParams(selectedTask.imageType).catch(() => notify("批量同步失败"))}>
@@ -1925,9 +1999,10 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                       </div>
                     </>
                   )}
+                  {missingReference && <p className="wb-inspector-field">{missingReferenceHint}</p>}
                   <div className="wb-inspector-actions">
                     {!selectedIsImageEditChild && <button type="button" className="wb-primary-action" onClick={() => savePrompt().catch(() => notify("提示词保存失败"))}>保存提示词</button>}
-                    <button type="button" className="wb-primary-action" disabled={selectedTask.originKind === "reverse_import" && !selectedTask.sourceLibraryReferenceId} onClick={() => generateOne(selectedTask, promptDraft).catch((error) => notify(error instanceof Error ? error.message : "生成提交失败"))}>
+                    <button type="button" className="wb-primary-action" disabled={missingReference || savingTaskInput || selectedTask.status === "generating"} title={missingReference ? missingReferenceHint : undefined} onClick={() => generateOne(selectedTask, promptDraft).catch((error) => notify(error instanceof Error ? error.message : "生成提交失败"))}>
                       {selectedIsImageEditChild ? "再次生成" : "创作"}
                     </button>
                     <button type="button" onClick={() => copyPrompt({ ...selectedTask, promptDraft }).catch(() => notify("复制失败"))}><Icon name="copy" />复制提示词</button>
@@ -1961,7 +2036,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
             </header>
             <div className="wb-style-drawer-body">
               <div className="wb-style-origin">
-                <strong>原计划冻结全局风格（只读）</strong>
+                <strong>{workbench.planSnapshot ? "原计划冻结全局风格（只读）" : "自由风格"}</strong>
                 <p>{planStyleGuide}</p>
               </div>
               <label className="wb-style-field">
@@ -1979,7 +2054,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
             <footer>
               {styleOverride && (
                 <button type="button" className="wb-style-reset" disabled={savingStyle} onClick={() => void saveStyleOverride(null)}>
-                  恢复原计划风格
+                  {workbench.planSnapshot ? "恢复原计划风格" : "清除画布风格"}
                 </button>
               )}
               <button type="button" disabled={savingStyle} onClick={() => setStyleDrawerOpen(false)}>取消</button>
@@ -2005,6 +2080,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
       {customTaskOpen && (
         <CustomTaskModal
           inputImages={workbench.inputImages}
+          imageOptions={imageOptions}
           onClose={() => setCustomTaskOpen(false)}
           onCreate={createCustomTask}
         />

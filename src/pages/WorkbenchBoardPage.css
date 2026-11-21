@@ -496,3 +496,9 @@
   opacity: 0.45;
   cursor: not-allowed;
 }
+.wb-canvas-actions .wb-upload-product {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
