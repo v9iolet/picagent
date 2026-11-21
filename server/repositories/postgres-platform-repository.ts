@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import type { PlatformProfile, PlatformRepository } from "../types.js";
 
-const columns = `code, name, market_scope AS "marketScope", main_image_background AS "mainImageBackground", main_image_strategy AS "mainImageStrategy", gallery_strategy AS "galleryStrategy", text_strategy AS "textStrategy", model_strategy AS "modelStrategy", source_note AS "sourceNote", sort_order AS "sortOrder"`;
+const columns = `code, name, to_jsonb(platform_profiles)->'listing_copy_rules' AS "listingCopyRules", market_scope AS "marketScope", main_image_background AS "mainImageBackground", main_image_strategy AS "mainImageStrategy", gallery_strategy AS "galleryStrategy", text_strategy AS "textStrategy", model_strategy AS "modelStrategy", source_note AS "sourceNote", sort_order AS "sortOrder"`;
 
 export class PostgresPlatformRepository implements PlatformRepository {
   constructor(private readonly pool: Pool) {}

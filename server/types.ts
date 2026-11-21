@@ -73,6 +73,7 @@ export interface PromptRepository {
 }
 
 export interface PlatformProfile {
+  listingCopyRules?: import("./listing-copy.js").ListingRules;
   code: string;
   name: string;
   marketScope: "overseas" | "domestic";
@@ -181,7 +182,7 @@ export interface RagClient {
 }
 export interface PlanLlmInput {
   requestId?: string; templateVersionId: string; templateBody: string; userPromptTemplate?: string; dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>;
-  chunks: RagChunk[]; inputImageIds: string[]; baseVersionIds: string[]; visionImages?: PlanVisionImage[]; platformProfile?: PlatformProfile; flow?: "plan" | "category-prompt";
+  chunks: RagChunk[]; inputImageIds: string[]; baseVersionIds: string[]; visionImages?: PlanVisionImage[]; platformProfile?: PlatformProfile; flow?: "plan" | "category-prompt" | "listing-copy";
 }
 export interface CategoryPromptLlmInput extends PlanLlmInput {
   categoryCode: string;

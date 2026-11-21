@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 
-export type ModelArchiveType = "multimodal-plan" | "multimodal-category-prompt" | "image-generation";
+export type ModelArchiveType = "multimodal-listing-copy" | "multimodal-plan" | "multimodal-category-prompt" | "image-generation";
 
 export interface ModelArchiveSession {
   directory: string;
