@@ -1361,7 +1361,6 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       const [images, snapshot] = await Promise.all([deps.repository.getInputImages(startCheckMatch[1]), deps.planRepository.getLatestSnapshot(startCheckMatch[1])]);
       if (!images.length) return fail("INVALID_INPUT_IMAGE");
-      if (images.some((image) => !image.currentBaseVersionId)) return fail("BASE_IMAGE_REQUIRED");
       if (!snapshot) return fail("INVALID_PLAN_SNAPSHOT");
       if (snapshot.phase === "structure_plan" && snapshot.confirmationStatus === "confirmed") {
         const items = materializeCategoryPlanItems(snapshot, await listCategoryRequestsForSnapshot(snapshot));
