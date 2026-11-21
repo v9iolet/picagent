@@ -2,11 +2,13 @@ import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import type { PromptStage } from "./prompt-library.js";
 
 export type SuiteStatus = "draft" | "in_progress";
+export type SuiteOrigin = "suite_studio" | "canvas";
 
 export interface Suite {
   id: string;
   name: string;
   status: SuiteStatus;
+  origin?: SuiteOrigin;
   styleOverride?: string | null;
   styleOverrideUpdatedAt?: string | null;
   createdAt: string;
@@ -38,7 +40,7 @@ export interface ResponseEnvelope<T> { data: T; requestId: string }
 export interface ErrorEnvelope { error: { code: string; message: string }; requestId: string }
 
 export interface SuiteRepository {
-  createSuite(name: string, idempotencyKey?: string): Promise<Suite>;
+  createSuite(name: string, idempotencyKey?: string, origin?: SuiteOrigin): Promise<Suite>;
   listSuites(): Promise<Suite[]>;
   getSuite(id: string): Promise<Suite | null>;
   renameSuite?(suiteId: string, name: string): Promise<Suite | null>;
@@ -249,9 +251,39 @@ export interface PlanSnapshot {
   requestSummary: Record<string, unknown>; rawOutputSummary: Record<string, unknown>; schemaVersion: string; items: PlanItem[]; createdAt: string;
   phase?: "legacy_plan" | "structure_plan";
   confirmationStatus?: "draft" | "confirmed";
+  confirmationMode?: "auto" | "human";
   confirmedAt?: string | null;
   structure?: PlanStructure;
   categoryOutputs?: Record<string, { status: "succeeded" | "failed" | "running"; requestedCount: number; items: Array<Record<string, unknown>>; errorCode?: string | null; errorMessage?: string | null }>;
+}
+
+export type SuitePipelineStatus = "running" | "waiting_base_refine_decision" | "waiting_human_input" | "completed" | "partial_failed" | "failed";
+export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "done";
+export interface SuitePipelineRun {
+  id: string;
+  suiteId: string;
+  idempotencyKey: string;
+  status: SuitePipelineStatus;
+  currentPhase: SuitePipelinePhase;
+  resumeCount?: number;
+  lastResumeKey?: string | null;
+  resumeKeys?: string[];
+  structureSnapshotId?: string | null;
+  taskIds?: string[];
+  config: Record<string, unknown>;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+export interface PipelineRepository {
+  createRun(run: SuitePipelineRun): Promise<{ run: SuitePipelineRun; duplicate: boolean }>;
+  getRun(id: string): Promise<SuitePipelineRun | null>;
+  getLatestRun(suiteId: string): Promise<SuitePipelineRun | null>;
+  listRuns(suiteId: string): Promise<SuitePipelineRun[]>;
+  resumeRun(previous: SuitePipelineRun, key: string, phase: SuitePipelinePhase, config: SuitePipelineRun["config"]): Promise<SuitePipelineRun | null>;
+  updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>): Promise<SuitePipelineRun | null>;
 }
 export interface PlanAttempt {
   id: string; suiteId: string; idempotencyKey: string; status: PlanAttemptStatus; templateVersionId: string;

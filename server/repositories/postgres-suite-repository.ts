@@ -6,7 +6,7 @@ import type {
   GenerationAttempt,
   InputImage,
   Suite,
-  SuiteRepository,
+  SuiteRepository, SuiteOrigin,
 } from "../types.js";
 
 const inputImageColumns = `id, suite_id AS "suiteId", ordinal, original_object_key AS "originalObjectKey",
@@ -32,7 +32,7 @@ function withPreviewUrls(image: Omit<InputImage, "originalPreviewUrl" | "thumbna
 export class PostgresSuiteRepository implements SuiteRepository {
   constructor(private readonly pool: Pool) {}
 
-  async createSuite(name: string, idempotencyKey?: string) {
+  async createSuite(name: string, idempotencyKey?: string, origin: SuiteOrigin = "suite_studio") {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -44,7 +44,7 @@ export class PostgresSuiteRepository implements SuiteRepository {
           return suite!;
         }
       }
-      const result = await client.query<Suite>("INSERT INTO suite_workbench.suites (id, name, status, created_at, updated_at) VALUES (gen_random_uuid(), $1, 'draft', now(), now()) RETURNING id, name, status, created_at AS \"createdAt\", updated_at AS \"updatedAt\"", [name]);
+      const result = await client.query<Suite>("INSERT INTO suite_workbench.suites (id, name, status, origin, created_at, updated_at) VALUES (gen_random_uuid(), $1, 'draft', $2, now(), now()) RETURNING id, name, status, origin, created_at AS \"createdAt\", updated_at AS \"updatedAt\"", [name, origin]);
       const suite = result.rows[0];
       if (idempotencyKey) await client.query("INSERT INTO suite_workbench.idempotency_keys (scope, key, resource_id) VALUES ($1, $2, $3)", ["suite.create", idempotencyKey, suite.id]);
       await client.query("COMMIT");
@@ -58,18 +58,18 @@ export class PostgresSuiteRepository implements SuiteRepository {
   }
 
   async listSuites() {
-    const result = await this.pool.query<Suite>("SELECT id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 30");
+    const result = await this.pool.query<Suite>("SELECT id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE deleted_at IS NULL ORDER BY created_at DESC");
     return result.rows;
   }
 
   async getSuite(id: string, client: Pool | PoolClient = this.pool) {
-    const result = await client.query<Suite>("SELECT id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE id = $1 AND deleted_at IS NULL", [id]);
+    const result = await client.query<Suite>("SELECT id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE id = $1 AND deleted_at IS NULL", [id]);
     return result.rows[0] ?? null;
   }
 
   async renameSuite(suiteId: string, name: string) {
     const result = await this.pool.query<Suite>(
-      "UPDATE suite_workbench.suites SET name = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
+      "UPDATE suite_workbench.suites SET name = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
       [suiteId, name.trim()],
     );
     return result.rows[0] ?? null;
@@ -86,7 +86,7 @@ export class PostgresSuiteRepository implements SuiteRepository {
   async updateSuiteStyleOverride(suiteId: string, styleOverride: string | null) {
     const cleaned = styleOverride?.trim() ? styleOverride.trim() : null;
     const result = await this.pool.query<Suite>(
-      "UPDATE suite_workbench.suites SET style_override = $2, style_override_updated_at = CASE WHEN $2 IS NULL THEN NULL ELSE now() END, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
+      "UPDATE suite_workbench.suites SET style_override = $2, style_override_updated_at = CASE WHEN $2 IS NULL THEN NULL ELSE now() END, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
       [suiteId, cleaned],
     );
     return result.rows[0] ?? null;

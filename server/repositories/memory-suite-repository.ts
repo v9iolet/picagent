@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { BaseGenerationAttemptInput, BaseGenerationSuccessInput, BaseImageVersion, GenerationAttempt, InputImage, Suite, SuiteRepository } from "../types.js";
+import type { BaseGenerationAttemptInput, BaseGenerationSuccessInput, BaseImageVersion, GenerationAttempt, InputImage, Suite, SuiteOrigin, SuiteRepository } from "../types.js";
 
 export class MemorySuiteRepository implements SuiteRepository {
   private suites = new Map<string, Suite>();
@@ -10,10 +10,10 @@ export class MemorySuiteRepository implements SuiteRepository {
   private generationIdempotency = new Map<string, string>();
   private versions = new Map<string, BaseImageVersion>();
 
-  async createSuite(name: string, idempotencyKey?: string) {
+  async createSuite(name: string, idempotencyKey?: string, origin: SuiteOrigin = "suite_studio") {
     if (idempotencyKey && this.suiteIdempotency.has(idempotencyKey)) return this.suiteIdempotency.get(idempotencyKey)!;
     const now = new Date().toISOString();
-    const suite = { id: randomUUID(), name, status: "draft" as const, createdAt: now, updatedAt: now };
+    const suite = { id: randomUUID(), name, status: "draft" as const, origin, createdAt: now, updatedAt: now };
     this.suites.set(suite.id, suite);
     if (idempotencyKey) this.suiteIdempotency.set(idempotencyKey, suite);
     return suite;

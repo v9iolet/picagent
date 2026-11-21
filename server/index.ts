@@ -20,6 +20,7 @@ import { PostgresTaskRepository } from "./repositories/postgres-task-repository.
 import { PostgresPromptRepository } from "./repositories/postgres-prompt-repository.js";
 import { PostgresLibraryRepository } from "./repositories/postgres-library-repository.js";
 import { PostgresReverseRepository } from "./repositories/postgres-reverse-repository.js";
+import { PostgresPipelineRepository } from "./repositories/postgres-pipeline-repository.js";
 import { MinioStorage } from "./storage/minio-storage.js";
 import { ImageEditorService, type ImageEditProvider, type ImageSource } from "./image-editor.js";
 import { createImageEditorApi } from "./image-editor-api.js";
@@ -146,6 +147,7 @@ const app = createTicket02App({
   planRepository: new PostgresPlanRepository(pool),
   categoryPromptRepository: new PostgresCategoryPromptRepository(pool),
   taskRepository,
+  pipelineRepository: new PostgresPipelineRepository(pool),
   imageEditorApi,
   libraryRepository: new PostgresLibraryRepository(pool),
   reverseRepository: new PostgresReverseRepository(pool),
