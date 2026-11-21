@@ -32,6 +32,7 @@ export interface ApiPromptTemplate {
 export interface ApiPromptTemplateCopy extends ApiPromptTemplate { body: string; userPromptTemplate: string; outputSchema?: Record<string, unknown>; status?: "draft" | "published" | "retired" }
 export interface ApiPlatformProfile {
   code: string; name: string; marketScope: "overseas" | "domestic";
+  mainImageBackground: "pure_white_required" | "white_preferred" | "flexible";
   mainImageStrategy: string; galleryStrategy: string; textStrategy: string; modelStrategy: string;
   sourceNote: string; sortOrder: number;
 }

@@ -20,6 +20,28 @@ async function fixture() {
   return { api, suite, snapshot, plans, providerInputs, bytes };
 }
 
+test("start-creation-check accepts original images without a white-background refinement", async () => {
+  const { api, suite, snapshot } = await fixture();
+  const checked = await api.request("POST", `/api/suites/${suite.id}/start-creation-check`);
+  assert.equal(checked.status, 200);
+  assert.deepEqual(checked.body.data, { ready: true, planSnapshotId: snapshot.id, itemCount: 2 });
+});
+
+test("start-creation-check still requires input images and a usable plan", async () => {
+  const repository = new MemorySuiteRepository();
+  const plans = new MemoryPlanRepository();
+  const api = createTicket02App({ repository, storage: new MemoryStorage(), planRepository: plans });
+  const suite = await repository.createSuite("未精修原图");
+  const path = `/api/suites/${suite.id}/start-creation-check`;
+  const empty = await api.request("POST", path);
+  assert.equal(empty.status, 400);
+  assert.equal(empty.body.error.code, "INVALID_INPUT_IMAGE");
+  await repository.createInputImage({ id: randomUUID(), suiteId: suite.id, ordinal: 1, originalObjectKey: "input/original.png", thumbnailObjectKey: "input/original.png", sha256: "a".repeat(64), width: 64, height: 64, mimeType: "image/png", originalFilename: "source.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
+  const missingPlan = await api.request("POST", path);
+  assert.equal(missingPlan.status, 400);
+  assert.equal(missingPlan.body.error.code, "INVALID_PLAN_SNAPSHOT");
+});
+
 test("creates real tasks from latest plan and is idempotent", async () => {
   const { api, suite, snapshot } = await fixture();
   const first = await api.request("POST", `/api/suites/${suite.id}/tasks`, { headers: { "idempotency-key": "create-1" }, body: { planSnapshotId: snapshot.id } });

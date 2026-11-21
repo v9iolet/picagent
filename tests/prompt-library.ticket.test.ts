@@ -135,7 +135,7 @@ test("platform API exposes maintained dropdown options without prompt bodies", a
     storage: new MemoryStorage(),
     platformRepository: {
       async listEnabled() {
-        return [{ code: "amazon", name: "Amazon", marketScope: "overseas", mainImageStrategy: "白底", galleryStrategy: "细节", textStrategy: "无首图文字", modelStrategy: "默认无脸", sourceNote: "official", sortOrder: 10 }];
+        return [{ code: "amazon", name: "Amazon", marketScope: "overseas", mainImageBackground: "pure_white_required", mainImageStrategy: "白底", galleryStrategy: "细节", textStrategy: "无首图文字", modelStrategy: "默认无脸", sourceNote: "official", sortOrder: 10 }];
       },
       async find(value: string) { return value === "amazon" ? (await this.listEnabled())[0] : null; },
     },
@@ -144,6 +144,7 @@ test("platform API exposes maintained dropdown options without prompt bodies", a
   assert.equal(response.status, 200);
   assert.deepEqual(response.body.data.map((platform: { code: string }) => platform.code), ["amazon"]);
   assert.equal(response.body.data[0].mainImageStrategy, "白底");
+  assert.equal(response.body.data[0].mainImageBackground, "pure_white_required");
 });
 
 test("base generation loads a published PG template and freezes its version and dynamic input", async () => {

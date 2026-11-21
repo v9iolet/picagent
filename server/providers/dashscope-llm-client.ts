@@ -7,6 +7,12 @@ import { failObservation, finishObservation, logObservation, recordModelFailure,
 
 type VisionContent = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 
+const mainImageBackgroundRequirements = {
+  pure_white_required: "主图必须使用纯白背景（RGB 255,255,255），不添加文字、Logo、水印或装饰。",
+  white_preferred: "主图优先白底或干净浅色背景。",
+  flexible: "主图按平台策略选择背景，可用场景背景。",
+};
+
 export function buildPlanUserContent(input: PlanLlmInput): VisionContent[] {
   const user = {
     dynamicInput: input.dynamicInput,
@@ -26,6 +32,7 @@ export function buildPlanUserContent(input: PlanLlmInput): VisionContent[] {
   const platformRules = input.platformProfile ? [
     "平台适配规则（来自平台维护表，优先于泛化平台假设）：",
     `- 平台：${input.platformProfile.name}`,
+    `- 主图背景要求：${input.platformProfile.mainImageBackground}（${mainImageBackgroundRequirements[input.platformProfile.mainImageBackground]}）`,
     `- 主图策略：${input.platformProfile.mainImageStrategy}`,
     `- 主图组策略：${input.platformProfile.galleryStrategy}`,
     `- 文字策略：${input.platformProfile.textStrategy}`,
