@@ -74,6 +74,7 @@ export interface PlatformProfile {
   code: string;
   name: string;
   marketScope: "overseas" | "domestic";
+  mainImageBackground: "pure_white_required" | "white_preferred" | "flexible";
   mainImageStrategy: string;
   galleryStrategy: string;
   textStrategy: string;
