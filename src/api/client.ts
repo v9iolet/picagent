@@ -112,6 +112,8 @@ export const modelSettingsApi = {
 
 export const suiteApi = {
   create(name: string) { return request<{ id: string; name: string }>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name }) }); },
+  rename(id: string, name: string) { return request<ApiSuite>(`/api/suites/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name }) }); },
+  delete(id: string) { return request<{ id: string }>(`/api/suites/${encodeURIComponent(id)}`, { method: "DELETE" }); },
   list() { return request<ApiSuite[]>("/api/suites"); },
   get(id: string) { return request<ApiSuite>(`/api/suites/${encodeURIComponent(id)}`); },
   removeInputImage(suiteId: string, inputImageId: string) {
@@ -153,7 +155,7 @@ export const suiteApi = {
   getPlan(suiteId: string) { return request<ApiPlanState>(`/api/suites/${encodeURIComponent(suiteId)}/plan`); },
   getPlanAttempt(attemptId: string) { return request<ApiPlanAttempt>(`/api/plan-attempts/${encodeURIComponent(attemptId)}`); },
   getStructurePlan(suiteId: string) { return request<ApiPlanState>(`/api/suites/${encodeURIComponent(suiteId)}/structure-plan`); },
-  generateStructurePlan(suiteId: string, templateVersionId: string, dynamicInput: Record<string, unknown>, selectedChunks: ApiRagChunk[]) { return request<{ attemptId: string; status: string }>(`/api/suites/${encodeURIComponent(suiteId)}/structure-plan`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ templateVersionId, dynamicInput, humanInput: {}, selectedChunks: selectedChunks.map(({ id, version }) => ({ id, version })) }) }); },
+  generateStructurePlan(suiteId: string, templateVersionId: string, dynamicInput: Record<string, unknown>, selectedChunks: ApiRagChunk[] = []) { return request<{ attemptId: string; status: string }>(`/api/suites/${encodeURIComponent(suiteId)}/structure-plan`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ templateVersionId, dynamicInput, humanInput: {}, selectedChunks: selectedChunks.map(({ id, version }) => ({ id, version })) }) }); },
   confirmStructurePlan(suiteId: string, structure: ApiStructurePlan) { return request<ApiPlanSnapshot>(`/api/suites/${encodeURIComponent(suiteId)}/structure-plan/confirm`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ structure }) }); },
   getCategoryPrompts(suiteId: string) { return request<ApiCategoryPromptState>(`/api/suites/${encodeURIComponent(suiteId)}/category-prompts`); },
   generateCategoryPrompts(suiteId: string, planSnapshotId: string, templateVersionId?: string) { return request<{ planSnapshotId: string; status: string }>(`/api/suites/${encodeURIComponent(suiteId)}/category-prompts`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ planSnapshotId, templateVersionId }) }); },
@@ -163,7 +165,24 @@ export const suiteApi = {
   startCreationCheck(suiteId: string) { return request<{ ready: boolean; planSnapshotId: string; itemCount: number }>(`/api/suites/${encodeURIComponent(suiteId)}/start-creation-check`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() } }); },
   getWorkbench(suiteId: string) { return request<ApiWorkbench>(`/api/suites/${encodeURIComponent(suiteId)}/workbench`); },
   updateStyleOverride(suiteId: string, styleOverride: string | null) { return request<{ suite: ApiSuite; planStyleGuide: string; styleOverride: string | null; effectiveStyleGuide: string }>(`/api/suites/${encodeURIComponent(suiteId)}/style-override`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ styleOverride }) }); },
-  deliveryExportUrl(suiteId: string) { return `/api/suites/${encodeURIComponent(suiteId)}/delivery/export`; },
+  deliveryExportUrl(suiteId: string, options?: { preset?: string; format?: string; quality?: number; stitchDetail?: boolean }) {
+    const search = new URLSearchParams();
+    if (options?.preset && options.preset !== "original") search.set("preset", options.preset);
+    if (options?.format && options.format !== "original") search.set("format", options.format);
+    if (options?.quality !== undefined) search.set("quality", String(options.quality));
+    if (options?.stitchDetail) search.set("stitchDetail", "true");
+    const qs = search.toString();
+    return `/api/suites/${encodeURIComponent(suiteId)}/delivery/export${qs ? `?${qs}` : ""}`;
+  },
+  createCustomTask(suiteId: string, body: { imageType: "main" | "detail"; title: string; purpose?: string; promptDraft: string; sourceInputImageId?: string | null; generationParams?: Record<string, unknown> }) {
+    return request<ApiSuiteTask>(`/api/suites/${encodeURIComponent(suiteId)}/tasks/custom`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) });
+  },
+  batchUpdateTaskParams(suiteId: string, body: { imageType?: "main" | "detail" | "all"; taskIds?: string[]; generationParams: Record<string, unknown> }) {
+    return request<{ updatedCount: number; tasks: ApiSuiteTask[] }>(`/api/suites/${encodeURIComponent(suiteId)}/tasks/batch-params`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) });
+  },
+  translateImageTexts(body: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }) {
+    return request<{ targetLanguage: string; translations: Array<{ id: string; originalText: string; translatedText: string }>; model: string; channelName: string | null }>("/api/image-editor/translate-text", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  },
   createTasks(suiteId: string, planSnapshotId?: string) { return request<{ planSnapshotId: string; tasks: ApiSuiteTask[]; createdTaskIds: string[] }>(`/api/suites/${encodeURIComponent(suiteId)}/tasks`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(planSnapshotId ? { planSnapshotId } : {}) }); },
   updateTask(taskId: string, body: Partial<Pick<ApiSuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams">>) { return request<ApiSuiteTask>(`/api/suite-tasks/${encodeURIComponent(taskId)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   generateBatch(suiteId: string, taskIds?: string[]) { return request<{ batchId: string; status: string; requestedCount?: number }>(`/api/suites/${encodeURIComponent(suiteId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(taskIds ? { taskIds } : {}) }); },

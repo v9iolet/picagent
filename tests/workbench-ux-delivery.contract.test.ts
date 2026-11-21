@@ -301,3 +301,157 @@ test("seedDemoShowcase creates a complete end-to-end showcase suite and is idemp
   assert.equal(manifest.summary.mainCount, 2);
   assert.equal(manifest.summary.detailCount, 2);
 });
+
+test("multi-platform preset ZIP export resizes images, converts format, and stitches detail long image", async () => {
+  const repository = new MemorySuiteRepository();
+  const planRepository = new MemoryPlanRepository();
+  const taskRepository = new MemoryTaskRepository();
+  const reverseRepository = new MemoryReverseRepository();
+  const imageEditorRepository = new MemoryImageEditorRepository();
+  const storage = new MemoryStorage();
+
+  const seeded = await seedDemoShowcase({ repository, planRepository, taskRepository, reverseRepository, imageEditorRepository, storage });
+  const app = createTicket02App({
+    repository,
+    planRepository,
+    taskRepository,
+    reverseRepository,
+    storage,
+    imageEditorApi: createImageEditorApi(new ImageEditorService(imageEditorRepository, async () => null, storage, async () => null)),
+  });
+
+  const exported = await app.request("GET", `/api/suites/${seeded.suiteId}/delivery/export?preset=taobao&format=jpeg&quality=85&stitchDetail=true`);
+  assert.equal(exported.status, 200);
+  const entries = readZipEntries(exported.raw!);
+  assert.ok(entries.has("manifest.json"));
+  assert.ok(entries.has("detail/00_detail_long_stitched.jpg"));
+
+  const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8")) as {
+    exportOptions: { preset: string; format: string; quality: number; stitchDetail: boolean; stitchedDetailPath: string | null };
+    summary: { stitchedDetailIncluded: boolean; mainCount: number; detailCount: number };
+    items: Array<{ exportPath: string; imageType: string; width: number; height: number; mimeType: string }>;
+  };
+  assert.equal(manifest.exportOptions.preset, "taobao");
+  assert.equal(manifest.exportOptions.format, "jpeg");
+  assert.equal(manifest.exportOptions.quality, 85);
+  assert.equal(manifest.exportOptions.stitchDetail, true);
+  assert.equal(manifest.summary.stitchedDetailIncluded, true);
+
+  const mainItem = manifest.items.find((item) => item.imageType === "main")!;
+  assert.equal(mainItem.width, 800);
+  assert.equal(mainItem.height, 800);
+  assert.equal(mainItem.mimeType, "image/jpeg");
+  assert.ok(mainItem.exportPath.endsWith(".jpg"));
+
+  const detailItem = manifest.items.find((item) => item.imageType === "detail")!;
+  assert.equal(detailItem.width, 790);
+
+  const stitchedMeta = await sharp(entries.get("detail/00_detail_long_stitched.jpg")!).metadata();
+  assert.equal(stitchedMeta.format, "jpeg");
+  assert.equal(stitchedMeta.width, 790);
+  assert.ok((stitchedMeta.height ?? 0) > detailItem.height);
+});
+
+test("cross-border image text translation, custom canvas tasks, batch param sync, and suite rename work end-to-end", async () => {
+  const repository = new MemorySuiteRepository();
+  const planRepository = new MemoryPlanRepository();
+  const taskRepository = new MemoryTaskRepository();
+  const storage = new MemoryStorage();
+  const samplePng = await tinyPng({ r: 80, g: 130, b: 210 });
+
+  const app = createTicket02App({
+    repository,
+    planRepository,
+    taskRepository,
+    storage,
+    llmClient: {
+      provider: "fake",
+      model: "qwen-vl-max",
+      isFake: true,
+      async generatePlan() { return {}; },
+      async translateTexts({ targetLanguage, items }) {
+        return items.map((item) => ({
+          id: item.id,
+          originalText: item.text,
+          translatedText: `[${targetLanguage}] ${item.text}`,
+        }));
+      },
+    },
+  });
+
+  // 1. Translation endpoint validates input & translates OCR blocks
+  const emptyTr = await app.request("POST", "/api/image-editor/translate-text", { body: { targetLanguage: "日语", items: [] } });
+  assert.equal(emptyTr.status, 400);
+
+  const trRes = await app.request("POST", "/api/image-editor/translate-text", {
+    body: {
+      targetLanguage: "日语",
+      items: [
+        { id: "b1", text: "65W 极速快充" },
+        { id: "b2", text: "折叠插脚" },
+      ],
+    },
+  });
+  assert.equal(trRes.status, 200);
+  const trData = (trRes.body as { data: { targetLanguage: string; translations: Array<{ id: string; translatedText: string }> } }).data;
+  assert.equal(trData.targetLanguage, "日语");
+  assert.equal(trData.translations.length, 2);
+  assert.equal(trData.translations[0].translatedText, "[日语] 65W 极速快充");
+
+  // 2. Create suite, rename suite, upload image, add custom task cards idempotently, and batch sync params
+  const created = await app.request("POST", "/api/suites", { body: { name: "旧方案名" } });
+  const suiteId = (created.body as { data: { id: string } }).data.id;
+
+  const renamed = await app.request("PATCH", `/api/suites/${suiteId}`, { body: { name: "65W 氮化镓日本站" } });
+  assert.equal(renamed.status, 200);
+  assert.equal((renamed.body as { data: { name: string } }).data.name, "65W 氮化镓日本站");
+
+  await app.upload(suiteId, { filename: "charger.png", mimeType: "image/png", bytes: samplePng, ordinal: 1 });
+
+  const custom1 = await app.request("POST", `/api/suites/${suiteId}/tasks/custom`, {
+    headers: { "idempotency-key": "custom-1" },
+    body: { imageType: "detail", title: "黑五促销场景", promptDraft: "黑五暖光极简桌面场景", generationParams: { ratio: "3:4", size: "1K", quality: "medium" } },
+  });
+  assert.equal(custom1.status, 201);
+  const custom1Replay = await app.request("POST", `/api/suites/${suiteId}/tasks/custom`, {
+    headers: { "idempotency-key": "custom-1" },
+    body: { imageType: "detail", title: "黑五促销场景", promptDraft: "黑五暖光极简桌面场景" },
+  });
+  assert.equal(custom1Replay.status, 200);
+  assert.equal((custom1Replay.body as { data: { id: string } }).data.id, (custom1.body as { data: { id: string } }).data.id);
+
+  const custom2 = await app.request("POST", `/api/suites/${suiteId}/tasks/custom`, {
+    headers: { "idempotency-key": "custom-2" },
+    body: { imageType: "main", title: "纯白底主图", promptDraft: "纯白背景产品居中" },
+  });
+  assert.equal(custom2.status, 201);
+
+  const batchSync = await app.request("POST", `/api/suites/${suiteId}/tasks/batch-params`, {
+    body: { imageType: "detail", generationParams: { ratio: "9:16", size: "2K", quality: "high" } },
+  });
+  assert.equal(batchSync.status, 200);
+  assert.equal((batchSync.body as { data: { updatedCount: number } }).data.updatedCount, 1);
+
+  const wb = (await app.request("GET", `/api/suites/${suiteId}/workbench`)).body as {
+    data: { tasks: Array<{ imageType: string; generationParams: { ratio?: string; size?: string; quality?: string } }> };
+  };
+  assert.equal(wb.data.tasks.length, 2);
+  const detailTask = wb.data.tasks.find((t) => t.imageType === "detail")!;
+  const mainTask = wb.data.tasks.find((t) => t.imageType === "main")!;
+  assert.equal(detailTask.generationParams.ratio, "9:16");
+  assert.equal(detailTask.generationParams.size, "2K");
+  assert.equal(detailTask.generationParams.quality, "high");
+  assert.notEqual(mainTask.generationParams.ratio, "9:16");
+
+  // 3. Delete suite removes it from list & detail endpoints
+  const deleted = await app.request("DELETE", `/api/suites/${suiteId}`);
+  assert.equal(deleted.status, 200);
+  assert.equal((deleted.body as { data: { id: string } }).data.id, suiteId);
+
+  const listAfterDelete = (await app.request("GET", "/api/suites")).body as { data: Array<{ id: string }> };
+  assert.equal(listAfterDelete.data.some((item) => item.id === suiteId), false);
+  const getAfterDelete = await app.request("GET", `/api/suites/${suiteId}`);
+  assert.equal(getAfterDelete.status, 404);
+  const deleteAgain = await app.request("DELETE", `/api/suites/${suiteId}`);
+  assert.equal(deleteAgain.status, 404);
+});

@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   applyStyleOverrideToPrompt,
   computeLineageHighlight,
+  computeOutpaintPreviewBox,
   computeWorkbenchLanes,
+  evaluateDeliveryCompliance,
   resolveDeliverySlots,
   type DeliveryEditChildLike,
   type DeliveryTaskLike,
@@ -167,4 +169,47 @@ test("computeLineageHighlight traverses both upstream sources and downstream der
   const empty = computeLineageHighlight(null, edges);
   assert.equal(empty.highlightedNodeIds.size, 0);
   assert.equal(empty.highlightedEdgeIds.size, 0);
+});
+
+test("evaluateDeliveryCompliance scores finalized high-res suites and flags resolution or pending gaps", () => {
+  const readyTasks: DeliveryTaskLike[] = [
+    {
+      id: "m1", ordinal: 1, imageType: "main", title: "主图", purpose: "首屏", promptDraft: "p1", status: "generated",
+      versions: [{ id: "vm1", versionNumber: 1, width: 1200, height: 1200, isCurrent: true, isFinal: true, previewUrl: "/m1.png", promptSnapshot: { finalPrompt: "主图完整提示词" } }],
+    },
+    {
+      id: "d1", ordinal: 2, imageType: "detail", title: "详情", purpose: "卖点", promptDraft: "p2", status: "generated",
+      versions: [{ id: "vd1", versionNumber: 1, width: 1000, height: 1400, isCurrent: true, isFinal: true, previewUrl: "/d1.png", promptSnapshot: { finalPrompt: "详情完整提示词" } }],
+    },
+  ];
+  const perfect = evaluateDeliveryCompliance(resolveDeliverySlots(readyTasks), "amazon");
+  assert.equal(perfect.score, 100);
+  assert.ok(perfect.checks.every((check) => check.status === "pass"));
+
+  const lowResTasks: DeliveryTaskLike[] = [
+    {
+      id: "m1", ordinal: 1, imageType: "main", title: "低清主图", purpose: "首屏", promptDraft: "p1", status: "generated",
+      versions: [{ id: "vm1", versionNumber: 1, width: 600, height: 600, isCurrent: true, isFinal: false, previewUrl: "/m1.png", promptSnapshot: { finalPrompt: "提示词" } }],
+    },
+    { id: "d2", ordinal: 2, imageType: "detail", title: "待生成", purpose: "卖点", promptDraft: "p2", status: "pending", versions: [] },
+  ];
+  const warned = evaluateDeliveryCompliance(resolveDeliverySlots(lowResTasks), "amazon");
+  assert.ok(warned.score < 100);
+  assert.equal(warned.checks.find((c) => c.id === "resolution")?.status, "warn");
+  assert.equal(warned.checks.find((c) => c.id === "slots")?.status, "warn");
+});
+
+test("computeOutpaintPreviewBox computes target dimensions and anchor box for aspect ratio expansion", () => {
+  const wide = computeOutpaintPreviewBox(1000, 1000, "right", "16:9");
+  assert.equal(wide.targetHeight, 1000);
+  assert.equal(wide.targetWidth, Math.ceil(1000 * (16 / 9)));
+  assert.equal(wide.anchor, "left");
+  assert.equal(wide.innerX, 0);
+  assert.ok(wide.innerWidth < 1);
+
+  const tall = computeOutpaintPreviewBox(1000, 1000, "all", "9:16");
+  assert.equal(tall.targetWidth, 1000);
+  assert.equal(tall.targetHeight, Math.ceil(1000 / (9 / 16)));
+  assert.equal(tall.anchor, "center");
+  assert.ok(tall.innerY > 0 && tall.innerHeight < 1);
 });

@@ -189,22 +189,26 @@ async function run() {
     await page.waitForSelector(".pa-lobby");
     const lobbyText = await page.locator("body").innerText();
     assert.doesNotMatch(lobbyText, /接口预留|接口已预留/, "Lobby must not contain placeholder modes");
-    assert.equal(await page.locator(".pa-rail-item").count(), 3, "AppShell rail should have exactly 3 real nav items");
+    assert.equal(await page.locator(".pa-rail-item").count(), 4, "AppShell rail should have exactly 4 real nav items");
     assert.ok(await page.locator(".pa-mode-card.is-demo").isVisible(), "Demo shortcut card should appear");
     assert.ok(await page.locator(".pa-project-card img").first().isVisible(), "Recent project card should display cover thumbnail");
 
-    // 2. Four-step wizard (/suites/:suiteId): Stepper, collapsible steps, RAG banner
+    // 2. Four-step wizard (/suites/:suiteId): Stepper, collapsible steps, product brief
+    const ragRequests = [];
+    page.on("request", (request) => { if (new URL(request.url()).pathname === "/api/rag/chunks/search") ragRequests.push(request.url()); });
     await page.goto(`${baseUrl}/suites/${seeded.suiteId}`, { waitUntil: "networkidle" });
     await page.waitForSelector(".pa-wizard-stepper");
     assert.equal(await page.locator(".pa-step").count(), 4, "Wizard should render 4 horizontal steps");
-    assert.ok(await page.locator(".pa-rag-banner").isVisible(), "RAG banner should be prominent in step 2");
+    const brief = page.getByRole("region", { name: "产品简报", exact: true });
+    assert.ok(await brief.getByRole("textbox", { name: /补充商品事实/ }).isVisible(), "Product facts should be directly visible in the brief");
+    assert.deepEqual(ragRequests, [], "Wizard should not search the RAG catalog");
     await page.getByRole("button", { name: "折叠步骤" }).first().click();
     assert.ok(await page.locator(".pa-collapsed-summary").isVisible(), "Completed step 1 should collapse cleanly");
 
     // 3. Compose board (/suites/:suiteId/board): AppShell intact, three-lane layout, style override drawer, before/after compare
     await page.goto(`${baseUrl}/suites/${seeded.suiteId}/board`, { waitUntil: "networkidle" });
     await page.waitForSelector(".wb-style-card");
-    assert.equal(await page.locator(".pa-rail-item").count(), 3, "Board page must share AppShell rail");
+    assert.equal(await page.locator(".pa-rail-item").count(), 4, "Board page must share AppShell rail");
 
     // Tidy layout and click a task node -> must highlight lineage without snapping back
     await page.getByRole("button", { name: "一键整理布局" }).click();
@@ -256,22 +260,25 @@ async function run() {
     // 5. ReversePage: Unified AppShell, dynamic 4-step status, structure summary pills
     await page.goto(`${baseUrl}/reverse/${seeded.reversePlanId}`, { waitUntil: "networkidle" });
     await page.waitForSelector(".reverse-layout");
-    assert.equal(await page.locator(".pa-rail-item").count(), 3, "ReversePage must share AppShell rail");
+    assert.equal(await page.locator(".pa-rail-item").count(), 4, "ReversePage must share AppShell rail");
     assert.ok((await page.locator(".reverse-step.done").count()) >= 3, "Completed reverse steps must be marked done dynamically");
     assert.ok(await page.locator(".reverse-summary-pills").isVisible(), "ReversePage must show summary pills");
 
-    // 6. StyleLibraryPage: Unified AppShell, single click updates inspector without forcing modal, dynamic stage filter + template edit
-    await page.goto(`${baseUrl}/style-library`, { waitUntil: "networkidle" });
+    // 6a. ImageAssetsPage (/assets): Unified AppShell, image-only gallery, single click updates inspector
+    await page.goto(`${baseUrl}/assets`, { waitUntil: "networkidle" });
     await page.waitForSelector(".style-library-workarea");
-    assert.equal(await page.locator(".pa-rail-item").count(), 3, "StyleLibraryPage must share AppShell rail");
-    await page.getByRole("tab", { name: /提示词模板/ }).click();
-    await page.waitForSelector(".style-card");
+    assert.equal(await page.locator(".pa-rail-item").count(), 4, "ImageAssetsPage must share AppShell rail");
+
+    // 6b. PromptTemplatesPage (/templates): Unified AppShell, stage filter, compact template cards + draft lifecycle
+    await page.goto(`${baseUrl}/templates`, { waitUntil: "networkidle" });
+    await page.waitForSelector(".template-card");
+    assert.equal(await page.locator(".pa-rail-item").count(), 4, "PromptTemplatesPage must share AppShell rail");
     const filterText = await page.locator(".style-filter-panel").innerText();
-    assert.match(filterText, /执行阶段/, "Template tab must switch left filter panel to execution stage");
+    assert.match(filterText, /执行阶段/, "Template page must show execution stage filter");
     assert.match(filterText, /爆品图反推/, "Template stage filter must include reverse_prompt");
-    await page.locator(".style-card").first().click();
+    await page.locator(".template-card").first().click();
     assert.equal(await page.locator(".style-library-prompt-modal").count(), 0, "Clicking card must NOT force-open full-screen prompt modal");
-    await page.getByRole("button", { name: "查看完整提示词快照" }).click();
+    await page.getByRole("button", { name: "查看完整正文" }).click();
     await page.waitForSelector(".style-library-prompt-modal");
     await page.keyboard.press("Escape");
     // Template draft lifecycle: copy -> edit -> save -> publish
@@ -283,7 +290,7 @@ async function run() {
     // 7. ModelSettingsPage: Unified AppShell intact
     await page.goto(`${baseUrl}/settings`, { waitUntil: "networkidle" });
     await page.waitForSelector(".settings-main");
-    assert.equal(await page.locator(".pa-rail-item").count(), 3, "ModelSettingsPage must share AppShell rail");
+    assert.equal(await page.locator(".pa-rail-item").count(), 4, "ModelSettingsPage must share AppShell rail");
 
     assert.deepEqual(errors, [], `No uncaught page errors expected, got: ${errors.join("; ")}`);
     console.log("PASS: All P0 & P1 Playwright E2E assertions succeeded.");

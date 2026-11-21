@@ -41,6 +41,8 @@ export interface SuiteRepository {
   createSuite(name: string, idempotencyKey?: string): Promise<Suite>;
   listSuites(): Promise<Suite[]>;
   getSuite(id: string): Promise<Suite | null>;
+  renameSuite?(suiteId: string, name: string): Promise<Suite | null>;
+  deleteSuite?(suiteId: string): Promise<{ id: string } | null>;
   updateSuiteStyleOverride(suiteId: string, styleOverride: string | null): Promise<Suite | null>;
   getInputImages(suiteId: string): Promise<InputImage[]>;
   hasInputImageHash(suiteId: string, sha256: string): Promise<boolean>;
@@ -191,6 +193,7 @@ export interface LlmClient {
   generatePlan(input: PlanLlmInput): Promise<unknown>;
   generateCategoryPrompt?(input: CategoryPromptLlmInput): Promise<unknown>;
   generateReversePrompt?(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; referenceMimeType?: string; baselineImage?: Buffer; baselineMimeType?: string; mode: "main" | "detail" }): Promise<unknown>;
+  translateTexts?(input: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }): Promise<Array<{ id: string; originalText: string; translatedText: string }>>;
 }
 export type PlanAttemptStatus = "running" | "succeeded" | "failed";
 export interface PlanItem {
@@ -371,6 +374,7 @@ export interface CanvasLayoutGroup { groupKey: string; x: number; y: number; wid
 export interface CanvasLayout { id: string; suiteId: string; layoutVersion: number; viewport: { x: number; y: number; zoom: number }; nodes: CanvasLayoutNode[]; groups: CanvasLayoutGroup[]; updatedAt: string }
 export interface TaskRepository {
   createTasksFromSnapshot(suiteId: string, snapshot: PlanSnapshot, inputImages: InputImage[]): Promise<{ tasks: SuiteTask[]; created: SuiteTask[] }>;
+  createCustomTask?(input: { suiteId: string; planSnapshotId: string | null; imageType: TaskImageType; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }): Promise<{ task: SuiteTask; duplicate: boolean }>;
   createReverseTasks(input: { suiteId: string; reversePlanId: string; taskGroupId: string; mode: ReverseMode; idempotencyKey: string; items: Array<{ referenceId: string; ordinal: number; filename: string; promptVersionId: string; prompt: string }> }): Promise<{ tasks: SuiteTask[]; created: SuiteTask[]; duplicate: boolean }>;
   getTask(taskId: string): Promise<SuiteTask | null>;
   listTasks(suiteId: string): Promise<SuiteTask[]>;

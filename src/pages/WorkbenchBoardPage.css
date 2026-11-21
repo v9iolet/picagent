@@ -15,6 +15,10 @@
   height: 100%;
 }
 
+.pa-wb-main .wb-canvas-panel {
+  grid-template-rows: 58px auto minmax(0, 1fr);
+}
+
 .wb-card.is-lineage-active {
   border-color: #2563eb !important;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18), 0 12px 26px rgba(15, 23, 42, 0.1) !important;
@@ -184,4 +188,311 @@
   color: #a12727;
   border-color: #f3c8c8;
   background: #fff6f6;
+}
+
+/* 画布筛选条与队列操作 */
+.wb-filter-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--pa-border);
+  background: var(--pa-surface-soft);
+  flex-wrap: wrap;
+}
+
+.wb-filter-strip button {
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--pa-border);
+  background: #fff;
+  color: var(--pa-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.wb-filter-strip button.is-active {
+  border-color: var(--pa-accent);
+  background: var(--pa-accent-soft);
+  color: var(--pa-accent);
+}
+
+.wb-filter-strip .wb-filter-extra {
+  margin-left: auto;
+}
+
+.wb-retry-failed-btn {
+  border-color: #fca5a5 !important;
+  background: #fef2f2 !important;
+  color: #b91c1c !important;
+}
+
+.wb-version-compare-btn {
+  margin-left: auto;
+  border-color: color-mix(in oklch, var(--pa-accent) 32%, var(--pa-border)) !important;
+  background: var(--pa-accent-soft) !important;
+  color: var(--pa-accent) !important;
+}
+
+.wb-batch-sync-row {
+  margin-top: -4px;
+}
+
+.wb-batch-sync-row button {
+  width: 100%;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px dashed var(--pa-border-strong);
+  background: var(--pa-surface-soft);
+  color: var(--pa-accent);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.wb-batch-sync-row button:hover {
+  background: var(--pa-accent-soft);
+  border-style: solid;
+}
+
+/* 自定义任务抽屉 */
+.wb-custom-task-form {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wb-custom-task-form .wb-style-field input,
+.wb-custom-task-form .wb-style-field select {
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--pa-border-strong);
+  background: #fff;
+  font-size: 12px;
+}
+
+.wb-custom-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.wb-custom-error {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 12px;
+}
+
+/* 编辑器缩放、扩图可视预览、电商快捷指令、一键翻译 */
+.wb-editor-canvas-scroll {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.wb-editor-canvas-scroll > .wb-editor-canvas {
+  flex: 0 0 auto;
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.wb-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--pa-border);
+  border-radius: 7px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.wb-zoom-controls button {
+  height: 24px;
+  min-width: 26px;
+  padding: 0 6px;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.wb-outpaint-frame {
+  position: relative;
+  width: min(76%, 340px);
+  max-height: 76%;
+  border: 2px dashed #3b82f6;
+  border-radius: 8px;
+  background: repeating-linear-gradient(45deg, rgba(59, 130, 246, 0.08), rgba(59, 130, 246, 0.08) 8px, rgba(255, 255, 255, 0.72) 8px, rgba(255, 255, 255, 0.72) 16px);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+}
+
+.wb-outpaint-origin {
+  position: absolute;
+  border: 2px solid #0f172a;
+  overflow: hidden;
+  background: #fff;
+}
+
+.wb-outpaint-origin img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.wb-outpaint-caption {
+  margin-top: 10px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.84);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.wb-quick-chips-block {
+  display: grid;
+  gap: 6px;
+}
+
+.wb-quick-chips-block > span {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--pa-muted);
+}
+
+.wb-quick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wb-quick-chips button {
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--pa-border);
+  background: var(--pa-surface-soft);
+  color: var(--pa-ink);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.wb-quick-chips button:hover {
+  border-color: var(--pa-accent);
+  background: var(--pa-accent-soft);
+  color: var(--pa-accent);
+}
+
+.wb-translate-box {
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklch, var(--pa-accent) 28%, var(--pa-border));
+  background: #f8fbff;
+  display: grid;
+  gap: 8px;
+}
+
+.wb-translate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.wb-translate-head strong {
+  font-size: 12px;
+  color: var(--pa-ink);
+}
+
+.wb-translate-head span {
+  font-size: 10px;
+  color: var(--pa-accent);
+  font-weight: 600;
+}
+
+.wb-translate-controls {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.wb-translate-controls select,
+.wb-translate-controls button {
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--pa-border);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.wb-translate-controls button {
+  background: var(--pa-accent);
+  border-color: var(--pa-accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.wb-translate-controls button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.wb-translate-rows {
+  display: grid;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.wb-translate-row {
+  display: grid;
+  gap: 3px;
+}
+
+.wb-translate-row small {
+  font-size: 10px;
+  color: var(--pa-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wb-translate-row input {
+  height: 26px;
+  padding: 0 7px;
+  border-radius: 6px;
+  border: 1px solid var(--pa-border);
+  background: #fff;
+  font-size: 11px;
+}
+
+.wb-translate-apply {
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--pa-accent);
+  background: #fff;
+  color: var(--pa-accent);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.wb-translate-apply:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

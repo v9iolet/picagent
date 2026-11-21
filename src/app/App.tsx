@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { ModelSettingsPage } from "../pages/ModelSettingsPage";
 import { StartPage } from "../pages/StartPage";
 import { BoardPage } from "../pages/BoardPage";
-import { StyleLibraryPage } from "../pages/StyleLibraryPage";
+import { ImageAssetsPage } from "../pages/ImageAssetsPage";
+import { PromptTemplatesPage } from "../pages/PromptTemplatesPage";
 import { ReversePage } from "../pages/ReversePage";
 
 export function App() {
@@ -24,7 +25,12 @@ export function App() {
 
   if (path === "/settings" || path === "/settings/preferences") return <ModelSettingsPage preferences={path.endsWith("/preferences")} navigate={navigate} />;
   if (path.endsWith("/board") && suiteId) return <BoardPage suiteId={suiteId} navigate={navigate} />;
-  if (path === "/style-library") return <StyleLibraryPage navigate={navigate} />;
+  if (path === "/assets") return <ImageAssetsPage navigate={navigate} />;
+  if (path === "/templates") return <PromptTemplatesPage navigate={navigate} />;
+  if (path === "/style-library") {
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    return tab === "templates" ? <PromptTemplatesPage navigate={navigate} /> : <ImageAssetsPage navigate={navigate} />;
+  }
   if (path === "/reverse" || reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;
   return <StartPage suiteId={suiteId} navigate={navigate} />;
 }

@@ -20,6 +20,18 @@ export class MemorySuiteRepository implements SuiteRepository {
   }
   async listSuites() { return [...this.suites.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); }
   async getSuite(id: string) { return this.suites.get(id) ?? null; }
+  async renameSuite(suiteId: string, name: string) {
+    const suite = this.suites.get(suiteId);
+    if (!suite) return null;
+    const updated: Suite = { ...suite, name: name.trim(), updatedAt: new Date().toISOString() };
+    this.suites.set(suiteId, updated);
+    return updated;
+  }
+  async deleteSuite(suiteId: string) {
+    if (!this.suites.has(suiteId)) return null;
+    this.suites.delete(suiteId);
+    return { id: suiteId };
+  }
   async updateSuiteStyleOverride(suiteId: string, styleOverride: string | null) {
     const suite = this.suites.get(suiteId);
     if (!suite) return null;

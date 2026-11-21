@@ -79,17 +79,21 @@ test("template copy endpoint returns only a published template from the requeste
   assert.equal(mismatch.status, 404); assert.equal((mismatch.body as any).error.code, "PROMPT_TEMPLATE_NOT_FOUND");
 });
 
-test("workbench exposes the unified library with image assets and prompt templates", async () => {
+test("workbench exposes separate image assets and prompt templates navigation pages", async () => {
   const shell = await readFile(new URL("../src/components/AppShell.tsx", import.meta.url), "utf8");
-  const library = await readFile(new URL("../src/pages/StyleLibraryPage.tsx", import.meta.url), "utf8");
-  assert.match(shell, /风格库/);
-  assert.match(shell, /\/style-library/);
-  assert.match(library, /图片资产/);
-  assert.match(library, /提示词模板/);
-  assert.match(library, /listLibraryResources/);
-  assert.match(library, /process_image/);
-  assert.match(library, /base_refine/);
-  assert.match(library, /plan/);
-  assert.match(library, /task_image/);
-  assert.match(library, /原始输入图不适用生成提示词/);
+  const imagesPage = await readFile(new URL("../src/pages/ImageAssetsPage.tsx", import.meta.url), "utf8");
+  const templatesPage = await readFile(new URL("../src/pages/PromptTemplatesPage.tsx", import.meta.url), "utf8");
+  assert.match(shell, /图片库/);
+  assert.match(shell, /\/assets/);
+  assert.match(shell, /模板库/);
+  assert.match(shell, /\/templates/);
+  assert.match(imagesPage, /图片资产/);
+  assert.match(imagesPage, /listLibraryResources/);
+  assert.match(imagesPage, /process_image/);
+  assert.match(imagesPage, /原始输入图不适用生成提示词/);
+  assert.match(templatesPage, /提示词模板/);
+  assert.match(templatesPage, /listLibraryResources/);
+  assert.match(templatesPage, /base_refine/);
+  assert.match(templatesPage, /plan/);
+  assert.match(templatesPage, /task_image/);
 });

@@ -92,7 +92,7 @@ async function setup(llmOutput: unknown = output, plans = new MemoryPlanReposito
   const suite = await repository.createSuite("结构计划");
   await repository.createInputImage({ id: "img-1", suiteId: suite.id, ordinal: 1, originalObjectKey: `suites/${suite.id}/img-1`, thumbnailObjectKey: `suites/${suite.id}/img-1-thumb`, sha256: "a".repeat(64), width: 1, height: 1, mimeType: "image/png", originalFilename: "product.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
   await storage.put({ key: `suites/${suite.id}/img-1`, bytes: image, contentType: "image/png" });
-  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: plans, ragClient: { async search() { return []; }, async getByIds() { return []; } }, llmClient: { provider: "fake", model: "structure", isFake: true, async generatePlan() { return llmOutput; } } });
+  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: plans, llmClient: { provider: "fake", model: "structure", isFake: true, async generatePlan() { return llmOutput; } } });
   return { app, suite, template, plans };
 }
 
@@ -101,7 +101,7 @@ async function wait(app: Awaited<ReturnType<typeof setup>>["app"], id: string) {
   throw new Error("timeout");
 }
 
-test("structure plan enforces selected categories and exposes a draft snapshot", async () => {
+test("structure plan can generate and confirm a draft without RAG", async () => {
   const { app, suite, template } = await setup();
   const started = await app.request("POST", `/api/suites/${suite.id}/structure-plan`, { headers: { "idempotency-key": "structure-1" }, body: { templateVersionId: template.templateVersionId, dynamicInput } });
   assert.equal(started.status, 202);
@@ -110,6 +110,8 @@ test("structure plan enforces selected categories and exposes a draft snapshot",
   assert.equal(terminal.snapshot.phase, "structure_plan");
   assert.equal(terminal.snapshot.confirmationStatus, "draft");
   assert.equal(terminal.snapshot.schemaVersion, "suite-structure-plan-v2");
+  assert.deepEqual(terminal.snapshot.chunks, []);
+  assert.equal(terminal.snapshot.dynamicInput.human_supplement, dynamicInput.human_supplement);
   assert.equal(terminal.snapshot.structure.mainAllocation.count, 1);
   assert.equal(terminal.snapshot.structure.mainImageCount, undefined);
   assert.equal(terminal.snapshot.structure.canProceed, undefined);

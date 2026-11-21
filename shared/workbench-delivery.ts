@@ -500,3 +500,240 @@ export function computeLineageHighlight(
 
   return { highlightedNodeIds, highlightedEdgeIds };
 }
+
+export const SUPPORTED_OUTPUT_LANGUAGES = [
+  { value: "英文", label: "英文 (English · US/UK/AU)", code: "en" },
+  { value: "中文", label: "中文 (简体中文 · 国内电商)", code: "zh-CN" },
+  { value: "日语", label: "日语 (日本語 · Amazon JP)", code: "ja" },
+  { value: "德语", label: "德语 (Deutsch · Amazon DE)", code: "de" },
+  { value: "法语", label: "法语 (Français · Amazon FR)", code: "fr" },
+  { value: "西班牙语", label: "西班牙语 (Español · ES/MX)", code: "es" },
+  { value: "韩语", label: "韩语 (한국어 · Coupang)", code: "ko" },
+  { value: "泰语", label: "泰语 (ไทย · Shopee/Lazada TH)", code: "th" },
+  { value: "越南语", label: "越南语 (Tiếng Việt · VN)", code: "vi" },
+  { value: "俄语", label: "俄语 (Русский · Ozon/WB)", code: "ru" },
+  { value: "葡萄牙语", label: "葡萄牙语 (Português · BR)", code: "pt" },
+  { value: "阿拉伯语", label: "阿拉伯语 (العربية · Noon/AE)", code: "ar" },
+] as const;
+
+export type DeliveryExportPresetId = "original" | "amazon" | "taobao" | "tiktok" | "shopify";
+export type DeliveryExportFormat = "original" | "png" | "jpeg" | "webp";
+
+export interface DeliveryExportPreset {
+  id: DeliveryExportPresetId;
+  label: string;
+  description: string;
+  defaultFormat: DeliveryExportFormat;
+  defaultQuality: number;
+  mainBox?: { width: number; height: number; fit: "contain" | "cover" };
+  detailWidth?: number;
+  minMainSide?: number;
+}
+
+export const DELIVERY_EXPORT_PRESETS: Record<DeliveryExportPresetId, DeliveryExportPreset> = {
+  original: {
+    id: "original",
+    label: "原图无损",
+    description: "保留模型生成的原始分辨率与格式，适合二次精修与归档。",
+    defaultFormat: "original",
+    defaultQuality: 92,
+    minMainSide: 800,
+  },
+  amazon: {
+    id: "amazon",
+    label: "Amazon 跨境规范",
+    description: "主图 2000×2000 白底补边 JPG（满足缩放要求），详情图 1600px 宽 JPG。",
+    defaultFormat: "jpeg",
+    defaultQuality: 90,
+    mainBox: { width: 2000, height: 2000, fit: "contain" },
+    detailWidth: 1600,
+    minMainSide: 1000,
+  },
+  taobao: {
+    id: "taobao",
+    label: "淘宝 / 天猫规范",
+    description: "主图 800×800 JPG，详情页 790px 宽 JPG（支持一键无缝长图拼接）。",
+    defaultFormat: "jpeg",
+    defaultQuality: 88,
+    mainBox: { width: 800, height: 800, fit: "contain" },
+    detailWidth: 790,
+    minMainSide: 800,
+  },
+  tiktok: {
+    id: "tiktok",
+    label: "TikTok Shop 规范",
+    description: "主图 1080×1080 JPG，详情图 1080px 宽适配移动端竖屏浏览。",
+    defaultFormat: "jpeg",
+    defaultQuality: 90,
+    mainBox: { width: 1080, height: 1080, fit: "contain" },
+    detailWidth: 1080,
+    minMainSide: 800,
+  },
+  shopify: {
+    id: "shopify",
+    label: "Shopify 独立站 WebP",
+    description: "主图 2048×2048 WebP，详情 1600px 宽 WebP，兼顾高清与秒开加载。",
+    defaultFormat: "webp",
+    defaultQuality: 88,
+    mainBox: { width: 2048, height: 2048, fit: "contain" },
+    detailWidth: 1600,
+    minMainSide: 1000,
+  },
+};
+
+export interface DeliveryComplianceCheck {
+  id: string;
+  label: string;
+  status: "pass" | "warn" | "fail";
+  detail: string;
+}
+
+export interface DeliveryComplianceReport {
+  presetId: DeliveryExportPresetId;
+  score: number;
+  totalSlots: number;
+  deliverableCount: number;
+  finalizedCount: number;
+  checks: DeliveryComplianceCheck[];
+}
+
+export function evaluateDeliveryCompliance(
+  slots: ResolvedDeliverySlot[],
+  presetId: DeliveryExportPresetId = "original",
+): DeliveryComplianceReport {
+  const preset = DELIVERY_EXPORT_PRESETS[presetId] ?? DELIVERY_EXPORT_PRESETS.original;
+  const totalSlots = slots.length;
+  const deliverable = slots.filter((slot) => slot.sourceRole !== "pending");
+  const mainDeliverable = deliverable.filter((slot) => slot.imageType === "main");
+  const finalized = deliverable.filter((slot) => slot.sourceRole === "edit_final" || slot.sourceRole === "parent_final");
+  const minMainSide = preset.minMainSide ?? 800;
+
+  const checks: DeliveryComplianceCheck[] = [];
+
+  if (totalSlots === 0) {
+    checks.push({ id: "slots", label: "套图坑位完整性", status: "fail", detail: "尚无任务坑位，请先在规划页或创作板创建任务。" });
+  } else if (deliverable.length === totalSlots) {
+    checks.push({ id: "slots", label: "套图坑位完整性", status: "pass", detail: `全部 ${totalSlots} 个坑位均已出图，可直接打包交付。` });
+  } else {
+    checks.push({
+      id: "slots",
+      label: "套图坑位完整性",
+      status: deliverable.length > 0 ? "warn" : "fail",
+      detail: `已出图 ${deliverable.length}/${totalSlots}，仍有 ${totalSlots - deliverable.length} 个坑位待生成。`,
+    });
+  }
+
+  if (!deliverable.length) {
+    checks.push({ id: "final", label: "终版人工确认率", status: "fail", detail: "尚无可确认的成品版本。" });
+  } else if (finalized.length === deliverable.length) {
+    checks.push({ id: "final", label: "终版人工确认率", status: "pass", detail: `全部 ${finalized.length} 张交付图已由设计师显式设为终版。` });
+  } else {
+    checks.push({
+      id: "final",
+      label: "终版人工确认率",
+      status: "warn",
+      detail: `${finalized.length}/${deliverable.length} 已设终版，其余将按规则自动回退当前版导出。`,
+    });
+  }
+
+  const lowResMains = mainDeliverable.filter((slot) => {
+    const longest = Math.max(slot.width ?? 0, slot.height ?? 0);
+    return longest > 0 && longest < minMainSide;
+  });
+  if (!mainDeliverable.length) {
+    checks.push({ id: "resolution", label: `主图分辨率达标（≥${minMainSide}px）`, status: "warn", detail: "暂无已生成的主图可供校验。" });
+  } else if (!lowResMains.length) {
+    checks.push({
+      id: "resolution",
+      label: `主图分辨率达标（≥${minMainSide}px）`,
+      status: "pass",
+      detail: `${mainDeliverable.length} 张主图均满足 ${preset.label} 清晰度要求。`,
+    });
+  } else {
+    checks.push({
+      id: "resolution",
+      label: `主图分辨率达标（≥${minMainSide}px）`,
+      status: "warn",
+      detail: `${lowResMains.length} 张主图原图最长边不足 ${minMainSide}px（导出平台预设时将自动缩放补齐，建议源图升级 2K）。`,
+    });
+  }
+
+  const missingTrace = deliverable.filter((slot) => !slot.promptText.trim());
+  checks.push({
+    id: "trace",
+    label: "提示词快照可追溯性",
+    status: deliverable.length > 0 && !missingTrace.length ? "pass" : deliverable.length ? "warn" : "fail",
+    detail: deliverable.length === 0
+      ? "等待出图后生成不可变溯源快照。"
+      : !missingTrace.length
+        ? "全部交付图均携带完整冻结提示词与模型血缘，自动写入 manifest.json。"
+        : `有 ${missingTrace.length} 张图片缺少完整提示词快照。`,
+  });
+
+  const weight = checks.reduce((sum, item) => sum + (item.status === "pass" ? 1 : item.status === "warn" ? 0.55 : 0), 0);
+  const score = checks.length ? Math.round((weight / checks.length) * 100) : 0;
+
+  return {
+    presetId: preset.id,
+    score,
+    totalSlots,
+    deliverableCount: deliverable.length,
+    finalizedCount: finalized.length,
+    checks,
+  };
+}
+
+export interface OutpaintPreviewBox {
+  targetWidth: number;
+  targetHeight: number;
+  anchor: "center" | "left" | "right";
+  /** Normalized 0..1 position of the original image inside the expanded target frame */
+  innerX: number;
+  innerY: number;
+  innerWidth: number;
+  innerHeight: number;
+}
+
+export function computeOutpaintPreviewBox(
+  sourceWidth: number,
+  sourceHeight: number,
+  direction: "all" | "horizontal" | "vertical" | "left" | "right",
+  targetRatio: "original" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9",
+): OutpaintPreviewBox {
+  const safeW = Math.max(1, sourceWidth);
+  const safeH = Math.max(1, sourceHeight);
+  const sourceRatio = safeW / safeH;
+  const ratioMap: Record<typeof targetRatio, number | null> = {
+    original: null,
+    "1:1": 1,
+    "3:4": 3 / 4,
+    "4:3": 4 / 3,
+    "9:16": 9 / 16,
+    "16:9": 16 / 9,
+  };
+  const desiredRatio = ratioMap[targetRatio] ?? sourceRatio;
+  let targetWidth = safeW;
+  let targetHeight = safeH;
+  if (targetRatio === "original") {
+    if (direction === "all") {
+      targetWidth = Math.ceil(safeW * 1.25);
+      targetHeight = Math.ceil(safeH * 1.25);
+    } else if (direction === "horizontal" || direction === "left" || direction === "right") {
+      targetWidth = Math.ceil(safeW * 1.3);
+    } else if (direction === "vertical") {
+      targetHeight = Math.ceil(safeH * 1.3);
+    }
+  } else if (sourceRatio < desiredRatio) {
+    targetWidth = Math.max(safeW, Math.ceil(safeH * desiredRatio));
+  } else {
+    targetHeight = Math.max(safeH, Math.ceil(safeW / desiredRatio));
+  }
+
+  const innerWidth = Math.min(1, safeW / targetWidth);
+  const innerHeight = Math.min(1, safeH / targetHeight);
+  const anchor: "center" | "left" | "right" = direction === "left" ? "right" : direction === "right" ? "left" : "center";
+  const innerX = anchor === "left" ? 0 : anchor === "right" ? 1 - innerWidth : (1 - innerWidth) / 2;
+  const innerY = (1 - innerHeight) / 2;
+
+  return { targetWidth, targetHeight, anchor, innerX, innerY, innerWidth, innerHeight };
+}

@@ -58,19 +58,35 @@ export class PostgresSuiteRepository implements SuiteRepository {
   }
 
   async listSuites() {
-    const result = await this.pool.query<Suite>("SELECT id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites ORDER BY updated_at DESC LIMIT 30");
+    const result = await this.pool.query<Suite>("SELECT id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE deleted_at IS NULL ORDER BY updated_at DESC LIMIT 30");
     return result.rows;
   }
 
   async getSuite(id: string, client: Pool | PoolClient = this.pool) {
-    const result = await client.query<Suite>("SELECT id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE id = $1", [id]);
+    const result = await client.query<Suite>("SELECT id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE id = $1 AND deleted_at IS NULL", [id]);
+    return result.rows[0] ?? null;
+  }
+
+  async renameSuite(suiteId: string, name: string) {
+    const result = await this.pool.query<Suite>(
+      "UPDATE suite_workbench.suites SET name = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
+      [suiteId, name.trim()],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  async deleteSuite(suiteId: string) {
+    const result = await this.pool.query<{ id: string }>(
+      "UPDATE suite_workbench.suites SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id",
+      [suiteId],
+    );
     return result.rows[0] ?? null;
   }
 
   async updateSuiteStyleOverride(suiteId: string, styleOverride: string | null) {
     const cleaned = styleOverride?.trim() ? styleOverride.trim() : null;
     const result = await this.pool.query<Suite>(
-      "UPDATE suite_workbench.suites SET style_override = $2, style_override_updated_at = CASE WHEN $2 IS NULL THEN NULL ELSE now() END, updated_at = now() WHERE id = $1 RETURNING id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
+      "UPDATE suite_workbench.suites SET style_override = $2, style_override_updated_at = CASE WHEN $2 IS NULL THEN NULL ELSE now() END, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
       [suiteId, cleaned],
     );
     return result.rows[0] ?? null;

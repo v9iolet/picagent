@@ -3,12 +3,21 @@ import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
 import type { ModelSettings } from "./model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
+import sharp from "sharp";
 import { processGeneratedImage, processImage } from "./image.js";
 import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptStage } from "./prompt-library.js";
 import { MemoryCategoryPromptRepository } from "./repositories/memory-category-prompt-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { materializeCategoryPlanItems } from "./suite-task-prompt.js";
-import { applyStyleOverrideToPrompt, resolveDeliverySlots, sanitizeDeliveryName, type DeliveryEditChildLike } from "../shared/workbench-delivery.js";
+import {
+  applyStyleOverrideToPrompt,
+  DELIVERY_EXPORT_PRESETS,
+  resolveDeliverySlots,
+  sanitizeDeliveryName,
+  type DeliveryEditChildLike,
+  type DeliveryExportFormat,
+  type DeliveryExportPresetId,
+} from "../shared/workbench-delivery.js";
 import { createZipBuffer } from "./zip.js";
 import type { ImageEditorApiResponse } from "./image-editor-api.js";
 import type {
@@ -73,6 +82,10 @@ const errorMessages: Record<string, string> = {
   INVALID_SUITE_ID: "方案不存在",
   INVALID_STYLE_OVERRIDE: "画布风格覆盖必须为文本或空值",
   DELIVERY_EMPTY: "当前方案尚无可交付的图片版本",
+  INVALID_EXPORT_OPTIONS: "导出规格或图片格式参数无效",
+  TRANSLATE_ITEMS_REQUIRED: "请先识别或填写需要翻译的图片文字块",
+  TRANSLATE_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
+  CUSTOM_TASK_FIELDS_REQUIRED: "请填写任务标题和生图提示词",
   INVALID_INPUT_IMAGE: "原图不存在",
   INVALID_BASE_VERSION: "底图版本不存在",
   EMPTY_NAME: "方案名称不能为空",
@@ -738,6 +751,35 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
 
   const request = async (method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> => {
     if (path === "/api/model-settings" || path.startsWith("/api/model-settings/")) return deps.modelSettings ? deps.modelSettings.request(method, path, options.body) : fail("NOT_FOUND", 404);
+    if (method === "POST" && path === "/api/image-editor/translate-text") {
+      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const targetLanguage = typeof body.targetLanguage === "string" && body.targetLanguage.trim() ? body.targetLanguage.trim() : "英文";
+      const rawItems = Array.isArray(body.items) ? body.items : [];
+      const items = rawItems
+        .map((item, index) => {
+          const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
+          return { id: String(row.id ?? `block-${index + 1}`), text: String(row.text ?? "").trim() };
+        })
+        .filter((item) => item.text.length > 0);
+      if (!items.length) return fail("TRANSLATE_ITEMS_REQUIRED", 400);
+      const llmClient = await resolveVision();
+      if (!llmClient?.translateTexts) return fail("TRANSLATE_LLM_NOT_CONFIGURED", 503);
+      try {
+        const translations = await llmClient.translateTexts({
+          targetLanguage,
+          items,
+          preserveBrandTerms: body.preserveBrandTerms !== false,
+        });
+        return ok({
+          targetLanguage,
+          translations,
+          model: llmClient.model,
+          channelName: llmClient.channel?.channelName ?? null,
+        });
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "LLM_FAILED", 502);
+      }
+    }
     if (path.startsWith("/api/image-editor/")) return deps.imageEditorApi ? deps.imageEditorApi.request(method, path, options) : fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
     const reversePlanMatch = path.match(/^\/api\/reverse-plans\/([^/]+)$/);
@@ -1031,7 +1073,6 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      if (!deps.ragClient) return fail("RAG_NOT_CONFIGURED", 503);
       const llmClient = await resolveVision();
       if (!llmClient) return fail("LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(structureMatch[1]);
@@ -1049,7 +1090,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
       const humanInput = body.humanInput && typeof body.humanInput === "object" && !Array.isArray(body.humanInput) ? body.humanInput as Record<string, unknown> : {};
       const refs = Array.isArray(body.selectedChunks) ? body.selectedChunks.flatMap((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).version === "string" ? [{ id: (item as { id: string }).id, version: (item as { version: string }).version }] : []) : [];
-      const chunks = await deps.ragClient.getByIds(refs);
+      const chunks = refs.length ? await deps.ragClient?.getByIds(refs) : [];
+      if (!chunks) return fail("RAG_NOT_CONFIGURED", 503);
       for (const ref of refs) { const chunk = chunks.find((item) => item.id === ref.id); if (!chunk || !chunk.published) return fail("RAG_CHUNK_NOT_FOUND", 409); if (chunk.version !== ref.version) return fail("RAG_CHUNK_VERSION_DRIFT", 409); }
       const images = await deps.repository.getInputImages(suite.id);
       if (images.length < 1 || images.length > 6) return fail("INVALID_INPUT_IMAGE");
@@ -1389,11 +1431,23 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       return ok(payload);
     }
 
-    const deliveryExportMatch = path.match(/^\/api\/suites\/([^/]+)\/delivery\/export$/);
+    const deliveryExportMatch = path.match(/^\/api\/suites\/([^/]+)\/delivery\/export(?:\?(.*))?$/);
     if (method === "GET" && deliveryExportMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(deliveryExportMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
+
+      const query = new URLSearchParams(deliveryExportMatch[2] ?? "");
+      const presetRaw = (query.get("preset") ?? "original").trim() as DeliveryExportPresetId;
+      if (!Object.prototype.hasOwnProperty.call(DELIVERY_EXPORT_PRESETS, presetRaw)) return fail("INVALID_EXPORT_OPTIONS", 400);
+      const preset = DELIVERY_EXPORT_PRESETS[presetRaw];
+      const formatRaw = (query.get("format") ?? preset.defaultFormat).trim() as DeliveryExportFormat;
+      if (!["original", "png", "jpeg", "webp"].includes(formatRaw)) return fail("INVALID_EXPORT_OPTIONS", 400);
+      const qualityRaw = query.get("quality") ? Number(query.get("quality")) : preset.defaultQuality;
+      if (!Number.isFinite(qualityRaw) || qualityRaw < 60 || qualityRaw > 100) return fail("INVALID_EXPORT_OPTIONS", 400);
+      const quality = Math.round(qualityRaw);
+      const stitchDetail = query.get("stitchDetail") === "true" || query.get("stitchDetail") === "1";
+
       const [snapshot, tasks] = await Promise.all([
         deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null),
         deps.taskRepository.listTasks(suite.id),
@@ -1407,8 +1461,25 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const deliverable = slots.filter((slot) => slot.sourceRole !== "pending" && slot.exportPath);
       if (!deliverable.length) return fail("DELIVERY_EMPTY", 400);
 
+      const extForFormat = (fmt: DeliveryExportFormat, fallbackPath: string) => {
+        if (fmt === "jpeg") return "jpg";
+        if (fmt === "webp") return "webp";
+        if (fmt === "png") return "png";
+        return fallbackPath.split(".").pop() || "png";
+      };
+      const mimeForFormat = (fmt: DeliveryExportFormat, fallbackMime: string) => {
+        if (fmt === "jpeg") return "image/jpeg";
+        if (fmt === "webp") return "image/webp";
+        if (fmt === "png") return "image/png";
+        return fallbackMime;
+      };
+      const replaceExt = (filePath: string, ext: string) => filePath.replace(/\.[^./]+$/, `.${ext}`);
+
+      const needsTransform = preset.id !== "original" || formatRaw !== "original";
       const entries: Array<{ name: string; data: Buffer }> = [];
       const manifestItems: Array<Record<string, unknown>> = [];
+      const detailForStitch: Buffer[] = [];
+
       for (const slot of deliverable) {
         let bytes: Buffer | null = null;
         if (slot.objectKey) {
@@ -1416,9 +1487,47 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           if (stored) bytes = stored.bytes;
         }
         if (!bytes) return fail("OBJECT_NOT_FOUND", 404);
-        entries.push({ name: slot.exportPath!, data: bytes });
+
+        let outBytes = bytes;
+        let outWidth = slot.width;
+        let outHeight = slot.height;
+        let outMime = slot.mimeType;
+        let outPath = slot.exportPath!;
+
+        if (needsTransform) {
+          let pipeline = sharp(bytes);
+          if (slot.imageType === "main" && preset.mainBox) {
+            pipeline = pipeline.resize({
+              width: preset.mainBox.width,
+              height: preset.mainBox.height,
+              fit: preset.mainBox.fit,
+              background: { r: 255, g: 255, b: 255, alpha: 1 },
+            });
+          } else if (slot.imageType === "detail" && preset.detailWidth) {
+            pipeline = pipeline.resize({ width: preset.detailWidth, withoutEnlargement: false });
+          }
+          if (formatRaw === "jpeg") {
+            pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } }).jpeg({ quality, mozjpeg: true });
+          } else if (formatRaw === "webp") {
+            pipeline = pipeline.webp({ quality });
+          } else if (formatRaw === "png") {
+            pipeline = pipeline.png({ compressionLevel: 8 });
+          }
+          const rendered = await pipeline.toBuffer({ resolveWithObject: true });
+          outBytes = rendered.data;
+          outWidth = rendered.info.width;
+          outHeight = rendered.info.height;
+          outMime = mimeForFormat(formatRaw, slot.mimeType);
+          outPath = replaceExt(slot.exportPath!, extForFormat(formatRaw, slot.exportPath!));
+        }
+
+        if (stitchDetail && slot.imageType === "detail") {
+          detailForStitch.push(outBytes);
+        }
+
+        entries.push({ name: outPath, data: outBytes });
         manifestItems.push({
-          exportPath: slot.exportPath,
+          exportPath: outPath,
           imageType: slot.imageType,
           ordinal: slot.typeOrdinal,
           title: slot.title,
@@ -1430,9 +1539,10 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           sourceVersionId: slot.sourceVersionId,
           versionId: slot.versionId,
           versionNumber: slot.versionNumber,
-          width: slot.width,
-          height: slot.height,
-          mimeType: slot.mimeType,
+          width: outWidth,
+          height: outHeight,
+          byteLength: outBytes.length,
+          mimeType: outMime,
           model: slot.model,
           channelName: slot.channelName,
           templateVersionId: slot.templateVersionId,
@@ -1441,10 +1551,54 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         });
       }
 
+      let stitchedDetailPath: string | null = null;
+      if (stitchDetail && detailForStitch.length > 0) {
+        const targetWidth = preset.detailWidth ?? 1200;
+        const resizedSlices = await Promise.all(
+          detailForStitch.map((sliceBytes) =>
+            sharp(sliceBytes)
+              .resize({ width: targetWidth, withoutEnlargement: false })
+              .png()
+              .toBuffer({ resolveWithObject: true }),
+          ),
+        );
+        const totalHeight = resizedSlices.reduce((sum, slice) => sum + slice.info.height, 0);
+        let top = 0;
+        const composites = resizedSlices.map((slice) => {
+          const entry = { input: slice.data, top, left: 0 };
+          top += slice.info.height;
+          return entry;
+        });
+        let stitched = sharp({
+          create: {
+            width: targetWidth,
+            height: Math.max(1, totalHeight),
+            channels: 4,
+            background: { r: 255, g: 255, b: 255, alpha: 1 },
+          },
+        }).composite(composites);
+        const stitchFmt: DeliveryExportFormat = formatRaw === "original" ? "png" : formatRaw;
+        if (stitchFmt === "jpeg") stitched = stitched.flatten({ background: { r: 255, g: 255, b: 255 } }).jpeg({ quality, mozjpeg: true });
+        else if (stitchFmt === "webp") stitched = stitched.webp({ quality });
+        else stitched = stitched.png({ compressionLevel: 8 });
+        const stitchedBytes = await stitched.toBuffer();
+        const ext = extForFormat(stitchFmt, "detail.png");
+        stitchedDetailPath = `detail/00_detail_long_stitched.${ext}`;
+        entries.push({ name: stitchedDetailPath, data: stitchedBytes });
+      }
+
       const planStyleGuide = resolvePlanStyleGuide(snapshot);
       const manifest = {
         schemaVersion: "picagent-delivery-manifest-v1",
         exportedAt: new Date().toISOString(),
+        exportOptions: {
+          preset: preset.id,
+          presetLabel: preset.label,
+          format: formatRaw,
+          quality,
+          stitchDetail,
+          stitchedDetailPath,
+        },
         suite: {
           id: suite.id,
           name: suite.name,
@@ -1459,6 +1613,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           exportedCount: manifestItems.length,
           mainCount: manifestItems.filter((item) => item.imageType === "main").length,
           detailCount: manifestItems.filter((item) => item.imageType === "detail").length,
+          stitchedDetailIncluded: Boolean(stitchedDetailPath),
         },
         items: manifestItems,
       };
@@ -1466,13 +1621,14 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const zipBuffer = createZipBuffer(entries);
       const safeSuiteName = sanitizeDeliveryName(suite.name, `suite_${suite.id.slice(0, 8)}`);
       const asciiFallback = safeSuiteName.replace(/[^\x20-\x7e]/g, "") || `suite_${suite.id.slice(0, 8)}`;
-      const encodedName = encodeURIComponent(`${safeSuiteName}_delivery.zip`);
+      const suffix = preset.id === "original" ? "delivery" : `delivery_${preset.id}`;
+      const encodedName = encodeURIComponent(`${safeSuiteName}_${suffix}.zip`);
       return {
         status: 200,
-        body: { data: { exportedCount: manifestItems.length }, requestId: randomUUID() },
+        body: { data: { exportedCount: manifestItems.length, preset: preset.id, stitchedDetailPath }, requestId: randomUUID() },
         headers: {
           "content-type": "application/zip",
-          "content-disposition": `attachment; filename="${asciiFallback}_delivery.zip"; filename*=UTF-8''${encodedName}`,
+          "content-disposition": `attachment; filename="${asciiFallback}_${suffix}.zip"; filename*=UTF-8''${encodedName}`,
           "cache-control": "no-store",
         },
         raw: zipBuffer,
@@ -1510,6 +1666,66 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         styleOverride: suite.styleOverride ?? null,
         effectiveStyleGuide: suite.styleOverride?.trim() || planStyleGuide,
       });
+    }
+
+    const customTaskMatch = path.match(/^\/api\/suites\/([^/]+)\/tasks\/custom$/);
+    if (method === "POST" && customTaskMatch) {
+      if (!deps.taskRepository?.createCustomTask) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
+      const suite = await deps.repository.getSuite(customTaskMatch[1]);
+      if (!suite) return fail("INVALID_SUITE_ID", 404);
+      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      const promptDraft = typeof body.promptDraft === "string" ? body.promptDraft.trim() : "";
+      const imageType = body.imageType === "main" ? "main" : "detail";
+      const purpose = typeof body.purpose === "string" && body.purpose.trim() ? body.purpose.trim() : (imageType === "main" ? "自由补充主图" : "自由补充详情图");
+      if (!title || !promptDraft) return fail("CUSTOM_TASK_FIELDS_REQUIRED", 400);
+      const [snapshot, inputImages] = await Promise.all([
+        deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null),
+        deps.repository.getInputImages(suite.id),
+      ]);
+      const sourceInputImageId = typeof body.sourceInputImageId === "string" && inputImages.some((img) => img.id === body.sourceInputImageId)
+        ? body.sourceInputImageId
+        : (inputImages[0]?.id ?? null);
+      const generationParams = body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)
+        ? body.generationParams as Record<string, unknown>
+        : { ratio: imageType === "main" ? "1:1" : "3:4", size: "1K", quality: "medium" };
+      const result = await deps.taskRepository.createCustomTask({
+        suiteId: suite.id,
+        planSnapshotId: snapshot?.id ?? null,
+        imageType,
+        title,
+        purpose,
+        promptDraft,
+        sourceInputImageId,
+        generationParams,
+        idempotencyKey,
+      });
+      return ok(result.task, result.duplicate ? 200 : 201);
+    }
+
+    const batchParamsMatch = path.match(/^\/api\/suites\/([^/]+)\/tasks\/batch-params$/);
+    if (method === "POST" && batchParamsMatch) {
+      if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
+      const suite = await deps.repository.getSuite(batchParamsMatch[1]);
+      if (!suite) return fail("INVALID_SUITE_ID", 404);
+      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const patch = body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)
+        ? body.generationParams as Record<string, unknown>
+        : null;
+      if (!patch || !Object.keys(patch).length) return fail("INVALID_EXPORT_OPTIONS", 400);
+      const scope = body.imageType === "main" || body.imageType === "detail" ? body.imageType : "all";
+      const explicitIds = Array.isArray(body.taskIds) ? new Set(body.taskIds.filter((id): id is string => typeof id === "string")) : null;
+      const tasks = (await deps.taskRepository.listTasks(suite.id)).filter((task) => {
+        if (task.status === "archived") return false;
+        if (explicitIds) return explicitIds.has(task.id);
+        return scope === "all" ? true : task.imageType === scope;
+      });
+      const updated: SuiteTask[] = [];
+      for (const task of tasks) {
+        const next = await deps.taskRepository.updateTask(task.id, { generationParams: { ...task.generationParams, ...patch } });
+        if (next) updated.push(next);
+      }
+      return ok({ updatedCount: updated.length, tasks: updated });
     }
 
     const createTasksMatch = path.match(/^\/api\/suites\/([^/]+)\/tasks$/);
@@ -1832,6 +2048,18 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!suite) return fail("INVALID_SUITE_ID", 404);
       const inputImages = await deps.repository.getInputImages(suite.id);
       return ok({ ...suite, inputImages } satisfies SuiteAggregate);
+    }
+    if (method === "PATCH" && suiteMatch) {
+      const name = typeof options.body === "object" && options.body !== null && "name" in options.body ? String((options.body as { name: unknown }).name).trim() : "";
+      if (!name) return fail("EMPTY_NAME");
+      if (!deps.repository.renameSuite) return fail("NOT_FOUND", 404);
+      const updated = await deps.repository.renameSuite(suiteMatch[1], name);
+      return updated ? ok(updated) : fail("INVALID_SUITE_ID", 404);
+    }
+    if (method === "DELETE" && suiteMatch) {
+      if (!deps.repository.deleteSuite) return fail("NOT_FOUND", 404);
+      const deleted = await deps.repository.deleteSuite(suiteMatch[1]);
+      return deleted ? ok(deleted) : fail("INVALID_SUITE_ID", 404);
     }
     return fail("NOT_FOUND", 404);
   };

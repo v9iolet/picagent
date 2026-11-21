@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { CanvasLayout, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskRepository, TaskResultSlot } from "../types.js";
 
@@ -11,6 +11,40 @@ const versionCols = `id,task_id AS "taskId",slot_id AS "slotId",attempt_id AS "a
 
 export class PostgresTaskRepository implements TaskRepository {
   constructor(private readonly pool: Pool) {}
+  async createCustomTask(input: { suiteId: string; planSnapshotId: string | null; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (input.idempotencyKey) {
+        const existing = await client.query<{ resource_id: string }>("SELECT resource_id FROM suite_workbench.idempotency_keys WHERE scope = $1 AND key = $2", [`suite.${input.suiteId}.custom-task`, input.idempotencyKey]);
+        if (existing.rowCount) {
+          const found = await client.query<SuiteTask>(`SELECT ${taskCols} FROM suite_workbench.suite_tasks WHERE id = $1`, [existing.rows[0].resource_id]);
+          await client.query("COMMIT");
+          if (found.rows[0]) return { task: found.rows[0], duplicate: true };
+        }
+      }
+      const nextOrd = Number((await client.query<{ n: number }>("SELECT COALESCE(MAX(ordinal), 0) + 1 AS n FROM suite_workbench.suite_tasks WHERE suite_id = $1", [input.suiteId])).rows[0].n);
+      const now = new Date().toISOString();
+      const params = { size: "1K", quality: "medium", ...input.generationParams };
+      const sha = createHash("sha256").update(input.promptDraft).digest("hex");
+      const status = input.sourceInputImageId ? "pending" : "incomplete";
+      const inserted = await client.query<SuiteTask>(
+        `INSERT INTO suite_workbench.suite_tasks (id,suite_id,plan_snapshot_id,plan_item_id,ordinal,image_type,title,purpose,prompt_draft,source_input_image_id,generation_params_json,status,reference_image_ids_json,fact_refs_json,prompt_sha256,origin_kind,created_at,updated_at)
+         VALUES (gen_random_uuid(),$1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,'[]'::jsonb,$12,'suite_plan',$13,$13) RETURNING ${taskCols}`,
+        [input.suiteId, input.planSnapshotId, nextOrd, input.imageType, input.title, input.purpose, input.promptDraft, input.sourceInputImageId, JSON.stringify(params), status, JSON.stringify(input.sourceInputImageId ? [input.sourceInputImageId] : []), sha, now],
+      );
+      if (input.idempotencyKey) {
+        await client.query("INSERT INTO suite_workbench.idempotency_keys (scope, key, resource_id) VALUES ($1, $2, $3)", [`suite.${input.suiteId}.custom-task`, input.idempotencyKey, inserted.rows[0].id]);
+      }
+      await client.query("COMMIT");
+      return { task: inserted.rows[0], duplicate: false };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
   async createTasksFromSnapshot(suiteId: string, snapshot: PlanSnapshot, inputImages: InputImage[]) { const client = await this.pool.connect(); const created: SuiteTask[] = []; try { await client.query("BEGIN"); await client.query("UPDATE suite_workbench.suite_tasks SET status='archived',archived_at=COALESCE(archived_at,now()),updated_at=now() WHERE suite_id=$1 AND plan_item_id<>ALL($2::uuid[]) AND status<>'archived'", [suiteId, snapshot.items.map((item) => item.id)]); for (const item of snapshot.items) { const found = await client.query<SuiteTask>("SELECT " + taskCols + " FROM suite_workbench.suite_tasks WHERE suite_id=$1 AND plan_item_id=$2", [suiteId,item.id]); if (found.rows[0]) continue; const now = new Date().toISOString(); const params = { size: "1K", quality: "medium", ...(item.suggestedParams ?? {}), ...(item.aspectRatio ? { aspectRatio: item.aspectRatio } : {}) }; const r = await client.query<SuiteTask>("INSERT INTO suite_workbench.suite_tasks (id,suite_id,plan_snapshot_id,plan_item_id,ordinal,image_type,title,purpose,prompt_draft,source_input_image_id,generation_params_json,status,category_code,reference_image_ids_json,fact_refs_json,global_style_card_json,prompt_sha256,created_at,updated_at) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12,$13,$14,$15,$16,$16) RETURNING " + taskCols, [suiteId,snapshot.id,item.id,item.ordinal,item.imageType,item.title,item.purpose,item.prompt,item.referenceImageIds?.[0] ?? inputImages[0]?.id ?? null,JSON.stringify(params),item.categoryCode ?? null,JSON.stringify(item.referenceImageIds ?? []),JSON.stringify(item.factRefs ?? []),JSON.stringify(item.globalStyleCard ?? {}),item.promptSha256 ?? null,now]); created.push(r.rows[0]); } await client.query("COMMIT"); return { tasks: await this.listTasks(suiteId), created }; } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); } }
   async createReverseTasks(input: { suiteId: string; reversePlanId: string; taskGroupId: string; mode: "main" | "detail"; idempotencyKey: string; items: Array<{ referenceId: string; ordinal: number; filename: string; promptVersionId: string; prompt: string }> }) { const c = await this.pool.connect(); const created: SuiteTask[] = []; try { await c.query("BEGIN"); const found = await c.query<{ taskIds: string[] }>('SELECT task_ids_json AS "taskIds" FROM suite_workbench.reverse_canvas_imports WHERE suite_id=$1 AND idempotency_key=$2', [input.suiteId,input.idempotencyKey]); if (found.rows[0]) { await c.query("COMMIT"); const tasks = await this.listTasks(input.suiteId); return { tasks, created: tasks.filter((task) => found.rows[0].taskIds.includes(task.id)), duplicate: true }; } const offset = Number((await c.query<{ n: number }>("SELECT COALESCE(MAX(ordinal),0) AS n FROM suite_workbench.suite_tasks WHERE suite_id=$1", [input.suiteId])).rows[0].n); const now = new Date().toISOString(); for (const item of input.items) { const row = await c.query<SuiteTask>(`INSERT INTO suite_workbench.suite_tasks (id,suite_id,plan_snapshot_id,plan_item_id,ordinal,image_type,title,purpose,prompt_draft,generation_params_json,status,created_at,updated_at,reference_image_ids_json,fact_refs_json,prompt_sha256,origin_kind,reverse_plan_id,reverse_reference_id,reverse_prompt_version_id,reverse_task_group_id,source_revision) VALUES (gen_random_uuid(),$1,NULL,NULL,$2,$3,$4,'爆品参考图反推生图',$5,'{"size":"1K","quality":"medium"}'::jsonb,'incomplete',$6,$6,$7,'[]'::jsonb,encode(digest($5,'sha256'),'hex'),'reverse_import',$8,$9,$10,$11,0) RETURNING ${taskCols}`, [input.suiteId,offset+item.ordinal,input.mode,item.filename,item.prompt,now,JSON.stringify([item.referenceId]),input.reversePlanId,item.referenceId,item.promptVersionId,input.taskGroupId]); created.push(row.rows[0]); } await c.query("INSERT INTO suite_workbench.reverse_canvas_imports (id,suite_id,reverse_plan_id,task_group_id,idempotency_key,task_ids_json,created_at) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6)", [input.suiteId,input.reversePlanId,input.taskGroupId,input.idempotencyKey,JSON.stringify(created.map((task) => task.id)),now]); await c.query("COMMIT"); return { tasks: await this.listTasks(input.suiteId), created, duplicate: false }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
   async getTask(id: string) { const r = await this.pool.query<SuiteTask>("SELECT " + taskCols + " FROM suite_workbench.suite_tasks WHERE id=$1", [id]); return r.rows[0] ?? null; }

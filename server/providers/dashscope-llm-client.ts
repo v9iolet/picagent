@@ -167,6 +167,61 @@ export class DashScopeLlmClient implements LlmClient {
       return parsed;
     } catch (error) { const normalized = error instanceof DOMException && error.name === "AbortError" ? new Error("LLM_TIMEOUT") : error; failObservation(observation, normalized); recordModelFailure("reverse-prompt", this.provider, this.model, Date.now() - startedAt, normalized instanceof Error ? normalized.message : "LLM_FAILED"); throw normalized; } finally { clearTimeout(timer); }
   }
+
+  async translateTexts(input: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }): Promise<Array<{ id: string; originalText: string; translatedText: string }>> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(this.timeoutMs, 120_000));
+    const startedAt = Date.now();
+    const systemPrompt = [
+      "你是专业跨境电商视觉本地化翻译专家。",
+      `请将输入 JSON 数组中的商品图片文案逐条翻译为地道、简洁、符合电商主图/详情页排版习惯的【${input.targetLanguage}】。`,
+      "规则：",
+      "1. 严格保留数字、尺寸单位（mm/cm/g/W/mAh/V 等）、型号编码与认证缩写。",
+      input.preserveBrandTerms !== false ? "2. 专有品牌名与英文商标保持原样不强行意译。" : "2. 可按目标市场习惯本地化表达。",
+      "3. 保持精炼短句风格，避免破坏原图排版长度。",
+      '4. 仅返回严格 JSON 对象：{"translations":[{"id":"原id","translatedText":"译文"}]}，禁止任何额外说明。',
+    ].join("\n");
+    const observation = startGeneration("llm.image-translate", { system: systemPrompt, items: input.items, targetLanguage: input.targetLanguage }, { flow: "image-translate", provider: this.provider, model: this.model });
+    try {
+      const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), {
+        method: "POST",
+        redirect: "error",
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: this.model,
+          temperature: 0.1,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: JSON.stringify({ targetLanguage: input.targetLanguage, items: input.items }) },
+          ],
+        }),
+      });
+      const rawBody = await response.text();
+      if (!response.ok) throw new Error(`LLM_HTTP_${response.status}`);
+      const payload = parseProviderJson(rawBody, this.apiKey, "LLM_INVALID_HTTP_RESPONSE") as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      const content = payload.choices?.[0]?.message?.content;
+      if (!content) throw new Error("LLM_EMPTY_RESPONSE");
+      const parsed = parseProviderJson(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""), this.apiKey, "LLM_INVALID_JSON_RESPONSE") as { translations?: Array<{ id?: unknown; translatedText?: unknown }> };
+      const byId = new Map((parsed.translations ?? []).map((row) => [String(row.id ?? ""), String(row.translatedText ?? "").trim()]));
+      const result = input.items.map((item) => ({
+        id: item.id,
+        originalText: item.text,
+        translatedText: byId.get(item.id) || item.text,
+      }));
+      finishObservation(observation, { status: "succeeded", count: result.length }, { http_status: response.status });
+      recordModelSuccess("image-translate", this.provider, this.model, Date.now() - startedAt, { input: payload.usage?.prompt_tokens, output: payload.usage?.completion_tokens });
+      return result;
+    } catch (error) {
+      const normalized = error instanceof DOMException && error.name === "AbortError" ? new Error("LLM_TIMEOUT") : error;
+      failObservation(observation, normalized);
+      recordModelFailure("image-translate", this.provider, this.model, Date.now() - startedAt, normalized instanceof Error ? normalized.message : "LLM_FAILED");
+      throw normalized;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function captureText(content: string): string | { captured: false } {
