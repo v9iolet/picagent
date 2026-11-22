@@ -123,10 +123,11 @@ const buildCategoryGroups = (config: SuitePipelineRun["config"]) => {
 
 function normalizeVisualConfig(config: SuitePipelineRun["config"]): SuitePipelineRun["config"] {
   const { count } = buildCategoryGroups(config).selling_points;
+  const smart = config.mode === "smart";
   return {
     ...config,
     visualStyle: resolveVisualStyle(config.visualStyle).id,
-    sellingPointLayouts: resolveSellingPointLayouts(config.sellingPointLayouts, count).map(({ id }) => id),
+    sellingPointLayouts: smart ? [] : resolveSellingPointLayouts(config.sellingPointLayouts, count).map(({ id }) => id),
   };
 }
 
@@ -226,7 +227,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         const groups = buildCategoryGroups(config);
         const style = resolveVisualStyle(config.visualStyle);
         const visualStyle = `${style.name}：${style.promptDirective}`;
-        const layouts = resolveSellingPointLayouts(config.sellingPointLayouts, groups.selling_points.count);
+        const layouts = smart ? [] : resolveSellingPointLayouts(config.sellingPointLayouts, groups.selling_points.count);
         const details = Object.values(groups)
           .filter((group) => group.categories[0] !== "main")
           .reduce((sum, group) => sum + group.count, 0);

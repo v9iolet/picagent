@@ -117,7 +117,9 @@ export function fromRun(run: Pipeline | null): Config {
     ...config,
     counts,
     visualStyle: resolveVisualStyle(config.visualStyle).id,
-    sellingPointLayouts: resolveSellingPointLayouts(config.sellingPointLayouts, counts.selling_points).map(({ id }) => id),
+    sellingPointLayouts: config.mode === "smart"
+      ? []
+      : resolveSellingPointLayouts(config.sellingPointLayouts, counts.selling_points).map(({ id }) => id),
   };
 }
 export async function download(url: string, name: string) {

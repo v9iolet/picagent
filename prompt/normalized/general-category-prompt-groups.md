@@ -99,16 +99,22 @@ fields:
 
 ### 商业排版与卖点图版式
 
-有 `visual_style` 时，在全局风格卡的品牌基调下融入该风格。背景色阶、景别、机位、光线方向和明暗反差按各图职责变化，避免重复的灰白平光摆拍。对于 `feature_benefit`、`material_detail` 和 `lifestyle_use`，按需要采用主副标题、带图标的卖点胶囊、局部放大镜、细指示线、分屏或有层次的真实光影。同一类别的多张图必须有可一眼区分的构图及视觉视角。缺乏确认事实或平台限制文字时，保留构图意图并省略相关文案与标注。
+有 `visual_style` 时，在全局风格卡的品牌基调下融入该风格。背景明暗色阶、景别、机位、光线方向和明暗反差必须按各图职责明显区分，避免重复的灰白平光摆拍；每张卡 `prompt` 应精炼聚焦正向视觉画面、光影与商业版式（建议 150–260 英文词或 200–350 中文字符），不要堆砌冗长商品参数清单。
 
-`selling_point_layouts` 是分配给当前卖点图类别（`feature_benefit` 或 `material_detail`）的有序 JSON 数组字符串，每项的 `promptDirective` 包含构图、文字层级与光影指导。数组有 K 项时，将第 1 至 K 个指定版式逐一落实到 `items` 中对应顺序的前 K 条 `prompt`，明确写出主体位置、信息区块、文字层级和关键光影。每种版式用一张；其余卖点图选用有别于已指定版式且彼此不同的商业排版。无指定版式时按类别职责智能安排，例如核心卖点优先使用概括性商业构图，材质细节优先使用局部近景。版式中的标题位与标注位只使用当前类别已确认的文案。
+对于卖点图类别（`feature_benefit` 与 `material_detail`）：
+- 强制「一图一核心卖点」，不得在一张图里堆砌全部卖点。
+- 默认设置 `allowsTextOverlay: "yes"`，必须在 `textContent` 中提炼目标语言（`output_language`）的精炼上图短文案：包含 1 个主标题（≤ 6 英文词或 ≤ 10 中文字符）、可选副标题，以及 2–3 个短卖点胶囊或工艺标注词；每条文案严格取自已确认事实并标明 `source`。
+- 在 `prompt` 中用**明确带引号的排版渲染指令**将 `textContent` 的各条短文案准确落位到对应版式区块（如顶部撞色标题区、左侧带图标卖点胶囊栏、右侧参数框或微距指示线标注末端）。
+- **严禁**在卖点图或细节图 `prompt` 末尾堆砌 `"no added text, no icons, no marketing copy"` 等否定词清单。
+
+`selling_point_layouts` 是分配给当前卖点图类别（`feature_benefit` 或 `material_detail`）的有序 JSON 数组字符串，每项的 `promptDirective` 包含构图、文字层级与光影指导。数组有 K 项时，将第 1 至 K 个指定版式逐一落实到 `items` 中对应顺序的前 K 条 `prompt`，明确写出主体位置、信息区块、文字层级和关键光影。每种版式用一张；其余卖点图选用有别于已指定版式且彼此不同的商业排版。无指定版式时按类别职责智能安排，例如 `feature_benefit` 优先使用高对比商业卖点构图，`material_detail` 优先使用局部微距与工艺指示线。版式中的标题位与标注位只使用当前类别已确认的 `textContent` 文案。
 
 ### 对比图与构图约束
 
 category_code 为 comparison 时，只做有事实依据的自身对比（新旧款、使用前后、规格之间），每一条最终 prompt 都必须明确包含“不出现竞品品牌、竞品商品，不用最好、第一等无依据比较”的约束。只能使用当前类别获准的事实，不能自行补造对比参数或效果。
 
 aspect_ratio 有值时写入各图的构图要求（第二阶段同时写入 aspectRatio），不承诺精确像素。
-main_image_background 为 pure_white_required 时，主图必须是 RGB 255 纯白背景、无文字/Logo/水印/装饰；white_preferred 时优先白底或干净浅色背景；flexible 时按平台策略允许场景底。平台背景规则优先于风格卡。target_market_country 沿用目标市场字段，不新增别名。
+仅当 `category_code === "main"` 且 `main_image_background === "pure_white_required"` 时，强制主图使用 RGB 255 纯白背景且无文字、Logo、水印或装饰（设置 `allowsTextOverlay: "no"`）；当 `category_code === "main"` 且 `main_image_background === "white_preferred"` 时优先白底或干净浅色背景；`flexible` 或非主图类别不得套用纯白禁字约束。平台背景规则优先于风格卡。target_market_country 沿用目标市场字段，不新增别名。
 
 严格按以下规则返回：
 
