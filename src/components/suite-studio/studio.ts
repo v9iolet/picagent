@@ -13,6 +13,7 @@ import {
   SUITE_CATEGORY_GROUPS,
   type SuiteCategoryGroupCode,
 } from "../../../shared/suite-categories";
+import { resolveSellingPointLayouts, resolveVisualStyle } from "../../../shared/selling-point-layouts";
 
 export type Counts = Record<SuiteCategoryGroupCode, number>;
 export interface Config extends ListingConfig {
@@ -20,6 +21,8 @@ export interface Config extends ListingConfig {
   size: string;
   mode: "smart" | "custom";
   counts: Counts;
+  visualStyle: string;
+  sellingPointLayouts: string[];
   listingCopy: boolean;
 }
 export const initialConfig: Config = {
@@ -36,6 +39,8 @@ export const initialConfig: Config = {
     lifestyle: SUITE_CATEGORY_GROUPS.lifestyle.defaultCount,
     other: SUITE_CATEGORY_GROUPS.other.defaultCount,
   },
+  visualStyle: "auto",
+  sellingPointLayouts: [],
   listingCopy: false,
 };
 export function totalImages(c: Config) {
@@ -106,7 +111,14 @@ export const studioApi = {
 };
 export function fromRun(run: Pipeline | null): Config {
   const { refineBaseImages, ...config } = run?.config ?? {};
-  return { ...initialConfig, ...config, counts: { ...initialConfig.counts, ...config.counts } };
+  const counts = { ...initialConfig.counts, ...config.counts };
+  return {
+    ...initialConfig,
+    ...config,
+    counts,
+    visualStyle: resolveVisualStyle(config.visualStyle).id,
+    sellingPointLayouts: resolveSellingPointLayouts(config.sellingPointLayouts, counts.selling_points).map(({ id }) => id),
+  };
 }
 export async function download(url: string, name: string) {
   const res = await fetch(url);

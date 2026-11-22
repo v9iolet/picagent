@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { requiresPureWhiteMainImage } from "../shared/platform-main-background.js";
 import { productNameFor } from "../shared/product-name.js";
 import { SUITE_CATEGORY_GROUPS, SMART_SUITE_STRUCTURE_PRESET } from "../shared/suite-categories.js";
+import { resolveSellingPointLayouts, resolveVisualStyle } from "../shared/selling-point-layouts.js";
 import { resolveDeliverySlots, type DeliveryEditChildLike } from "../shared/workbench-delivery.js";
 import { errorMessages, fail } from "./api-errors.js";
 import { ok, asRecord, dataOf, now, type AppResponse } from "./api-response.js";
@@ -112,6 +113,15 @@ const buildCategoryGroups = (config: SuitePipelineRun["config"]) => {
   };
 };
 
+function normalizeVisualConfig(config: SuitePipelineRun["config"]): SuitePipelineRun["config"] {
+  const { count } = buildCategoryGroups(config).selling_points;
+  return {
+    ...config,
+    visualStyle: resolveVisualStyle(config.visualStyle).id,
+    sellingPointLayouts: resolveSellingPointLayouts(config.sellingPointLayouts, count).map(({ id }) => id),
+  };
+}
+
 export function createSuitePipeline(deps: SuitePipelineDependencies) {
   const { pipelineRepository, listingRepository, request, appendConfirmedSnapshot, loadSuiteImageEditChildren } = deps;
   const executePipeline = async (run: SuitePipelineRun) => {
@@ -206,6 +216,9 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         if (!smart) required.push("category_groups");
         if (required.some((key) => !allowed.has(key))) throw new PipelineError("PLAN_TEMPLATE_OUTDATED");
         const groups = buildCategoryGroups(config);
+        const style = resolveVisualStyle(config.visualStyle);
+        const visualStyle = `${style.name}：${style.promptDirective}`;
+        const layouts = resolveSellingPointLayouts(config.sellingPointLayouts, groups.selling_points.count);
         const details = Object.values(groups)
           .filter((group) => group.categories[0] !== "main")
           .reduce((sum, group) => sum + group.count, 0);
@@ -217,6 +230,8 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           human_supplement: typeof config.sellingPoints === "string" ? config.sellingPoints : "",
           emphasis_requirements: typeof config.sellingPoints === "string" ? config.sellingPoints : "",
           aspect_ratio: config.aspectRatio ?? "1:1",
+          visual_style: visualStyle,
+          ...(layouts.length > 0 && { selling_point_layouts: JSON.stringify(layouts) }),
           main_image_background: requiresPureWhiteMainImage(platform) ? "pure_white_required" : "flexible",
           main_image_count: smart ? SMART_SUITE_STRUCTURE_PRESET.main_image_count : groups.main.count,
           detail_image_count_min: 0,
@@ -276,6 +291,14 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
             parentSnapshotId: rawSnapshot.id,
             confirmationStatus: "confirmed",
             confirmationMode: "auto",
+            requestSummary: {
+              ...rawSnapshot.requestSummary,
+              // Preserve the choices for category templates even when the structure template predates them.
+              ...(!allowed.has("visual_style") && { visualStyle }),
+              ...(!allowed.has("selling_point_layouts") && layouts.length > 0 && {
+                sellingPointLayoutIds: layouts.map(({ id }) => id),
+              }),
+            },
             confirmedAt: now(),
             createdAt: now(),
           };
@@ -443,7 +466,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
   async function startRun(idempotencyKey: string | undefined, payload: unknown) {
     if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
     const body = asRecord(payload);
-    const config: SuitePipelineRun["config"] = { ...asRecord(body.config) };
+    const config = normalizeVisualConfig(asRecord(body.config));
     const cloneSpec =
       body.cloneFrom && typeof body.cloneFrom === "object" && !Array.isArray(body.cloneFrom)
         ? (body.cloneFrom as Record<string, unknown>)
@@ -557,7 +580,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           if (category === "feature_benefit" || category === "material_detail") nextCounts.selling_points = 0;
           else if (category === "lifestyle_use") nextCounts.lifestyle = 0;
         }
-      config = { ...config, sellingPoints: mergedSellingPoints, counts: nextCounts };
+      config = normalizeVisualConfig({ ...config, sellingPoints: mergedSellingPoints, counts: nextCounts });
     }
     if (!["retry_base_refine", "skip_base_refine", "submit_missing_facts", "resume_after_interrupt"].includes(action))
       return fail("INVALID_PIPELINE_ACTION", 400);

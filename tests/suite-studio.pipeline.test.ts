@@ -34,6 +34,8 @@ async function pipelineFixture(options: {
   beforePlan?: (input: PlanLlmInput) => void;
   publishCategoryTemplate?: boolean;
   imageCount?: number;
+  materialCount?: number;
+  legacyVisualInputs?: "both" | "structure";
 } = {}) {
   const repository = new MemorySuiteRepository();
   const storage = new MemoryStorage();
@@ -44,6 +46,9 @@ async function pipelineFixture(options: {
     "general-base-refine.md",
   ]) {
     const record = parseNormalizedPromptMarkdown(await readFile(new URL(`../prompt/normalized/${name}`, import.meta.url), "utf8"), name);
+    if (options.legacyVisualInputs === "both" || (options.legacyVisualInputs === "structure" && record.stage === "structure_plan")) {
+      record.inputSchema = record.inputSchema.filter(({ key }) => key !== "visual_style" && key !== "selling_point_layouts");
+    }
     const [version] = await prompts.importRecords([record]);
     await prompts.publishVersion(version.templateVersionId);
   }
@@ -93,12 +98,13 @@ async function pipelineFixture(options: {
         const imageId = input.inputImageIds[0];
         const groups = input.dynamicInput.category_groups ? JSON.parse(String(input.dynamicInput.category_groups)) : null;
         const details = groups?.selling_points.count ?? 0;
+        const materialCount = options.materialCount ?? 0;
         return {
           schemaVersion: "suite-structure-plan-v2", status: missing ? "NEEDS_HUMAN_INPUT" : "READY_FOR_REVIEW",
           mainAllocation: { category: "main", count: Number(input.dynamicInput.main_image_count), reason: "主图", sourceImageIds: [imageId], factRefs: [], missingFacts: [] },
           detailImageCount: details,
           categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({
-            category, requirement: "optional", count: category === "feature_benefit" ? details : 0, reason: "", sourceImageIds: [imageId], factRefs: [],
+            category, requirement: "optional", count: category === "feature_benefit" ? details - materialCount : category === "material_detail" ? materialCount : 0, reason: "", sourceImageIds: [imageId], factRefs: [],
             missingFacts: missing && category === "feature_benefit" ? ["防水等级"] : category === "comparison" && options.maxMissingFacts ? ["缺少对比事实"] : [],
           })),
           globalStyleCard: { promptPrefix: "统一" },
@@ -216,6 +222,69 @@ test("new suites default to suite studio and support canvas origin", async () =>
   assert.equal(studio.origin, "suite_studio");
   assert.equal(canvas.origin, "canvas");
 });
+
+const visualChoices = {
+  ...oneCard,
+  mode: "custom",
+  counts: { ...oneCard.counts, selling_points: 3 },
+  visualStyle: "dark_tech",
+  sellingPointLayouts: [
+    "left_pills_right_hero", "fake-layout", "hero_color_block", "hero_color_block",
+    "macro_callout_lines", "scene_circle_zoom",
+  ],
+};
+const expectedLayouts = ["left_pills_right_hero", "hero_color_block", "macro_callout_lines"];
+
+function layoutIds(input: unknown): string[] | undefined {
+  if (input === undefined) return undefined;
+  assert.equal(typeof input, "string");
+  const layouts = JSON.parse(input as string) as Array<{ id: string; promptDirective: { composition: string } }>;
+  assert.ok(layouts.every(({ promptDirective }) => promptDirective.composition.length > 0));
+  return layouts.map(({ id }) => id);
+}
+
+for (const legacyVisualInputs of [undefined, "both", "structure"] as const) {
+  const title = legacyVisualInputs === "both"
+    ? "one-click generation completes with legacy templates that omit visual preferences"
+    : legacyVisualInputs === "structure"
+      ? "a legacy structure template still lets a current category template use the frozen visual preferences"
+      : "one-click planning forwards the visual style and splits the first three valid layouts between two selling-point categories";
+  test(title, async () => {
+    const planCalls: PlanLlmInput[] = [];
+    const categoryCalls = new Map<string, CategoryPromptLlmInput>();
+    const { app, suite } = await pipelineFixture({
+      materialCount: 1,
+      legacyVisualInputs,
+      beforePlan: (input) => { planCalls.push(input); },
+      beforeCategory: async (_call, input) => { categoryCalls.set(input.categoryCode, input); },
+    });
+    const response = await start(app, suite.id, "visual-preferences", visualChoices);
+    assert.equal(response.status, 202);
+    const pipeline = await waitPipeline(app, suite.id, ["completed"]);
+    assert.equal(pipeline.config.visualStyle, "dark_tech");
+    assert.deepEqual(pipeline.config.sellingPointLayouts, expectedLayouts);
+    assert.equal(planCalls.length, 1);
+    const [plan] = planCalls;
+    const feature = categoryCalls.get("feature_benefit");
+    const material = categoryCalls.get("material_detail");
+    const main = categoryCalls.get("main");
+    assert.ok(main && feature && material);
+    assert.equal(feature.requestedCount, 2);
+    assert.equal(material.requestedCount, 1);
+    assert.equal(Object.hasOwn(main.dynamicInput, "selling_point_layouts"), false);
+
+    const expectedStyle = "暗调科技光影：采用深色质感背景、冷暖轮廓光和高对比科技构图，突出有依据的参数。";
+    const expectPlanInputs = !legacyVisualInputs;
+    const expectCategoryInputs = legacyVisualInputs !== "both";
+    assert.equal(plan.dynamicInput.visual_style, expectPlanInputs ? expectedStyle : undefined);
+    assert.deepEqual(layoutIds(plan.dynamicInput.selling_point_layouts), expectPlanInputs ? expectedLayouts : undefined);
+    for (const input of [main, feature, material]) {
+      assert.equal(input.dynamicInput.visual_style, expectCategoryInputs ? expectedStyle : undefined);
+    }
+    assert.deepEqual(layoutIds(feature.dynamicInput.selling_point_layouts), expectCategoryInputs ? ["left_pills_right_hero", "hero_color_block"] : undefined);
+    assert.deepEqual(layoutIds(material.dynamicInput.selling_point_layouts), expectCategoryInputs ? ["macro_callout_lines"] : undefined);
+  });
+}
 
 test("custom 1/3/2/1 runs end to end and freezes ratio, size, auto confirmation, and listing copy", async () => {
   const repository = new MemorySuiteRepository();

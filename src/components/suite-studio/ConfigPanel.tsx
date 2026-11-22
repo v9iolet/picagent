@@ -1,5 +1,5 @@
 import { ResolutionCostNote } from "../ResolutionCostNote";
-import { useId, useState } from "react";
+import { Fragment, useId, useRef, useState } from "react";
 import type { ApiImage, ApiPlatformProfile } from "../../api/client";
 import type { ImageOptions } from "../../../shared/model-settings";
 import {
@@ -9,7 +9,9 @@ import {
 } from "../../../shared/suite-categories";
 import { SUPPORTED_OUTPUT_LANGUAGES } from "../../../shared/workbench-delivery";
 import { requiresPureWhiteMainImage } from "../../../shared/platform-main-background";
+import { VISUAL_STYLES } from "../../../shared/selling-point-layouts";
 import { totalImages, type Config } from "./studio";
+import { SellingPointLayoutModal } from "./SellingPointLayoutModal";
 
 const sellingPointsPlaceholder = `建议包含以下信息生成更精准：
 1.产品名称
@@ -44,13 +46,21 @@ export function ConfigPanel({
 }: Props) {
   const [drag, setDrag] = useState(false);
   const [showSellingPointsHelp, setShowSellingPointsHelp] = useState(false);
+  const [showLayouts, setShowLayouts] = useState(false);
   const sellingPointsHelpId = useId();
+  const layoutsHelpId = useId();
+  const layoutCountId = useId();
+  const layoutEntry = useRef<HTMLButtonElement>(null);
   const profile = platforms.find((p) => p.code === c.platform);
   const pureWhiteMain = requiresPureWhiteMainImage(profile);
   const count = totalImages(c);
+  function closeLayouts() {
+    setShowLayouts(false);
+    requestAnimationFrame(() => layoutEntry.current?.focus({ preventScroll: true }));
+  }
   function select(
     label: string,
-    key: "targetMarket" | "outputLanguage" | "aspectRatio" | "size",
+    key: "targetMarket" | "outputLanguage" | "aspectRatio" | "size" | "visualStyle",
     choices: readonly (string | { value: string; label: string })[],
   ) {
     return (
@@ -138,6 +148,7 @@ export function ConfigPanel({
             {select("语言", "outputLanguage", SUPPORTED_OUTPUT_LANGUAGES)}
             {select("比例", "aspectRatio", options.aspectRatios)}
             {select("分辨率", "size", options.sizes)}
+            {select("视觉风格", "visualStyle", VISUAL_STYLES.map(({ id, name }) => ({ value: id, label: name })))}
           </div>
           <ResolutionCostNote size={c.size} className="ss-note" />
           {profile && (
@@ -195,39 +206,71 @@ export function ConfigPanel({
                   : key === "other"
                     ? group.categories.length
                     : SUITE_IMAGE_LIMITS.detail.max;
-              const step = (delta: number) => update({ counts: { ...c.counts, [key]: value + delta } });
+              const step = (delta: number) => {
+                const nextCount = value + delta;
+                update({
+                  counts: { ...c.counts, [key]: nextCount },
+                  ...(key === "selling_points" && nextCount < c.sellingPointLayouts.length && {
+                    sellingPointLayouts: c.sellingPointLayouts.slice(0, nextCount),
+                  }),
+                });
+              };
               return (
-                <div key={key} className="ss-counter">
-                  <div>
-                    <strong>{name}</strong>
-                    {key === "other" && <em>AI智能匹配</em>}
-                    <small>
-                      {group.description}
-                      {key === "other" ? "，张数为上限。" : ""}
-                    </small>
+                <Fragment key={key}>
+                  <div className="ss-counter">
+                    <div>
+                      <strong>{name}</strong>
+                      {key === "other" && <em>AI智能匹配</em>}
+                      <small>
+                        {group.description}
+                        {key === "other" ? "，张数为上限。" : ""}
+                      </small>
+                    </div>
+                    <div className="ss-stepper">
+                      <button
+                        aria-label={"减少" + name}
+                        disabled={value <= (key === "main" ? 1 : 0)}
+                        onClick={() => step(-1)}
+                      >
+                        −
+                      </button>
+                      <output aria-label={name + "张数"}>{value}</output>
+                      <button
+                        aria-label={"增加" + name}
+                        disabled={
+                          value >= max ||
+                          count >= SUITE_IMAGE_LIMITS.total.max ||
+                          (key !== "main" && count - c.counts.main >= SUITE_IMAGE_LIMITS.detail.max)
+                        }
+                        onClick={() => step(1)}
+                      >
+                        ＋
+                      </button>
+                    </div>
                   </div>
-                  <div className="ss-stepper">
+                  {key === "selling_points" && (
                     <button
-                      aria-label={"减少" + name}
-                      disabled={value <= (key === "main" ? 1 : 0)}
-                      onClick={() => step(-1)}
+                      type="button"
+                      ref={layoutEntry}
+                      className="ss-layout-entry"
+                      aria-label="选择卖点图版式参考"
+                      aria-describedby={c.sellingPointLayouts.length ? `${layoutsHelpId} ${layoutCountId}` : layoutsHelpId}
+                      aria-haspopup="dialog"
+                      disabled={value === 0}
+                      onClick={() => setShowLayouts(true)}
                     >
-                      −
+                      <span className="ss-layout-entry-icon" aria-hidden="true">?</span>
+                      <span>
+                        <strong>选择卖点图版式参考</strong>
+                        <small id={layoutsHelpId}>每种版式用于一张卖点图</small>
+                      </span>
+                      {c.sellingPointLayouts.length > 0 && (
+                        <span id={layoutCountId} className="ss-layout-entry-badge">已选 {c.sellingPointLayouts.length} 个版式</span>
+                      )}
+                      <span className="ss-layout-entry-arrow" aria-hidden="true">›</span>
                     </button>
-                    <output aria-label={name + "张数"}>{value}</output>
-                    <button
-                      aria-label={"增加" + name}
-                      disabled={
-                        value >= max ||
-                        count >= SUITE_IMAGE_LIMITS.total.max ||
-                        (key !== "main" && count - c.counts.main >= SUITE_IMAGE_LIMITS.detail.max)
-                      }
-                      onClick={() => step(1)}
-                    >
-                      ＋
-                    </button>
-                  </div>
-                </div>
+                  )}
+                </Fragment>
               );
             })
           )}
@@ -245,6 +288,17 @@ export function ConfigPanel({
           <small>根据所选平台规范，智能生成符合上架要求的商品文案</small>
         </section>
       </fieldset>
+      {showLayouts && (
+        <SellingPointLayoutModal
+          selectedIds={c.sellingPointLayouts}
+          maxCount={c.counts.selling_points}
+          close={closeLayouts}
+          apply={(sellingPointLayouts) => {
+            update({ sellingPointLayouts });
+            closeLayouts();
+          }}
+        />
+      )}
       <footer>
         <button className="ss-primary" disabled={busy || !images.length || !profile} onClick={generate}>
           {c.listingCopy ? "一键生成套图与商品上架文案" : "一键生成套图"}（{count}张）

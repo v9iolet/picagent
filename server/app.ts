@@ -9,13 +9,14 @@ import { MemoryListingRepository, type ListingRepository } from "./listing-copy.
 import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../shared/model-settings.js";
 import { PURE_WHITE_MAIN_IMAGE_REQUIREMENTS } from "../shared/platform-main-background.js";
 import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
+import { allocateSellingPointLayouts, resolveSellingPointLayouts } from "../shared/selling-point-layouts.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
 import type { ModelSettings } from "./model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { processGeneratedImage, processImage } from "./image.js";
-import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptStage } from "./prompt-library.js";
+import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptStage, type PromptTemplateRuntime } from "./prompt-library.js";
 import { MemoryCategoryPromptRepository } from "./repositories/memory-category-prompt-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { MemoryPipelineRepository } from "./repositories/memory-pipeline-repository.js";
@@ -81,6 +82,17 @@ function platformForPlanning(profile: PlatformProfile | null, background: unknow
     return { ...profile, mainImageBackground: background, mainImageStrategy: PURE_WHITE_MAIN_IMAGE_REQUIREMENTS };
   if (background === "flexible") return { ...profile, mainImageBackground: background };
   return profile;
+}
+
+function savedSellingPointLayoutIds(snapshot: PlanSnapshot): unknown {
+  const input = snapshot.dynamicInput.selling_point_layouts;
+  if (typeof input !== "string") return snapshot.requestSummary.sellingPointLayoutIds;
+  try {
+    const layouts: unknown = JSON.parse(input);
+    return Array.isArray(layouts) ? layouts.map((layout) => asRecord(layout).id) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function observedPromptLoad(repository: PromptRepository, templateVersionId: string, stage?: PromptStage) {
@@ -465,7 +477,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
   };
 
-  const categoryPlanInput = (snapshot: PlanSnapshot, categoryCode: string, requestedCount: number, allocation: Record<string, unknown> | null) => {
+  const categoryPlanInput = (
+    snapshot: PlanSnapshot,
+    categoryCode: string,
+    requestedCount: number,
+    allocation: Record<string, unknown> | null,
+    template: PromptTemplateRuntime,
+  ) => {
     const styleCard = snapshot.structure?.globalStyleCard ?? {};
     const factRefs = allocation && Array.isArray(allocation.factRefs) ? allocation.factRefs.map(String) : [];
     const sourceImageIds = allocation && Array.isArray(allocation.sourceImageIds) ? allocation.sourceImageIds.map(String) : snapshot.inputImageIds;
@@ -473,6 +491,20 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const universalInput: Record<string, unknown> = {};
     for (const key of ["platform", "output_language", "product_name", "product_category", "brand", "target_market_country", "aspect_ratio", "main_image_background", "platform_text_rule", "text_strategy", "emphasis_requirements", "design_constraints"]) {
       if (snapshot.dynamicInput[key] !== undefined) universalInput[key] = snapshot.dynamicInput[key];
+    }
+    const allowed = new Set(template.inputSchema.map(({ key }) => key));
+    const visualStyle = snapshot.dynamicInput.visual_style ?? snapshot.requestSummary.visualStyle;
+    if (allowed.has("visual_style") && typeof visualStyle === "string" && visualStyle.trim()) {
+      universalInput.visual_style = visualStyle;
+    }
+    if (allowed.has("selling_point_layouts") && isStructurePlanV2(snapshot.structure) &&
+        (categoryCode === "feature_benefit" || categoryCode === "material_detail")) {
+      const categories = snapshot.structure.categoryAllocations;
+      const featureCount = categories.find(({ category }) => category === "feature_benefit")?.count ?? 0;
+      const materialCount = categories.find(({ category }) => category === "material_detail")?.count ?? 0;
+      const layouts = resolveSellingPointLayouts(savedSellingPointLayoutIds(snapshot), featureCount + materialCount);
+      const slice = allocateSellingPointLayouts(layouts, { feature_benefit: featureCount, material_detail: materialCount })[categoryCode];
+      if (slice.length) universalInput.selling_point_layouts = JSON.stringify(slice);
     }
     const facts = designerFactsText(snapshot.dynamicInput);
     if (facts) universalInput.human_supplement = facts;
@@ -1199,7 +1231,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
       const run = async () => {
         for (const entry of allocations) {
-          const dynamicInput = categoryPlanInput(snapshot, entry.categoryCode, entry.requestedCount, entry.allocation);
+          const dynamicInput = categoryPlanInput(snapshot, entry.categoryCode, entry.requestedCount, entry.allocation, template!);
           const approvedFactRefs = entry.allocation && Array.isArray(entry.allocation.factRefs) ? entry.allocation.factRefs.map(String) : [];
           const requestKey = `${idempotencyKey}:${snapshot.id}:${entry.categoryCode}`;
           const request: CategoryPromptRequest = {
@@ -1257,7 +1289,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const allocation = previous.categoryCode === "main" && isStructurePlanV2(snapshot.structure)
         ? snapshot.structure.mainAllocation as unknown as Record<string, unknown>
         : snapshot.structure.categoryAllocations.map((item) => item as Record<string, unknown>).find((item) => String(item.category) === previous.categoryCode) ?? null;
-      const dynamicInput = categoryPlanInput(snapshot, previous.categoryCode, previous.requestedCount, allocation);
+      const dynamicInput = categoryPlanInput(snapshot, previous.categoryCode, previous.requestedCount, allocation, template);
       const retryRequest: CategoryPromptRequest = { ...previous, id: randomUUID(), status: "running", idempotencyKey: `${idempotencyKey}:${snapshot.id}:${previous.categoryCode}:retry`, retryOfRequestId: previous.id, provider: llmSource(llmClient), templateVersionId: template.templateVersionId, dynamicInput, requestSummary: { ...previous.requestSummary, retryOfRequestId: previous.id }, responseSummary: null, items: [], errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), completedAt: null };
       const reservation = await categoryPromptRepository.beginRequest(retryRequest);
       if (reservation.duplicate) return ok(categoryRequestView(reservation.request), reservation.request.status === "running" ? 202 : 200);

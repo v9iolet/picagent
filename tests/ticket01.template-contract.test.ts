@@ -63,7 +63,7 @@ test("grouped planning versions publish through the existing lifecycle and prese
     validatePromptTemplateContract(newRecord);
     assert.equal(newRecord.code, oldRecord.code);
     assert.notEqual(newRecord.templateVersionId, oldRecord.templateVersionId);
-    for (const key of ["aspect_ratio", "main_image_background", "target_market_country", ...(stage === "structure-plan" ? ["category_groups"] : [])]) {
+    for (const key of ["aspect_ratio", "main_image_background", "target_market_country", "visual_style", "selling_point_layouts", ...(stage === "structure-plan" ? ["category_groups"] : [])]) {
       assert.equal(newRecord.inputSchema.find((field) => field.key === key)?.required, false, key);
     }
     assert.equal(newRecord.inputSchema.some((field) => field.key === "target_market"), false);
