@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout } from "node:timers/promises";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
@@ -14,7 +14,7 @@ function fixture() {
   const storage = new MemoryStorage();
   const library = new MemoryLibraryRepository();
   const calls: Parameters<ImageProvider["edit"]>[0][] = [];
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), taskRepository: new MemoryTaskRepository(), libraryRepository: library, storage,
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), taskRepository: new MemoryTaskRepository(), libraryRepository: library, storage,
     provider: { edit: async (request) => { calls.push(request); return { bytes: png, mimeType: "image/png" }; } },
   });
   const create = async (name: string, origin?: "canvas") => {

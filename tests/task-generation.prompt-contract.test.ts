@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import sharp from "sharp";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
@@ -23,7 +23,7 @@ test("plan generation sends template, user input, selected chunks, and image ids
   const suite = await suites.createSuite("Ticket 08 prompt audit");
   const imageBytes = await sharp({ create: { width: 12, height: 12, channels: 3, background: "white" } }).png().toBuffer();
   const calls: Array<Parameters<NonNullable<LlmClient["generatePlan"]>>[0]> = [];
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository: suites,
     storage,
     promptRepository: prompts,

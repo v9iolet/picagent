@@ -4,7 +4,7 @@ import http from "node:http";
 import path from "node:path";
 import { chromium } from "playwright";
 import sharp from "sharp";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import { ModelSettings } from "../server/model-settings.js";
@@ -77,7 +77,7 @@ async function startTestServer() {
   );
   const imageEditorApi = createImageEditorApi(editorService);
 
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository,
     planRepository,
     taskRepository,

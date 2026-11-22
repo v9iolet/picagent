@@ -4,7 +4,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { createServer } from "vite";
 import { chromium } from "playwright";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
@@ -76,7 +76,7 @@ async function offlineStudio() {
       }),
     },
   );
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     imageEditorApi: createImageEditorApi(editor),
     repository: new MemorySuiteRepository(),
     storage,

@@ -1,3 +1,8 @@
+import { planSnapshotView, isStructurePlanV2, taskView, taskAttemptView, taskSlotView, taskVersionView, taskBatchView } from "./suite-views.js";
+import { createSuitePipeline } from "./suite-pipeline.js";
+import { fail, errorMessages } from "./api-errors.js";
+import { ok, asRecord, dataOf, type AppResponse } from "./api-response.js";
+export type { AppResponse } from "./api-response.js";
 import { isProductImageResource } from "./library-reference-policy.js";
 import { createListingCopyApi } from "./listing-copy-api.js";
 import { MemoryListingRepository, type ListingRepository } from "./listing-copy.js";
@@ -31,7 +36,6 @@ import type {
   CategoryPromptLlmInput,
   CategoryPromptRequest,
   CategoryPromptRepository,
-  ErrorEnvelope,
   GenerationAttempt,
   ImageProvider,
   InputImage,
@@ -42,7 +46,6 @@ import type {
   PlatformRepository,
   PromptRepository,
   RagClient,
-  ResponseEnvelope,
   StorageAdapter,
   StructureAllocation,
   StructurePlanV2,
@@ -54,15 +57,13 @@ import type {
   TaskGenerationAttempt,
   TaskGenerationBatch,
   TaskResultSlot,
-  TaskImageVersion,
   LibraryRepository,
   ReverseRepository, ReversePlan, ReverseReference, ReverseAttempt, ReversePromptVersion,
-  PipelineRepository, SuitePipelineRun,
+  PipelineRepository,
 } from "./types.js";
 import { failObservation, finishObservation, startTool } from "./observability.js";
 
-export interface AppResponse { status: number; body: ResponseEnvelope<unknown> | ErrorEnvelope; headers?: Record<string, string>; raw?: Buffer }
-export interface Ticket02App {
+export interface SuiteStudioApp {
   request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<AppResponse>;
   upload(suiteId: string, file: UploadFile): Promise<AppResponse>;
   preview(suiteId: string, imageId: string, kind: "original" | "thumbnail"): Promise<AppResponse>;
@@ -84,99 +85,6 @@ async function observedPromptLoad(repository: PromptRepository, templateVersionI
   }
 }
 
-const errorMessages: Record<string, string> = {
-  INVALID_SUITE_ID: "方案不存在",
-  INVALID_STYLE_OVERRIDE: "画布风格覆盖必须为文本或空值",
-  DELIVERY_EMPTY: "当前方案尚无可交付的图片版本",
-  INVALID_EXPORT_OPTIONS: "导出规格或图片格式参数无效",
-  TRANSLATE_ITEMS_REQUIRED: "请先识别或填写需要翻译的图片文字块",
-  TRANSLATE_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
-  CUSTOM_TASK_FIELDS_REQUIRED: "请填写任务标题和生图提示词",
-  INVALID_INPUT_IMAGE: "原图不存在",
-  INVALID_BASE_VERSION: "底图版本不存在",
-  EMPTY_NAME: "方案名称不能为空",
-  INVALID_ORDINAL: "上传序号必须是 1 到 6",
-  TOO_MANY_IMAGES: "一个方案最多上传 6 张原图",
-  DUPLICATE_ORDINAL: "该上传序号已经存在",
-  DUPLICATE_IMAGE: "同一方案内不能重复上传相同图片",
-  UNSUPPORTED_IMAGE_MIME: "仅支持 JPG、PNG 或 WebP 图片",
-  INVALID_IMAGE: "文件不是有效图片",
-  MIME_MISMATCH: "图片真实类型与声明类型不一致",
-  IMAGE_TOO_LARGE: "图片文件超过 12MB 限制",
-  IMAGE_SIZE_UNSUPPORTED: "当前账号分组不支持该分辨率",
-  IMAGE_DIMENSIONS_TOO_LARGE: "图片尺寸超过限制",
-  MISSING_IDEMPOTENCY_KEY: "生成请求缺少幂等键",
-  INVALID_PROMPT_STAGE: "提示词阶段无效",
-  PROMPT_REPOSITORY_NOT_CONFIGURED: "提示词库未配置",
-  PROMPT_TEMPLATE_REQUIRED: "请选择提示词模板",
-  PROMPT_TEMPLATE_NOT_FOUND: "提示词模板未发布或阶段不匹配",
-  PLATFORM_NOT_FOUND: "目标平台不在维护表中",
-  PROMPT_INPUT_INVALID: "提示词动态字段无效",
-  IMAGE_PROVIDER_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认生图模型",
-  IMAGE_PROVIDER_FAILED: "图像生成服务调用失败",
-  INVALID_GENERATED_IMAGE: "图像生成服务返回了无效图片",
-  INPUT_OBJECT_NOT_FOUND: "原图对象不存在",
-  INPUT_OBJECT_READ_FAILED: "原图对象读取失败",
-  INPUT_IMAGE_HAS_HISTORY: "已有生成记录的原图不能取消",
-  STORAGE_WRITE_FAILED: "生成图片保存失败",
-  GENERATION_PERSIST_FAILED: "生成结果保存失败",
-  IMAGE_PROVIDER_TIMEOUT: "图像生成服务响应超时",
-  LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
-  PLAN_REPOSITORY_NOT_CONFIGURED: "计划仓储未配置",
-  PLAN_TEMPLATE_NOT_FOUND: "计划模板未发布或阶段不匹配",
-  RAG_NOT_CONFIGURED: "商品资料检索未配置",
-  RAG_CHUNK_NOT_FOUND: "所选商品资料不存在或未发布",
-  RAG_CHUNK_VERSION_DRIFT: "所选商品资料版本已变化，请重新选择",
-  LLM_OUTPUT_SCHEMA_INVALID: "LLM 输出不符合计划 Schema",
-  LLM_OUTPUT_COUNT_MISMATCH: "模型返回的主图或详情页数量与固定数量不一致，请重试",
-  STRUCTURE_PLAN_INVALID: "图片结构计划不符合数量或类别约束",
-  STRUCTURE_PLAN_NEEDS_INPUT: "必生类别缺少已确认商品事实",
-  STRUCTURE_PLAN_NOT_CONFIRMED: "图片结构计划尚未确认",
-  CATEGORY_PROMPT_REPOSITORY_NOT_CONFIGURED: "类别提示词仓储未配置",
-  CATEGORY_PROMPT_TEMPLATE_NOT_FOUND: "类别提示词模板未发布或阶段不匹配",
-  CATEGORY_PROMPT_NOT_CONFIRMED: "图片结构计划尚未确认，不能生成类别提示词",
-  INVALID_CATEGORY_PROMPT_REQUEST: "类别提示词请求不存在",
-  CATEGORY_PROMPT_INVALID: "类别提示词输出不符合类别或事实约束",
-  CATEGORY_PROMPT_COUNT_MISMATCH: "类别提示词数量与确认数量不一致，请重试",
-  CATEGORY_PROMPT_FAILED: "类别提示词生成失败",
-  CATEGORY_PROMPT_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
-  CATEGORY_PROMPTS_NOT_READY: "类别提示词尚未全部成功，请重试失败类别",
-  LLM_PROVIDER_FAILED: "LLM 计划生成失败",
-  LLM_TIMEOUT: "计划生成超时，请重试",
-  TASK_REPOSITORY_NOT_CONFIGURED: "套图任务仓储未配置",
-  INVALID_PLAN_SNAPSHOT: "没有可用的计划快照",
-  NO_TASKS_TO_GENERATE: "没有可生成的套图任务",
-  INVALID_SUITE_TASK: "套图任务不存在",
-  INVALID_TASK_BATCH: "生成批次不存在",
-  TASK_RETRY_INPUT_CHANGED: "任务输入已变更，请提交新的生成",
-  TASK_IMAGE_PROVIDER_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认生图模型",
-  TASK_IMAGE_PROVIDER_FAILED: "套图图片生成失败",
-  REVERSE_CANVAS_NO_RESULTS: "至少需要一条成功提示词才能进入共享画布",
-  REVERSE_WHITE_RESOURCE_REQUIRED: "请先从图片资源库选择产品白底图",
-  TASK_INVALID_SOURCE: "套图任务没有可用输入图",
-  TASK_INVALID_GENERATED_IMAGE: "套图图片生成结果无效",
-  TASK_STORAGE_WRITE_FAILED: "套图图片保存失败",
-  INVALID_TASK_VERSION: "图片版本不存在",
-  LAYOUT_VERSION_CONFLICT: "画布布局已被其他操作更新，请刷新后重试",
-  LIBRARY_RESOURCE_NOT_FOUND: "资源不存在或已归档",
-  LIBRARY_VERSION_INVALID: "资源版本无效",
-  LIBRARY_RESOURCE_FORBIDDEN: "资源不属于当前方案",
-  LIBRARY_STAGE_MISMATCH: "资源阶段与目标不匹配",
-  LIBRARY_TARGET_NOT_FOUND: "引用目标不存在",
-  LIBRARY_REPOSITORY_NOT_CONFIGURED: "资源库未配置",
-  REVERSE_REPOSITORY_NOT_CONFIGURED: "反推仓储未配置",
-  INVALID_REVERSE_PLAN: "反推方案不存在",
-  INVALID_REVERSE_MODE: "反推模式无效",
-  REVERSE_TEMPLATE_REQUIRED: "请选择反推模板",
-  REVERSE_TEMPLATE_NOT_FOUND: "反推模板未发布或模式不匹配",
-  REVERSE_REFERENCE_LIMIT: "一个方案最多上传 16 张参考图",
-  REVERSE_REFERENCE_NOT_FOUND: "反推参考图不存在",
-  REVERSE_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
-  REVERSE_OUTPUT_INVALID: "反推模型输出不符合契约",
-};
-
-function ok<T>(data: T, status = 200): AppResponse { return { status, body: { data, requestId: randomUUID() } }; }
-function fail(code: string, status = 400, message?: string): AppResponse { return { status, body: { error: { code, message: message ?? errorMessages[code] ?? "请求失败" }, requestId: randomUUID() } }; }
 function versionView(version: BaseImageVersion) {
   return {
     id: version.id,
@@ -281,10 +189,6 @@ function planAttemptView(attempt: PlanAttempt, snapshot: PlanSnapshot | null) {
   return { id: attempt.id, suiteId: attempt.suiteId, status: attempt.status, templateVersionId: attempt.templateVersionId, provider: attempt.provider, errorCode: attempt.errorCode, errorMessage: attempt.errorMessage, outputSummary: attempt.outputSummary, snapshot: snapshot ? planSnapshotView(snapshot) : null, createdAt: attempt.createdAt, completedAt: attempt.completedAt };
 }
 
-function planSnapshotView(snapshot: PlanSnapshot) {
-  return { id: snapshot.id, suiteId: snapshot.suiteId, revisionNumber: snapshot.revisionNumber, revisionKind: snapshot.revisionKind, parentSnapshotId: snapshot.parentSnapshotId, templateVersionId: snapshot.templateVersionId, dynamicInput: snapshot.dynamicInput, humanInput: snapshot.humanInput, chunks: snapshot.chunks.map(({ content: _content, ...chunk }) => chunk), inputImageIds: snapshot.inputImageIds, baseVersionIds: snapshot.baseVersionIds, provider: snapshot.provider, schemaVersion: snapshot.schemaVersion, items: snapshot.items, phase: snapshot.phase ?? "legacy_plan", confirmationStatus: snapshot.confirmationStatus ?? "confirmed", confirmationMode: snapshot.confirmationMode ?? "human", confirmedAt: snapshot.confirmedAt ?? null, structure: snapshot.structure ?? null, categoryOutputs: snapshot.categoryOutputs ?? {}, createdAt: snapshot.createdAt };
-}
-
 type StructureOutput = StructurePlanV2 & { schemaVersion: "suite-structure-plan-v2" };
 
 function parseCategoryGroups(value: unknown): SuiteCategoryGroups | null {
@@ -379,10 +283,6 @@ function validateStructureOutput(output: StructureOutput, input: Record<string, 
   return null;
 }
 
-function isStructurePlanV2(structure: PlanSnapshot["structure"]): structure is StructurePlanV2 {
-  return Boolean(structure && "mainAllocation" in structure && "status" in structure);
-}
-
 function parseStructureJsonValue(value: unknown, fallback: unknown): unknown {
   if (Array.isArray(value) || (value && typeof value === "object")) return value;
   if (typeof value !== "string") return fallback;
@@ -469,17 +369,11 @@ export function planOutputMatchesRequestedCounts(output: { items: Array<{ imageT
   });
 }
 
-function taskView(task: SuiteTask) { return task; }
-function taskAttemptView(attempt: TaskGenerationAttempt) { return attempt; }
-function taskBatchView(batch: TaskGenerationBatch) { return batch; }
-function taskSlotView(slot: TaskResultSlot) { return slot; }
-function taskVersionView(version: TaskImageVersion) { return version; }
-
 function llmSource(client: LlmClient) {
   return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };
 }
 
-export function createTicket02App(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> } }): Ticket02App {
+export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> } }): SuiteStudioApp {
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
   const resolveImage = async () => {
     const selected = await resolveModel("image");
@@ -788,8 +682,9 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
   const loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
     if (!deps.imageEditorApi) return [];
     const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
-    if (response.status !== 200 || !("data" in response.body) || !Array.isArray(response.body.data)) return [];
-    const all = response.body.data as DeliveryEditChildLike[];
+    const data = dataOf(response);
+    if (response.status !== 200 || !Array.isArray(data)) return [];
+    const all = data as DeliveryEditChildLike[];
     const allowed = new Set(tasks.map((task) => task.id));
     let changed = true;
     while (changed) {
@@ -802,164 +697,23 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     }
     return all.filter((child) => typeof child.task?.id === "string" && allowed.has(child.task.id));
   };
-  const waitUntil = async <T>(load: () => Promise<T>, done: (value: T) => boolean, timeoutMs = 120_000): Promise<T> => {
-    const started = Date.now();
-    while (Date.now() - started < timeoutMs) {
-      const value = await load();
-      if (done(value)) return value;
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    throw new Error("PIPELINE_TIMEOUT");
-  };
-  const productNameFor = (config: Record<string, unknown>, images: InputImage[]) => {
-    const firstLine = typeof config.sellingPoints === "string" ? config.sellingPoints.split(/\r?\n/).map((line) => line.trim()).find(Boolean) : "";
-    if (firstLine) return firstLine.slice(0, 30);
-    const filename = images[0]?.originalFilename?.replace(/\.[^.]+$/, "").trim();
-    return filename || "未命名商品套图";
-  };
-  const buildCategoryGroups = (config: Record<string, unknown>) => {
-    const raw = config.counts && typeof config.counts === "object" && !Array.isArray(config.counts) ? config.counts as Record<string, unknown> : {};
-    const value = (key: string, fallback: number) => Number.isInteger(Number(raw[key])) ? Math.max(0, Number(raw[key])) : fallback;
-    const sellingPoints = raw.selling_points !== undefined ? value("selling_points", 3) : raw.sellingPoint !== undefined ? value("sellingPoint", 3) : (raw.feature_benefit !== undefined || raw.material_detail !== undefined ? value("feature_benefit", 0) + value("material_detail", 0) : 3);
-    return {
-      main: { categories: ["main"], mode: "exact", count: value("main", value("main_image_count", 1)) },
-      selling_points: { categories: ["feature_benefit", "material_detail"], mode: "exact", count: sellingPoints },
-      lifestyle: { categories: ["lifestyle_use"], mode: "exact", count: value("lifestyle", value("lifestyle_use", 2)) },
-      other: { categories: ["comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"], mode: "max", count: value("other", 1) },
-    };
-  };
+  const pipeline = createSuitePipeline({
+    repository: deps.repository, storage: deps.storage, platformRepository: deps.platformRepository,
+    promptRepository: deps.promptRepository, planRepository: deps.planRepository, taskRepository: deps.taskRepository,
+    hasPlanningModel: () => Boolean(deps.llmClient || deps.modelSettings), pipelineRepository, listingRepository,
+    startListingCopy: listing.startPipeline, appendConfirmedSnapshot, loadSuiteImageEditChildren, request,
+  });
 
-  const executePipeline = async (run: SuitePipelineRun) => {
-    const { suiteId, config } = run;
-    try {
-      const resumePhase = run.currentPhase;
-      const executionKey = `${run.idempotencyKey}:r${run.resumeCount ?? 0}`;
-      const images = await deps.repository.getInputImages(suiteId);
-      const platform = typeof config.platform === "string" && deps.platformRepository ? await deps.platformRepository.find(config.platform) : null;
-      if (typeof config.platform === "string" && deps.platformRepository && !platform) throw new Error("PLATFORM_NOT_FOUND");
-      const refineRequired = platform?.mainImageBackground === "pure_white_required" || config.refineBaseImages === true || (platform?.mainImageBackground === "white_preferred" && config.refineBaseImages !== false);
-      if (resumePhase === "base_refining" && refineRequired && deps.promptRepository) {
-        const [baseTemplate] = await deps.promptRepository.listPublished("base_refine");
-        if (baseTemplate) {
-          const pending = images.filter((image) => !image.currentBaseVersionId);
-          const queue = [...pending];
-          const refineOne = async () => {
-            while (queue.length) {
-              const image = queue.shift()!;
-              const response = await request("POST", `/api/suites/${suiteId}/input-images/${image.id}/base-generation`, { headers: { "idempotency-key": `${executionKey}:base:${image.id}` }, body: { templateVersionId: baseTemplate.templateVersionId, dynamicInput: { source_image_ids: image.id, background_target: platform?.mainImageBackground === "pure_white_required" ? "纯白背景 RGB 255，无文字、Logo、水印或装饰" : "干净白底或浅色背景" } } });
-              if (response.status >= 400) throw new Error("BASE_REFINE_FAILED");
-              const attemptId = "data" in response.body && response.body.data && typeof response.body.data === "object" ? String(((response.body.data as Record<string, unknown>).attempt as Record<string, unknown> | undefined)?.id ?? "") : "";
-              if (attemptId) await waitUntil(() => deps.repository.listGenerationAttempts(suiteId, image.id), (attempts) => attempts.some((attempt) => attempt.id === attemptId && attempt.status !== "running"));
-            }
-          };
-          await Promise.all([refineOne(), refineOne()]);
-          const failed = (await Promise.all(images.map(async (image) => { const attempts = await deps.repository.listGenerationAttempts(suiteId, image.id); return attempts.find((attempt) => attempt.idempotencyKey === `${executionKey}:base:${image.id}`); }))).find((attempt) => attempt?.status === "failed");
-          if (failed) { await pipelineRepository.updateRun(run.id, { status: "waiting_base_refine_decision", currentPhase: "base_refining", errorCode: failed.errorCode ?? "BASE_REFINE_FAILED", errorMessage: failed.errorMessage ?? "白底精修失败", updatedAt: new Date().toISOString() }); return; }
-        }
-      }
-      let rawSnapshot: PlanSnapshot | null = run.structureSnapshotId && deps.planRepository ? await deps.planRepository.getSnapshot(run.structureSnapshotId) : null;
-      if (!rawSnapshot) {
-        if (["category_prompting", "image_generating", "done"].includes(resumePhase)) throw new Error("STRUCTURE_PLAN_FAILED");
-        await pipelineRepository.updateRun(run.id, { currentPhase: "structure_planning", updatedAt: new Date().toISOString() });
-        if (!deps.promptRepository || !deps.planRepository || !deps.llmClient && !deps.modelSettings) throw new Error("LLM_NOT_CONFIGURED");
-        const structureTemplates = await deps.promptRepository.listPublished("structure_plan");
-        const structureTemplate = structureTemplates.find((item) => item.inputSchema.some((field) => field.key === "category_groups")) ?? structureTemplates[0];
-        if (!structureTemplate) throw new Error("PLAN_TEMPLATE_NOT_FOUND");
-        const smart = config.mode === "smart";
-        const groups = buildCategoryGroups(config);
-        const details = Object.values(groups).filter((group) => group.categories[0] !== "main").reduce((sum, group) => sum + group.count, 0);
-        const smartCategories = [...DETAIL_CATEGORY_CODES];
-        const dynamicInput: Record<string, unknown> = {
-          platform: config.platform ?? "", target_market_country: config.targetMarket ?? "", output_language: config.outputLanguage ?? "中文", product_name: productNameFor(config, images),
-          human_supplement: typeof config.sellingPoints === "string" ? config.sellingPoints : "", emphasis_requirements: typeof config.sellingPoints === "string" ? config.sellingPoints : "",
-          aspect_ratio: config.aspectRatio ?? "1:1", main_image_background: platform?.mainImageBackground ?? "flexible",
-          main_image_count: groups.main.count, detail_image_count_min: 0, detail_image_count_max: smart ? 6 : details,
-          ...(smart ? { selected_detail_categories: JSON.stringify(smartCategories), category_requirements: JSON.stringify(Object.fromEntries(smartCategories.map((code) => [code, "optional"]))) } : { category_groups: JSON.stringify(groups), selected_detail_categories: JSON.stringify(smartCategories), category_requirements: JSON.stringify(Object.fromEntries(smartCategories.map((code) => [code, "optional"]))) }),
-        };
-        const planResponse = await request("POST", `/api/suites/${suiteId}/structure-plan`, { headers: { "idempotency-key": `${executionKey}:structure` }, body: { templateVersionId: structureTemplate.templateVersionId, dynamicInput, humanInput: {} } });
-        if (planResponse.status >= 400) throw new Error("STRUCTURE_PLAN_FAILED");
-        const planAttemptId = "data" in planResponse.body && typeof planResponse.body.data === "object" && planResponse.body.data ? String((planResponse.body.data as Record<string, unknown>).attemptId ?? "") : "";
-        if (!planAttemptId) throw new Error("STRUCTURE_PLAN_FAILED");
-        const terminal = await waitUntil(() => request("GET", `/api/plan-attempts/${planAttemptId}`), (response) => response.status === 200 && "data" in response.body && typeof response.body.data === "object" && response.body.data !== null && ["succeeded", "failed"].includes(String((response.body.data as Record<string, unknown>).status)));
-        if (!("data" in terminal.body) || !(terminal.body.data as Record<string, unknown>).snapshot) throw new Error("STRUCTURE_PLAN_FAILED");
-        const rawView = (terminal.body.data as Record<string, unknown>).snapshot as PlanSnapshot;
-        rawSnapshot = await deps.planRepository.getSnapshot(rawView.id);
-        if (!rawSnapshot) throw new Error("STRUCTURE_PLAN_FAILED");
-        if (rawSnapshot.confirmationStatus !== "confirmed") {
-          const structure = rawSnapshot.structure as StructurePlanV2 | null;
-          const missing = Boolean(structure && (structure.status !== "READY_FOR_REVIEW" || structure.mainAllocation.missingFacts.length || structure.categoryAllocations.some((item) => item.count > 0 && item.missingFacts.length)));
-          if (missing) { await pipelineRepository.updateRun(run.id, { status: "waiting_human_input", currentPhase: "structure_planning", errorCode: "MISSING_FACTS", errorMessage: "请补充卖点或调整分组数量", updatedAt: new Date().toISOString() }); return; }
-          const confirmed: PlanSnapshot = { ...rawSnapshot, id: randomUUID(), revisionNumber: rawSnapshot.revisionNumber + 1, revisionKind: "human", parentSnapshotId: rawSnapshot.id, confirmationStatus: "confirmed", confirmationMode: "auto", confirmedAt: new Date().toISOString(), createdAt: new Date().toISOString() };
-          rawSnapshot = await appendConfirmedSnapshot(confirmed);
-        }
-      }
-      if (!rawSnapshot || rawSnapshot.confirmationStatus !== "confirmed") throw new Error("STRUCTURE_PLAN_FAILED");
-      await pipelineRepository.updateRun(run.id, { structureSnapshotId: rawSnapshot.id, updatedAt: new Date().toISOString() });
-
-      if (config.listingCopy === true) {
-        void listing.startPipeline(run.id, suiteId, config, images).catch(() => console.error("Could not start listing copy for pipeline", run.id));
-      }
-
-      let taskRows: SuiteTask[] = [];
-      const canReuseTasks = Boolean(run.taskIds?.length) && !["base_refining"].includes(resumePhase);
-      if (canReuseTasks && deps.taskRepository) {
-        const allTasks = await deps.taskRepository.listTasks(suiteId);
-        const ids = new Set(run.taskIds ?? []);
-        taskRows = ids.size ? allTasks.filter((task) => ids.has(task.id)) : allTasks;
-      }
-      if (!taskRows.length) {
-        await pipelineRepository.updateRun(run.id, { currentPhase: "category_prompting", updatedAt: new Date().toISOString() });
-        const categoryResponse = await request("POST", `/api/suites/${suiteId}/category-prompts`, { headers: { "idempotency-key": `${executionKey}:categories` }, body: { planSnapshotId: rawSnapshot.id } });
-        if (categoryResponse.status >= 400) throw new Error("CATEGORY_PROMPT_FAILED");
-        const categoryState = await waitUntil(() => request("GET", `/api/suites/${suiteId}/category-prompts`), (response) => response.status === 200 && "data" in response.body && typeof response.body.data === "object" && response.body.data !== null && ["succeeded", "partial"].includes(String((response.body.data as Record<string, unknown>).status)));
-        if (!("data" in categoryState.body) || String((categoryState.body.data as Record<string, unknown>).status) !== "succeeded") throw new Error("CATEGORY_PROMPT_FAILED");
-        const tasksResponse = await request("POST", `/api/suites/${suiteId}/tasks`, { body: { planSnapshotId: rawSnapshot.id } });
-        if (tasksResponse.status >= 400) throw new Error("TASK_MATERIALIZATION_FAILED");
-        if ("data" in tasksResponse.body && tasksResponse.body.data && typeof tasksResponse.body.data === "object" && deps.taskRepository) {
-          const rows = Array.isArray((tasksResponse.body.data as Record<string, unknown>).tasks) ? (tasksResponse.body.data as Record<string, unknown>).tasks as Array<Record<string, unknown>> : [];
-          const ids = rows.flatMap((row) => typeof row.id === "string" ? [row.id] : []);
-          await pipelineRepository.updateRun(run.id, { taskIds: ids, updatedAt: new Date().toISOString() });
-          taskRows = (await deps.taskRepository.listTasks(suiteId)).filter((task) => ids.includes(task.id));
-          for (const task of taskRows) await deps.taskRepository.updateTask(task.id, { generationParams: { ...task.generationParams, ratio: config.aspectRatio ?? task.generationParams.ratio ?? (task.imageType === "main" ? "1:1" : "3:4"), size: config.size ?? task.generationParams.size ?? "1K" } });
-        }
-      }
-      if (!deps.taskRepository || !taskRows.length) throw new Error("TASK_MATERIALIZATION_FAILED");
-      if (resumePhase !== "done") {
-        await pipelineRepository.updateRun(run.id, { currentPhase: "image_generating", updatedAt: new Date().toISOString() });
-        const pendingTasks: SuiteTask[] = [];
-        for (const task of taskRows) {
-          const history = await deps.taskRepository.listTaskVersions(task.id);
-          if (!history.versions.some((version) => version.isCurrent)) pendingTasks.push(task);
-        }
-        if (pendingTasks.length) {
-          const generationResponse = await request("POST", `/api/suites/${suiteId}/generation`, { headers: { "idempotency-key": `${executionKey}:images` }, body: { taskIds: pendingTasks.map((task) => task.id) } });
-          if (generationResponse.status >= 400) throw new Error("IMAGE_GENERATION_FAILED");
-          const data = "data" in generationResponse.body ? generationResponse.body.data : null;
-          if (!data || typeof data !== "object" || !("batchId" in data) || typeof data.batchId !== "string") throw new Error("IMAGE_GENERATION_FAILED");
-          const batchId = data.batchId;
-          await waitUntil(() => deps.taskRepository!.getBatch(batchId), (batch) => batch !== null && batch.status !== "running");
-        }
-      }
-      const histories = await Promise.all(taskRows.map((task) => deps.taskRepository!.listTaskVersions(task.id)));
-      const generated = histories.filter((history) => history.versions.some((version) => version.isCurrent)).length;
-      const status = generated === taskRows.length ? "completed" : generated > 0 ? "partial_failed" : "failed";
-      const completedAt = new Date().toISOString();
-      await pipelineRepository.updateRun(run.id, { status, currentPhase: "done", updatedAt: completedAt, completedAt });
-    } catch (error) {
-      await pipelineRepository.updateRun(run.id, { status: "failed", errorCode: error instanceof Error ? error.message : "PIPELINE_FAILED", errorMessage: error instanceof Error ? error.message : "一键生成失败", updatedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
-    }
-  };
-
-  const request = async (method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> => {
+  async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
     if (/^\/api\/listing-copies(?:[/?]|$)/.test(path)) return listing.request(method, path, options.body);
     if (path === "/api/model-settings" || path.startsWith("/api/model-settings/")) return deps.modelSettings ? deps.modelSettings.request(method, path, options.body) : fail("NOT_FOUND", 404);
     if (method === "POST" && path === "/api/image-editor/translate-text") {
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const targetLanguage = typeof body.targetLanguage === "string" && body.targetLanguage.trim() ? body.targetLanguage.trim() : "英文";
       const rawItems = Array.isArray(body.items) ? body.items : [];
       const items = rawItems
         .map((item, index) => {
-          const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
+          const row = asRecord(item, { allowArrays: true });
           return { id: String(row.id ?? `block-${index + 1}`), text: String(row.text ?? "").trim() };
         })
         .filter((item) => item.text.length > 0);
@@ -985,142 +739,16 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     if (path.startsWith("/api/image-editor/")) return deps.imageEditorApi ? deps.imageEditorApi.request(method, path, options) : fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
 
-    const cloneSuiteInputs = async (sourceSuiteId: string, targetSuiteId: string, selectedImageIds?: Set<string>) => {
-      const images = await deps.repository.getInputImages(sourceSuiteId);
-      for (const image of images.filter((item) => !selectedImageIds || selectedImageIds.has(item.id))) {
-        const id = randomUUID();
-        const originalKey = `suites/${targetSuiteId}/inputs/${id}/original`;
-        const thumbnailKey = `suites/${targetSuiteId}/inputs/${id}/thumbnail`;
-        const generationKey = `suites/${targetSuiteId}/inputs/${id}/generation-input.jpg`;
-        const [original, thumbnail, generation] = await Promise.all([
-          deps.storage.get(image.originalObjectKey), deps.storage.get(image.thumbnailObjectKey), deps.storage.get(image.originalObjectKey.replace(/\/original$/, "/generation-input.jpg")),
-        ]);
-        if (!original || !thumbnail) throw new Error("INPUT_OBJECT_NOT_FOUND");
-        await deps.storage.put({ key: originalKey, bytes: original.bytes, contentType: original.contentType });
-        await deps.storage.put({ key: thumbnailKey, bytes: thumbnail.bytes, contentType: thumbnail.contentType });
-        if (generation) await deps.storage.put({ key: generationKey, bytes: generation.bytes, contentType: generation.contentType });
-        await deps.repository.createInputImage({ id, suiteId: targetSuiteId, ordinal: image.ordinal, originalObjectKey: originalKey, thumbnailObjectKey: thumbnailKey, sha256: image.sha256, width: image.width, height: image.height, mimeType: image.mimeType, originalFilename: image.originalFilename, currentBaseVersionId: null, createdAt: new Date().toISOString() });
-      }
-    };
-
-    const pipelineStart = path === "/api/suites/one-click-generate" && method === "POST";
-    if (pipelineStart) {
-      if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
-      const config = body.config && typeof body.config === "object" && !Array.isArray(body.config) ? { ...(body.config as Record<string, unknown>) } : {};
-      const cloneSpec = body.cloneFrom && typeof body.cloneFrom === "object" && !Array.isArray(body.cloneFrom) ? body.cloneFrom as Record<string, unknown> : null;
-      const sourceId = typeof body.cloneFrom === "string" ? body.cloneFrom : typeof cloneSpec?.suiteId === "string" ? cloneSpec.suiteId : typeof body.suiteId === "string" ? body.suiteId : null;
-      let suite = sourceId ? await deps.repository.getSuite(sourceId) : null;
-      if (sourceId && !suite) return fail("INVALID_SUITE_ID", 404);
-      if ("runId" in body) {
-        const latest = suite && await pipelineRepository.getLatestRun(suite.id);
-        return latest?.status === "running" ? fail("PIPELINE_ALREADY_RUNNING", 409) : fail("INVALID_PIPELINE_START");
-      }
-      if (typeof body.cloneFrom === "string" || cloneSpec) {
-        const source = suite!;
-        suite = await deps.repository.createSuite(productNameFor(config, await deps.repository.getInputImages(source.id)), `${idempotencyKey}:suite`, "suite_studio");
-        const imageIds = cloneSpec && Array.isArray(cloneSpec.imageIds) ? new Set(cloneSpec.imageIds.filter((id): id is string => typeof id === "string")) : undefined;
-        if (!(await deps.repository.getInputImages(suite.id)).length) await cloneSuiteInputs(source.id, suite.id, imageIds);
-      }
-      if (!suite) suite = await deps.repository.createSuite(productNameFor(config, []), `${idempotencyKey}:suite`, "suite_studio");
-      const now = new Date().toISOString();
-      try {
-        const { run, duplicate } = await pipelineRepository.createRun({
-          id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", currentPhase: "base_refining",
-          resumeCount: 0, lastResumeKey: null, resumeKeys: [], structureSnapshotId: null, taskIds: [], config,
-          errorCode: null, errorMessage: null, createdAt: now, updatedAt: now, completedAt: null,
-        });
-        if (!duplicate) void executePipeline(run);
-        return ok({ suiteId: suite.id, pipeline: run }, run.status === "running" ? 202 : 200);
-      } catch (error) {
-        if (error instanceof Error && error.message === "PIPELINE_ALREADY_RUNNING") return fail(error.message, 409);
-        throw error;
-      }
-    }
+    if (method === "POST" && path === "/api/suites/one-click-generate") return pipeline.startRun(idempotencyKey, options.body);
     const resumeMatch = path.match(/^\/api\/suites\/([^/]+)\/one-click-generate\/resume$/);
-    if (method === "POST" && resumeMatch) {
-      if (!idempotencyKey?.trim()) return fail("MISSING_IDEMPOTENCY_KEY");
-      const suite = await deps.repository.getSuite(resumeMatch[1]);
-      if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const current = await pipelineRepository.getLatestRun(suite.id);
-      if (!current) return fail("PIPELINE_NOT_FOUND", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
-      const action = String(body.action ?? "");
-      const usedKey = (run: SuitePipelineRun) => run.lastResumeKey === idempotencyKey || run.resumeKeys?.includes(idempotencyKey);
-      if (usedKey(current)) return ok({ suiteId: suite.id, pipeline: current }, 202);
-      let config = current.config;
-      if (action === "retry_base_refine" || action === "skip_base_refine") {
-        if (current.status !== "waiting_base_refine_decision") return fail("PIPELINE_ACTION_NOT_ALLOWED", 409);
-      } else if (action === "submit_missing_facts") {
-        if (current.status !== "waiting_human_input") return fail("PIPELINE_ACTION_NOT_ALLOWED", 409);
-      } else if (action === "resume_after_interrupt") {
-        if (current.status !== "failed" || current.errorCode !== "PIPELINE_INTERRUPTED") return fail("PIPELINE_ACTION_NOT_ALLOWED", 409);
-      }
-      if (action === "skip_base_refine") {
-        const platform = typeof config.platform === "string" && deps.platformRepository ? await deps.platformRepository.find(config.platform) : null;
-        if (platform?.mainImageBackground === "pure_white_required") return fail("PURE_WHITE_REQUIRED", 409);
-        config = { ...config, refineBaseImages: false };
-      }
-      if (action === "retry_base_refine") config = { ...config, refineBaseImages: true };
-      if (action === "submit_missing_facts") {
-        const supplement = typeof body.supplementText === "string" ? body.supplementText : typeof body.sellingPoints === "string" ? body.sellingPoints : typeof body.humanSupplement === "string" ? body.humanSupplement : undefined;
-        const previousSellingPoints = typeof config.sellingPoints === "string" ? config.sellingPoints : "";
-        const mergedSellingPoints = supplement === undefined ? previousSellingPoints : [previousSellingPoints, supplement].filter(Boolean).join("\n");
-        const previousCounts = config.counts && typeof config.counts === "object" && !Array.isArray(config.counts) ? config.counts as Record<string, unknown> : {};
-        const nextCounts = body.counts && typeof body.counts === "object" && !Array.isArray(body.counts) ? { ...previousCounts, ...(body.counts as Record<string, unknown>) } : { ...previousCounts };
-        if (Array.isArray(body.removedCategories)) for (const category of body.removedCategories.filter((value): value is string => typeof value === "string")) {
-          if (category === "feature_benefit" || category === "material_detail") nextCounts.selling_points = 0;
-          else if (category === "lifestyle_use") nextCounts.lifestyle = 0;
-        }
-        config = { ...config, sellingPoints: mergedSellingPoints, counts: nextCounts };
-      }
-      if (!["retry_base_refine", "skip_base_refine", "submit_missing_facts", "resume_after_interrupt"].includes(action)) return fail("INVALID_PIPELINE_ACTION", 400);
-      const phase = action === "resume_after_interrupt" ? current.currentPhase : action === "submit_missing_facts" ? "structure_planning" : "base_refining";
-      const updated = await pipelineRepository.resumeRun(current, idempotencyKey, phase, config);
-      if (!updated) {
-        const latest = await pipelineRepository.getRun(current.id);
-        if (latest && usedKey(latest)) return ok({ suiteId: suite.id, pipeline: latest }, 202);
-        return fail("PIPELINE_ACTION_NOT_ALLOWED", 409);
-      }
-      void executePipeline(updated);
-      return ok({ suiteId: suite.id, pipeline: updated }, 202);
-    }
+    if (method === "POST" && resumeMatch) return pipeline.resumeRun(resumeMatch[1], idempotencyKey, options.body);
     const studioStateMatch = path.match(/^\/api\/suites\/([^/]+)\/studio-state$/);
-    if (method === "GET" && studioStateMatch) {
-      if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
-      const suite = await deps.repository.getSuite(studioStateMatch[1]);
-      if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const [inputImages, pipeline, snapshot, tasks, batches, slots] = await Promise.all([deps.repository.getInputImages(suite.id), pipelineRepository.getLatestRun(suite.id), deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null), deps.taskRepository.listTasks(suite.id), deps.taskRepository.listBatches(suite.id), deps.taskRepository.listSlots(suite.id)]);
-      const activeTasks = tasks.filter((task) => task.status !== "archived");
-      const taskAggregates = await Promise.all(activeTasks.map(async (task) => { const history = await deps.taskRepository!.listTaskVersions(task.id); return { ...taskView(task), versions: history.versions.map(taskVersionView), attempts: history.attempts.map(taskAttemptView), slots: slots.filter((slot) => slot.taskId === task.id).map(taskSlotView) }; }));
-      const imageEditChildren = await loadSuiteImageEditChildren(activeTasks);
-      const cards = resolveDeliverySlots(taskAggregates, imageEditChildren, { defaultTemplateVersionId: snapshot?.templateVersionId ?? null });
-      const otherLimit = pipeline?.config && typeof pipeline.config === "object" ? pipeline.config.mode === "smart" ? 6 : pipeline.config.counts && typeof pipeline.config.counts === "object" ? Number((pipeline.config.counts as Record<string, unknown>).other ?? 0) : 0 : 0;
-      const otherCodes = new Set<string>(SUITE_CATEGORY_GROUPS.other.categories as readonly string[]);
-      const actualOther = snapshot?.structure && isStructurePlanV2(snapshot.structure) ? snapshot.structure.categoryAllocations.filter((item) => otherCodes.has(item.category) && item.count > 0).reduce((sum, item) => sum + item.count, 0) : 0;
-      const planning = snapshot?.structure && isStructurePlanV2(snapshot.structure) ? { snapshot: planSnapshotView(snapshot), notGeneratedReasons: cards.length > 0 && actualOther < otherLimit ? snapshot.structure.categoryAllocations.filter((item) => otherCodes.has(item.category) && item.count === 0 && item.missingFacts.length > 0).map((item) => ({ category: item.category, reasons: item.missingFacts })) : [] } : { snapshot: snapshot ? planSnapshotView(snapshot) : null, notGeneratedReasons: [] };
-      const total = cards.length; const done = cards.filter((card) => card.sourceRole !== "pending").length;
-      const listingCopy = pipeline?.config.listingCopy === true ? await listingRepository.summary(pipeline.id) : null;
-      return ok({ suite, pipeline, listingCopy, inputImages, planning, cards, progress: { total, completed: done, percent: total ? Math.round(done / total * 100) : 0 }, batches });
-    }
+    if (method === "GET" && studioStateMatch) return pipeline.getStudioState(studioStateMatch[1]);
     const feedMatch = path.match(/^\/api\/suites\/feed(?:\?(.*))?$/);
-    if (method === "GET" && feedMatch) {
-      const query = new URLSearchParams(feedMatch[1] ?? ""); const limit = Math.min(100, Math.max(1, Number(query.get("limit") ?? 10))); const offset = Math.max(0, Number(query.get("offset") ?? 0));
-      const suites = await deps.repository.listSuites(); const eligible = [];
-      for (const suite of suites) {
-        if (suite.origin === "canvas") continue;
-        const [pipeline, tasks] = await Promise.all([pipelineRepository.getLatestRun(suite.id), deps.taskRepository?.listTasks(suite.id) ?? Promise.resolve([])]);
-        const active = tasks.filter((task) => task.status !== "archived"); if (!pipeline && !active.length) continue;
-        const first = active.sort((a, b) => a.ordinal - b.ordinal)[0]; let thumbnail = null;
-        if (first && deps.taskRepository) thumbnail = (await deps.taskRepository.listTaskVersions(first.id)).versions.find((version) => version.isFinal) ?? (await deps.taskRepository.listTaskVersions(first.id)).versions[0] ?? null;
-        eligible.push({ suite, pipeline, card: thumbnail ? { taskId: first!.id, previewUrl: thumbnail.previewUrl, title: first!.title } : null });
-      }
-      eligible.sort((a, b) => b.suite.createdAt.localeCompare(a.suite.createdAt));
-      return ok({ items: eligible.slice(offset, offset + limit), total: eligible.length, limit, offset });
-    }
+    if (method === "GET" && feedMatch) return pipeline.getFeed(feedMatch[1]);
     const reversePlanMatch = path.match(/^\/api\/reverse-plans\/([^/]+)$/);
     if (method === "POST" && path === "/api/reverse-plans") {
-      const result = await reverseRepository.createPlan(idempotencyKey); const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const result = await reverseRepository.createPlan(idempotencyKey); const body = asRecord(options.body, { allowArrays: true });
       if (body.mode === "detail") result.plan.mode = "detail";
       return ok(await reverseRepository.savePlan(result.plan), result.duplicate ? 200 : 201);
     }
@@ -1128,7 +756,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     if (reversePlanMatch && method === "GET") { const plan = await reverseRepository.getPlan(reversePlanMatch[1]); return plan ? ok(plan) : fail("INVALID_REVERSE_PLAN", 404); }
     if (reversePlanMatch && method === "PATCH") {
       const plan = await reverseRepository.getPlan(reversePlanMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (body.mode !== undefined && body.mode !== "main" && body.mode !== "detail") return fail("INVALID_REVERSE_MODE");
       const next = { ...plan, mode: (body.mode ?? plan.mode) as "main" | "detail", baselineReferenceId: typeof body.baselineReferenceId === "string" ? body.baselineReferenceId : body.baselineReferenceId === null ? null : plan.baselineReferenceId, updatedAt: new Date().toISOString() };
       if (next.mode === "detail" && !next.baselineReferenceId && next.references[0]) next.baselineReferenceId = next.references[0].id;
@@ -1139,7 +767,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       return withReversePlanWrite(reverseRefsMatch[1], async () => {
         const plan = await reverseRepository.getPlan(reverseRefsMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
         if (plan.references.length >= 16) return fail("REVERSE_REFERENCE_LIMIT", 400);
-        const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+        const body = asRecord(options.body, { allowArrays: true });
         if (typeof body.filename !== "string" || typeof body.mimeType !== "string" || typeof body.bytesBase64 !== "string") return fail("INVALID_INPUT_IMAGE");
         let processed; try { processed = await processImage(Buffer.from(body.bytesBase64, "base64"), body.mimeType); } catch (error) { const code = error instanceof Error ? error.message : "INVALID_IMAGE"; return fail(code); }
         if (plan.references.some((item) => item.sha256 === processed.sha256)) return fail("DUPLICATE_IMAGE", 409, "该参考图已存在");
@@ -1151,7 +779,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     }
     const reverseRefMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)$/);
     if (reverseRefMatch && method === "PATCH") {
-      const plan = await reverseRepository.getPlan(reverseRefMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {}; const refs = [...plan.references]; const ref = refs.find((item) => item.id === reverseRefMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
+      const plan = await reverseRepository.getPlan(reverseRefMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const body = asRecord(options.body, { allowArrays: true }); const refs = [...plan.references]; const ref = refs.find((item) => item.id === reverseRefMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
       if (typeof body.templateVersionId === "string") { if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503); const template = await deps.promptRepository.getPublishedVersion(body.templateVersionId, "reverse_prompt"); if (!template || template.applicability.targetType !== plan.mode) return fail("REVERSE_TEMPLATE_NOT_FOUND", 400); ref.templateVersionId = template.templateVersionId; }
       if (typeof body.ordinal === "number") { const target = Math.max(1, Math.min(refs.length, Math.trunc(body.ordinal))); refs.splice(refs.indexOf(ref), 1); refs.splice(target - 1, 0, ref); refs.forEach((item, i) => item.ordinal = i + 1); }
       await reverseRepository.savePlan({ ...plan, references: refs, updatedAt: new Date().toISOString() }); return ok(ref);
@@ -1182,7 +810,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
         for (const reference of plan.references) {
           if (!reference.templateVersionId || reference.attempts.some((item) => item.status === "succeeded" || item.status === "running")) continue;
           const response = await runReverse(plan, reference, false, llmClient);
-          const data = "data" in response.body ? response.body.data as { attemptId: string } : null;
+          const data = dataOf(response) as { attemptId: string } | null;
           results.push(data ? { referenceId: reference.id, attemptId: data.attemptId } : { referenceId: reference.id, error: "error" in response.body ? response.body.error.code : "REVERSE_OUTPUT_INVALID" });
         }
         return ok({ planId: plan.id, attempts: results }, 202);
@@ -1193,7 +821,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     const reversePromptMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/prompt$/);
     if (reversePromptMatch && method === "PATCH") {
       const plan = await reverseRepository.getPlan(reversePromptMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const ref = plan.references.find((item) => item.id === reversePromptMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {}; if (typeof body.prompt !== "string" || !body.prompt.trim()) return fail("REVERSE_OUTPUT_INVALID");
+      const body = asRecord(options.body, { allowArrays: true }); if (typeof body.prompt !== "string" || !body.prompt.trim()) return fail("REVERSE_OUTPUT_INVALID");
       const source = ref.promptVersions.find((item) => item.id === ref.effectivePromptVersionId) ?? [...ref.promptVersions].reverse()[0]; if (!source) return fail("REVERSE_OUTPUT_INVALID");
       const version: ReversePromptVersion = { ...source, id: randomUUID(), kind: "user", prompt: body.prompt.trim(), rawOutput: null, createdAt: new Date().toISOString() }; ref.promptVersions.push(version); ref.effectivePromptVersionId = version.id; await reverseRepository.savePlan({ ...plan, updatedAt: new Date().toISOString() }); return ok(version, 201);
     }
@@ -1209,7 +837,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       const plan = await reverseRepository.getPlan(reverseCanvasMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
       const items = plan.references.map((reference) => ({ reference, prompt: reference.promptVersions.find((version) => version.id === reference.effectivePromptVersionId) })).filter((item): item is { reference: ReverseReference; prompt: ReversePromptVersion } => Boolean(item.prompt && item.reference.attempts.some((attempt) => attempt.status === "succeeded")));
       if (!items.length) return fail("REVERSE_CANVAS_NO_RESULTS", 409);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       let suite = typeof body.targetSuiteId === "string" ? await deps.repository.getSuite(body.targetSuiteId) : null;
       if (typeof body.targetSuiteId === "string" && !suite) return fail("INVALID_SUITE_ID", 404);
       if (!suite) suite = await deps.repository.createSuite(typeof body.name === "string" && body.name.trim() ? body.name.trim() : `爆品图反推 ${new Date().toISOString().slice(0, 10)}`, `${idempotencyKey}:suite`, "canvas");
@@ -1218,9 +846,9 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       return ok({ suiteId: suite.id, taskGroupId: result.created[0]?.reverseTaskGroupId ?? taskGroupId, taskIds: result.created.map((task) => task.id), duplicate: result.duplicate }, result.duplicate ? 200 : 201);
     }
     if (method === "POST" && path === "/api/suites") {
-      const name = typeof options.body === "object" && options.body !== null && "name" in options.body ? String((options.body as { name: unknown }).name).trim() : "";
+      const body = asRecord(options.body, { allowArrays: true });
+      const name = "name" in body ? String(body.name).trim() : "";
       if (!name) return fail("EMPTY_NAME");
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
       const origin = body.origin === "canvas" ? "canvas" : "suite_studio";
       return ok(await deps.repository.createSuite(name, idempotencyKey, origin), 201);
     }
@@ -1289,7 +917,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     const reverseAssetStatusMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/status$/);
     if (method === "POST" && reverseAssetStatusMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const status = body.status as import("./types.js").LibraryAssetStatus;
       if (!["draft", "published", "archived"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
       const resource = await deps.libraryRepository.setResourceStatus(reverseAssetStatusMatch[1], status);
@@ -1297,7 +925,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     }
     if (method === "POST" && path === "/api/library/reverse-reference-assets") {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (typeof body.title !== "string" || typeof body.objectKey !== "string" || typeof body.mimeType !== "string" || !body.promptSnapshot || typeof body.promptSnapshot !== "object") return fail("INVALID_REVERSE_REFERENCE_ASSET");
       const asset = await deps.libraryRepository.createReverseReferenceAsset({ suiteId: typeof body.suiteId === "string" ? body.suiteId : null, title: body.title, summary: typeof body.summary === "string" ? body.summary : "", objectKey: body.objectKey, mimeType: body.mimeType, promptSnapshot: body.promptSnapshot as Record<string, unknown>, visualStructure: body.visualStructure && typeof body.visualStructure === "object" ? body.visualStructure as Record<string, unknown> : {}, source: body.source && typeof body.source === "object" ? body.source as Record<string, unknown> : {} });
       return ok(asset, 201);
@@ -1311,7 +939,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     if (libraryReferencesMatch && method === "POST" && !libraryReferencesMatch[2]) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (typeof body.resourceId !== "string" || (body.targetType !== "plan" && body.targetType !== "task") || typeof body.targetId !== "string") return fail("LIBRARY_RESOURCE_NOT_FOUND");
       try { const result = await deps.libraryRepository.createReference({ suiteId: libraryReferencesMatch[1], resourceId: body.resourceId, targetType: body.targetType, targetId: body.targetId, idempotencyKey, createdBy: typeof body.createdBy === "string" ? body.createdBy : null }); return ok(result.reference, result.duplicate ? 200 : 201); }
       catch (error) { const code = error instanceof Error ? error.message : "LIBRARY_RESOURCE_NOT_FOUND"; return fail(code, code === "LIBRARY_RESOURCE_FORBIDDEN" || code === "LIBRARY_TARGET_NOT_FOUND" ? 403 : code === "LIBRARY_RESOURCE_NOT_FOUND" ? 404 : 409); }
@@ -1330,7 +958,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     const promptLifecycleMatch = path.match(/^\/api\/prompt-templates\/([^/]+)$/);
     if (method === "PATCH" && promptLifecycleMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const updated = await deps.promptRepository.updateDraft(promptLifecycleMatch[1], {
         name: typeof body.name === "string" ? body.name : undefined,
         body: typeof body.body === "string" ? body.body : undefined,
@@ -1381,7 +1009,8 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
 
     if (method === "POST" && path === "/api/rag/chunks/search") {
       if (!deps.ragClient) return fail("RAG_NOT_CONFIGURED", 503);
-      const query = options.body && typeof options.body === "object" && "query" in options.body ? String((options.body as { query: unknown }).query) : "";
+      const body = asRecord(options.body, { allowArrays: true });
+      const query = "query" in body ? String(body.query) : "";
       const observation = startTool("rag.query", { query }, { query_length: query.length });
       try {
         const result = await deps.ragClient.search(query);
@@ -1417,11 +1046,11 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!llmClient) return fail("LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(structureMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
       const template = await deps.promptRepository.getPublishedVersion(templateVersionId, "structure_plan");
       if (!template) return fail("PLAN_TEMPLATE_NOT_FOUND", 404);
-      const rawInput = body.dynamicInput && typeof body.dynamicInput === "object" && !Array.isArray(body.dynamicInput) ? body.dynamicInput as Record<string, unknown> : {};
+      const rawInput = asRecord(body.dynamicInput);
       const dynamicInput = { ...rawInput, selected_detail_categories: Array.isArray(rawInput.selected_detail_categories) ? JSON.stringify(rawInput.selected_detail_categories) : rawInput.selected_detail_categories, category_requirements: rawInput.category_requirements && typeof rawInput.category_requirements === "object" ? JSON.stringify(rawInput.category_requirements) : rawInput.category_requirements };
       const validated = validateDynamicInput(template.inputSchema, dynamicInput);
       if (!validated.ok) return fail("PROMPT_INPUT_INVALID", 400, validated.message);
@@ -1437,7 +1066,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       const platformValue = typeof validated.value.platform === "string" ? validated.value.platform.trim() : "";
       const platformProfile = platformValue && deps.platformRepository ? await deps.platformRepository.find(platformValue) : null;
       if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
-      const humanInput = body.humanInput && typeof body.humanInput === "object" && !Array.isArray(body.humanInput) ? body.humanInput as Record<string, unknown> : {};
+      const humanInput = asRecord(body.humanInput);
       const refs = Array.isArray(body.selectedChunks) ? body.selectedChunks.flatMap((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).version === "string" ? [{ id: (item as { id: string }).id, version: (item as { version: string }).version }] : []) : [];
       const chunks = refs.length ? await deps.ragClient?.getByIds(refs) : [];
       if (!chunks) return fail("RAG_NOT_CONFIGURED", 503);
@@ -1473,8 +1102,8 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       // Confirmation is terminal for a snapshot. Repeated clicks must reuse the
       // already-confirmed immutable snapshot instead of inserting its plan items again.
       if (latest.confirmationStatus === "confirmed") return ok(planSnapshotView(latest));
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
-      const requestedStructure = body.structure && typeof body.structure === "object" && !Array.isArray(body.structure) ? body.structure as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
+      const requestedStructure = asRecord(body.structure);
       const structure = {
         ...latest.structure,
         ...requestedStructure,
@@ -1523,7 +1152,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!llmClient) return fail("CATEGORY_PROMPT_LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(categoryPromptsMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const snapshotId = typeof body.planSnapshotId === "string" ? body.planSnapshotId : undefined;
       const requestedSnapshot = snapshotId ? await deps.planRepository.getSnapshot(snapshotId) : await deps.planRepository.getLatestSnapshot(suite.id);
       const snapshot = requestedSnapshot ? await resolveCategorySourceSnapshot(requestedSnapshot) : null;
@@ -1591,7 +1220,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       const categoryRequests = await categoryPromptRepository.listRequests(snapshot.id);
       const previous = categoryRequests.find((request) => request.id === categoryRetryMatch[2]) ?? categoryRequests.filter((request) => request.categoryCode === categoryRetryMatch[2]).at(-1);
       if (!previous || previous.status !== "failed") return fail("INVALID_CATEGORY_PROMPT_REQUEST", 404);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : previous.templateVersionId;
       const template = await observedPromptLoad(deps.promptRepository, templateVersionId, "category_prompt");
       if (!template) return fail("CATEGORY_PROMPT_TEMPLATE_NOT_FOUND", 404);
@@ -1640,7 +1269,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!llmClient) return fail("LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(planMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
       const template = await observedPromptLoad(deps.promptRepository, templateVersionId, "plan");
       if (!template) return fail("PLAN_TEMPLATE_NOT_FOUND", 404);
@@ -1649,7 +1278,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       const platformValue = typeof validated.value.platform === "string" ? validated.value.platform.trim() : "";
       const platformProfile = platformValue && deps.platformRepository ? await deps.platformRepository.find(platformValue) : null;
       if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
-      const humanInput = body.humanInput && typeof body.humanInput === "object" && !Array.isArray(body.humanInput) ? body.humanInput as Record<string, unknown> : {};
+      const humanInput = asRecord(body.humanInput);
       const refs = Array.isArray(body.selectedChunks) ? body.selectedChunks.flatMap((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).version === "string" ? [{ id: (item as { id: string }).id, version: (item as { version: string }).version }] : []) : [];
       const chunks = await deps.ragClient.getByIds(refs);
       for (const ref of refs) {
@@ -1699,7 +1328,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       const latest = await deps.planRepository.getLatestSnapshot(planMatch[1]);
       if (!latest) return fail("INVALID_PLAN_SNAPSHOT", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (!Array.isArray(body.items) || !validPlanOutput({ schemaVersion: "suite-plan-v1", items: body.items }, { items: { properties: { imageType: {} } } })) return fail("LLM_OUTPUT_SCHEMA_INVALID");
       const items = body.items as Array<{ imageType?: "main" | "detail"; title: string; purpose: string; prompt: string }>;
       const snapshot: PlanSnapshot = { ...latest, id: randomUUID(), revisionNumber: latest.revisionNumber + 1, revisionKind: "human", parentSnapshotId: latest.id, items: items.map((item, index) => ({ id: randomUUID(), ordinal: index + 1, imageType: item.imageType ?? "main", title: item.title, purpose: item.purpose, prompt: item.prompt })), createdAt: new Date().toISOString() };
@@ -1741,7 +1370,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (cached) return ok(cached);
       const suite = await deps.repository.getSuite(styleOverrideMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const rawValue = body.styleOverride;
       if (rawValue !== null && rawValue !== undefined && typeof rawValue !== "string") return fail("INVALID_STYLE_OVERRIDE");
       const nextValue = typeof rawValue === "string" && rawValue.trim() ? rawValue.trim() : null;
@@ -2002,7 +1631,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!deps.taskRepository?.createCustomTask) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(customTaskMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const title = typeof body.title === "string" ? body.title.trim() : "";
       const promptDraft = typeof body.promptDraft === "string" ? body.promptDraft.trim() : "";
       const imageType = body.imageType === "main" ? "main" : "detail";
@@ -2037,7 +1666,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(batchParamsMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const patch = body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)
         ? body.generationParams as Record<string, unknown>
         : null;
@@ -2062,7 +1691,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!deps.taskRepository || !deps.planRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(createTasksMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const snapshotId = typeof body.planSnapshotId === "string" ? body.planSnapshotId : undefined;
       let snapshot = snapshotId ? await deps.planRepository.getSnapshot(snapshotId) : await deps.planRepository.getLatestSnapshot(suite.id);
       if (!snapshot || snapshot.suiteId !== suite.id) return fail("INVALID_PLAN_SNAPSHOT", 409);
@@ -2084,7 +1713,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     const updateTaskMatch = path.match(/^\/api\/suite-tasks\/([^/]+)$/);
     if (method === "PATCH" && updateTaskMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const patch: Parameters<TaskRepository["updateTask"]>[1] = {};
       for (const key of ["title", "purpose", "promptDraft"] as const) if (typeof body[key] === "string") patch[key] = body[key];
       if (typeof body.status === "string") patch.status = body.status as SuiteTask["status"];
@@ -2115,7 +1744,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!deps.taskRepository || !deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       const task = await deps.taskRepository.getTask(whiteResourceMatch[1]); if (!task) return fail("INVALID_SUITE_TASK", 404);
       if (task.status === "generating" || task.status === "archived") return fail("TASK_INVALID_SOURCE", 409);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const resourceIds = Array.isArray(body.resourceIds) ? body.resourceIds.filter((item): item is string => typeof item === "string") : typeof body.resourceId === "string" ? [body.resourceId] : [];
       if (!resourceIds.length) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       if (resourceIds.length > 3) return fail("REVERSE_WHITE_RESOURCE_LIMIT", 409);
@@ -2148,7 +1777,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     }
     if (method === "PATCH" && layoutMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const expectedVersion = Number(body.layoutVersion ?? 0);
       const viewport = body.viewport && typeof body.viewport === "object" ? body.viewport as { x: number; y: number; zoom: number } : { x: 0, y: 0, zoom: 1 };
       const nodes = Array.isArray(body.nodes) ? body.nodes : [];
@@ -2162,7 +1791,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const allTasks = await deps.taskRepository.listTasks(suiteGenerationMatch[1]);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const requested = Array.isArray(body.taskIds) ? body.taskIds.filter((id): id is string => typeof id === "string") : allTasks.filter((task) => task.status !== "archived").map((task) => task.id);
       const tasks = allTasks.filter((task) => requested.includes(task.id) && task.status !== "archived");
       if (!tasks.length) return fail("NO_TASKS_TO_GENERATE", 409);
@@ -2176,7 +1805,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const task = await deps.taskRepository.getTask(taskGenerationMatch[1]);
       if (!task || task.status === "archived") return fail("INVALID_SUITE_TASK", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (typeof body.promptDraft === "string") await deps.taskRepository.updateTask(task.id, { promptDraft: body.promptDraft });
       const current = await deps.taskRepository.getTask(task.id);
       try {
@@ -2221,7 +1850,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
     const selectTaskVersionMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/select$/);
     if (method === "POST" && selectTaskVersionMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
-      const selection = options.body && typeof options.body === "object" && (options.body as Record<string, unknown>).selection === "final" ? "final" : "current";
+      const selection = asRecord(options.body, { allowArrays: true }).selection === "final" ? "final" : "current";
       const version = await deps.taskRepository.selectVersion(selectTaskVersionMatch[1], selectTaskVersionMatch[2], selection); return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
     }
     const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
@@ -2250,7 +1879,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       const [suiteId, inputImageId] = generationMatch.slice(1);
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
       if (!templateVersionId) return fail("PROMPT_TEMPLATE_REQUIRED");
       const template = await observedPromptLoad(deps.promptRepository, templateVersionId, "base_refine");
@@ -2399,7 +2028,8 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       return ok({ ...suite, inputImages } satisfies SuiteAggregate);
     }
     if (method === "PATCH" && suiteMatch) {
-      const name = typeof options.body === "object" && options.body !== null && "name" in options.body ? String((options.body as { name: unknown }).name).trim() : "";
+      const body = asRecord(options.body, { allowArrays: true });
+      const name = "name" in body ? String(body.name).trim() : "";
       if (!name) return fail("EMPTY_NAME");
       if (!deps.repository.renameSuite) return fail("NOT_FOUND", 404);
       const updated = await deps.repository.renameSuite(suiteMatch[1], name);
@@ -2411,7 +2041,7 @@ export function createTicket02App(deps: { listingRepository?: ListingRepository;
       return deleted ? ok(deleted) : fail("INVALID_SUITE_ID", 404);
     }
     return fail("NOT_FOUND", 404);
-  };
+  }
 
   const upload = async (suiteId: string, file: UploadFile): Promise<AppResponse> => {
     const suite = await deps.repository.getSuite(suiteId);

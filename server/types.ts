@@ -1,3 +1,4 @@
+import type { ListingConfigInput } from "../shared/listing-config.js";
 import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import type { PromptStage } from "./prompt-library.js";
 
@@ -271,7 +272,7 @@ export interface SuitePipelineRun {
   resumeKeys?: string[];
   structureSnapshotId?: string | null;
   taskIds?: string[];
-  config: Record<string, unknown>;
+  config: ListingConfigInput & Record<string, unknown>;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;

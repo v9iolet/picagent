@@ -3,7 +3,7 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
@@ -15,7 +15,7 @@ import sharp from "sharp";
 import pg from "pg";
 import { PostgresPipelineRepository } from "../server/repositories/postgres-pipeline-repository.js";
 import { readZipEntries } from "../server/zip.js";
-import type { AppResponse, Ticket02App } from "../server/app.js";
+import type { AppResponse, SuiteStudioApp } from "../server/app.js";
 import type { SuitePipelineRun } from "../server/types.js";
 
 const originalFact = "轻量化铝合金机身";
@@ -56,7 +56,7 @@ async function pipelineFixture(options: {
   const taskRepository = new MemoryTaskRepository();
   const supplements: string[] = [];
   let categoryCalls = 0;
-  const createApp = () => createTicket02App({
+  const createApp = () => createSuiteStudioApp({
     repository, storage, pipelineRepository: pipeline, promptRepository: prompts,
     planRepository, categoryPromptRepository, taskRepository,
     provider: { async edit() {
@@ -112,11 +112,11 @@ async function pipelineFixture(options: {
   };
 }
 
-function start(app: Ticket02App, suiteId: string, key: string, config: Record<string, unknown> = oneCard, extra = {}) {
+function start(app: SuiteStudioApp, suiteId: string, key: string, config: Record<string, unknown> = oneCard, extra = {}) {
   return app.request("POST", "/api/suites/one-click-generate", { headers: { "Idempotency-Key": key }, body: { suiteId, config, ...extra } });
 }
 
-function resume(app: Ticket02App, suiteId: string, action: string, key?: string, extra = {}) {
+function resume(app: SuiteStudioApp, suiteId: string, action: string, key?: string, extra = {}) {
   return app.request("POST", `/api/suites/${suiteId}/one-click-generate/resume`, {
     headers: key ? { "Idempotency-Key": key } : {}, body: { action, ...extra },
   });
@@ -128,7 +128,7 @@ function expectError(response: AppResponse, status: number, code: string) {
   assert.equal(response.body.error.code, code);
 }
 
-async function waitPipeline(app: ReturnType<typeof createTicket02App>, suiteId: string, statuses = ["completed", "failed", "partial_failed", "waiting_human_input", "waiting_base_refine_decision"] as string[]) {
+async function waitPipeline(app: ReturnType<typeof createSuiteStudioApp>, suiteId: string, statuses = ["completed", "failed", "partial_failed", "waiting_human_input", "waiting_base_refine_decision"] as string[]) {
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
     const response = await app.request("GET", `/api/suites/${suiteId}/studio-state`);
@@ -208,7 +208,7 @@ test("custom 1/3/2/1 runs end to end and freezes ratio, size, auto confirmation,
   await storage.put({ key: `suites/${suite.id}/input.png`, bytes, contentType: "image/png" });
   const inputId = randomUUID();
   await repository.createInputImage({ id: inputId, suiteId: suite.id, ordinal: 1, originalObjectKey: `suites/${suite.id}/input.png`, thumbnailObjectKey: `suites/${suite.id}/input.png`, sha256: "f".repeat(64), width: 16, height: 16, mimeType: "image/png", originalFilename: "商品.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
-  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: new MemoryPlanRepository(), categoryPromptRepository: new MemoryCategoryPromptRepository(), taskRepository: new MemoryTaskRepository(), provider: { edit: async () => ({ bytes, mimeType: "image/png" }) }, llmClient: { provider: "fake", model: "fake", isFake: true, async generatePlan() { return { schemaVersion: "suite-structure-plan-v2", status: "READY_FOR_REVIEW", mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [inputId], factRefs: [], missingFacts: [] }, detailImageCount: 6, categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({ category, requirement: "optional", count: category === "feature_benefit" ? 3 : category === "lifestyle_use" ? 2 : category === "comparison" ? 1 : 0, reason: "事实支持", sourceImageIds: [inputId], factRefs: [], missingFacts: [] })), globalStyleCard: { promptPrefix: "统一" } }; }, async generateCategoryPrompt(input) { return { schemaVersion: "suite-category-prompt-v1", category: input.categoryCode, items: Array.from({ length: input.requestedCount }, (_, index) => ({ stableId: `${input.categoryCode}-${index}`, category: input.categoryCode, title: "图片", purpose: "展示商品", referenceImageIds: [inputId], factRefs: [], prompt: "生成", allowsTextOverlay: "no", textContent: [], aspectRatio: input.categoryCode === "main" ? "1:1" : "3:4", suggestedParams: {} })) }; } } });
+  const app = createSuiteStudioApp({ repository, storage, promptRepository: prompts, planRepository: new MemoryPlanRepository(), categoryPromptRepository: new MemoryCategoryPromptRepository(), taskRepository: new MemoryTaskRepository(), provider: { edit: async () => ({ bytes, mimeType: "image/png" }) }, llmClient: { provider: "fake", model: "fake", isFake: true, async generatePlan() { return { schemaVersion: "suite-structure-plan-v2", status: "READY_FOR_REVIEW", mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [inputId], factRefs: [], missingFacts: [] }, detailImageCount: 6, categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({ category, requirement: "optional", count: category === "feature_benefit" ? 3 : category === "lifestyle_use" ? 2 : category === "comparison" ? 1 : 0, reason: "事实支持", sourceImageIds: [inputId], factRefs: [], missingFacts: [] })), globalStyleCard: { promptPrefix: "统一" } }; }, async generateCategoryPrompt(input) { return { schemaVersion: "suite-category-prompt-v1", category: input.categoryCode, items: Array.from({ length: input.requestedCount }, (_, index) => ({ stableId: `${input.categoryCode}-${index}`, category: input.categoryCode, title: "图片", purpose: "展示商品", referenceImageIds: [inputId], factRefs: [], prompt: "生成", allowsTextOverlay: "no", textContent: [], aspectRatio: input.categoryCode === "main" ? "1:1" : "3:4", suggestedParams: {} })) }; } } });
   const started = await app.request("POST", "/api/suites/one-click-generate", { headers: { "Idempotency-Key": "pipeline-test" }, body: { suiteId: suite.id, config: { platform: "淘宝", mode: "custom", counts: { main: 1, selling_points: 3, lifestyle: 2, other: 1 }, aspectRatio: "3:4", size: "2K", listingCopy: true } } });
   assert.equal(started.status, 202);
   const duplicate = await app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "pipeline-test" }, body: { suiteId: suite.id, config: { listingCopy: false } } });

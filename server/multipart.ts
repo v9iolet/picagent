@@ -1,4 +1,4 @@
-import type { Ticket02App, AppResponse } from "./app.js";
+import type { SuiteStudioApp, AppResponse } from "./app.js";
 
 export function decodeMultipartFilename(filenameStar: string | undefined, filenameHeader: string | undefined): string {
   if (filenameStar) return decodeURIComponent(filenameStar);
@@ -26,7 +26,7 @@ export function parseMultipartFile(body: Buffer, contentType: string): { filenam
 }
 
 // Kept outside index.ts so the actual HTTP dispatcher can run without PostgreSQL or MinIO.
-export async function dispatchInputImageUpload(app: Ticket02App, path: string, body: Buffer, headers: Record<string, string | undefined>): Promise<AppResponse | null> {
+export async function dispatchInputImageUpload(app: SuiteStudioApp, path: string, body: Buffer, headers: Record<string, string | undefined>): Promise<AppResponse | null> {
   if (/^\/api\/listing-copies\/[^/]+\/input-images$/.test(path)) {
     const file = parseMultipartFile(body, headers["content-type"] ?? "");
     if (!file) return { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "未找到图片文件" }, requestId: "" } };

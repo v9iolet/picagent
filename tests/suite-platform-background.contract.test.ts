@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Pool } from "pg";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { PostgresPlatformRepository } from "../server/repositories/postgres-platform-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
@@ -43,7 +43,7 @@ test("migrated platform API and repository expose the specified backgrounds for 
     await scopedPool.query(seed);
     await scopedPool.query(migration);
     assert.deepEqual(await repository.listEnabled(), first);
-    const api = createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), platformRepository: repository });
+    const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), platformRepository: repository });
     const response = await api.request("GET", "/api/platforms");
     assert.equal(response.status, 200);
     assert.equal(response.body.data.length, 16);

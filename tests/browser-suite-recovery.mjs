@@ -18,7 +18,7 @@ await page.getByText("1/6 张").waitFor({ state: "visible" });
 const imageCount = await page.locator(".start-thumbnail-strip button").count();
 const sourceName = await page.locator(".start-image-card.source footer strong").textContent();
 const overflow = await page.evaluate(() => ({ok: document.documentElement.scrollWidth <= window.innerWidth, sw: document.documentElement.scrollWidth, iw: window.innerWidth, bad: [...document.querySelectorAll("*")].filter((element) => element.getBoundingClientRect().right > window.innerWidth + 1).slice(0, 8).map((element) => ({ tag: element.tagName, className: element.className, right: element.getBoundingClientRect().right, width: element.getBoundingClientRect().width }))}));
-await page.screenshot({ path: "output/ticket02-browser-recovery.png", fullPage: true });
+await page.screenshot({ path: "output/suite-browser-recovery.png", fullPage: true });
 console.log(JSON.stringify({ suiteUrl, imageCount, sourceName, overflow, errors }));
 await browser.close();
 

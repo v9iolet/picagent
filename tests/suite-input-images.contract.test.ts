@@ -1,13 +1,13 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 
 const png1x1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
 function app() {
-  return createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage() });
+  return createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage() });
 }
 
 test("creates a suite idempotently and restores it", async () => {
@@ -36,7 +36,7 @@ test("rejects non-images, invalid mime and oversized files", async () => {
 
 test("persists image metadata, hash and suite-scoped object keys", async () => {
   const storage = new MemoryStorage();
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage });
   const suite = await api.request("POST", "/api/suites", { body: { name: "测试" } });
   const result = await api.upload(suite.body.data.id as string, { filename: "耳机1.png", mimeType: "image/png", bytes: png1x1 });
   assert.equal(result.status, 201);
@@ -78,7 +78,7 @@ test("rejects the same image only within the same suite", async () => {
 
 test("does not call an image provider before generation", async () => {
   const calls: string[] = [];
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), provider: { generate: async () => { calls.push("called"); } } });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), provider: { generate: async () => { calls.push("called"); } } });
   const suite = await api.request("POST", "/api/suites", { body: { name: "测试" } });
   await api.upload(suite.body.data.id as string, { filename: "a.png", mimeType: "image/png", bytes: png1x1 });
   assert.deepEqual(calls, []);

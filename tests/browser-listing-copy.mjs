@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { chromium } from "playwright";
 import { createServer } from "vite";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { dispatchInputImageUpload } from "../server/multipart.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
@@ -51,7 +51,7 @@ async function offlineBrowser(t, pendingCopy) {
   };
   const calls = [];
   const bytes = await readFile(photo);
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository: new MemorySuiteRepository(),
     storage: new MemoryStorage(),
     promptRepository: prompts,

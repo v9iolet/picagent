@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryCategoryPromptRepository } from "../server/repositories/memory-category-prompt-repository.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
@@ -38,7 +38,7 @@ async function fixture(outputFor: (category: string, count: number) => unknown, 
   const categoryRequests = new MemoryCategoryPromptRepository();
   let calls = 0;
   const inputs: Array<Parameters<NonNullable<import("../server/types.js").LlmClient["generateCategoryPrompt"]>>[0]> = [];
-  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: plans, categoryPromptRepository: categoryRequests, llmClient: { provider: "fake", model: "qwen-test", isFake: true, async generatePlan() { return {}; }, async generateCategoryPrompt(input) { calls += 1; inputs.push(input); return outputFor(input.categoryCode, input.requestedCount); } } });
+  const app = createSuiteStudioApp({ repository, storage, promptRepository: prompts, planRepository: plans, categoryPromptRepository: categoryRequests, llmClient: { provider: "fake", model: "qwen-test", isFake: true, async generatePlan() { return {}; }, async generateCategoryPrompt(input) { calls += 1; inputs.push(input); return outputFor(input.categoryCode, input.requestedCount); } } });
   return { app, suite, snapshot, template: published, categoryRequests, inputs, get calls() { return calls; } };
 }
 

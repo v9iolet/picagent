@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { parseNormalizedPromptMarkdown, validatePromptTemplateContract } from "../server/prompt-library.js";
-import { createTicket02App, type AppResponse } from "../server/app.js";
+import { createSuiteStudioApp, type AppResponse } from "../server/app.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
@@ -62,7 +62,7 @@ async function fixture(generatePlan: (input: PlanLlmInput) => Promise<unknown>, 
   const bytes = await sharp({ create: { width: 12, height: 12, channels: 3, background: "white" } })
     .png()
     .toBuffer();
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository,
     storage,
     promptRepository: prompts,
