@@ -155,10 +155,11 @@ export const modelSettingsApi = {
 };
 
 export const suiteApi = {
-  create(name: string) { return request<{ id: string; name: string }>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name }) }); },
+  create(name: string, origin?: ApiSuite["origin"]) { return request<ApiSuite>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name, origin }) }); },
   rename(id: string, name: string) { return request<ApiSuite>(`/api/suites/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name }) }); },
   delete(id: string) { return request<{ id: string }>(`/api/suites/${encodeURIComponent(id)}`, { method: "DELETE" }); },
   list() { return request<ApiSuite[]>("/api/suites"); },
+  listCanvases() { return request<ApiSuite[]>("/api/suites?view=canvas"); },
   get(id: string) { return request<ApiSuite>(`/api/suites/${encodeURIComponent(id)}`); },
   removeInputImage(suiteId: string, inputImageId: string) {
     return request<{ id: string }>(`/api/suites/${encodeURIComponent(suiteId)}/input-images/${encodeURIComponent(inputImageId)}`, { method: "DELETE" });

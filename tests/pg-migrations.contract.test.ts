@@ -6,6 +6,8 @@ import { createTicket02App } from "../server/app.js";
 import { loadPostgresConfig } from "../server/config.js";
 import type { ListingImage, ListingJob, ListingVersion } from "../server/listing-copy.js";
 import { runMigrations } from "../server/migrations.js";
+import { PostgresLibraryRepository } from "../server/repositories/postgres-library-repository.js";
+import { PostgresTaskRepository } from "../server/repositories/postgres-task-repository.js";
 import { PostgresListingRepository } from "../server/repositories/postgres-listing-copy-repository.js";
 import { PostgresPipelineRepository } from "../server/repositories/postgres-pipeline-repository.js";
 import { PostgresPlatformRepository } from "../server/repositories/postgres-platform-repository.js";
@@ -376,5 +378,27 @@ test("startup recovery fails running pipelines and listing jobs and increments t
     await runMigrations(pool, { recoverStaleAttempts: true });
     assert.deepEqual(await jobs.summary(run.id), failedJob);
     assert.deepEqual(await pipelines.getRun(run.id), failedPipeline);
+  });
+});
+
+test("PG library binds a published input_image from another suite to a canvas task", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const suites = new PostgresSuiteRepository(pool);
+    const library = new PostgresLibraryRepository(pool);
+    const source = await suites.createSuite("原图来源");
+    const canvas = await suites.createSuite("资源画布", undefined, "canvas");
+    const id = randomUUID();
+    const prefix = `suites/${source.id}/inputs/${id}/`;
+    await suites.createInputImage({ id, suiteId: source.id, ordinal: 1, originalObjectKey: prefix + "original",
+      thumbnailObjectKey: prefix + "thumbnail", sha256: "1".repeat(64), width: 1, height: 1, mimeType: "image/png",
+      originalFilename: "product.png", currentBaseVersionId: null, createdAt: timestamp });
+    const { task } = await new PostgresTaskRepository(pool).createCustomTask({ suiteId: canvas.id, planSnapshotId: null,
+      imageType: "detail", title: "细节", purpose: "展示细节", promptDraft: "展示商品", sourceInputImageId: null, generationParams: {} });
+    const { reference } = await library.createReference({ suiteId: canvas.id, resourceId: `input:${id}`,
+      targetType: "task", targetId: task.id, idempotencyKey: "bind-input" });
+    assert.equal(reference.resourceType, "input_image");
+    assert.equal(reference.resourceVersionId, id);
+    assert.equal(reference.snapshot.suiteId, source.id);
+    assert.deepEqual(await library.listReferences(canvas.id, "task", task.id), [reference]);
   });
 });

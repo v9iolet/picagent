@@ -1,3 +1,4 @@
+import { assertReferenceAllowed } from "../library-reference-policy.js";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { LibraryAssetStatus, LibraryReference, LibraryRepository, LibraryResource, LibraryResourceQuery } from "../types.js";
@@ -93,10 +94,7 @@ export class PostgresLibraryRepository implements LibraryRepository {
 
   async createReference(input: { suiteId: string; resourceId: string; targetType: "plan" | "task"; targetId: string; idempotencyKey: string; createdBy?: string | null }) {
     const resource = await this.getResource(input.resourceId); if (!resource) throw new Error("LIBRARY_RESOURCE_NOT_FOUND");
-    if (resource.suiteId && resource.suiteId !== input.suiteId && resource.resourceType !== "base_image") throw new Error("LIBRARY_RESOURCE_FORBIDDEN");
-    if (resource.status && resource.status !== "published") throw new Error("LIBRARY_RESOURCE_NOT_PUBLISHED");
-    if (resource.resourceType === "process_image") throw new Error("LIBRARY_PROCESS_IMAGE_NOT_SELECTABLE");
-    if (resource.resourceType === "prompt_template" && ((input.targetType === "plan" && resource.stage !== "plan") || (input.targetType === "task" && resource.stage !== "task_image"))) throw new Error("LIBRARY_STAGE_MISMATCH");
+    assertReferenceAllowed(resource, input.suiteId, input.targetType);
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");

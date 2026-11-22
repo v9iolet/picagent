@@ -1,3 +1,4 @@
+import { ResolutionCostNote } from "../ResolutionCostNote";
 import { useState } from "react";
 import type { ApiImage, ApiPlatformProfile } from "../../api/client";
 import type { ImageOptions } from "../../../shared/model-settings";
@@ -128,7 +129,7 @@ export function ConfigPanel({
             {select("比例", "aspectRatio", options.aspectRatios)}
             {select("分辨率", "size", options.sizes)}
           </div>
-          {c.size === "4K" && <p className="ss-note">4K 出图更慢，费用更贵。</p>}
+          <ResolutionCostNote size={c.size} className="ss-note" />
           <label className="ss-switch">
             <span>白底精修</span>
             <input

@@ -1,5 +1,7 @@
+import { ResolutionCostNote } from "./ResolutionCostNote";
 import { useState, type FormEvent } from "react";
 import type { ApiImage } from "../api/client";
+import type { ImageOptions } from "../../shared/model-settings";
 import { Icon } from "../pages/shared";
 
 const QUICK_SCENES = [
@@ -11,18 +13,22 @@ const QUICK_SCENES = [
 
 export function CustomTaskModal({
   inputImages,
+  imageOptions,
   onClose,
   onCreate,
 }: {
   inputImages: ApiImage[];
+  imageOptions: ImageOptions;
   onClose: () => void;
   onCreate: (input: { imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown> }) => Promise<void>;
 }) {
   const [imageType, setImageType] = useState<"main" | "detail">("detail");
   const [title, setTitle] = useState("");
   const [purpose, setPurpose] = useState("");
+  const preferred = (options: string[], value: string) => options.includes(value) ? value : options[0] ?? value;
   const [ratio, setRatio] = useState("3:4");
   const [size, setSize] = useState("1K");
+  const effectiveSize = preferred(imageOptions.sizes, size);
   const [quality, setQuality] = useState("medium");
   const [sourceInputImageId, setSourceInputImageId] = useState<string>(inputImages[0]?.id ?? "");
   const [promptDraft, setPromptDraft] = useState("");
@@ -52,7 +58,7 @@ export function CustomTaskModal({
         purpose: purpose.trim() || (imageType === "main" ? "画布自由新增主图" : "画布自由新增详情图"),
         promptDraft: promptDraft.trim(),
         sourceInputImageId: sourceInputImageId || null,
-        generationParams: { ratio, size, quality },
+        generationParams: { ratio: preferred(imageOptions.aspectRatios, ratio), size: effectiveSize, quality },
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "创建任务卡失败");
@@ -91,20 +97,14 @@ export function CustomTaskModal({
               </label>
               <label className="wb-style-field">
                 <span>画面比例</span>
-                <select value={ratio} onChange={(event) => setRatio(event.target.value)}>
-                  <option value="1:1">1:1</option>
-                  <option value="3:4">3:4</option>
-                  <option value="4:3">4:3</option>
-                  <option value="9:16">9:16</option>
-                  <option value="16:9">16:9</option>
+                <select value={preferred(imageOptions.aspectRatios, ratio)} onChange={(event) => setRatio(event.target.value)}>
+                  {imageOptions.aspectRatios.map((option) => <option key={option}>{option}</option>)}
                 </select>
               </label>
               <label className="wb-style-field">
-                <span>尺寸</span>
-                <select value={size} onChange={(event) => setSize(event.target.value)}>
-                  <option value="1K">1K</option>
-                  <option value="2K">2K</option>
-                  <option value="4K">4K</option>
+                <span>分辨率</span>
+                <select value={effectiveSize} onChange={(event) => setSize(event.target.value)}>
+                  {imageOptions.sizes.map((option) => <option key={option}>{option}</option>)}
                 </select>
               </label>
               <label className="wb-style-field">
@@ -116,6 +116,7 @@ export function CustomTaskModal({
                 </select>
               </label>
             </div>
+            <ResolutionCostNote size={effectiveSize} className="wb-resolution-note" />
             <label className="wb-style-field">
               <span>任务标题 *</span>
               <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：黑五促销主图 / 包装清单图" />
@@ -124,6 +125,7 @@ export function CustomTaskModal({
               <label className="wb-style-field">
                 <span>参考商品底图</span>
                 <select value={sourceInputImageId} onChange={(event) => setSourceInputImageId(event.target.value)}>
+                  <option value="">稍后绑定</option>
                   {inputImages.map((img) => (
                     <option key={img.id} value={img.id}>原图 #{img.ordinal} · {img.originalFilename}</option>
                   ))}
