@@ -1,5 +1,5 @@
 import { ResolutionCostNote } from "../ResolutionCostNote";
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { ApiImage, ApiPlatformProfile } from "../../api/client";
 import type { ImageOptions } from "../../../shared/model-settings";
 import {
@@ -8,7 +8,15 @@ import {
   type SuiteCategoryGroupCode,
 } from "../../../shared/suite-categories";
 import { SUPPORTED_OUTPUT_LANGUAGES } from "../../../shared/workbench-delivery";
-import { refinement, totalImages, type Config } from "./studio";
+import { requiresPureWhiteMainImage } from "../../../shared/platform-main-background";
+import { totalImages, type Config } from "./studio";
+
+const sellingPointsPlaceholder = `建议包含以下信息生成更精准：
+1.产品名称
+2.核心卖点
+3.适用人群
+4.期望场景
+5.具体参数`;
 
 interface Props {
   config: Config;
@@ -35,8 +43,10 @@ export function ConfigPanel({
   generate,
 }: Props) {
   const [drag, setDrag] = useState(false);
-  const profile = platforms.find((p) => p.code === c.platform),
-    policy = refinement(profile, c.refineBaseImages);
+  const [showSellingPointsHelp, setShowSellingPointsHelp] = useState(false);
+  const sellingPointsHelpId = useId();
+  const profile = platforms.find((p) => p.code === c.platform);
+  const pureWhiteMain = requiresPureWhiteMainImage(profile);
   const count = totalImages(c);
   function select(
     label: string,
@@ -130,35 +140,38 @@ export function ConfigPanel({
             {select("分辨率", "size", options.sizes)}
           </div>
           <ResolutionCostNote size={c.size} className="ss-note" />
-          <label className="ss-switch">
-            <span>白底精修</span>
-            <input
-              type="checkbox"
-              aria-label="白底精修"
-              checked={policy.enabled}
-              disabled={policy.locked}
-              onChange={(e) => update({ refineBaseImages: e.target.checked })}
-            />
-          </label>
-          <small>
-            {policy.locked
-              ? `${profile?.name} 要求纯白背景，精修已锁定。`
-              : profile?.mainImageBackground === "white_preferred"
-                ? "平台优先使用白底图，可关闭精修。"
-                : "平台允许场景背景，可按需开启精修。"}
-          </small>
+          {profile && (
+            <small>
+              {pureWhiteMain
+                ? "国际站主图将按纯白背景规范生成，数量以主图配置为准。"
+                : "国内站主图按场景策略生成，不强制白底。"}
+            </small>
+          )}
         </section>
         <section>
-          <label>
+          <div className="ss-selling-points-heading">
             <h2>商品卖点 & 生成要求</h2>
-            <textarea
-              rows={3}
-              aria-label="商品卖点与生成要求"
-              placeholder="输入产品名称、核心卖点、适用场景及已确认的参数…"
-              value={c.sellingPoints}
-              onChange={(e) => update({ sellingPoints: e.target.value })}
-            />
-          </label>
+            <button
+              type="button"
+              aria-label="商品卖点填写说明"
+              aria-expanded={showSellingPointsHelp}
+              aria-controls={sellingPointsHelpId}
+              onClick={() => setShowSellingPointsHelp((open) => !open)}
+            >
+              ?
+            </button>
+          </div>
+          <p id={sellingPointsHelpId} className="ss-note" hidden={!showSellingPointsHelp}>
+            建议逐行填写产品名称、核心卖点、适用人群、期望场景和具体参数。请填写已确认的商品事实，不确定的信息可留空。
+          </p>
+          <textarea
+            rows={6}
+            aria-label="商品卖点与生成要求"
+            aria-describedby={showSellingPointsHelp ? sellingPointsHelpId : undefined}
+            placeholder={sellingPointsPlaceholder}
+            value={c.sellingPoints}
+            onChange={(e) => update({ sellingPoints: e.target.value })}
+          />
         </section>
         <section>
           <h2>套图结构配置</h2>
@@ -174,7 +187,7 @@ export function ConfigPanel({
           ) : (
             (Object.keys(SUITE_CATEGORY_GROUPS) as SuiteCategoryGroupCode[]).map((key) => {
               const group = SUITE_CATEGORY_GROUPS[key],
-                name = key === "main" ? policy.mainName : key === "other" ? "其他" : group.name;
+                name = key === "main" && pureWhiteMain ? SUITE_CATEGORY_GROUPS.main.whiteName : key === "other" ? "其他" : group.name;
               const value = c.counts[key];
               const max =
                 key === "main"

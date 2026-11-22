@@ -4,7 +4,6 @@ import {
   type ApiImage,
   type ApiListingSummary,
   type ApiPlanSnapshot,
-  type ApiPlatformProfile,
   type ApiSuite,
 } from "../../api/client";
 import { SUPPORTED_OUTPUT_LANGUAGES, type ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
@@ -22,7 +21,6 @@ export interface Config extends ListingConfig {
   mode: "smart" | "custom";
   counts: Counts;
   listingCopy: boolean;
-  refineBaseImages?: boolean;
 }
 export const initialConfig: Config = {
   platform: "",
@@ -45,14 +43,6 @@ export function totalImages(c: Config) {
     ? SMART_SUITE_STRUCTURE_PRESET.main_image_count + SMART_SUITE_STRUCTURE_PRESET.detail_image_count_max
     : Object.values(c.counts).reduce((a, b) => a + b, 0);
 }
-export function refinement(profile?: ApiPlatformProfile, manual?: boolean) {
-  const policy = profile?.mainImageBackground;
-  return {
-    locked: policy === "pure_white_required",
-    enabled: policy === "pure_white_required" || (manual ?? policy === "white_preferred"),
-    mainName: policy === "flexible" ? "主图" : "白底主图",
-  };
-}
 export function currentImageOptions(settings: ModelSettingsView) {
   const pref = settings.preferences.image;
   const model = settings.channels
@@ -69,7 +59,7 @@ export interface Pipeline {
     | "waiting_base_refine_decision"
     | "waiting_human_input";
   currentPhase: string;
-  config: Partial<Config>;
+  config: Partial<Config> & { refineBaseImages?: boolean };
   errorCode: string | null;
   errorMessage: string | null;
 }
@@ -115,7 +105,8 @@ export const studioApi = {
     `${path(id)}/delivery/export?${new URLSearchParams({ taskIds: ids.join(",") })}`,
 };
 export function fromRun(run: Pipeline | null): Config {
-  return { ...initialConfig, ...run?.config, counts: { ...initialConfig.counts, ...run?.config.counts } };
+  const { refineBaseImages, ...config } = run?.config ?? {};
+  return { ...initialConfig, ...config, counts: { ...initialConfig.counts, ...config.counts } };
 }
 export async function download(url: string, name: string) {
   const res = await fetch(url);

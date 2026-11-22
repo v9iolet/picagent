@@ -7,6 +7,7 @@ import { isProductImageResource } from "./library-reference-policy.js";
 import { createListingCopyApi } from "./listing-copy-api.js";
 import { MemoryListingRepository, type ListingRepository } from "./listing-copy.js";
 import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../shared/model-settings.js";
+import { PURE_WHITE_MAIN_IMAGE_REQUIREMENTS } from "../shared/platform-main-background.js";
 import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
@@ -43,6 +44,7 @@ import type {
   PlanAttempt,
   PlanRepository,
   PlanSnapshot,
+  PlatformProfile,
   PlatformRepository,
   PromptRepository,
   RagClient,
@@ -71,6 +73,14 @@ export interface SuiteStudioApp {
   previewTaskVersion(taskId: string, versionId: string): Promise<AppResponse>;
   previewLibraryResource(resourceId: string): Promise<AppResponse>;
   previewReverseReference(planId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+}
+
+function platformForPlanning(profile: PlatformProfile | null, background: unknown): PlatformProfile | undefined {
+  if (!profile) return undefined;
+  if (background === "pure_white_required")
+    return { ...profile, mainImageBackground: background, mainImageStrategy: PURE_WHITE_MAIN_IMAGE_REQUIREMENTS };
+  if (background === "flexible") return { ...profile, mainImageBackground: background };
+  return profile;
 }
 
 async function observedPromptLoad(repository: PromptRepository, templateVersionId: string, stage?: PromptStage) {
@@ -503,7 +513,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       let sourceKind: "base" | "original" = "original";
       let sourceVersionId: string | null = null;
       let sourceObjectKey = image.originalObjectKey;
-      if (image.currentBaseVersionId) {
+      if (snapshot.requestSummary.useOriginalImages !== true && image.currentBaseVersionId) {
         const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId);
         if (base) { sourceKind = "base"; sourceVersionId = base.id; sourceObjectKey = base.objectKey; }
       }
@@ -538,6 +548,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const batch: TaskGenerationBatch = { id: randomUUID(), suiteId, kind, requestedCount: tasks.length, taskIds: tasks.map((task) => task.id), status: "running", idempotencyKey, createdAt: now, startedAt: now, finishedAt: null };
     const slots: TaskResultSlot[] = tasks.map((task, index) => ({ id: randomUUID(), batchId: batch.id, taskId: task.id, slotOrdinal: index + 1, retryOfSlotId: failedAttempt?.slotId ?? null, status: "generating", selectedVersionId: null, createdAt: now, completedAt: null }));
     const attempts: TaskGenerationAttempt[] = [];
+    const taskPlans = new Map<string, PlanSnapshot | null>();
+    if (latestPlanSnapshot) taskPlans.set(latestPlanSnapshot.id, latestPlanSnapshot);
     for (const [index, task] of tasks.entries()) {
       const providerName = channel ? "openai-compatible-image" : provider ? "image-provider" : "unconfigured";
       if (failedAttempt) {
@@ -548,6 +560,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         });
         continue;
       }
+      if (task.planSnapshotId && deps.planRepository && !taskPlans.has(task.planSnapshotId))
+        taskPlans.set(task.planSnapshotId, await deps.planRepository.getSnapshot(task.planSnapshotId));
+      const taskPlan = task.planSnapshotId ? taskPlans.get(task.planSnapshotId) : null;
+      const useOriginalImages = taskPlan?.requestSummary.useOriginalImages === true;
       let sourceKind: "base" | "original" | "library" = "original"; let sourceObjectKey = ""; let sourceBaseVersionId: string | null = null; let sourceInputImageId: string | null = null; let sourceLibraryReferenceId: string | null = null; let sourceResourceVersionId: string | null = null;
       const generationParams = task.generationParams ?? {};
       const materialRefs = Array.isArray(generationParams.productMaterialRefs) ? generationParams.productMaterialRefs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 3) : [];
@@ -590,7 +606,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         const image = await deps.repository.getInputImage(suiteId, task.sourceInputImageId);
         if (!image) throw new Error("TASK_INVALID_SOURCE");
         sourceKind = "original"; sourceObjectKey = image.originalObjectKey; sourceInputImageId = image.id;
-        if (image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId); if (base) { sourceKind = "base"; sourceObjectKey = base.objectKey; sourceBaseVersionId = base.id; } }
+        if (!useOriginalImages && image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId); if (base) { sourceKind = "base"; sourceObjectKey = base.objectKey; sourceBaseVersionId = base.id; } }
       }
       if (!inputImages.length) {
         const stored = await deps.storage.get(sourceObjectKey);
@@ -1050,8 +1066,11 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
       const template = await deps.promptRepository.getPublishedVersion(templateVersionId, "structure_plan");
       if (!template) return fail("PLAN_TEMPLATE_NOT_FOUND", 404);
-      const rawInput = asRecord(body.dynamicInput);
-      const dynamicInput = { ...rawInput, selected_detail_categories: Array.isArray(rawInput.selected_detail_categories) ? JSON.stringify(rawInput.selected_detail_categories) : rawInput.selected_detail_categories, category_requirements: rawInput.category_requirements && typeof rawInput.category_requirements === "object" ? JSON.stringify(rawInput.category_requirements) : rawInput.category_requirements };
+      const dynamicInput = { ...asRecord(body.dynamicInput) };
+      if (Array.isArray(dynamicInput.selected_detail_categories))
+        dynamicInput.selected_detail_categories = JSON.stringify(dynamicInput.selected_detail_categories);
+      if (dynamicInput.category_requirements && typeof dynamicInput.category_requirements === "object")
+        dynamicInput.category_requirements = JSON.stringify(dynamicInput.category_requirements);
       const validated = validateDynamicInput(template.inputSchema, dynamicInput);
       if (!validated.ok) return fail("PROMPT_INPUT_INVALID", 400, validated.message);
       if (validated.value.category_groups) {
@@ -1073,22 +1092,30 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       for (const ref of refs) { const chunk = chunks.find((item) => item.id === ref.id); if (!chunk || !chunk.published) return fail("RAG_CHUNK_NOT_FOUND", 409); if (chunk.version !== ref.version) return fail("RAG_CHUNK_VERSION_DRIFT", 409); }
       const images = await deps.repository.getInputImages(suite.id);
       if (images.length < 1 || images.length > 6) return fail("INVALID_INPUT_IMAGE");
+      const useOriginalImages = body.useOriginalImages === true;
       const visionImages = [];
-      for (const image of images) { let key = image.originalObjectKey; let source = await deps.storage.get(key); if (image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suite.id, image.id, image.currentBaseVersionId); if (base) { key = base.objectKey; source = await deps.storage.get(key); } } if (!source) return fail("PLAN_INPUT_IMAGE_NOT_FOUND", 409); visionImages.push({ id: image.id, sourceKind: image.currentBaseVersionId ? "base" as const : "original" as const, sourceVersionId: image.currentBaseVersionId, mimeType: source.contentType, bytes: source.bytes }); }
+      for (const image of images) {
+        const base = !useOriginalImages && image.currentBaseVersionId
+          ? await deps.repository.getBaseImageVersion(suite.id, image.id, image.currentBaseVersionId)
+          : null;
+        const source = await deps.storage.get(base?.objectKey ?? image.originalObjectKey);
+        if (!source) return fail("PLAN_INPUT_IMAGE_NOT_FOUND", 409);
+        visionImages.push({ id: image.id, sourceKind: base ? "base" as const : "original" as const, sourceVersionId: base?.id ?? null, mimeType: source.contentType, bytes: source.bytes });
+      }
       const createdAt = new Date().toISOString();
-      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: images.flatMap((item) => item.currentBaseVersionId ? [item.currentBaseVersionId] : []), provider: llmSource(llmClient), errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
+      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: visionImages.flatMap((item) => item.sourceVersionId ? [item.sourceVersionId] : []), provider: llmSource(llmClient), errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
       const reservation = await deps.planRepository.beginAttempt(attempt);
       if (reservation.duplicate) return ok({ attemptId: reservation.attempt.id, status: reservation.attempt.status }, reservation.attempt.status === "running" ? 202 : 200);
       void (async () => {
         try {
-          const raw = await llmClient.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined });
+          const raw = await llmClient.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformForPlanning(platformProfile, useOriginalImages ? validated.value.main_image_background : undefined) });
           const output = normalizeStructureOutput(raw);
           if (!output) { await deps.planRepository!.failAttempt(attempt.id, "LLM_OUTPUT_SCHEMA_INVALID", errorMessages.LLM_OUTPUT_SCHEMA_INVALID, summarizeOutput(raw)); return; }
           const supplementRef = designerFactsText(validated.value) ? ["human_supplement"] : [];
           let validationError: string | null = null; try { validationError = validateStructureOutput(output, { ...validated.value, selected_detail_categories: JSON.parse(String(validated.value.selected_detail_categories)), category_requirements: JSON.parse(String(validated.value.category_requirements)) }, attempt.inputImageIds, [...chunks.map((chunk) => chunk.id), ...supplementRef]); } catch { validationError = "input_json"; }
           if (validationError) { await deps.planRepository!.failAttempt(attempt.id, "STRUCTURE_PLAN_INVALID", errorMessages.STRUCTURE_PLAN_INVALID, summarizeOutput(raw, { validationError })); return; }
           const latest = await deps.planRepository!.getLatestSnapshot(suite.id);
-          const snapshot: PlanSnapshot = { id: randomUUID(), suiteId: suite.id, revisionNumber: (latest?.revisionNumber ?? 0) + 1, revisionKind: "llm", parentSnapshotId: latest?.id ?? null, templateVersionId, dynamicInput: validated.value, humanInput, chunks: chunks.map((chunk) => ({ sourceChunkId: chunk.id, sourceVersion: chunk.version, title: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256 })), inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, provider: attempt.provider, requestSummary: { phase: "structure_plan", templateVersionId }, rawOutputSummary: summarizeOutput(raw), schemaVersion: output.schemaVersion, items: [], phase: "structure_plan", confirmationStatus: "draft", confirmationMode: "human", confirmedAt: null, structure: { status: output.status, mainAllocation: output.mainAllocation, detailImageCount: output.detailImageCount, categoryAllocations: output.categoryAllocations, globalStyleCard: output.globalStyleCard }, createdAt: new Date().toISOString() };
+          const snapshot: PlanSnapshot = { id: randomUUID(), suiteId: suite.id, revisionNumber: (latest?.revisionNumber ?? 0) + 1, revisionKind: "llm", parentSnapshotId: latest?.id ?? null, templateVersionId, dynamicInput: validated.value, humanInput, chunks: chunks.map((chunk) => ({ sourceChunkId: chunk.id, sourceVersion: chunk.version, title: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256 })), inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, provider: attempt.provider, requestSummary: { phase: "structure_plan", templateVersionId, ...(useOriginalImages && { useOriginalImages }) }, rawOutputSummary: summarizeOutput(raw), schemaVersion: output.schemaVersion, items: [], phase: "structure_plan", confirmationStatus: "draft", confirmationMode: "human", confirmedAt: null, structure: { status: output.status, mainAllocation: output.mainAllocation, detailImageCount: output.detailImageCount, categoryAllocations: output.categoryAllocations, globalStyleCard: output.globalStyleCard }, createdAt: new Date().toISOString() };
           await deps.planRepository!.completeAttempt(attempt.id, snapshot);
         } catch (error) { await deps.planRepository!.failAttempt(attempt.id, error instanceof Error && error.message === "LLM_TIMEOUT" ? "LLM_TIMEOUT" : "LLM_PROVIDER_FAILED", error instanceof Error && error.message === "LLM_TIMEOUT" ? errorMessages.LLM_TIMEOUT : errorMessages.LLM_PROVIDER_FAILED).catch(() => undefined); }
       })();
@@ -1186,7 +1213,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           try {
             const chunks = snapshot.chunks.filter((chunk) => approvedFactRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, summary: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256, published: true }));
             const visionImages = await loadCategoryVisionImages(suite.id, snapshot, entry.allocation);
-            const llmInput: CategoryPromptLlmInput = { requestId: request.id, templateVersionId: template!.templateVersionId, templateBody: template!.body, userPromptTemplate: template!.userPromptTemplate, dynamicInput, humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined, categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, approvedFactRefs };
+            const llmInput: CategoryPromptLlmInput = { requestId: request.id, templateVersionId: template!.templateVersionId, templateBody: template!.body, userPromptTemplate: template!.userPromptTemplate, dynamicInput, humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformForPlanning(platformProfile, snapshot.requestSummary.useOriginalImages === true ? snapshot.dynamicInput.main_image_background : undefined), categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, approvedFactRefs };
             if (!llmClient.generateCategoryPrompt) throw new Error("CATEGORY_PROMPT_LLM_NOT_CONFIGURED");
             const raw = await llmClient.generateCategoryPrompt(llmInput);
             const output = normalizeCategoryPromptOutput(raw);
@@ -1240,7 +1267,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           const chunks = snapshot.chunks.filter((chunk) => approvedFactRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, summary: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256, published: true }));
           const visionImages = await loadCategoryVisionImages(suite.id, snapshot, allocation);
           if (!llmClient.generateCategoryPrompt) throw new Error("CATEGORY_PROMPT_LLM_NOT_CONFIGURED");
-          const raw = await llmClient.generateCategoryPrompt({ requestId: retryRequest.id, templateVersionId: template.templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput, humanInput: retryRequest.humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined, categoryCode: retryRequest.categoryCode, requestedCount: retryRequest.requestedCount, approvedFactRefs });
+          const raw = await llmClient.generateCategoryPrompt({ requestId: retryRequest.id, templateVersionId: template.templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput, humanInput: retryRequest.humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformForPlanning(platformProfile, snapshot.requestSummary.useOriginalImages === true ? snapshot.dynamicInput.main_image_background : undefined), categoryCode: retryRequest.categoryCode, requestedCount: retryRequest.requestedCount, approvedFactRefs });
           const output = normalizeCategoryPromptOutput(raw);
           const summary = summarizeOutput(raw);
           if (!output || output.category !== retryRequest.categoryCode) { await categoryPromptRepository.failRequest(retryRequest.id, "CATEGORY_PROMPT_INVALID", errorMessages.CATEGORY_PROMPT_INVALID, summary); return; }

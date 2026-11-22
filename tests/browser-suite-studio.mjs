@@ -17,12 +17,12 @@ import { ImageEditorService, MemoryImageEditorRepository } from "../server/image
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import { readZipEntries } from "../server/zip.js";
 
-async function offlineStudio() {
+async function offlineStudio(structureTemplate = "general-structure-plan-groups.md") {
   const sample = await readFile("public/assets/gan65-product.jpg");
   const prompts = new MemoryPromptRepository();
   for (const name of [
     "general-base-refine.md",
-    "general-structure-plan-groups.md",
+    structureTemplate,
     "general-category-prompt-groups.md",
   ]) {
     const [v] = await prompts.importRecords([
@@ -38,7 +38,7 @@ async function offlineStudio() {
     code,
     name,
     mainImageBackground,
-    marketScope: "overseas",
+    marketScope: code === "taobao" ? "domestic" : "overseas",
     mainImageStrategy: "",
     galleryStrategy: "",
     textStrategy: "",
@@ -255,11 +255,28 @@ test("商品套图：空态、静默草稿、平台联动、七张实图与选�
   await page.getByLabel("上传商品原图").setInputFiles("public/assets/gan65-product.jpg");
   await page.waitForURL(/\/create\/suite\/[^/]+$/);
   const suiteId = new URL(page.url()).pathname.split("/").pop();
-  const platform = page.getByLabel("平台", { exact: true }),
-    refine = page.getByLabel("白底精修", { exact: true });
+  const platform = page.getByLabel("平台", { exact: true });
+  const refine = page.getByRole("checkbox", { name: "白底精修", exact: true });
+  const overseasHint = page.getByText("国际站主图将按纯白背景规范生成，数量以主图配置为准。", { exact: true });
   await platform.selectOption({ label: "Amazon" });
-  assert.equal(await refine.isDisabled(), true);
-  assert.equal(await refine.isChecked(), true);
+  assert.equal(await refine.count(), 0);
+  await overseasHint.waitFor({ state: "visible" });
+  const sellingPoints = page.getByRole("textbox", { name: "商品卖点与生成要求" });
+  assert.equal(await sellingPoints.getAttribute("rows"), "6");
+  assert.equal(
+    await sellingPoints.getAttribute("placeholder"),
+    "建议包含以下信息生成更精准：\n1.产品名称\n2.核心卖点\n3.适用人群\n4.期望场景\n5.具体参数",
+  );
+  const helpButton = page.getByRole("button", { name: "商品卖点填写说明" });
+  await helpButton.focus();
+  await helpButton.press("Enter");
+  const help = page.locator("#" + await helpButton.getAttribute("aria-controls"));
+  await help.waitFor({ state: "visible" });
+  assert.match(await help.textContent(), /已确认的商品事实/);
+  assert.equal(await helpButton.getAttribute("aria-expanded"), "true");
+  await helpButton.click();
+  await help.waitFor({ state: "hidden" });
+  await sellingPoints.fill("1. 产品名称：便携键盘\n2. 核心卖点：轻便");
   await page.getByRole("button", { name: "自定义配置", exact: true }).click();
   for (const [name, n] of [
     ["白底主图", 1],
@@ -282,6 +299,7 @@ test("商品套图：空态、静默草稿、平台联动、七张实图与选�
   await batch.locator('[data-status="running"]').waitFor();
   await page.screenshot({ path: "tests/browser/suite-studio-running.png" });
   await batch.locator('[data-status="completed"]').waitFor({ timeout: 25000 });
+  await batch.getByText("便携键盘", { exact: true }).waitFor();
   const cards = batch.locator("[data-result-card]");
   assert.equal(await cards.count(), 7);
   assert.equal(await cards.locator("img").count(), 7);
@@ -338,13 +356,12 @@ test("商品套图：空态、静默草稿、平台联动、七张实图与选�
     /\/generation$/,
   );
   await platform.selectOption({ label: "淘宝" });
-  assert.equal(await refine.isDisabled(), false);
-  assert.equal(await refine.isChecked(), false);
+  assert.equal(await refine.count(), 0);
+  await page.getByText("国内站主图按场景策略生成，不强制白底。", { exact: true }).waitFor({ state: "visible" });
   assert.equal(await page.getByLabel("主图张数", { exact: true }).textContent(), "1");
-  await refine.check();
-  await platform.selectOption({ label: "Amazon" });
-  await platform.selectOption({ label: "淘宝" });
-  assert.equal(await refine.isChecked(), true);
+  await platform.selectOption({ label: "eBay" });
+  await overseasHint.waitFor({ state: "visible" });
+  assert.equal(await page.getByLabel("白底主图张数", { exact: true }).textContent(), "1");
   await page.goto(fixture.url + "settings");
   await page.getByRole("button", { name: "编辑 离线测试", exact: true }).click();
   await page.getByLabel("生图", { exact: true }).uncheck();
@@ -357,6 +374,37 @@ test("商品套图：空态、静默草稿、平台联动、七张实图与选�
     ),
     false,
   );
+});
+
+test("旧版结构计划模板失败时显示中文发布指引", async (t) => {
+  const fixture = await offlineStudio("general-structure-plan.md");
+  t.after(fixture.close);
+  const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8000);
+  await page.goto(fixture.url + "create/suite");
+  await page.getByLabel("上传商品原图").setInputFiles("public/assets/gan65-product.jpg");
+  await page.waitForURL(/\/create\/suite\/[^/]+$/);
+  await page.getByRole("button", { name: /^一键生成套图/ }).click();
+  const batch = page.getByRole("region", { name: "生成批次" });
+  const failed = batch.locator('[data-status="failed"]');
+  const guidance = batch.getByText("请先在模板库发布最新版结构计划模板，再生成套图。", { exact: true });
+  await failed.waitFor();
+  await guidance.waitFor();
+  assert.doesNotMatch(await batch.innerText(), /PLAN_TEMPLATE_OUTDATED/);
+
+  const suiteId = new URL(page.url()).pathname.split("/").pop();
+  await page.route(`**/api/suites/${suiteId}/studio-state`, async (route) => {
+    const response = await route.fetch();
+    const json = await response.json();
+    json.data.pipeline.errorMessage = "PLAN_TEMPLATE_OUTDATED";
+    await route.fulfill({ response, json });
+  });
+  await page.reload();
+  await failed.waitFor();
+  await guidance.waitFor();
+  assert.doesNotMatch(await batch.innerText(), /PLAN_TEMPLATE_OUTDATED/);
 });
 
 test("零张欠配：卖点图和场景图都显示缺失事实并允许置零续跑", async (t) => {

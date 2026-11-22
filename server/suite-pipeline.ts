@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { requiresPureWhiteMainImage } from "../shared/platform-main-background.js";
+import { productNameFor } from "../shared/product-name.js";
 import { SUITE_CATEGORY_GROUPS, SMART_SUITE_STRUCTURE_PRESET } from "../shared/suite-categories.js";
 import { resolveDeliverySlots, type DeliveryEditChildLike } from "../shared/workbench-delivery.js";
-import { fail } from "./api-errors.js";
+import { errorMessages, fail } from "./api-errors.js";
 import { ok, asRecord, dataOf, now, type AppResponse } from "./api-response.js";
 import type { ListingRepository } from "./listing-copy.js";
 import type {
@@ -62,18 +64,27 @@ const waitUntil = async <T>(load: () => Promise<T>, done: (value: T) => boolean,
   throw new Error("PIPELINE_TIMEOUT");
 };
 
-const productNameFor = (config: SuitePipelineRun["config"], images: InputImage[]) => {
-  const firstLine =
-    typeof config.sellingPoints === "string"
-      ? config.sellingPoints
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .find(Boolean)
-      : "";
-  if (firstLine) return firstLine.slice(0, 30);
-  const filename = images[0]?.originalFilename?.replace(/\.[^.]+$/, "").trim();
-  return filename || "未命名商品套图";
-};
+class PipelineError extends Error {
+  constructor(readonly code: string, message?: string) {
+    super(message || errorMessages[code] || errorMessages.PIPELINE_FAILED);
+  }
+}
+
+function stageError(fallback: string, code: unknown, message: unknown) {
+  const resolvedCode = typeof code === "string" && code.trim() ? code : fallback;
+  return new PipelineError(
+    resolvedCode,
+    typeof message === "string" && message.trim()
+      ? message
+      : errorMessages[resolvedCode] ?? errorMessages[fallback],
+  );
+}
+
+function checkResponse(response: AppResponse, fallback: string) {
+  if (response.status < 400) return;
+  const error = "error" in response.body ? response.body.error : null;
+  throw stageError(fallback, error?.code, error?.message);
+}
 
 const buildCategoryGroups = (config: SuitePipelineRun["config"]) => {
   const raw = asRecord(config.counts);
@@ -180,7 +191,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           : null;
       if (!rawSnapshot) {
         if (["category_prompting", "image_generating", "done"].includes(resumePhase))
-          throw new Error("STRUCTURE_PLAN_FAILED");
+          throw new PipelineError("STRUCTURE_PLAN_FAILED");
         await pipelineRepository.updateRun(run.id, { currentPhase: "structure_planning", updatedAt: now() });
         if (!deps.promptRepository || !deps.planRepository || !deps.hasPlanningModel())
           throw new Error("LLM_NOT_CONFIGURED");
@@ -188,8 +199,12 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         const structureTemplate =
           structureTemplates.find((item) => item.inputSchema.some((field) => field.key === "category_groups")) ??
           structureTemplates[0];
-        if (!structureTemplate) throw new Error("PLAN_TEMPLATE_NOT_FOUND");
+        if (!structureTemplate) throw new PipelineError("PLAN_TEMPLATE_NOT_FOUND");
         const smart = config.mode === "smart";
+        const allowed = new Set(structureTemplate.inputSchema.map((field) => field.key));
+        const required = ["target_market_country", "aspect_ratio", "main_image_background"];
+        if (!smart) required.push("category_groups");
+        if (required.some((key) => !allowed.has(key))) throw new PipelineError("PLAN_TEMPLATE_OUTDATED");
         const groups = buildCategoryGroups(config);
         const details = Object.values(groups)
           .filter((group) => group.categories[0] !== "main")
@@ -198,12 +213,12 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           platform: config.platform ?? "",
           target_market_country: config.targetMarket ?? "",
           output_language: config.outputLanguage ?? "中文",
-          product_name: productNameFor(config, images),
+          product_name: productNameFor(config.sellingPoints, images[0]?.originalFilename),
           human_supplement: typeof config.sellingPoints === "string" ? config.sellingPoints : "",
           emphasis_requirements: typeof config.sellingPoints === "string" ? config.sellingPoints : "",
           aspect_ratio: config.aspectRatio ?? "1:1",
-          main_image_background: platform?.mainImageBackground ?? "flexible",
-          main_image_count: groups.main.count,
+          main_image_background: requiresPureWhiteMainImage(platform) ? "pure_white_required" : "flexible",
+          main_image_count: smart ? SMART_SUITE_STRUCTURE_PRESET.main_image_count : groups.main.count,
           detail_image_count_min: 0,
           detail_image_count_max: smart ? SMART_SUITE_STRUCTURE_PRESET.detail_image_count_max : details,
           ...(!smart && { category_groups: JSON.stringify(groups) }),
@@ -212,20 +227,29 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         };
         const planResponse = await request("POST", `/api/suites/${suiteId}/structure-plan`, {
           headers: { "idempotency-key": `${executionKey}:structure` },
-          body: { templateVersionId: structureTemplate.templateVersionId, dynamicInput, humanInput: {} },
+          body: {
+            templateVersionId: structureTemplate.templateVersionId,
+            dynamicInput: Object.fromEntries(Object.entries(dynamicInput).filter(([key]) => allowed.has(key))),
+            humanInput: {},
+            useOriginalImages: resumePhase !== "base_refining",
+          },
         });
-        if (planResponse.status >= 400) throw new Error("STRUCTURE_PLAN_FAILED");
+        checkResponse(planResponse, "STRUCTURE_PLAN_FAILED");
         const planAttemptId = String(asRecord(dataOf(planResponse)).attemptId ?? "");
-        if (!planAttemptId) throw new Error("STRUCTURE_PLAN_FAILED");
+        if (!planAttemptId) throw new PipelineError("STRUCTURE_PLAN_FAILED");
         const terminal = await waitUntil(
           () => request("GET", `/api/plan-attempts/${planAttemptId}`),
           (response) =>
-            response.status === 200 && ["succeeded", "failed"].includes(String(asRecord(dataOf(response)).status)),
+            response.status >= 400 || ["succeeded", "failed"].includes(String(asRecord(dataOf(response)).status)),
         );
-        const rawView = asRecord(dataOf(terminal)).snapshot as PlanSnapshot | undefined;
-        if (!rawView) throw new Error("STRUCTURE_PLAN_FAILED");
+        checkResponse(terminal, "STRUCTURE_PLAN_FAILED");
+        const attempt = asRecord(dataOf(terminal));
+        if (attempt.status === "failed")
+          throw stageError("STRUCTURE_PLAN_FAILED", attempt.errorCode, attempt.errorMessage);
+        const rawView = attempt.snapshot as PlanSnapshot | undefined;
+        if (!rawView) throw new PipelineError("STRUCTURE_PLAN_FAILED");
         rawSnapshot = await deps.planRepository.getSnapshot(rawView.id);
-        if (!rawSnapshot) throw new Error("STRUCTURE_PLAN_FAILED");
+        if (!rawSnapshot) throw new PipelineError("STRUCTURE_PLAN_FAILED");
         if (rawSnapshot.confirmationStatus !== "confirmed") {
           const structure = rawSnapshot.structure as StructurePlanV2 | null;
           const missing = Boolean(
@@ -258,7 +282,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           rawSnapshot = await appendConfirmedSnapshot(confirmed);
         }
       }
-      if (!rawSnapshot || rawSnapshot.confirmationStatus !== "confirmed") throw new Error("STRUCTURE_PLAN_FAILED");
+      if (!rawSnapshot || rawSnapshot.confirmationStatus !== "confirmed") throw new PipelineError("STRUCTURE_PLAN_FAILED");
       await pipelineRepository.updateRun(run.id, { structureSnapshotId: rawSnapshot.id, updatedAt: now() });
 
       if (config.listingCopy === true) {
@@ -276,21 +300,34 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       }
       if (!taskRows.length) {
         await pipelineRepository.updateRun(run.id, { currentPhase: "category_prompting", updatedAt: now() });
+        const categoryKey = `${executionKey}:categories`;
         const categoryResponse = await request("POST", `/api/suites/${suiteId}/category-prompts`, {
-          headers: { "idempotency-key": `${executionKey}:categories` },
+          headers: { "idempotency-key": categoryKey },
           body: { planSnapshotId: rawSnapshot.id },
         });
-        if (categoryResponse.status >= 400) throw new Error("CATEGORY_PROMPT_FAILED");
-        const categoryState = await waitUntil(
-          () => request("GET", `/api/suites/${suiteId}/category-prompts`),
-          (response) =>
-            response.status === 200 && ["succeeded", "partial"].includes(String(asRecord(dataOf(response)).status)),
+        checkResponse(categoryResponse, "CATEGORY_PROMPT_FAILED");
+        const categories = asRecord(dataOf(categoryResponse)).categories;
+        if (!Array.isArray(categories) || !categories.length) throw new PipelineError("CATEGORY_PROMPT_FAILED");
+        const categoryRequests = await waitUntil(
+          async () => {
+            const response = await request("GET", `/api/suites/${suiteId}/category-prompts`);
+            checkResponse(response, "CATEGORY_PROMPT_FAILED");
+            const { requests } = asRecord(dataOf(response));
+            if (!Array.isArray(requests)) return [];
+            return requests.map((row) => asRecord(row)).filter((row) =>
+              typeof row.idempotencyKey === "string" && row.idempotencyKey.startsWith(`${categoryKey}:`),
+            );
+          },
+          (requests) => requests.length === categories.length &&
+            requests.every((row) => row.status === "succeeded" || row.status === "failed"),
         );
-        if (String(asRecord(dataOf(categoryState)).status) !== "succeeded") throw new Error("CATEGORY_PROMPT_FAILED");
+        const failedCategory = categoryRequests.find((row) => row.status === "failed");
+        if (failedCategory)
+          throw stageError("CATEGORY_PROMPT_FAILED", failedCategory.errorCode, failedCategory.errorMessage);
         const tasksResponse = await request("POST", `/api/suites/${suiteId}/tasks`, {
           body: { planSnapshotId: rawSnapshot.id },
         });
-        if (tasksResponse.status >= 400) throw new Error("TASK_MATERIALIZATION_FAILED");
+        checkResponse(tasksResponse, "TASK_MATERIALIZATION_FAILED");
         const taskData = dataOf(tasksResponse);
         if (taskData && typeof taskData === "object" && deps.taskRepository) {
           const { tasks } = asRecord(taskData);
@@ -308,7 +345,9 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
             });
         }
       }
-      if (!deps.taskRepository || !taskRows.length) throw new Error("TASK_MATERIALIZATION_FAILED");
+      if (!deps.taskRepository || !taskRows.length) throw new PipelineError("TASK_MATERIALIZATION_FAILED");
+      const taskRepository = deps.taskRepository;
+      let batchId: string | undefined;
       if (resumePhase !== "done") {
         await pipelineRepository.updateRun(run.id, { currentPhase: "image_generating", updatedAt: now() });
         const pendingTasks: SuiteTask[] = [];
@@ -321,36 +360,55 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
             headers: { "idempotency-key": `${executionKey}:images` },
             body: { taskIds: pendingTasks.map((task) => task.id) },
           });
-          if (generationResponse.status >= 400) throw new Error("IMAGE_GENERATION_FAILED");
+          checkResponse(generationResponse, "IMAGE_GENERATION_FAILED");
           const data = dataOf(generationResponse);
           if (!data || typeof data !== "object" || !("batchId" in data) || typeof data.batchId !== "string")
-            throw new Error("IMAGE_GENERATION_FAILED");
-          const batchId = data.batchId;
+            throw new PipelineError("IMAGE_GENERATION_FAILED");
+          const id = data.batchId;
+          batchId = id;
           await waitUntil(
-            () => deps.taskRepository!.getBatch(batchId),
+            () => taskRepository.getBatch(id),
             (batch) => batch !== null && batch.status !== "running",
           );
         }
       }
-      const histories = await Promise.all(taskRows.map((task) => deps.taskRepository!.listTaskVersions(task.id)));
-      const generated = histories.filter((history) => history.versions.some((version) => version.isCurrent)).length;
+      const histories = await Promise.all(taskRows.map((task) => taskRepository.listTaskVersions(task.id)));
+      const missing = histories.filter((history) => !history.versions.some((version) => version.isCurrent));
+      const generated = taskRows.length - missing.length;
       const status = generated === taskRows.length ? "completed" : generated > 0 ? "partial_failed" : "failed";
+      let failure: PipelineError | undefined;
+      if (missing.length) {
+        const batchSlots = batchId
+          ? new Set((await taskRepository.listSlots(suiteId)).filter((slot) => slot.batchId === batchId).map((slot) => slot.id))
+          : null;
+        const failed = missing
+          .map(({ attempts }) => attempts.filter((attempt) =>
+            attempt.status === "failed" && (!batchSlots || batchSlots.has(attempt.slotId)),
+          ).at(-1))
+          .find(Boolean);
+        failure = stageError("IMAGE_GENERATION_FAILED", failed?.errorCode, failed?.errorMessage);
+      }
       const completedAt = now();
-      await pipelineRepository.updateRun(run.id, { status, currentPhase: "done", updatedAt: completedAt, completedAt });
+      await pipelineRepository.updateRun(run.id, {
+        status, currentPhase: "done", errorCode: failure?.code ?? null, errorMessage: failure?.message ?? null,
+        updatedAt: completedAt, completedAt,
+      });
     } catch (error) {
+      const failure = error instanceof PipelineError
+        ? error
+        : stageError("PIPELINE_FAILED", error instanceof Error ? error.message : undefined, undefined);
       await pipelineRepository.updateRun(run.id, {
         status: "failed",
-        errorCode: error instanceof Error ? error.message : "PIPELINE_FAILED",
-        errorMessage: error instanceof Error ? error.message : "一键生成失败",
+        errorCode: failure.code,
+        errorMessage: failure.message,
         updatedAt: now(),
         completedAt: now(),
       });
     }
   };
 
-  const cloneSuiteInputs = async (sourceSuiteId: string, targetSuiteId: string, selectedImageIds?: Set<string>) => {
-    const images = await deps.repository.getInputImages(sourceSuiteId);
-    for (const image of images.filter((item) => !selectedImageIds || selectedImageIds.has(item.id))) {
+  const cloneSuiteInputs = async (images: InputImage[], targetSuiteId: string) => {
+    for (const image of images) {
       const id = randomUUID();
       const originalKey = `suites/${targetSuiteId}/inputs/${id}/original`;
       const thumbnailKey = `suites/${targetSuiteId}/inputs/${id}/thumbnail`;
@@ -406,20 +464,21 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     }
     if (typeof body.cloneFrom === "string" || cloneSpec) {
       const source = suite!;
-      suite = await deps.repository.createSuite(
-        productNameFor(config, await deps.repository.getInputImages(source.id)),
-        `${idempotencyKey}:suite`,
-        "suite_studio",
-      );
       const imageIds =
         cloneSpec && Array.isArray(cloneSpec.imageIds)
           ? new Set(cloneSpec.imageIds.filter((id): id is string => typeof id === "string"))
           : undefined;
+      const originals = (await deps.repository.getInputImages(source.id)).filter((image) => !imageIds || imageIds.has(image.id));
+      suite = await deps.repository.createSuite(
+        productNameFor(config.sellingPoints, originals[0]?.originalFilename),
+        `${idempotencyKey}:suite`,
+        "suite_studio",
+      );
       if (!(await deps.repository.getInputImages(suite.id)).length)
-        await cloneSuiteInputs(source.id, suite.id, imageIds);
+        await cloneSuiteInputs(originals, suite.id);
     }
     if (!suite)
-      suite = await deps.repository.createSuite(productNameFor(config, []), `${idempotencyKey}:suite`, "suite_studio");
+      suite = await deps.repository.createSuite(productNameFor(config.sellingPoints), `${idempotencyKey}:suite`, "suite_studio");
     const createdAt = now();
     try {
       const { run, duplicate } = await pipelineRepository.createRun({
@@ -427,7 +486,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         suiteId: suite.id,
         idempotencyKey,
         status: "running",
-        currentPhase: "base_refining",
+        currentPhase: "structure_planning",
         resumeCount: 0,
         lastResumeKey: null,
         resumeKeys: [],
