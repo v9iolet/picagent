@@ -22,6 +22,13 @@ export class PostgresListingRepository implements ListingRepository {
   async summary(id: string) {
     return (await this.pool.query<ListingSummary>(`SELECT ${summary} FROM ${jobs} j WHERE j.id=$1`, [id])).rows[0] ?? null;
   }
+  async findLatestBySuiteId(suiteId: string) {
+    const result = await this.pool.query<ListingSummary>(
+      `SELECT ${summary} FROM ${jobs} j WHERE source_suite_id=$1 AND status <> 'draft' ORDER BY updated_at DESC,id LIMIT 1`,
+      [suiteId],
+    );
+    return result.rows[0] ?? null;
+  }
   async list(limit: number, offset: number) {
     return (
       await this.pool.query<ListingSummary>(

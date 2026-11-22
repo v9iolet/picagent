@@ -1,4 +1,4 @@
-import type { ListingConfig } from "../../shared/listing-config";
+import type { ListingConfig, ListingContent, ListingRules } from "../../shared/listing-config";
 import type { ModelChannelInput, ModelChannelSnapshot, ModelPreferences, ModelSettingsView } from "../../shared/model-settings";
 
 export interface ApiImage {
@@ -36,6 +36,7 @@ export interface ApiPlatformProfile {
   mainImageBackground: "pure_white_required" | "white_preferred" | "flexible";
   mainImageStrategy: string; galleryStrategy: string; textStrategy: string; modelStrategy: string;
   sourceNote: string; sortOrder: number;
+  listingCopyRules?: ListingRules;
 }
 export interface ApiRagChunk { id: string; version: string; title: string; summary: string; sourceKind: string; sourceAssetPaths: string[]; contentSha256: string; fieldValues?: Record<string, unknown> }
 export interface ApiPlanItem { id: string; ordinal: number; imageType: "main" | "detail"; title: string; purpose: string; prompt: string }
@@ -106,13 +107,7 @@ export interface ApiListingSummary extends Omit<ListingConfig, "sellingPoints"> 
   errorCode: string | null;
   updatedAt: string;
 }
-export interface ApiListingContent {
-  title: string;
-  bulletPoints: string[];
-  description: string;
-  searchTerms?: string[];
-  missingFacts: string[];
-}
+export type ApiListingContent = ListingContent;
 export interface ApiListingJob extends ApiListingSummary {
   inputImages: { id: string; originalFilename: string }[];
   versions: { id: string; versionNumber: number; createdAt: string; content: ApiListingContent }[];
@@ -120,24 +115,14 @@ export interface ApiListingJob extends ApiListingSummary {
 
 const listingPath = "/api/listing-copies";
 const listingJobPath = (id: string) => `${listingPath}/${encodeURIComponent(id)}`;
-const listingImagePath = (id: string, image: string) => `${listingJobPath(id)}/input-images/${encodeURIComponent(image)}`;
 const listingWrite = (path: string, method: "POST" | "PUT", body: object) =>
   request<ApiListingJob>(path, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 export const listingCopyApi = {
-  list: (limit: number, offset: number) => request<{ items: ApiListingSummary[] }>(`${listingPath}?limit=${limit}&offset=${offset}`),
   get: (id: string) => request<ApiListingJob>(listingJobPath(id)),
-  fromSuite: (sourceSuiteId: string) => listingWrite(listingPath, "POST", { sourceSuiteId }),
-  upload(id: string | undefined, file: File) {
-    const body = new FormData();
-    body.append("file", file);
-    return request<ApiListingJob>(`${listingJobPath(id ?? "draft")}/input-images`, { method: "POST", body });
-  },
-  removeImage: (id: string, image: string) => request<ApiListingJob>(listingImagePath(id, image), { method: "DELETE" }),
-  thumbnail: (id: string, image: string) => `${listingImagePath(id, image)}/preview/thumbnail`,
-  generate: (id: string, action: "generate" | "regenerate", config: Partial<ListingConfig> = {}) =>
-    listingWrite(`${listingJobPath(id)}/${action}`, "POST", config),
-  save: (id: string, content: ApiListingContent) => listingWrite(listingJobPath(id), "PUT", { content }),
+  generateForSuite: (sourceSuiteId: string) => listingWrite(listingPath, "POST", { sourceSuiteId, generate: true }),
+  regenerate: (id: string) => listingWrite(`${listingJobPath(id)}/regenerate`, "POST", {}),
+  save: (id: string, content: Partial<ApiListingContent>) => listingWrite(listingJobPath(id), "PUT", { content }),
 };
 
 const settingsPath = "/api/model-settings";

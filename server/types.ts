@@ -74,7 +74,7 @@ export interface PromptRepository {
 }
 
 export interface PlatformProfile {
-  listingCopyRules?: import("./listing-copy.js").ListingRules;
+  listingCopyRules?: import("../shared/listing-config.js").ListingRules;
   code: string;
   name: string;
   marketScope: "overseas" | "domestic";

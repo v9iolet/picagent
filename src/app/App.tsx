@@ -6,7 +6,6 @@ import { CanvasListPage } from "../pages/CanvasListPage";
 import { ImageAssetsPage } from "../pages/ImageAssetsPage";
 import { PromptTemplatesPage } from "../pages/PromptTemplatesPage";
 import { ReversePage } from "../pages/ReversePage";
-import { ListingCopyPage } from "../pages/ListingCopyPage";
 
 export function App() {
   const [path, setPath] = useState(window.location.pathname);
@@ -26,7 +25,10 @@ export function App() {
 
   const legacy = path.match(/^\/suites\/([^/]+)\/?$/);
   const legacyBoard = path.match(/^\/suites\/([^/]+)\/board\/?$/);
-  const canonical = legacyBoard ? `/create/canvas/${legacyBoard[1]}` : legacy ? (legacy[1] === "new" ? "/create/suite" : `/create/suite/${legacy[1]}`) : path === "/" ? "/create/suite" : path;
+  const legacyListing = /^\/create\/listing-copy(?:\/[^/]+)?\/?$/.test(path);
+  const canonical = legacyBoard ? `/create/canvas/${legacyBoard[1]}`
+    : legacy && legacy[1] !== "new" ? `/create/suite/${legacy[1]}`
+    : legacy || legacyListing || path === "/" ? "/create/suite" : path;
   useEffect(() => {
     if (path === canonical) return;
     window.history.replaceState({}, "", canonical);
@@ -44,7 +46,5 @@ export function App() {
     return tab === "templates" ? <PromptTemplatesPage navigate={navigate} /> : <ImageAssetsPage navigate={navigate} />;
   }
   if (path === "/reverse" || reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;
-  const listing = path.match(/^\/create\/listing-copy(?:\/([^/]+))?\/?$/);
-  if (listing) return <ListingCopyPage jobId={listing[1]} navigate={navigate} />;
   return <SuiteStudioPage suiteId={canonical.match(/^\/create\/suite\/([^/]+)\/?$/)?.[1]} navigate={navigate} />;
 }
