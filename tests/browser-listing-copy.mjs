@@ -94,6 +94,7 @@ async function offlineBrowser(t, pendingCopy) {
     },
   });
   const vite = await createServer({
+    cacheDir: "node_modules/.vite-browser-listing-copy",
     configFile: false,
     server: { host: "127.0.0.1", port: 0 },
     esbuild: { jsx: "automatic" },

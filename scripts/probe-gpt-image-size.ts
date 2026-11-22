@@ -1,6 +1,7 @@
 /** One-off live probe: npx tsx scripts/probe-gpt-image-size.ts --output /tmp/gpt-size.jsonl
  * --dry-run reads configuration and lists cases without making image requests.
  * --case-set legacy (default): original eight cases; ratios: five converted sizes + two controls.
+ * high-res: three non-square 4K/2K sizes.
  * Each case makes one POST; no retries or image URL downloads.
  */
 import { createHash } from "node:crypto";
@@ -19,18 +20,26 @@ const legacyCases = [
   { size: undefined, width: 512, height: 768 },
 ];
 
+function probeCases(caseSet: string) {
+  const pixels = (tier: string, ratio: string) => ({ tier, ratio, size: resolveImageSize(tier, ratio, "pixels"), width: 512, height: 512 });
+  switch (caseSet) {
+    case "legacy": return legacyCases;
+    case "ratios": return [
+      pixels("1K", "3:4"), pixels("1K", "4:3"), pixels("1K", "16:9"), pixels("1K", "9:16"), pixels("2K", "2:3"),
+      { control: "off-grid", size: "1024x1365", width: 512, height: 512 },
+      { control: "excessive-long-edge", size: "16384x16", width: 512, height: 512 },
+    ];
+    case "high-res": return [pixels("4K", "16:9"), pixels("4K", "3:4"), pixels("2K", "16:9")];
+    default: throw new Error("UNKNOWN_CASE_SET");
+  }
+}
+
 async function main() {
   const { values } = parseArgs({ options: {
     "dry-run": { type: "boolean" }, output: { type: "string" }, "case-set": { type: "string", default: "legacy" },
   } });
   const { "dry-run": dryRun = false, "case-set": caseSet, output } = values;
-  if (caseSet !== "legacy" && caseSet !== "ratios") throw new Error("UNKNOWN_CASE_SET");
-  const cases = caseSet === "legacy" ? legacyCases : [
-    ...[["1K", "3:4"], ["1K", "4:3"], ["1K", "16:9"], ["1K", "9:16"], ["2K", "2:3"]]
-      .map(([tier, ratio]) => ({ tier, ratio, size: resolveImageSize(tier, ratio, "pixels"), width: 512, height: 512 })),
-    { control: "off-grid", size: "1024x1365", width: 512, height: 512 },
-    { control: "excessive-long-edge", size: "16384x16", width: 512, height: 512 },
-  ];
+  const cases = probeCases(caseSet);
   if (!dryRun && !output) throw new Error("OUTPUT_PATH_REQUIRED: use --output <new-jsonl-path>");
 
   const pool = new Pool({ ...loadPostgresConfig(), options: "-c default_transaction_read_only=on", max: 1, connectionTimeoutMillis: 30_000 });
@@ -139,6 +148,7 @@ main().catch((error: unknown) => {
   const safeCodes = ["DEFAULT_IMAGE_CHANNEL_UNAVAILABLE", "DEFAULT_IMAGE_MODEL_UNAVAILABLE", "UNSAFE_CHANNEL_URL",
     "OUTPUT_PATH_REQUIRED: use --output <new-jsonl-path>", "UNKNOWN_CASE_SET", "UNEXPECTED_PROBE_TARGET"];
   if (error instanceof Error && "code" in error && error.code === "EEXIST") console.error("OUTPUT_ALREADY_EXISTS");
+  else if (error instanceof Error && /^Missing required configuration: PG_(HOST|DATABASE|USER|PASSWORD)$/.test(error.message)) console.error("PG_CONFIG_MISSING");
   else console.error(error instanceof Error && safeCodes.includes(error.message) ? error.message : "PROBE_SETUP_OR_OUTPUT_FAILED");
   process.exitCode = 1;
 });

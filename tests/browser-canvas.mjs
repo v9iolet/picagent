@@ -38,6 +38,7 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
     preferences: { image: { channelId: "offline", modelId: "gpt-image-2" }, vision: null },
   };
   const vite = await createServer({
+    cacheDir: "node_modules/.vite-browser-canvas",
     configFile: false,
     server: { host: "127.0.0.1", port: 0 },
     esbuild: { jsx: "automatic" },

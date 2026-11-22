@@ -15,7 +15,7 @@ function ImageOptionsFields({ options, onChange }: { options: ImageOptions; onCh
     <div>支持的分辨率档位<div className="settings-capabilities">{["1K", "2K", "4K"].map((size) => <label key={size}>
       <input type="checkbox" checked={options.sizes.includes(size)} onChange={(event) => onChange({ ...options, sizes: event.target.checked ? [...options.sizes, size] : options.sizes.filter((item) => item !== size) })} />{size}
     </label>)}</div></div>
-    <label>支持的比例<input required value={ratios} placeholder="1:1, 2:3, 3:2" onChange={(event) => {
+    <label>支持的比例<input required value={ratios} placeholder={defaultImageOptions("gpt-image-2").aspectRatios.join(", ")} onChange={(event) => {
       setRatios(event.target.value);
       onChange({ ...options, aspectRatios: event.target.value.split(/[,，\s]+/).filter(Boolean) });
     }} /></label>
