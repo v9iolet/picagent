@@ -1,33 +1,39 @@
 /** One-off live probe: npx tsx scripts/probe-gpt-image-size.ts --output /tmp/gpt-size.jsonl
  * --dry-run reads configuration and lists cases without making image requests.
- * Each real run makes exactly eight POSTs, with no retries or image URL downloads.
+ * --case-set legacy (default): original eight cases; ratios: five converted sizes + two controls.
+ * Each case makes one POST; no retries or image URL downloads.
  */
 import { createHash } from "node:crypto";
 import { appendFile, writeFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
 import { Pool } from "pg";
 import sharp from "sharp";
+import { resolveImageSize } from "../shared/model-settings.js";
 import { loadPostgresConfig } from "../server/config.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "../server/model-settings.js";
 
 const PROMPT = "Keep the reference image composition and aspect ratio. Add a small dark blue circle in the center; keep the background plain. Do not add text.";
-const cases = [
+const legacyCases = [
   ...["1K", "2K", "4K", "1024x1536", "1536x1024", "1024x1024", undefined]
     .map((size) => ({ size, width: 512, height: 512 })),
   { size: undefined, width: 512, height: 768 },
 ];
 
 async function main() {
-  const args = process.argv.slice(2);
-  const dryRun = args.includes("--dry-run");
-  const outputIndex = args.indexOf("--output");
-  const output = outputIndex < 0 ? undefined : args[outputIndex + 1];
-  const remaining = args.filter((_, index) => outputIndex < 0 || (index !== outputIndex && index !== outputIndex + 1));
-  if (remaining.some((arg) => arg !== "--dry-run") || (outputIndex >= 0 && (!output || output.startsWith("--")))) {
-    throw new Error("USAGE: --dry-run or --output <new-jsonl-path>");
-  }
+  const { values } = parseArgs({ options: {
+    "dry-run": { type: "boolean" }, output: { type: "string" }, "case-set": { type: "string", default: "legacy" },
+  } });
+  const { "dry-run": dryRun = false, "case-set": caseSet, output } = values;
+  if (caseSet !== "legacy" && caseSet !== "ratios") throw new Error("UNKNOWN_CASE_SET");
+  const cases = caseSet === "legacy" ? legacyCases : [
+    ...[["1K", "3:4"], ["1K", "4:3"], ["1K", "16:9"], ["1K", "9:16"], ["2K", "2:3"]]
+      .map(([tier, ratio]) => ({ tier, ratio, size: resolveImageSize(tier, ratio, "pixels"), width: 512, height: 512 })),
+    { control: "off-grid", size: "1024x1365", width: 512, height: 512 },
+    { control: "excessive-long-edge", size: "16384x16", width: 512, height: 512 },
+  ];
   if (!dryRun && !output) throw new Error("OUTPUT_PATH_REQUIRED: use --output <new-jsonl-path>");
 
-  const pool = new Pool({ ...loadPostgresConfig(), max: 1, connectionTimeoutMillis: 30_000 });
+  const pool = new Pool({ ...loadPostgresConfig(), options: "-c default_transaction_read_only=on", max: 1, connectionTimeoutMillis: 30_000 });
   let state;
   try {
     state = await new PostgresModelSettingsRepository(pool).read();
@@ -57,11 +63,15 @@ async function main() {
   const header = { type: "probe", startedAt: new Date().toISOString(), model: selected.model,
     channelId: channel.id, channelName: redact(channel.name), endpoint: endpoint.href,
     quality: "medium", n: 1, responseFormat: "b64_json", prompt: PROMPT,
+    caseSet, storedImageOptions: channel.models.find((model) => model.id === selected.model)?.imageOptions ?? null,
     maxRequests: cases.length, dryRun };
   console.log(JSON.stringify(header));
   if (dryRun) {
     console.log(JSON.stringify({ cases }));
     return;
+  }
+  if (selected.model !== "gpt-image-2.5-flare-special" || endpoint.href !== "https://omyai.vip/v1/images/edits") {
+    throw new Error("UNEXPECTED_PROBE_TARGET");
   }
   // Refuse to overwrite an earlier run, so an accidental rerun cannot erase evidence.
   await writeFile(output!, `${JSON.stringify(header)}\n`, { flag: "wx", mode: 0o600 });
@@ -127,7 +137,8 @@ async function main() {
 
 main().catch((error: unknown) => {
   const safeCodes = ["DEFAULT_IMAGE_CHANNEL_UNAVAILABLE", "DEFAULT_IMAGE_MODEL_UNAVAILABLE", "UNSAFE_CHANNEL_URL",
-    "OUTPUT_PATH_REQUIRED: use --output <new-jsonl-path>", "USAGE: --dry-run or --output <new-jsonl-path>"];
-  console.error(error instanceof Error && safeCodes.includes(error.message) ? error.message : "PROBE_SETUP_OR_OUTPUT_FAILED");
+    "OUTPUT_PATH_REQUIRED: use --output <new-jsonl-path>", "UNKNOWN_CASE_SET", "UNEXPECTED_PROBE_TARGET"];
+  if (error instanceof Error && "code" in error && error.code === "EEXIST") console.error("OUTPUT_ALREADY_EXISTS");
+  else console.error(error instanceof Error && safeCodes.includes(error.message) ? error.message : "PROBE_SETUP_OR_OUTPUT_FAILED");
   process.exitCode = 1;
 });
