@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Client, escapeIdentifier, type Pool, type QueryResultRow } from "pg";
 import { createSuiteStudioApp } from "../server/app.js";
@@ -237,26 +238,40 @@ test("026 updates only the requested run fields and resumes with a fresh key and
 });
 
 const platformLimits = {
-  amazon: [75, 5, true], walmart: [75, 5, false], tiktok_shop: [80, 5, false], ebay: [80, 5, false],
-  etsy: [120, 5, true], shopee: [100, 5, false], lazada: [100, 5, false], aliexpress: [100, 5, false],
-  temu: [80, 5, false], shopify: [70, 5, false], taobao: [30, 3, false], jd: [30, 3, false],
-  pinduoduo: [30, 3, false], "1688": [30, 3, false], douyin: [30, 3, false], xiaohongshu: [20, 3, false],
+  amazon: [75, 5, { supportsSearchTerms: true, itemHighlightsMaxLength: 125, searchTermsMaxBytes: 250 }],
+  walmart: [75, 5], tiktok_shop: [100, 5], ebay: [80, 5],
+  etsy: [140, 5, { maxTags: 13, tagMaxLength: 20 }], shopee: [100, 5], lazada: [100, 5], aliexpress: [100, 5],
+  temu: [80, 5], shopify: [70, 5, { seoTitleMaxLength: 60, seoDescriptionMaxLength: 160 }],
+  taobao: [30, 3, { subtitleMaxLength: 40 }], jd: [60, 3, { subtitleMaxLength: 40 }],
+  pinduoduo: [30, 3, { subtitleMaxLength: 40 }], "1688": [30, 3, { subtitleMaxLength: 40 }],
+  douyin: [30, 3, { maxHashtags: 10 }], xiaohongshu: [20, 3, { maxHashtags: 10 }],
 } as const;
 const domesticPlatforms = new Set(["taobao", "jd", "pinduoduo", "1688", "douyin", "xiaohongshu"]);
 
-test("027 seeds all 16 listing-copy rules and the platform repository exposes them", { skip }, async () => {
+test("029 upgrades all 16 listing-copy rules, preserves custom banned words and exposes the rules through the API", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const platforms = new PostgresPlatformRepository(pool);
-    const expected = Object.fromEntries(Object.entries(platformLimits).map(([code, [titleMaxLength, maxBulletPoints, supportsSearchTerms]]) => [
+    await pool.query(
+      "UPDATE suite_workbench.platform_profiles SET listing_copy_rules = $1 WHERE code = 'etsy'",
+      [{ titleMaxLength: 120, maxBulletPoints: 5, supportsSearchTerms: true, searchTermsMaxBytes: 20, forbiddenWords: ["handmade claim"] }],
+    );
+    const sql = await readFile("db/migrations/029_listing_copy_platform_rules_v2.sql", "utf8");
+    await pool.query(sql);
+    await pool.query(sql);
+    const expected = Object.fromEntries(Object.entries(platformLimits).map(([code, [titleMaxLength, maxBulletPoints, limits]]) => [
       code, {
-        titleMaxLength, maxBulletPoints, supportsSearchTerms,
-        forbiddenWords: domesticPlatforms.has(code) ? ["全网第一", "国家级", "绝对有效"] : ["best seller", "100% guaranteed", "free shipping"],
+        titleMaxLength, maxBulletPoints, supportsSearchTerms: false, ...limits,
+        forbiddenWords: code === "etsy" ? ["handmade claim"] : domesticPlatforms.has(code)
+          ? ["全网第一", "国家级", "绝对有效"] : ["best seller", "100% guaranteed", "free shipping"],
       },
     ]));
     const { rows } = await pool.query<{ code: string; listing_copy_rules: unknown }>("SELECT code, listing_copy_rules FROM suite_workbench.platform_profiles");
     assert.equal(rows.length, 16);
     assert.deepEqual(Object.fromEntries(rows.map((row) => [row.code, row.listing_copy_rules])), expected);
-    const enabled = await platforms.listEnabled();
+    const app = createSuiteStudioApp({ repository: new PostgresSuiteRepository(pool), storage: new MemoryStorage(), platformRepository: platforms });
+    const response = await app.request("GET", "/api/platforms");
+    assert.equal(response.status, 200);
+    const enabled: Awaited<ReturnType<typeof platforms.listEnabled>> = response.body.data;
     assert.equal(enabled.length, 16);
     assert.deepEqual(Object.fromEntries(enabled.map((profile) => [profile.code, profile.listingCopyRules])), expected);
     for (const [code, rules] of Object.entries(expected)) {
@@ -297,16 +312,18 @@ function listingImage(jobId: string, ordinal: number): ListingImage {
   };
 }
 
-test("027 saves listing jobs by revision, preserves old versions and omits drafts from history", { skip }, async () => {
+test("listing jobs preserve old versions and find the latest generated job for the specified suite", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const jobs = new PostgresListingRepository(pool);
-    const draft = listingJob();
-    const hidden = listingJob();
+    const { id: suiteId } = await new PostgresSuiteRepository(pool).createSuite("PG listing fixture");
+    const draft = listingJob(undefined, suiteId);
+    const hidden = { ...listingJob(undefined, suiteId), updatedAt: "2026-01-03T00:00:00.000Z" };
     assert.equal(await jobs.save(draft, null), true);
     assert.equal(await jobs.save(hidden, null), true);
     assert.equal(await jobs.save(draft, null), false);
     assert.deepEqual(await jobs.get(draft.id), { ...draft, createdAt: new Date(timestamp), updatedAt: new Date(timestamp) });
     assert.deepEqual(await jobs.list(10, 0), []);
+    assert.equal(await jobs.findLatestBySuiteId(suiteId), null);
 
     const first = listingVersion(1, "Steel bottle");
     const generated: ListingJob = { ...draft, status: "succeeded", revision: 1, versions: [first] };
@@ -324,6 +341,11 @@ test("027 saves listing jobs by revision, preserves old versions and omits draft
     }, edited);
     const history = await jobs.list(10, 0);
     assert.deepEqual(history.map(({ id, revision, status }) => ({ id, revision, status })), [{ id: draft.id, revision: 2, status: "succeeded" }]);
+    const newer = { ...listingJob(undefined, suiteId), status: "running" as const, updatedAt: "2026-01-02T00:00:00.000Z" };
+    assert.equal(await jobs.save(newer, null), true);
+    assert.equal(await jobs.save({ ...listingJob(), status: "running", updatedAt: hidden.updatedAt }, null), true);
+    assert.deepEqual(await jobs.findLatestBySuiteId(suiteId), await jobs.summary(newer.id));
+    assert.equal(await jobs.findLatestBySuiteId(randomUUID()), null);
   });
 });
 

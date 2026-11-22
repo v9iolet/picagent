@@ -306,7 +306,7 @@ export function createListingCopyApi(deps: {
         !edits ||
         typeof edits !== "object" ||
         Array.isArray(edits) ||
-        !["title", "bulletPoints", "description", "searchTerms", "missingFacts"].some((key) => Object.hasOwn(edits, key))
+        !Object.keys(edits).some((key) => key !== "schemaVersion")
       )
         throw new ListingError("LISTING_INVALID_CONTENT");
       const content = validateContent({ ...previous.content, ...edits }, await loadListingRules(job.platform));

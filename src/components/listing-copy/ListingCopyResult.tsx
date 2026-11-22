@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import { listingFieldCounts, listingFieldEnabled, type ListingCount, type ListingRules } from "../../../shared/listing-config";
 import { listingCopyApi, type ApiListingContent, type ApiListingJob, type ApiListingSummary } from "../../api/client";
 import { Icon } from "../../pages/shared";
 
@@ -30,19 +31,18 @@ export function listingMessage(error: unknown) {
   return hints[code] ?? code;
 }
 
-// The job may outlive either view. Only poll active generation; stop on unmount or a terminal state.
-export function useListingCopyJob(id?: string, initial?: ApiListingJob) {
+export function useListingCopyJob(id: string, initial?: ApiListingJob) {
   const [job, setJob] = useState(initial);
   const [readError, setReadError] = useState("");
   const [revision, setRevision] = useState(0);
   const needsRead = !job || job.status === "running";
   useEffect(() => {
-    if (!id || !needsRead) return;
+    if (!needsRead) return;
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
-        const next = await listingCopyApi.get(id!);
+        const next = await listingCopyApi.get(id);
         if (!active) return;
         setJob(next);
         if (next.status === "running") timer = setTimeout(poll, 1000);
@@ -59,15 +59,20 @@ export function useListingCopyJob(id?: string, initial?: ApiListingJob) {
   };
 }
 
-function CopyField({ label, value, rows, readOnly, update, notify }: {
+const countUnits: Record<ListingCount["unit"], string> = { characters: "字符", bytes: "字节", items: "条" };
+
+function CopyField({ label, value, rows, readOnly, update, notify, counts, itemLimit }: {
   label: string;
   value: string;
   rows?: number;
   readOnly: boolean;
   update: (value: string) => void;
   notify: (text: string) => void;
+  counts: ListingCount[];
+  itemLimit?: number;
 }) {
   const id = useId();
+  const countId = counts.length || itemLimit !== undefined ? `${id}-counts` : undefined;
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value);
@@ -83,55 +88,84 @@ function CopyField({ label, value, rows, readOnly, update, notify }: {
         <button aria-label={`复制${label}`} title={`复制${label}`} disabled={!value.trim()} onClick={() => void copy()}>
           <Icon name="copy" />
         </button>
+        {countId && <div id={countId} className="lc-counts">
+          {counts.map(({ actual, limit, unit, itemIndex }) => (
+            <span key={itemIndex ?? unit} className="lc-count" data-over-limit={actual > limit}>
+              {itemIndex !== undefined && `第 ${itemIndex + 1} 条 `}{actual} / {limit} {countUnits[unit]}
+            </span>
+          ))}
+          {itemLimit !== undefined && <span className="lc-count">每条 ≤ {itemLimit} 字符</span>}
+        </div>}
       </div>
-      {rows ? <textarea id={id} rows={rows} value={value} readOnly={readOnly} onChange={(e) => update(e.target.value)} />
-        : <input id={id} value={value} readOnly={readOnly} onChange={(e) => update(e.target.value)} />}
+      {rows ? <textarea id={id} aria-describedby={countId} rows={rows} value={value} readOnly={readOnly} onChange={(e) => update(e.target.value)} />
+        : <input id={id} aria-describedby={countId} value={value} readOnly={readOnly} onChange={(e) => update(e.target.value)} />}
     </div>
   );
 }
 
 const lines = (text: string) => text.split("\n").map((line) => line.trim()).filter(Boolean);
 
-function VersionEditor({ content, editable, domestic, save }: {
+type TextField = "title" | "description" | "itemHighlights" | "seoTitle" | "seoDescription" | "subtitle";
+type ListField = "bulletPoints" | "searchTerms" | "tags" | "hashtags" | "missingFacts";
+
+function VersionEditor({ content, editable, domestic, rules, save }: {
   content: ApiListingContent;
   editable: boolean;
   domestic: boolean;
-  save: (content: ApiListingContent) => void;
+  rules?: ListingRules;
+  save: (content: Partial<ApiListingContent>) => void;
 }) {
-  const [title, setTitle] = useState(content.title);
-  const [bullets, setBullets] = useState(content.bulletPoints.join("\n"));
-  const [description, setDescription] = useState(content.description);
-  const [terms, setTerms] = useState(content.searchTerms?.join("\n") ?? "");
+  const [edits, setEdits] = useState<Partial<Record<TextField | ListField, string>>>({});
   const [notice, setNotice] = useState("");
-  const changed = title !== content.title || bullets !== content.bulletPoints.join("\n") ||
-    description !== content.description || terms !== (content.searchTerms?.join("\n") ?? "");
-  const common = { readOnly: !editable, notify: setNotice };
+  const text = (field: TextField, label: string, rows?: number) => ({
+    field, label, rows, original: content[field] ?? "", parse: (value: string) => value,
+  });
+  const list = (field: ListField, label: string, rows: number) => ({
+    field, label, rows, original: content[field]?.join("\n") ?? "", parse: lines,
+  });
+  const fields = [
+    { ...text("title", "标题"), enabled: true },
+    { ...text("itemHighlights", "商品亮点 (Item Highlights)", 2), enabled: listingFieldEnabled("itemHighlights", rules) },
+    { ...text("subtitle", "促销副标题"), enabled: listingFieldEnabled("subtitle", rules) },
+    { ...list("bulletPoints", domestic ? "卖点短句" : "五点描述", 4), enabled: true },
+    { ...text("description", "商品描述", 4), enabled: true },
+    { ...list("searchTerms", "后台搜索词", 2), enabled: listingFieldEnabled("searchTerms", rules) },
+    { ...list("tags", "商品标签 (Tags)", 3), enabled: listingFieldEnabled("tags", rules) },
+    { ...text("seoTitle", "SEO Meta Title"), enabled: listingFieldEnabled("seoTitle", rules) },
+    { ...text("seoDescription", "SEO Meta Description", 3), enabled: listingFieldEnabled("seoDescription", rules) },
+    { ...list("hashtags", "话题标签 (#Tag)", 3), enabled: listingFieldEnabled("hashtags", rules) },
+    { ...list("missingFacts", "待补充事实", 2), enabled: false },
+  ];
+  const updates = fields.flatMap(({ field, enabled, original, parse }) => {
+    const value = edits[field];
+    return enabled && value !== undefined && value !== original ? [[field, parse(value)] as const] : [];
+  });
+  const patch = Object.fromEntries(updates);
+  const counts = listingFieldCounts({ ...content, ...patch }, rules);
   return (
     <div className="lc-fields">
-      <CopyField {...common} label="标题" value={title} update={setTitle} />
-      <CopyField {...common} label={domestic ? "卖点短句" : "五点描述"} rows={4} value={bullets} update={setBullets} />
-      <CopyField {...common} label="商品描述" rows={4} value={description} update={setDescription} />
-      {content.searchTerms !== undefined && <CopyField {...common} label="搜索词" rows={2} value={terms} update={setTerms} />}
-      {content.missingFacts.length > 0 && <div className="lc-missing">待补充事实：{content.missingFacts.join("、")}</div>}
+      {fields.filter(({ enabled, original }) => enabled || original).map(({ field, label, rows, enabled, original }) => (
+        <CopyField key={field} label={label} rows={rows} readOnly={!editable || !enabled} notify={setNotice}
+          value={enabled ? edits[field] ?? original : original}
+          update={(value) => setEdits((previous) => ({ ...previous, [field]: value }))}
+          counts={counts.filter((count) => count.field === field)}
+          itemLimit={field === "tags" && enabled ? rules?.tagMaxLength : undefined} />
+      ))}
       <div className="lc-row">
-        {editable && <button className="ss-primary" disabled={!changed} onClick={() => save({
-          title, bulletPoints: lines(bullets), description,
-          ...(content.searchTerms !== undefined ? { searchTerms: lines(terms) } : {}),
-          missingFacts: content.missingFacts,
-        })}>保存为新版本</button>}
+        {editable && <button className="ss-primary" disabled={!updates.length} onClick={() => save(patch)}>保存为新版本</button>}
         <span role="status" className="ss-help">{notice}</span>
       </div>
     </div>
   );
 }
 
-export function ListingCopyResult({ job, blocked, domestic, save, regenerate, canRegenerate = true }: {
+export function ListingCopyResult({ job, blocked, domestic, rules, save, regenerate }: {
   job: ApiListingJob;
   blocked: boolean;
   domestic: boolean;
-  save: (content: ApiListingContent) => void;
+  rules?: ListingRules;
+  save: (content: Partial<ApiListingContent>) => void;
   regenerate: () => void;
-  canRegenerate?: boolean;
 }) {
   const [selected, setSelected] = useState<string>();
   const latest = job.versions[job.versions.length - 1];
@@ -141,12 +175,13 @@ export function ListingCopyResult({ job, blocked, domestic, save, regenerate, ca
     <div className="lc-result">
       <div className="lc-row lc-result-head">
         <span role="status" className="lc-status" data-status={job.status}>{listingStatuses[job.status]}</span>
-        {job.status !== "draft" && <button disabled={!canRegenerate || !canWrite || !job.inputImages.length} onClick={regenerate}>重新生成</button>}
+        {job.status !== "draft" && <button disabled={!canWrite || !job.inputImages.length}
+          onClick={() => { setSelected(undefined); regenerate(); }}>重新生成</button>}
       </div>
       {job.status === "failed" && <p role="alert" className="lc-error">{listingMessage(job.errorCode ?? "LISTING_GENERATION_FAILED")}</p>}
       {version && <>
-        <VersionEditor key={version.id} content={version.content} domestic={domestic} editable={canWrite && version.id === latest?.id}
-          save={(content) => { setSelected(undefined); save(content); }} />
+        <VersionEditor key={version.id} content={version.content} domestic={domestic} rules={rules} editable={canWrite && version.id === latest?.id}
+          save={save} />
         <section className="lc-versions" aria-label="版本历史">
           <h3>版本历史</h3>
           <ul className="lc-list">

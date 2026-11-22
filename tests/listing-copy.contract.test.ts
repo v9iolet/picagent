@@ -11,6 +11,8 @@ import sharp from "sharp";
 import { dispatchInputImageUpload } from "../server/multipart.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
+import { evaluateListingWarnings } from "../shared/listing-config.js";
+import type { ListingRules } from "../shared/listing-config.js";
 import { DETAIL_CATEGORY_CODES } from "../shared/suite-categories.js";
 
 async function template(name: string) {
@@ -24,6 +26,11 @@ test("listing_copy 模板声明视觉输入、平台规则和独立的输出契�
   const record = await template("general-listing-copy");
   assert.equal(record.stage, "listing_copy");
   assert.equal(record.code, "general.listing-copy");
+  assert.deepEqual(record.outputSchema.required, ["schemaVersion", "title", "bulletPoints", "description", "missingFacts"]);
+  assert.deepEqual(Object.keys(record.outputSchema.properties as object), [
+    "schemaVersion", "title", "bulletPoints", "description", "missingFacts", "itemHighlights", "searchTerms",
+    "tags", "seoTitle", "seoDescription", "subtitle", "hashtags",
+  ]);
   assert.throws(() => validatePromptTemplateContract({ ...record, inputSchema: [] }));
   assert.throws(() => validatePromptTemplateContract({ ...record, executionTarget: "image_model" }));
 });
@@ -36,6 +43,26 @@ const content = {
   bulletPoints: [],
   searchTerms: ["杯"],
   missingFacts: ["容量"],
+};
+const commonRules = { titleMaxLength: 80, maxBulletPoints: 5, supportsSearchTerms: false, forbiddenWords: ["best seller"] };
+const domesticRules = { ...commonRules, titleMaxLength: 30, maxBulletPoints: 3 };
+const platformRules: Record<string, ListingRules> = {
+  amazon: { ...commonRules, titleMaxLength: 75, supportsSearchTerms: true, itemHighlightsMaxLength: 125, searchTermsMaxBytes: 250 },
+  etsy: { ...commonRules, titleMaxLength: 140, maxTags: 13, tagMaxLength: 20 },
+  shopify: { ...commonRules, titleMaxLength: 70, seoTitleMaxLength: 60, seoDescriptionMaxLength: 160 },
+  walmart: { ...commonRules, titleMaxLength: 75 },
+  ebay: commonRules,
+  temu: commonRules,
+  tiktok_shop: { ...commonRules, titleMaxLength: 100 },
+  shopee: { ...commonRules, titleMaxLength: 100 },
+  lazada: { ...commonRules, titleMaxLength: 100 },
+  aliexpress: { ...commonRules, titleMaxLength: 100 },
+  taobao: { ...domesticRules, subtitleMaxLength: 40 },
+  pinduoduo: { ...domesticRules, subtitleMaxLength: 40 },
+  "1688": { ...domesticRules, subtitleMaxLength: 40 },
+  jd: { ...domesticRules, titleMaxLength: 60, subtitleMaxLength: 40 },
+  douyin: { ...domesticRules, maxHashtags: 10 },
+  xiaohongshu: { ...domesticRules, titleMaxLength: 20, maxHashtags: 10 },
 };
 function data(res: AppResponse, expected: number): any {
   assert.equal(res.status, expected, JSON.stringify(res.body));
@@ -82,12 +109,7 @@ async function fixture(generatePlan: (input: PlanLlmInput) => Promise<unknown>, 
           modelStrategy: "",
           sourceNote: "",
           sortOrder: 1,
-          listingCopyRules: {
-            titleMaxLength: code === "amazon" ? 75 : 30,
-            maxBulletPoints: 5,
-            supportsSearchTerms: code === "amazon",
-            forbiddenWords: ["best seller"],
-          },
+          listingCopyRules: platformRules[code],
         };
       },
     },
@@ -107,11 +129,18 @@ async function fixture(generatePlan: (input: PlanLlmInput) => Promise<unknown>, 
   return { app, repository, storage, bytes, req, upload };
 }
 
-test("Amazon 标题超长失败；使用原图和配置重试后生成带渠道及输入快照的版本", async () => {
+test("Amazon 超限文案照常生成并保存，返回字符、字节与条数警告和原图快照", async () => {
   const calls: PlanLlmInput[] = [];
+  const output = {
+    ...content,
+    title: "😀".repeat(76),
+    itemHighlights: "A".repeat(126),
+    bulletPoints: Array(6).fill("point"),
+    searchTerms: ["杯".repeat(83), "茶"],
+  };
   const f = await fixture(async (input) => {
     calls.push(input);
-    return calls.length === 1 ? { ...content, title: "A".repeat(76) } : content;
+    return output;
   });
   const draft = await f.upload("draft"),
     path = `${root}/${draft.id}`;
@@ -122,34 +151,37 @@ test("Amazon 标题超长失败；使用原图和配置重试后生成带渠道�
     { platform: "amazon", targetMarket: "US", outputLanguage: "English", sellingPoints: "白色杯子" },
     202,
   );
-  const failed = await eventual(
-    () => f.req("GET", path),
-    (j) => j.status === "failed",
-  );
-  assert.equal(failed.errorCode, "LISTING_TITLE_TOO_LONG");
-  assert.deepEqual(failed.versions, []);
-  await f.req("POST", path + "/regenerate", {}, 202);
   const job = await eventual(
     () => f.req("GET", path),
     (j) => j.status === "succeeded",
   );
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].visionImages?.[0].bytes, f.bytes);
-  assert.equal(calls[1].dynamicInput.selling_points, "白色杯子");
-  const snap = job.versions[0].promptSnapshot;
-  assert.equal(snap.templateVersionId, calls[1].templateVersionId);
+  const first = job.versions[0];
+  assert.deepEqual(first.content, output);
+  assert.deepEqual(evaluateListingWarnings(first.content, first.promptSnapshot.input.listing_copy_rules), [
+    { field: "title", actual: 76, limit: 75, unit: "characters" },
+    { field: "bulletPoints", actual: 6, limit: 5, unit: "items" },
+    { field: "itemHighlights", actual: 126, limit: 125, unit: "characters" },
+    { field: "searchTerms", actual: 253, limit: 250, unit: "bytes" },
+  ]);
+  const edited = await f.req("PUT", path, { content: { itemHighlights: "B".repeat(127) } });
+  assert.equal(edited.versions[1].content.itemHighlights.length, 127);
+  assert.deepEqual(edited.versions[0], first);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].visionImages?.[0].bytes, f.bytes);
+  assert.equal(calls[0].dynamicInput.selling_points, "白色杯子");
+  const snap = first.promptSnapshot;
+  assert.equal(snap.templateVersionId, calls[0].templateVersionId);
   assert.equal(snap.model.model, "test-vision");
   assert.equal(snap.model.channel.channelId, "vision-fixture");
   assert.deepEqual(snap.input.image_ids, [draft.inputImages[0].id]);
   assert.equal(snap.input.images[0].sha256, draft.inputImages[0].sha256);
   assert.equal(snap.input.target_market, "US");
   assert.equal(snap.input.output_language, "English");
-  assert.deepEqual(job.versions[0].content.missingFacts, ["容量"]);
   assert.equal((await f.req("GET", root + "?limit=1&offset=0")).items[0].id, job.id);
 });
 
-test("淘宝不出搜索词；编辑产生新版本并保留旧内容，禁用词与超量要点不能保存", async () => {
-  const f = await fixture(async () => content),
+test("淘宝只保存适用字段，所有文本字段的禁用词和非法字段类型均硬拦截", async () => {
+  const f = await fixture(async () => ({ ...content, subtitle: "折叠收纳" })),
     draft = await f.upload("draft"),
     path = `${root}/${draft.id}`;
   await f.req("POST", path + "/generate", { platform: "taobao" }, 202);
@@ -158,21 +190,72 @@ test("淘宝不出搜索词；编辑产生新版本并保留旧内容，禁用�
     (j) => j.status === "succeeded",
   );
   const first = generated.versions[0];
+  assert.equal(first.content.subtitle, "折叠收纳");
   assert.ok(!("searchTerms" in first.content));
   const edited = await f.req("PUT", path, { content: { title: "我的杯子", searchTerms: ["ignored"] } });
   assert.deepEqual(edited.versions[0], first);
   assert.equal(edited.versions[1].content.title, "我的杯子");
   assert.equal(edited.versions[1].promptSnapshot.editedFromVersionId, first.id);
   assert.ok(!("searchTerms" in edited.versions[1].content));
-  for (const [changes, code] of [
-    [{ bulletPoints: Array(6).fill("point") }, "LISTING_TOO_MANY_BULLETS"],
-    [{ description: "Best Seller" }, "LISTING_FORBIDDEN_WORD"],
-  ] as const) {
-    const res = await f.app.request("PUT", path, { body: { content: { ...first.content, ...changes } } });
+  for (const changes of [
+    { title: "Best Seller" }, { description: "Best Seller" }, { bulletPoints: ["best seller"] },
+    { searchTerms: ["best seller"] }, { missingFacts: ["best seller"] }, { itemHighlights: "best seller" },
+    { tags: ["best seller"] }, { seoTitle: "best seller" }, { seoDescription: "best seller" },
+    { subtitle: "Ｂｅｓｔ Ｓｅｌｌｅｒ" }, { hashtags: ["#best seller"] },
+  ]) {
+    const res = await f.app.request("PUT", path, { body: { content: changes } });
     assert.equal(res.status, 400);
-    assert.equal((res.body as any).error.code, code);
+    assert.equal((res.body as any).error.code, "LISTING_FORBIDDEN_WORD");
+  }
+  for (const changes of [{ searchTerms: "unused" }, { subtitle: null }, { tags: [1] }, { unknown: "text" }]) {
+    const res = await f.app.request("PUT", path, { body: { content: changes } });
+    assert.equal(res.status, 400);
+    assert.equal((res.body as any).error.code, "LISTING_INVALID_CONTENT");
   }
   assert.deepEqual((await f.req("GET", path)).versions, [first, edited.versions[1]]);
+});
+
+test("16 平台只保存各自专属字段，专属字段超限仍可交付并生成警告", async () => {
+  const { searchTerms, ...base } = content;
+  const special = {
+    searchTerms,
+    itemHighlights: "Foldable handle",
+    tags: ["陶".repeat(21), ...Array(13).fill("cup")],
+    seoTitle: "A".repeat(61),
+    seoDescription: "B".repeat(161),
+    subtitle: "携".repeat(41),
+    hashtags: Array.from({ length: 11 }, (_, i) => `#杯${i}`),
+  };
+  const f = await fixture(async () => ({ ...base, ...special }));
+  const pairs = [
+    [["amazon"], { searchTerms, itemHighlights: special.itemHighlights }, []],
+    [["etsy"], { tags: special.tags }, [
+      { field: "tags", actual: 14, limit: 13, unit: "items" },
+      { field: "tags", actual: 21, limit: 20, unit: "characters", itemIndex: 0 },
+    ]],
+    [["shopify"], { seoTitle: special.seoTitle, seoDescription: special.seoDescription }, [
+      { field: "seoTitle", actual: 61, limit: 60, unit: "characters" },
+      { field: "seoDescription", actual: 161, limit: 160, unit: "characters" },
+    ]],
+    [["taobao", "pinduoduo", "1688", "jd"], { subtitle: special.subtitle }, [
+      { field: "subtitle", actual: 41, limit: 40, unit: "characters" },
+    ]],
+    [["douyin", "xiaohongshu"], { hashtags: special.hashtags }, [
+      { field: "hashtags", actual: 11, limit: 10, unit: "items" },
+    ]],
+    [["walmart", "ebay", "temu", "tiktok_shop", "shopee", "lazada", "aliexpress"], {}, []],
+  ] as const;
+  for (const [platforms, fields, warnings] of pairs) {
+    for (const platform of platforms) {
+      const draft = await f.upload("draft");
+      const path = `${root}/${draft.id}`;
+      await f.req("POST", path + "/generate", { platform }, 202);
+      const job = await eventual(() => f.req("GET", path), (j) => j.status === "succeeded");
+      const result = job.versions[0].content;
+      assert.deepEqual(result, { ...base, ...fields }, platform);
+      assert.deepEqual(evaluateListingWarnings(result, platformRules[platform]), warnings, platform);
+    }
+  }
 });
 
 test("套图上传不截获文案 multipart；首图建立隐藏草稿，可预览、删除且最多六张", async () => {
@@ -246,7 +329,7 @@ async function pipelineFixture(overrides: Record<string, unknown> = {}) {
         if (input.flow === "listing-copy") {
           copyCalls++;
           await pending;
-          return copyCalls === 1 ? { ...content, title: "A".repeat(90) } : content;
+          return copyCalls === 1 && overrides.listingCopy !== false ? { ...content, title: "Best Seller" } : content;
         }
         return {
           schemaVersion: "suite-structure-plan-v2",
@@ -320,6 +403,32 @@ async function pipelineFixture(overrides: Record<string, unknown> = {}) {
   return { f, state, suite, release, imageCalls: () => imageCalls, copyCalls: () => copyCalls };
 }
 
+test("未开启直出的批次可按需生成，studio-state 关联补生成任务并沿用批次输入", async () => {
+  const { f, state, suite, release, copyCalls } = await pipelineFixture({ listingCopy: false });
+  try {
+    const before = await eventual(state, (s) => s.pipeline.status === "completed");
+    assert.equal(before.listingCopy, null);
+    assert.equal(copyCalls(), 0);
+    const started = await f.req("POST", root, { sourceSuiteId: suite.id, generate: true }, 202);
+    const pending = await state();
+    assert.equal(pending.listingCopy.id, started.id);
+    assert.equal(pending.listingCopy.status, "running");
+    assert.equal(pending.listingCopy.sourceSuiteId, suite.id);
+    assert.equal(started.platform, "taobao");
+    assert.equal(started.targetMarket, "CN");
+    assert.equal(started.outputLanguage, "中文");
+    assert.equal(started.input.sellingPoints, "白色杯子");
+    assert.equal(started.inputImages[0].id, (await f.repository.getInputImages(suite.id))[0].id);
+    release();
+    const completed = await eventual(state, (s) => s.listingCopy?.status === "succeeded");
+    assert.equal(completed.listingCopy.id, started.id);
+    assert.equal(completed.pipeline.status, "completed");
+    assert.equal(copyCalls(), 1);
+  } finally {
+    release();
+  }
+});
+
 test("流水线在文案仍运行时完成出图；文案失败不改变批次完成状态，可复用批次独立生成", async () => {
   const { f, state, suite, release, imageCalls, copyCalls } = await pipelineFixture();
   try {
@@ -336,13 +445,14 @@ test("流水线在文案仍运行时完成出图；文案失败不改变批次�
   // studio-state reads pipeline before listingCopy. Inspect a fresh snapshot after the failure settles.
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal((await state()).pipeline.status, "completed");
-  assert.equal(failed.listingCopy.errorCode, "LISTING_TITLE_TOO_LONG");
+  assert.equal(failed.listingCopy.errorCode, "LISTING_FORBIDDEN_WORD");
   const independent = await f.req("POST", root, { sourceSuiteId: suite.id, generate: true }, 202);
   const job = await eventual(
     () => f.req("GET", `${root}/${independent.id}`),
     (j) => j.status === "succeeded",
   );
   assert.notEqual(job.id, failed.listingCopy.id);
+  assert.equal((await state()).listingCopy.id, failed.listingCopy.id);
   assert.equal(job.platform, "taobao");
   assert.equal(job.input.sellingPoints, "白色杯子");
   assert.equal(job.inputImages[0].id, (await f.repository.getInputImages(suite.id))[0].id);

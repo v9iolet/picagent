@@ -1,19 +1,7 @@
+import { listingFieldEnabled, type ListingContent, type ListingRules } from "../shared/listing-config.js";
 import type { InputImage, LlmModelSnapshot } from "./types.js";
 
-export interface ListingRules {
-  titleMaxLength: number;
-  maxBulletPoints: number;
-  supportsSearchTerms: boolean;
-  forbiddenWords: string[];
-}
-export interface ListingContent {
-  schemaVersion: "listing-copy-v1";
-  title: string;
-  bulletPoints: string[];
-  description: string;
-  searchTerms?: string[];
-  missingFacts: string[];
-}
+export type { ListingContent, ListingRules } from "../shared/listing-config.js";
 export type ListingImage = Pick<
   InputImage,
   | "id"
@@ -60,6 +48,7 @@ export interface ListingJob extends ListingSummary {
 export interface ListingRepository {
   get(id: string): Promise<ListingJob | null>;
   summary(id: string): Promise<ListingSummary | null>;
+  findLatestBySuiteId(suiteId: string): Promise<ListingSummary | null>;
   list(limit: number, offset: number): Promise<ListingSummary[]>;
   // Atomically write the job and append versions/image changes only if the revision still matches.
   save(job: ListingJob, previous: ListingJob | null): Promise<boolean>;
@@ -67,6 +56,9 @@ export interface ListingRepository {
 }
 function summary({ versions, inputImages, ...job }: ListingJob): ListingSummary {
   return job;
+}
+function newestFirst(a: ListingJob, b: ListingJob) {
+  return b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id);
 }
 export class MemoryListingRepository implements ListingRepository {
   private jobs = new Map<string, ListingJob>();
@@ -77,10 +69,16 @@ export class MemoryListingRepository implements ListingRepository {
     const j = this.jobs.get(id);
     return j ? structuredClone(summary(j)) : null;
   }
+  async findLatestBySuiteId(suiteId: string) {
+    const [latest] = [...this.jobs.values()]
+      .filter((job) => job.sourceSuiteId === suiteId && job.status !== "draft")
+      .sort(newestFirst);
+    return latest ? structuredClone(summary(latest)) : null;
+  }
   async list(limit: number, offset: number) {
     return [...this.jobs.values()]
       .filter((j) => j.status !== "draft")
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+      .sort(newestFirst)
       .slice(offset, offset + limit)
       .map((j) => structuredClone(summary(j)));
   }
@@ -102,30 +100,33 @@ export class ListingError extends Error {
   }
 }
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string");
+const requiredText = ["title", "description"] as const;
+const requiredLists = ["bulletPoints", "missingFacts"] as const;
+const optionalText = ["itemHighlights", "seoTitle", "seoDescription", "subtitle"] as const;
+const optionalLists = ["searchTerms", "tags", "hashtags"] as const;
+const fieldNames = new Set<string>(["schemaVersion", ...requiredText, ...requiredLists, ...optionalText, ...optionalLists]);
+const normalized = (text: string) => text.normalize("NFKC").toLowerCase();
+
 export function validateContent(raw: unknown, rules: ListingRules): ListingContent {
-  const c = raw as Partial<ListingContent> | null;
+  const c = raw as ListingContent;
   if (
-    !c ||
+    !c || typeof c !== "object" || Array.isArray(c) ||
     c.schemaVersion !== "listing-copy-v1" ||
-    typeof c.title !== "string" ||
-    typeof c.description !== "string" ||
-    !strings(c.bulletPoints) ||
-    !strings(c.missingFacts) ||
-    (rules.supportsSearchTerms && c.searchTerms !== undefined && !strings(c.searchTerms))
+    Object.keys(c).some((key) => !fieldNames.has(key)) ||
+    requiredText.some((field) => typeof c[field] !== "string") ||
+    requiredLists.some((field) => !strings(c[field])) ||
+    optionalText.some((field) => c[field] !== undefined && typeof c[field] !== "string") ||
+    optionalLists.some((field) => c[field] !== undefined && !strings(c[field]))
   )
     throw new ListingError("LISTING_INVALID_CONTENT");
-  if (Array.from(c.title).length > rules.titleMaxLength) throw new ListingError("LISTING_TITLE_TOO_LONG");
-  if (c.bulletPoints.length > rules.maxBulletPoints) throw new ListingError("LISTING_TOO_MANY_BULLETS");
-  const searchTerms = rules.supportsSearchTerms ? (c.searchTerms ?? []) : [];
-  const fields = [c.title, ...c.bulletPoints, c.description, ...searchTerms].map((s) => s.normalize("NFKC").toLowerCase());
-  if (rules.forbiddenWords.some((w) => w && fields.some((f) => f.includes(w.normalize("NFKC").toLowerCase()))))
+  const fields = [...requiredText, ...requiredLists, ...optionalText, ...optionalLists]
+    .flatMap((field) => c[field] ?? [])
+    .map(normalized);
+  if (rules.forbiddenWords.some((word) => word && fields.some((field) => field.includes(normalized(word)))))
     throw new ListingError("LISTING_FORBIDDEN_WORD");
-  return {
-    schemaVersion: c.schemaVersion,
-    title: c.title,
-    bulletPoints: c.bulletPoints,
-    description: c.description,
-    ...(rules.supportsSearchTerms ? { searchTerms } : {}),
-    missingFacts: c.missingFacts,
-  };
+  const content = { ...c };
+  for (const field of [...optionalText, ...optionalLists]) {
+    if (!listingFieldEnabled(field, rules)) delete content[field];
+  }
+  return content;
 }

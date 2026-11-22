@@ -634,7 +634,8 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         : { snapshot: snapshot ? planSnapshotView(snapshot) : null, notGeneratedReasons: [] };
     const total = cards.length;
     const done = cards.filter((card) => card.sourceRole !== "pending").length;
-    const listingCopy = pipeline?.config.listingCopy === true ? await listingRepository.summary(pipeline.id) : null;
+    const listingCopy = (pipeline && await listingRepository.summary(pipeline.id))
+      ?? await listingRepository.findLatestBySuiteId(suite.id);
     return ok({
       suite,
       pipeline,
