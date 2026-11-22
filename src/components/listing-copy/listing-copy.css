@@ -1,0 +1,201 @@
+.lc-layout {
+  grid-template-columns: 64px minmax(280px, 340px) minmax(0, 1fr);
+}
+.lc-main {
+  min-width: 0;
+}
+.lc-main > *, .lc-result {
+  max-width: 840px;
+}
+.lc-brief, .lc-fields, .lc-input-actions {
+  display: grid;
+  gap: 12px;
+}
+.lc-brief label, .lc-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  font-weight: 600;
+}
+.lc-brief input, .lc-brief select, .lc-brief textarea,
+.lc-field input, .lc-field textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  font: inherit;
+  font-weight: 400;
+  color: var(--pa-ink);
+  background: var(--pa-surface);
+  border: 1px solid var(--pa-border);
+  border-radius: 7px;
+}
+.lc-brief textarea, .lc-field textarea {
+  resize: vertical;
+}
+.lc-layout button svg, .lc-result button svg, .lc-source svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  vertical-align: middle;
+}
+.lc-layout .lc-config footer button {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+}
+.lc-input-actions input {
+  max-width: 100%;
+  font: inherit;
+}
+.lc-input-actions input::file-selector-button {
+  margin-right: 8px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--pa-border);
+  background: var(--pa-surface);
+  color: inherit;
+  cursor: pointer;
+}
+.lc-source, .lc-row, .lc-field-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.lc-thumbs {
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  list-style: none;
+}
+.lc-thumbs li {
+  position: relative;
+  min-width: 0;
+  aspect-ratio: 1;
+  border: 1px solid var(--pa-border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.lc-thumbs img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.lc-thumbs li button {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 2px 4px;
+}
+.lc-empty {
+  padding: 34px 14px;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: var(--pa-muted);
+  border: 1px dashed var(--pa-border);
+  border-radius: 8px;
+}
+.lc-empty svg {
+  width: 30px;
+  height: 30px;
+  fill: none;
+  stroke: currentColor;
+}
+.lc-field-head, .lc-result-head {
+  justify-content: space-between;
+}
+.lc-result-head {
+  margin-bottom: 14px;
+}
+.ss-dialog.lc-drawer {
+  inset: 0 0 0 auto;
+  margin: 0;
+  width: min(100%, 570px);
+  min-width: 0;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  border-radius: 0;
+  background: var(--pa-surface);
+  font: 14px/1.5 system-ui, sans-serif;
+}
+.lc-batch-name {
+  color: var(--pa-muted);
+}
+.lc-status {
+  color: var(--pa-muted);
+  font-weight: 600;
+}
+.lc-status[data-status="running"] {
+  color: var(--pa-accent);
+}
+.lc-main .lc-error, .lc-config .lc-error, .ss-dialog .lc-error {
+  padding: 8px 10px;
+  margin: 8px 0;
+  color: #99232c;
+  background: #fff0f1;
+  border-radius: 6px;
+}
+.lc-missing {
+  padding: 8px 10px;
+  background: #fff6de;
+  color: #734f11;
+  border-radius: 6px;
+}
+.lc-history, .lc-versions {
+  margin-top: 20px;
+  border-top: 1px solid var(--pa-border);
+  padding-top: 14px;
+  min-width: 0;
+}
+.lc-history h3, .lc-versions h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+.lc-list {
+  display: grid;
+  gap: 5px;
+  padding: 0;
+  list-style: none;
+}
+.lc-list li button {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.lc-list button[aria-pressed="true"], .lc-list button[aria-current] {
+  border-color: var(--pa-accent);
+  background: var(--pa-accent-soft);
+}
+.lc-list time {
+  font-size: 12px;
+  color: var(--pa-muted);
+}
+.lc-history .lc-list button > span {
+  min-width: 0;
+}
+.lc-fields .lc-row .ss-primary {
+  width: auto;
+}
+@media (max-width: 1000px) {
+  html:has(.lc-layout), body:has(.pa-shell .lc-layout) {
+    min-width: 0;
+  }
+  .lc-layout {
+    grid-template-columns: 56px minmax(240px, 32vw) minmax(0, 1fr);
+  }
+}
+@media (max-width: 680px) {
+  .lc-layout .ss-tools {
+    flex-wrap: wrap;
+  }
+}
