@@ -11,7 +11,7 @@ import { MemorySuiteRepository } from "../server/repositories/memory-suite-repos
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 
-async function offlineCanvas(t) {
+async function offlineCanvas(t, sizes = ["1K", "2K"]) {
   const sample = await readFile("public/assets/gan65-product.jpg");
   const libraryRepository = new MemoryLibraryRepository();
   const calls = [];
@@ -32,7 +32,7 @@ async function offlineCanvas(t) {
     channels: [{
       id: "offline", name: "离线测试", models: [{
         id: "gpt-image-2", capabilities: ["image"],
-        imageOptions: { sizes: ["1K", "2K"], aspectRatios: ["1:1", "3:2"], sizeMode: "pixels" },
+        imageOptions: { sizes, aspectRatios: ["1:1", "3:2"], sizeMode: "pixels" },
       }],
     }],
     preferences: { image: { channelId: "offline", modelId: "gpt-image-2" }, vision: null },
@@ -167,4 +167,29 @@ test("生图画布：新建、上传、绑定、选择 2K 后用选定尺寸出�
   await page.getByRole("button", { name: "返回画布列表" }).click();
   await page.getByRole("list", { name: "画布列表" }).getByRole("link", { name: /未命名画布/ }).waitFor();
   await page.screenshot({ path: "tests/browser/canvas-list.png" });
+});
+
+test("生图画布：新建任务与检查器仅在选择 4K 时提示耗时和费用", async (t) => {
+  const { page, url, calls } = await offlineCanvas(t, ["1K", "4K"]);
+  await page.goto(url + "create/canvas");
+  await page.getByRole("button", { name: "新建空白画布" }).click();
+  await page.getByRole("button", { name: "新建任务卡" }).click();
+  const modal = page.getByRole("dialog", { name: "自由新增画布任务卡" });
+  const note = page.getByText("4K 出图更慢，费用更贵。", { exact: true });
+  await modal.getByLabel("任务标题 *", { exact: true }).fill("高分辨率商品图");
+  assert.equal(await note.count(), 0);
+  await modal.getByRole("combobox", { name: /^分辨率/ }).selectOption("4K");
+  await note.waitFor();
+  await modal.getByLabel("生图提示词 *", { exact: true }).fill("展示商品外观");
+  await modal.getByRole("button", { name: "加入创作画布" }).click();
+  await modal.waitFor({ state: "hidden" });
+  const size = page.getByRole("combobox", { name: /^分辨率/ });
+  await size.waitFor();
+  assert.equal(await size.inputValue(), "4K");
+  await note.waitFor();
+  await size.selectOption("1K");
+  await note.waitFor({ state: "hidden" });
+  await size.selectOption("4K");
+  await note.waitFor();
+  assert.equal(calls.length, 0);
 });

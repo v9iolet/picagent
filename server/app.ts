@@ -1,3 +1,4 @@
+import { isProductImageResource } from "./library-reference-policy.js";
 import { createListingCopyApi } from "./listing-copy-api.js";
 import { MemoryListingRepository, type ListingRepository } from "./listing-copy.js";
 import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../shared/model-settings.js";
@@ -473,10 +474,6 @@ function taskAttemptView(attempt: TaskGenerationAttempt) { return attempt; }
 function taskBatchView(batch: TaskGenerationBatch) { return batch; }
 function taskSlotView(slot: TaskResultSlot) { return slot; }
 function taskVersionView(version: TaskImageVersion) { return version; }
-
-function isProductImageResource(resource: { resourceType: string }) {
-  return resource.resourceType === "base_image" || resource.resourceType === "input_image";
-}
 
 function llmSource(client: LlmClient) {
   return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };

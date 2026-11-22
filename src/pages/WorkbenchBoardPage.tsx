@@ -1,3 +1,4 @@
+import { ResolutionCostNote } from "../components/ResolutionCostNote";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { applyNodeChanges, Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, type Edge, type Node, type NodeProps, type Viewport, useNodesState, useReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -1991,6 +1992,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                     <>
                       <label className="wb-inspector-field"><span>比例</span><select value={ratioFor(selectedTask)} disabled={savingTaskInput} onChange={(event) => updateTaskParams({ ratio: event.target.value }).catch(() => notify("比例保存失败"))}>{parameterOptions(imageOptions.aspectRatios, ratioFor(selectedTask))}</select></label>
                       <label className="wb-inspector-field"><span>分辨率</span><select value={sizeFor(selectedTask)} disabled={savingTaskInput} onChange={(event) => updateTaskParams({ size: event.target.value }).catch(() => notify("分辨率保存失败"))}>{parameterOptions(imageOptions.sizes, sizeFor(selectedTask))}</select></label>
+                      <ResolutionCostNote size={sizeFor(selectedTask)} className="wb-resolution-note" />
                       <label className="wb-inspector-field"><span>清晰度</span><select value={qualityFor(selectedTask)} onChange={(event) => updateTaskParams({ quality: event.target.value }).catch(() => notify("清晰度保存失败"))}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
                       <div className="wb-batch-sync-row">
                         <button type="button" onClick={() => batchSyncParams(selectedTask.imageType).catch(() => notify("批量同步失败"))}>

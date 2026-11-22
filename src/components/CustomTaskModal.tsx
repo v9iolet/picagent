@@ -1,3 +1,4 @@
+import { ResolutionCostNote } from "./ResolutionCostNote";
 import { useState, type FormEvent } from "react";
 import type { ApiImage } from "../api/client";
 import type { ImageOptions } from "../../shared/model-settings";
@@ -27,6 +28,7 @@ export function CustomTaskModal({
   const preferred = (options: string[], value: string) => options.includes(value) ? value : options[0] ?? value;
   const [ratio, setRatio] = useState("3:4");
   const [size, setSize] = useState("1K");
+  const effectiveSize = preferred(imageOptions.sizes, size);
   const [quality, setQuality] = useState("medium");
   const [sourceInputImageId, setSourceInputImageId] = useState<string>(inputImages[0]?.id ?? "");
   const [promptDraft, setPromptDraft] = useState("");
@@ -56,7 +58,7 @@ export function CustomTaskModal({
         purpose: purpose.trim() || (imageType === "main" ? "画布自由新增主图" : "画布自由新增详情图"),
         promptDraft: promptDraft.trim(),
         sourceInputImageId: sourceInputImageId || null,
-        generationParams: { ratio: preferred(imageOptions.aspectRatios, ratio), size: preferred(imageOptions.sizes, size), quality },
+        generationParams: { ratio: preferred(imageOptions.aspectRatios, ratio), size: effectiveSize, quality },
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "创建任务卡失败");
@@ -101,7 +103,7 @@ export function CustomTaskModal({
               </label>
               <label className="wb-style-field">
                 <span>分辨率</span>
-                <select value={preferred(imageOptions.sizes, size)} onChange={(event) => setSize(event.target.value)}>
+                <select value={effectiveSize} onChange={(event) => setSize(event.target.value)}>
                   {imageOptions.sizes.map((option) => <option key={option}>{option}</option>)}
                 </select>
               </label>
@@ -114,6 +116,7 @@ export function CustomTaskModal({
                 </select>
               </label>
             </div>
+            <ResolutionCostNote size={effectiveSize} className="wb-resolution-note" />
             <label className="wb-style-field">
               <span>任务标题 *</span>
               <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：黑五促销主图 / 包装清单图" />

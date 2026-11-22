@@ -13,6 +13,9 @@ test("BoardPage routes the suite workbench through the compose/gallery surface",
 
 test("compose board connects base inputs to tasks and uses three-lane lineage projection", async () => {
   const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
+  assert.match(source, /image\.currentBaseVersionId \? `base:\$\{image\.currentBaseVersionId\}` : `input:\$\{image\.id\}`/);
+  assert.match(source, /const sourceId = task\.sourceInputImageId \? materialsByInputId\.get\(task\.sourceInputImageId\)\?\.id : undefined/);
+  assert.match(source, /if \(sourceId && !task\.sourceLibraryReferenceId\) rawEdges\.push\(\{ id: `\$\{sourceId\}->\$\{id\}`, source: sourceId, target: id/);
   assert.match(source, /computeWorkbenchLanes/);
   assert.match(source, /computeLineageHighlight/);
   assert.match(source, /DeliveryGalleryView/);

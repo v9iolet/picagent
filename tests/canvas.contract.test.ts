@@ -101,10 +101,7 @@ test("unbound canvas card rejects generation until a same-suite product image is
   assert.equal(f.calls.length, 2);
 });
 
-test("white-resource binds and generates from published input_image on an ordinary canvas task", async () => {
-  const f = fixture();
-  const canvas = await f.create("资源画布", "canvas");
-  const taskId = await f.addTask(canvas.id);
+async function publishedInput(f: ReturnType<typeof fixture>) {
   const sourceSuite = await f.create("原图来源");
   const image = await f.upload(sourceSuite.id);
   const resource: LibraryResource = {
@@ -113,10 +110,15 @@ test("white-resource binds and generates from published input_image on an ordina
     templateVersionId: null, resourceVersionId: image.id, stage: null, source: { objectKey: image.originalObjectKey },
     status: "published", createdAt: image.createdAt, updatedAt: image.createdAt,
   };
-  f.library.addResource({ ...resource, id: "draft", status: "draft" });
-  f.library.addResource(resource);
+  return f.library.addResource(resource);
+}
+
+test("white-resource binds and generates from published input_image on an ordinary canvas task", async () => {
+  const f = fixture();
+  const canvas = await f.create("资源画布", "canvas");
+  const taskId = await f.addTask(canvas.id);
+  const resource = await publishedInput(f);
   const bind = (resourceId: string) => f.api.request("POST", `/api/suite-tasks/${taskId}/white-resource`, { headers: { "idempotency-key": `bind-${resourceId}` }, body: { resourceId } });
-  assert.equal((await bind("draft")).status, 403);
   const bound = await bind(resource.id);
   assert.equal(bound.status, 201);
   assert.equal((bound.body as any).data.task.status, "pending");
@@ -127,7 +129,47 @@ test("white-resource binds and generates from published input_image on an ordina
   const [attempt] = board.tasks[0].attempts;
   assert.equal(attempt.status, "succeeded");
   assert.equal(attempt.sourceKind, "library");
-  assert.equal(attempt.sourceResourceVersionId, image.id);
+  assert.equal(attempt.sourceResourceVersionId, resource.resourceVersionId);
   assert.equal(attempt.sourceBaseVersionId, null);
   assert.deepEqual(f.calls.map((call) => call.image), [png]);
+});
+
+test("white-resource rejects unpublished inputs and non-product resources even in the same suite", async () => {
+  const f = fixture();
+  const canvas = await f.create("目标画布", "canvas");
+  const taskId = await f.addTask(canvas.id);
+  const input = await publishedInput(f);
+  const invalid = [
+    f.library.addResource({ ...input, id: "draft", status: "draft" }),
+    f.library.addResource({ ...input, id: "result", suiteId: canvas.id, resourceType: "task_image_version" }),
+  ];
+  for (const { id: resourceId } of invalid) {
+    const res = await f.api.request("POST", `/api/suite-tasks/${taskId}/white-resource`, {
+      headers: { "idempotency-key": `bind-${resourceId}` }, body: { resourceId },
+    });
+    assert.equal(res.status, 403);
+    assert.equal((res.body as any).error.code, "LIBRARY_RESOURCE_FORBIDDEN");
+  }
+  assert.deepEqual(await f.library.listReferences(canvas.id), []);
+  assert.equal((await f.workbench(canvas.id)).tasks[0].status, "incomplete");
+});
+
+test("library references allow only published product images across suites", async () => {
+  const f = fixture();
+  const canvas = await f.create("目标画布", "canvas");
+  const targetId = await f.addTask(canvas.id);
+  const input = await publishedInput(f);
+  const reference = (resourceId: string) => f.library.createReference({
+    suiteId: canvas.id, targetId, targetType: "task", resourceId, idempotencyKey: resourceId,
+  });
+  for (const [resource, message] of [
+    [{ ...input, id: "template", resourceType: "prompt_template", stage: "task_image" }, "LIBRARY_RESOURCE_FORBIDDEN"],
+    [{ ...input, id: "draft", status: "draft" }, "LIBRARY_RESOURCE_NOT_PUBLISHED"],
+  ] as const) {
+    f.library.addResource(resource);
+    await assert.rejects(reference(resource.id), { message });
+  }
+  for (const resource of [input, f.library.addResource({ ...input, id: "base", resourceType: "base_image" })]) {
+    assert.equal((await reference(resource.id)).reference.resourceId, resource.id);
+  }
 });
