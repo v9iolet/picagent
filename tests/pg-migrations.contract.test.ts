@@ -141,6 +141,30 @@ test("all migrations replay without changing data or the listing_copy template s
   });
 });
 
+test("030 idempotently allows commercial selling-point text on ebay and tiktok_shop without affecting other platforms", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const before = await pool.query<{ code: string; text_strategy: string; source_note: string; updated_at: Date }>(
+      "SELECT code, text_strategy, source_note, updated_at FROM suite_workbench.platform_profiles ORDER BY code",
+    );
+    assert.equal(before.rows.length, 16);
+    for (const code of ["ebay", "tiktok_shop"]) {
+      const row = before.rows.find((entry) => entry.code === code)!;
+      assert.match(row.text_strategy, /首图\/主图不添加文字/);
+      assert.match(row.text_strategy, /卖点图与细节副图允许并鼓励使用/);
+      assert.equal(row.source_note.split("[副图卖点文字规范 v1]").length - 1, 1);
+    }
+    for (const row of before.rows.filter((entry) => entry.code !== "ebay" && entry.code !== "tiktok_shop")) {
+      assert.doesNotMatch(row.source_note, /\[副图卖点文字规范 v1\]/);
+    }
+    const migration030 = await readFile("db/migrations/030_platform_detail_selling_point_text.sql", "utf8");
+    await pool.query(migration030);
+    const after = await pool.query<{ code: string; text_strategy: string; source_note: string; updated_at: Date }>(
+      "SELECT code, text_strategy, source_note, updated_at FROM suite_workbench.platform_profiles ORDER BY code",
+    );
+    assert.deepEqual(after.rows, before.rows);
+  });
+});
+
 function runningPipeline(suiteId: string): SuitePipelineRun {
   return {
     id: randomUUID(), suiteId, idempotencyKey: "start", status: "running", currentPhase: "base_refining",

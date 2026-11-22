@@ -1,8 +1,8 @@
 export const DETAIL_CATEGORIES = [
   ["appearance_angles", "多角度外观图"],
   ["lifestyle_use", "生活场景图"],
-  ["feature_benefit", "信息卖点图"],
-  ["material_detail", "细节特写图"],
+  ["feature_benefit", "卖点图 · 功能"],
+  ["material_detail", "卖点图 · 细节"],
   ["comparison", "对比图"],
   ["size_scale", "尺寸规格图"],
   ["included_items", "配件全家福"],

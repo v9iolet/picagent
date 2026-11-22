@@ -901,3 +901,161 @@ test("partial_failed pipeline converges to completed once single-card retry fill
   assert.equal(persisted?.status, "completed");
   assert.equal(persisted?.errorCode, null);
 });
+
+test("smart mode clears leftover sellingPointLayouts and never forwards them to planners", async () => {
+  const planCalls: PlanLlmInput[] = [];
+  const categoryCalls: CategoryPromptLlmInput[] = [];
+  const { app, suite } = await pipelineFixture({
+    beforePlan: (input) => { planCalls.push(input); },
+    beforeCategory: async (_call, input) => { categoryCalls.push(input); },
+  });
+  const started = await start(app, suite.id, "smart-clears-layouts", {
+    ...visualChoices,
+    mode: "smart",
+  });
+  assert.equal(started.status, 202);
+  const done = await waitPipeline(app, suite.id, ["completed"]);
+  assert.deepEqual(done.config.sellingPointLayouts, []);
+  assert.equal(planCalls.length, 1);
+  assert.equal(Object.hasOwn(planCalls[0].dynamicInput, "selling_point_layouts"), false);
+  for (const call of categoryCalls) {
+    assert.equal(Object.hasOwn(call.dynamicInput, "selling_point_layouts"), false);
+  }
+});
+
+test("selling-point categories lift main-image text ban on eBay and provider.edit receives slimmed providerPrompt", async () => {
+  const repository = new MemorySuiteRepository();
+  const storage = new MemoryStorage();
+  const prompts = new MemoryPromptRepository();
+  for (const name of ["general-structure-plan-groups.md", "general-category-prompt-groups.md"]) {
+    const record = parseNormalizedPromptMarkdown(await readFile(new URL(`../prompt/normalized/${name}`, import.meta.url), "utf8"), name);
+    const [version] = await prompts.importRecords([record]);
+    await prompts.publishVersion(version.templateVersionId);
+  }
+  const suite = await repository.createSuite("eBay 卖点直出测试");
+  const bytes = await sharp({ create: { width: 16, height: 16, channels: 3, background: "white" } }).png().toBuffer();
+  const inputId = randomUUID();
+  const originalKey = `suites/${suite.id}/inputs/${inputId}/original`;
+  const thumbKey = `suites/${suite.id}/inputs/${inputId}/thumbnail`;
+  await storage.put({ key: originalKey, bytes, contentType: "image/png" });
+  await storage.put({ key: thumbKey, bytes, contentType: "image/png" });
+  await repository.createInputImage({ id: inputId, suiteId: suite.id, ordinal: 1, originalObjectKey: originalKey, thumbnailObjectKey: thumbKey, sha256: "e".repeat(64), width: 16, height: 16, mimeType: "image/png", originalFilename: "product.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
+
+  const seenCategoryInputs = new Map<string, CategoryPromptLlmInput>();
+  const seenProviderPrompts: string[] = [];
+  const taskRepository = new MemoryTaskRepository();
+  const app = createSuiteStudioApp({
+    repository,
+    storage,
+    promptRepository: prompts,
+    planRepository: new MemoryPlanRepository(),
+    categoryPromptRepository: new MemoryCategoryPromptRepository(),
+    taskRepository,
+    platformRepository: {
+      find: async (code) => ({
+        code,
+        name: "eBay",
+        marketScope: "overseas",
+        mainImageBackground: "pure_white_required",
+        mainImageStrategy: "主图必须使用纯白背景（RGB 255,255,255），商品主体完整清晰，不得添加文字、Logo、水印、边框或装饰。",
+        galleryStrategy: "多角度、细节与卖点",
+        textStrategy: "首图/主图不添加文字、Logo、水印或装饰；卖点图与细节副图允许并鼓励使用清晰、克制、有事实依据的商业卖点标题、图标与标注。",
+        modelStrategy: "",
+        sourceNote: "",
+        sortOrder: 40,
+      }),
+      listEnabled: async () => [],
+    },
+    provider: {
+      async edit(request) {
+        seenProviderPrompts.push(request.prompt);
+        return { bytes, mimeType: "image/png" };
+      },
+    },
+    llmClient: {
+      provider: "fake",
+      model: "fake",
+      isFake: true,
+      async generatePlan() {
+        return {
+          schemaVersion: "suite-structure-plan-v2",
+          status: "READY_FOR_REVIEW",
+          mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [inputId], factRefs: ["human_supplement"], missingFacts: [] },
+          detailImageCount: 2,
+          categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({
+            category,
+            requirement: "optional",
+            count: category === "feature_benefit" || category === "material_detail" ? 1 : 0,
+            reason: "",
+            sourceImageIds: [inputId],
+            factRefs: category === "feature_benefit" || category === "material_detail" ? ["human_supplement"] : [],
+            missingFacts: [],
+          })),
+          globalStyleCard: { promptPrefix: "深空灰蓝金属质感商业棚拍" },
+        };
+      },
+      async generateCategoryPrompt(input) {
+        seenCategoryInputs.set(input.categoryCode, input);
+        return {
+          schemaVersion: "suite-category-prompt-v1",
+          category: input.categoryCode,
+          items: [{
+            stableId: `${input.categoryCode}-1`,
+            category: input.categoryCode,
+            title: input.categoryCode === "main" ? "白底主图" : "卖点直出",
+            purpose: "展示商品",
+            referenceImageIds: [inputId],
+            factRefs: ["human_supplement"],
+            prompt: input.categoryCode === "main" ? "正面平视展示商品主体" : '深蓝撞色商业版式，主标题 "65W Fast Charge"',
+            allowsTextOverlay: input.categoryCode === "main" ? "no" : "yes",
+            textContent: input.categoryCode === "main" ? [] : [{ text: "65W Fast Charge", source: "human_supplement" }, { text: "GaN Tech", source: "human_supplement" }],
+            aspectRatio: input.categoryCode === "main" ? "1:1" : "3:4",
+            suggestedParams: {},
+          }],
+        };
+      },
+    },
+  });
+
+  const started = await start(app, suite.id, "ebay-selling-points", {
+    platform: "ebay",
+    mode: "custom",
+    counts: { main: 1, selling_points: 2, lifestyle: 0, other: 0 },
+    sellingPoints: "65W Fast Charge; GaN Tech; " + "冗余补充信息".repeat(150),
+  });
+  assert.equal(started.status, 202);
+  await waitPipeline(app, suite.id, ["completed"]);
+
+  const fbRule = String(seenCategoryInputs.get("feature_benefit")?.dynamicInput.platform_text_rule);
+  const mdRule = String(seenCategoryInputs.get("material_detail")?.dynamicInput.platform_text_rule);
+  const mainRule = String(seenCategoryInputs.get("main")?.dynamicInput.platform_text_rule);
+  assert.match(fbRule, /卖点图与细节图允许并应呈现.*不得套用首图禁字规则/);
+  assert.match(mdRule, /卖点图与细节图允许并应呈现.*不得套用首图禁字规则/);
+  assert.doesNotMatch(mainRule, /不得套用首图禁字规则/);
+
+  assert.equal(seenProviderPrompts.length, 3);
+  for (const prompt of seenProviderPrompts) {
+    assert.doesNotMatch(prompt, /系统安全约束：/);
+    assert.doesNotMatch(prompt, /商品事实约束：/);
+    assert.doesNotMatch(prompt, /平台约束：/);
+    assert.doesNotMatch(prompt, /单卡人工补充：无/);
+    assert.doesNotMatch(prompt, /冗余补充信息/);
+    assert.match(prompt, /全局风格卡：深空灰蓝金属质感商业棚拍/);
+  }
+  const mainProviderPrompt = seenProviderPrompts.find((p) => p.includes("正面平视展示商品主体"))!;
+  assert.match(mainProviderPrompt, /RGB 255,255,255/);
+  const detailProviderPrompts = seenProviderPrompts.filter((p) => p.includes("65W Fast Charge"));
+  assert.equal(detailProviderPrompts.length, 2);
+  for (const detailPrompt of detailProviderPrompts) {
+    assert.doesNotMatch(detailPrompt, /RGB 255,255,255/);
+    assert.match(detailPrompt, /"GaN Tech"/);
+  }
+
+  const tasks = await taskRepository.listTasks(suite.id);
+  for (const task of tasks) {
+    const { attempts } = await taskRepository.listTaskVersions(task.id);
+    assert.match(String(attempts[0].promptSnapshot.finalPrompt), /系统安全约束：/);
+    assert.ok(typeof attempts[0].promptSnapshot.providerPrompt === "string");
+    assert.doesNotMatch(String(attempts[0].promptSnapshot.providerPrompt), /系统安全约束：/);
+  }
+});

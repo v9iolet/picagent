@@ -20,7 +20,7 @@ import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptS
 import { MemoryCategoryPromptRepository } from "./repositories/memory-category-prompt-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { MemoryPipelineRepository } from "./repositories/memory-pipeline-repository.js";
-import { materializeCategoryPlanItems } from "./suite-task-prompt.js";
+import { buildProviderImagePrompt, materializeCategoryPlanItems } from "./suite-task-prompt.js";
 import {
   applyStyleOverrideToPrompt,
   DELIVERY_EXPORT_PRESETS,
@@ -510,6 +510,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
     const facts = designerFactsText(snapshot.dynamicInput);
     if (facts) universalInput.human_supplement = facts;
+    const isSellingPointCategory = categoryCode === "feature_benefit" || categoryCode === "material_detail";
+    const platformTextRule = isSellingPointCategory
+      ? "卖点图与细节图允许并应呈现清晰、克制、基于已确认事实的商业卖点标题、图标与标注（不得套用首图禁字规则）。"
+      : (snapshot.dynamicInput.platform_text_rule ?? snapshot.dynamicInput.text_strategy ?? "platform rules from confirmed planning input");
+    if (isSellingPointCategory && "text_strategy" in universalInput) {
+      universalInput.text_strategy = platformTextRule;
+    }
     return {
       ...universalInput,
       category_code: categoryCode,
@@ -519,7 +526,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       approved_fact_refs: factRefs,
       approved_facts: snapshot.chunks.filter((chunk) => factRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues })),
       reference_image_ids: sourceImageIds,
-      platform_text_rule: snapshot.dynamicInput.platform_text_rule ?? snapshot.dynamicInput.text_strategy ?? "platform rules from confirmed planning input",
+      platform_text_rule: platformTextRule,
     };
   };
 
@@ -654,13 +661,21 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
       const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import";
       const finalPrompt = shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft;
+      const pureWhiteMain =
+        task.categoryCode === "main" &&
+        (taskPlan?.dynamicInput.main_image_background === "pure_white_required" ||
+          finalPrompt.includes(PURE_WHITE_MAIN_IMAGE_REQUIREMENTS));
+      const providerPrompt = buildProviderImagePrompt(finalPrompt, {
+        categoryCode: task.categoryCode ?? null,
+        pureWhiteMain,
+      });
       const effectiveGlobalStyleCard = shouldApplyStyleOverride
         ? { ...(task.globalStyleCard ?? {}), promptPrefix: activeStyleOverride, overridden: true }
         : (task.globalStyleCard ?? {});
       const effectivePromptSha256 = shouldApplyStyleOverride
         ? createHash("sha256").update(finalPrompt).digest("hex")
         : (task.promptSha256 ?? createHash("sha256").update(finalPrompt).digest("hex"));
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
@@ -703,7 +718,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return;
       }
       if (images.length > 1 && provider.supportsMultipleImages === false) { await deps.taskRepository.failAttempt(attempt.id, "TASK_PROVIDER_MULTI_IMAGE_UNSUPPORTED", "当前图片模型不支持多图输入", finish); return; }
-      const editRequest: Parameters<ImageProvider["edit"]>[0] = { requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality: "medium", n: 1, responseFormat: "b64_json" };
+      const editRequest: Parameters<ImageProvider["edit"]>[0] = { requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.providerPrompt ?? attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality: "medium", n: 1, responseFormat: "b64_json" };
       let generated: Awaited<ReturnType<ImageProvider["edit"]>>;
       try {
         generated = await provider.edit(editRequest);
