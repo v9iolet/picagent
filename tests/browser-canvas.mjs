@@ -170,13 +170,13 @@ test("生图画布：新建、上传、绑定、选择 2K 后用选定尺寸出�
   await page.screenshot({ path: "tests/browser/canvas-list.png" });
 });
 
-test("生图画布：新建任务与检查器仅在选择 4K 时提示耗时和费用", async (t) => {
+test("生图画布：新建任务与检查器仅在选择 4K 时提示耗时、费用和实际像素可能低于标称值", async (t) => {
   const { page, url, calls } = await offlineCanvas(t, ["1K", "4K"]);
   await page.goto(url + "create/canvas");
   await page.getByRole("button", { name: "新建空白画布" }).click();
   await page.getByRole("button", { name: "新建任务卡" }).click();
   const modal = page.getByRole("dialog", { name: "自由新增画布任务卡" });
-  const note = page.getByText("4K 出图更慢，费用更贵。", { exact: true });
+  const note = page.getByText("4K 出图更慢，费用更高，实际像素可能低于 4K 标称值。", { exact: true });
   await modal.getByLabel("任务标题 *", { exact: true }).fill("高分辨率商品图");
   assert.equal(await note.count(), 0);
   await modal.getByRole("combobox", { name: /^分辨率/ }).selectOption("4K");

@@ -275,7 +275,7 @@ test("商品套图：空态、静默草稿、平台联动、七张实图与选�
     "4K",
   ]);
   await page.getByLabel("分辨率", { exact: true }).selectOption("4K");
-  await page.getByText(/4K.*更慢.*更贵/).waitFor();
+  await page.getByText("4K 出图更慢，费用更高，实际像素可能低于 4K 标称值。", { exact: true }).waitFor();
   await page.getByLabel("分辨率", { exact: true }).selectOption("1K");
   await page.getByRole("button", { name: "一键生成套图（7张）", exact: true }).click();
   const batch = page.getByRole("region", { name: "生成批次" });
