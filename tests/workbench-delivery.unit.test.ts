@@ -6,10 +6,31 @@ import {
   computeOutpaintPreviewBox,
   computeWorkbenchLanes,
   evaluateDeliveryCompliance,
+  extractCardPromptPreview,
   resolveDeliverySlots,
   type DeliveryEditChildLike,
   type DeliveryTaskLike,
 } from "../shared/workbench-delivery.js";
+
+test("extractCardPromptPreview shows the category description without repetitive prompt constraints", () => {
+  const description = "用柔和侧光照亮产品\n右侧留出文字区";
+  const prompt = [
+    "系统安全约束：不得生成误导性内容。",
+    "平台约束：按平台规范展示。",
+    "商品事实约束：呈现两个接口。",
+    "全局风格卡：暖色调。",
+    `当前类别提示词：${description}`,
+    "单卡人工补充：无",
+  ].join("\r\n");
+  assert.equal(extractCardPromptPreview(prompt), description);
+  assert.equal(extractCardPromptPreview(`计划说明　当前类别提示词：${description}`), description);
+  assert.equal(extractCardPromptPreview(`系统安全约束：保持真实\n平台约束：禁止促销贴纸\n商品事实约束：两个接口\n全局风格卡：暖色调\n${description}`), description);
+  assert.equal(extractCardPromptPreview("系统安全约束：保持真实", "特写"), "特写");
+  assert.equal(extractCardPromptPreview("系统安全约束：保持真实"), "系统安全约束：保持真实");
+  const handwritten = `  ${description}\n`;
+  assert.equal(extractCardPromptPreview(handwritten), handwritten);
+  assert.equal(extractCardPromptPreview("当前类别提示词：正面主图\n单卡人工补充：保留左侧留白"), "正面主图\n单卡人工补充：保留左侧留白");
+});
 
 test("applyStyleOverrideToPrompt replaces existing global style line idempotently", () => {
   const base = [
@@ -151,7 +172,35 @@ test("computeWorkbenchLanes separates input/task/edit-child lanes without overla
   assert.deepEqual(restored.get("task:1"), { x: 500, y: 120 });
 
   const tidied = computeWorkbenchLanes(items, saved, { ignoreSavedPositions: true });
-  assert.equal(tidied.get("task:1")!.x, 348);
+  assert.deepEqual(tidied.get("task:1"), fresh.get("task:1"));
+});
+
+test("computeWorkbenchLanes leaves clearance around measured cards and a tall style guide", () => {
+  const items = [
+    { id: "style", kind: "style", width: 355, height: 1550 },
+    { id: "input", kind: "base", width: 224, height: 310 },
+    { id: "task-1", kind: "task", width: 320, height: 620 },
+    { id: "task-2", kind: "task", width: 385, height: 520 },
+    { id: "task-3", kind: "task", width: 320, height: 520 },
+    { id: "task-4", kind: "task", width: 320, height: 620 },
+    { id: "edit-1", kind: "edit-child", width: 320, height: 580, parentId: "task-1" },
+    { id: "edit-2", kind: "edit-child", width: 320, height: 570, parentId: "task-2" },
+  ] as const;
+  const measuredSizes = new Map<string, { width: number; height: number }>(items.map(({ id, width, height }) => [id, { width, height }]));
+  const saved = new Map(items.map(({ id }) => [id, { x: 0, y: 0 }]));
+  const positions = computeWorkbenchLanes([...items], saved, { ignoreSavedPositions: true, measuredSizes });
+  const boxes = items.map(({ id, width, height }) => ({ id, ...positions.get(id)!, width, height }));
+  for (const [index, a] of boxes.entries()) {
+    for (const b of boxes.slice(index + 1)) {
+      assert.ok(
+        a.x + a.width + 44 <= b.x || b.x + b.width + 44 <= a.x ||
+        a.y + a.height + 40 <= b.y || b.y + b.height + 40 <= a.y,
+        `${a.id} and ${b.id} must leave clearance`,
+      );
+    }
+  }
+  assert.equal(positions.get("task-3")!.y - positions.get("task-1")!.y, 660);
+  assert.equal(positions.get("task-4")!.y - positions.get("task-2")!.y, 560);
 });
 
 test("computeLineageHighlight traverses both upstream sources and downstream derived children", () => {

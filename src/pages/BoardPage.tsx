@@ -1,5 +1,5 @@
-import { WorkbenchBoardPage } from "./WorkbenchBoardPage";
+import { WorkbenchBoardPage, type WorkbenchBoardPageProps } from "./WorkbenchBoardPage";
 
-export function BoardPage(props: { suiteId: string; navigate: (to: string) => void }) {
+export function BoardPage(props: WorkbenchBoardPageProps) {
   return <WorkbenchBoardPage {...props} />;
 }

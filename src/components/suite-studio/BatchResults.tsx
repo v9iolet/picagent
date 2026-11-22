@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
-import { suiteApi, type ApiPlatformProfile, type ApiWorkbench } from "../../api/client";
+import { suiteApi, type ApiPlatformProfile } from "../../api/client";
 import { SUITE_CATEGORY_GROUPS, SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
 import { pipelineErrorMessages } from "../../../shared/suite-pipeline-errors";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
-import { DeliveryGalleryView } from "../DeliveryGalleryView";
 import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
 import { EditTextDialog, StudioDialog } from "./StudioDialog";
@@ -103,8 +102,7 @@ export function BatchResults({
     [notice, setNotice] = useState(""),
     [supplement, setSupplement] = useState("");
   const [preview, setPreview] = useState<{ url: string; title: string } | null>(null),
-    [edit, setEdit] = useState<ResolvedDeliverySlot | null>(null),
-    [gallery, setGallery] = useState<ApiWorkbench | null>(null);
+    [edit, setEdit] = useState<ResolvedDeliverySlot | null>(null);
   const [editJob, setEditJob] = useState(""),
     [retryJob, setRetryJob] = useState(""),
     [retrySize, setRetrySize] = useState<Record<string, string>>({});
@@ -202,7 +200,7 @@ export function BatchResults({
                 重命名
               </button>
               <button onClick={() => navigate(`/create/canvas/${id}`)}>进入创作板精修</button>
-              <button onClick={() => void act(async () => setGallery(await suiteApi.getWorkbench(id)))}>
+              <button onClick={() => navigate(`/create/canvas/${id}?view=gallery`)}>
                 货架预览导出
               </button>
               <button
@@ -397,18 +395,6 @@ export function BatchResults({
         </p>
       )}
       {showListingCopy && <ListingCopyDrawer state={s} profiles={profiles} close={() => setShowListingCopy(false)} />}
-      {gallery && (
-        <StudioDialog title="货架预览导出" wide close={() => setGallery(null)}>
-          <DeliveryGalleryView
-            workbench={gallery}
-            effectiveStyleGuide={gallery.effectiveStyleGuide ?? gallery.suite.styleOverride ?? ""}
-            onPreview={(card) => {
-              if (card.previewUrl) setPreview({ title: card.title, url: card.previewUrl });
-            }}
-            onNotify={setNotice}
-          />
-        </StudioDialog>
-      )}
       {preview && (
         <StudioDialog title={preview.title} close={() => setPreview(null)}>
           <img className="ss-zoom" src={preview.url} alt={preview.title} />

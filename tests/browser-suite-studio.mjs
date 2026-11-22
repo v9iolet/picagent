@@ -241,7 +241,7 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
   return { url: vite.resolvedUrls.local[0], calls, close: () => vite.close() };
 }
 
-test("商品套图：空态、静默草稿、平台联动、七张实图与选中 ZIP", async (t) => {
+test("商品套图：空态、静默草稿、平台联动、七张实图、选中 ZIP 与全屏交付入口", async (t) => {
   const fixture = await offlineStudio();
   t.after(fixture.close);
   const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
@@ -367,6 +367,18 @@ test("商品套图：空态、静默草稿、平台联动、七张实图与选�
   await platform.selectOption({ label: "eBay" });
   await overseasHint.waitFor({ state: "visible" });
   assert.equal(await page.getByLabel("白底主图张数", { exact: true }).textContent(), "1");
+  await batch.getByRole("button", { name: "批次菜单" }).click();
+  await batch.getByRole("button", { name: "货架预览导出" }).click();
+  await page.waitForURL(`**/create/canvas/${suiteId}?view=gallery`);
+  await page.getByRole("tab", { name: "成品展示板", selected: true }).waitFor();
+  const gallery = page.getByRole("region", { name: "成品交付视图" });
+  await gallery.getByRole("button", { name: "一键打包下载 ZIP (7)", exact: true }).waitFor();
+  assert.equal(await page.getByRole("dialog").count(), 0);
+  await page.getByRole("button", { name: "返回套图", exact: true }).click();
+  await page.waitForURL(`**/create/suite/${suiteId}`);
+  await batch.locator('[data-status="completed"]').waitFor();
+  await page.goBack();
+  await page.getByRole("tab", { name: "成品展示板", selected: true }).waitFor();
   await page.goto(fixture.url + "settings");
   await page.getByRole("button", { name: "编辑 离线测试", exact: true }).click();
   await page.getByLabel("生图", { exact: true }).uncheck();

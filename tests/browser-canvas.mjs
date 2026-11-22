@@ -96,6 +96,181 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
   return { api, calls, url, page };
 }
 
+const cardDescription = "用柔和侧光照亮商品，保留右侧留白。";
+const longStyle = "保留商品轮廓与材质，以柔和侧光展示真实质感。".repeat(110);
+
+async function seedGeneratedCanvas(api, taskCount) {
+  const created = await api.request("POST", "/api/suites", { body: { name: "桌面交付测试", origin: "canvas" } });
+  assert.equal(created.status, 201);
+  const suiteId = created.body.data.id;
+  const upload = await api.upload(suiteId, { filename: "产品.jpg", mimeType: "image/jpeg", bytes: await readFile("public/assets/gan65-product.jpg") });
+  assert.equal(upload.status, 201);
+  const inputId = upload.body.data.id;
+  const tasks = [];
+  for (let index = 0; index < taskCount; index++) {
+    const result = await api.request("POST", `/api/suites/${suiteId}/tasks/custom`, {
+      body: {
+        imageType: index === 0 ? "main" : "detail",
+        title: `商品视图 ${index + 1}`,
+        sourceInputImageId: inputId,
+        promptDraft: `系统安全约束：保持商品真实。\n当前类别提示词：${cardDescription}\n单卡人工补充：无`,
+      },
+    });
+    assert.equal(result.status, 201);
+    tasks.push(result.body.data.id);
+  }
+  const generation = await api.request("POST", `/api/suites/${suiteId}/generation`, { headers: { "idempotency-key": "fixture-generation" } });
+  assert.equal(generation.status, 202);
+  const batchId = generation.body.data.batchId;
+  let status;
+  for (let attempt = 0; attempt < 150; attempt++) {
+    const result = await api.request("GET", `/api/generation-batches/${batchId}`);
+    assert.equal(result.status, 200);
+    status = result.body.data.batch.status;
+    if (status === "completed") break;
+    assert.equal(status, "running");
+    await setTimeout(25);
+  }
+  assert.equal(status, "completed");
+  const style = await api.request("PATCH", `/api/suites/${suiteId}/style-override`, {
+    headers: { "idempotency-key": "fixture-style" }, body: { styleOverride: longStyle },
+  });
+  assert.equal(style.status, 200);
+  return { suiteId, inputId, tasks };
+}
+
+function assertDisjoint(boxes, group) {
+  for (const [index, a] of boxes.entries()) {
+    assert.ok(a, `${group} ${index} has a bounding box`);
+    for (const [offset, b] of boxes.slice(index + 1).entries()) {
+      assert.ok(b);
+      assert.ok(a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y,
+        `${group} ${index} and ${index + offset + 1} overlap`);
+    }
+  }
+}
+
+test("成品展示板：直达链接、折叠并复制冻结快照、窄桌面工具栏无溢出", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId } = await seedGeneratedCanvas(api, 2);
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { value: { async writeText(value) { window.copiedSnapshot = value; } } });
+  });
+  const workbench = await api.request("GET", `/api/suites/${suiteId}/workbench`);
+  const frozenPrompt = workbench.body.data.tasks.find((task) => task.imageType === "main").versions[0].promptSnapshot.finalPrompt;
+  assert.match(frozenPrompt, /系统安全约束：保持商品真实/);
+  await page.goto(url + `create/canvas/${suiteId}?view=gallery`);
+  await page.getByRole("tab", { name: "成品展示板", selected: true }).waitFor();
+  const gallery = page.getByRole("region", { name: "成品交付视图" });
+  await gallery.waitFor();
+  assert.equal(await page.getByRole("dialog").count(), 0);
+  const inspector = gallery.getByRole("complementary", { name: "交付坑位只读详情" });
+  const snapshot = inspector.locator("pre");
+  assert.equal(await snapshot.count(), 1);
+  assert.equal(await snapshot.isVisible(), false);
+  assert.equal(await inspector.getByText("模板版本", { exact: true }).isVisible(), false);
+  const style = gallery.getByText(longStyle, { exact: true });
+  assert.equal(await style.count(), 1);
+  assert.equal(await style.isVisible(), false);
+  await gallery.getByText("当前生效全局风格", { exact: true }).click();
+  await style.waitFor({ state: "visible" });
+  await gallery.getByText("当前生效全局风格", { exact: true }).click();
+  await inspector.getByText("冻结提示词快照（只读）", { exact: true }).click();
+  await snapshot.waitFor({ state: "visible" });
+  await inspector.getByText("模板版本", { exact: true }).waitFor();
+  assert.equal(await snapshot.textContent(), frozenPrompt);
+  await inspector.getByRole("button", { name: "复制提示词", exact: true }).click();
+  assert.equal(await page.evaluate(() => window.copiedSnapshot), frozenPrompt);
+
+  await gallery.locator(".dg-export-field select").nth(1).selectOption("jpeg");
+  for (const width of [1920, 1440, 1280, 1180, 1024, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    const galleryBox = await gallery.boundingBox();
+    assert.ok(galleryBox.x + galleryBox.width <= width + 1, `gallery exceeds ${width}px viewport`);
+    for (const [container, children] of [[".dg-toolbar", "button"], [".dg-export-bar", ":scope > *"]]) {
+      const region = gallery.locator(container);
+      const boundary = await region.boundingBox();
+      assert.ok(boundary.x + boundary.width <= width + 1, `${container} exceeds ${width}px viewport`);
+      const boxes = await Promise.all((await region.locator(children).all()).map((item) => item.boundingBox()));
+      assert.equal(boxes.length, 5);
+      assertDisjoint(boxes, `${container} at ${width}px`);
+      for (const box of boxes) {
+        assert.ok(box.x >= boundary.x - 1 && box.x + box.width <= boundary.x + boundary.width + 1,
+          `${container} control overflows at ${width}px`);
+      }
+      assert.equal(await region.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), true);
+    }
+    const hero = gallery.getByRole("region", { name: "主图轮播预览" });
+    assert.equal(await hero.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), true);
+  }
+  const mainBox = await gallery.locator(".dg-main").boundingBox();
+  const inspectorBox = await inspector.boundingBox();
+  assert.ok(mainBox.y + mainBox.height <= inspectorBox.y, "窄屏下检查器排列在内容区之后");
+  await page.getByRole("button", { name: "返回画布列表", exact: true }).click();
+  await page.waitForURL("**/create/canvas");
+  await page.getByRole("list", { name: "画布列表" }).getByRole("link", { name: /桌面交付测试/ }).waitFor();
+});
+
+test("创作画布：任务摘要显示核心提示词，整理后所有卡片零重叠且连线可辨", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId, inputId, tasks } = await seedGeneratedCanvas(api, 5);
+  const layoutPath = `/api/suites/${suiteId}/workbench/layout`;
+  const initialLayout = await api.request("PATCH", layoutPath, {
+    body: {
+      layoutVersion: 0, viewport: { x: 0, y: 0, zoom: 0.5 }, groups: [],
+      nodes: ["style:global", `input:${inputId}`, ...tasks.map((id) => `task:${id}`)].map((nodeId, index) => ({ nodeId, x: 100 + index * 20, y: 150 })),
+    },
+  });
+  assert.equal(initialLayout.status, 200);
+  await page.goto(url + `create/canvas/${suiteId}`);
+  const nodes = page.locator(".react-flow__node");
+  await page.locator(".wb-task-card").last().waitFor();
+  assert.equal(await nodes.count(), 7);
+  const cards = page.locator(".wb-task-prompt");
+  const previews = await cards.allTextContents();
+  assert.equal(previews.length, 5);
+  for (const text of previews) assert.ok(text === cardDescription, "卡片仅显示核心画面描述");
+  assert.equal(await page.locator(".wb-task-stats").first().getByText(`${cardDescription.length} 字`, { exact: true }).count(), 1);
+  assert.match(await page.getByRole("textbox", { name: "提示词草稿", exact: true }).inputValue(), /系统安全约束/);
+
+  const edgePath = (taskId) => page.getByTestId(`rf__edge-input:${inputId}->task:${taskId}`).locator(".react-flow__edge-path");
+  const edgeStyle = (edge) => edge.evaluate((path) => {
+    const style = getComputedStyle(path);
+    return [style.stroke, style.strokeWidth, style.opacity];
+  });
+  await edgePath(tasks[0]).waitFor({ state: "attached" });
+  assert.deepEqual(await edgeStyle(edgePath(tasks[0])), ["rgb(100, 116, 139)", "1.8px", "0.85"]);
+
+  const styleNode = nodes.filter({ has: page.getByRole("heading", { name: "全局风格卡", exact: true }) });
+  const styleHeight = await styleNode.evaluate((node) => node.offsetHeight);
+  assert.ok(styleHeight > 540);
+  const saved = page.waitForResponse((response) => response.url().endsWith(layoutPath) && response.request().method() === "PATCH");
+  await page.getByRole("button", { name: "一键整理布局" }).click();
+  const response = await saved;
+  assert.equal(response.status(), 200);
+  const savedNodes = (await response.json()).data.nodes;
+  const styleY = savedNodes.find((node) => node.nodeId === "style:global").y;
+  const inputY = savedNodes.find((node) => node.nodeId === `input:${inputId}`).y;
+  assert.equal(inputY - styleY, styleHeight + 40);
+  await page.getByText("已按三泳道自动整理画布布局", { exact: true }).waitFor();
+  await page.waitForFunction(() => {
+    const canvas = document.querySelector(".wb-canvas").getBoundingClientRect();
+    const cards = [...document.querySelectorAll(".react-flow__node")];
+    return cards.length === 7 && cards.every((card) => {
+      const box = card.getBoundingClientRect();
+      return box.left >= canvas.left && box.right <= canvas.right && box.top >= canvas.top && box.bottom <= canvas.bottom;
+    });
+  });
+  assertDisjoint(await Promise.all((await nodes.all()).map((node) => node.boundingBox())), "整理后的画布卡片");
+  await page.getByRole("heading", { name: "商品视图 1", exact: true }).click();
+  assert.deepEqual(await edgeStyle(edgePath(tasks[0])), ["rgb(37, 99, 235)", "2.6px", "1"]);
+  assert.equal((await edgeStyle(edgePath(tasks[1])))[2], "0.28");
+  await page.reload();
+  await page.locator(".wb-task-card").last().waitFor();
+  assert.equal(await nodes.count(), 7);
+  assertDisjoint(await Promise.all((await nodes.all()).map((node) => node.boundingBox())), "重新打开后的画布卡片");
+});
+
 test("生图画布：新建、上传、绑定、选择 2K 后用选定尺寸出图", async (t) => {
   const { api, calls, url, page } = await offlineCanvas(t);
   await page.goto(url + "create/suite");
