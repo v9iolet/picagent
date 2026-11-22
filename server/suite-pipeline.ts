@@ -613,7 +613,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
     const suite = await deps.repository.getSuite(suiteId);
     if (!suite) return fail("INVALID_SUITE_ID", 404);
-    const [inputImages, pipeline, snapshot, tasks, batches, slots] = await Promise.all([
+    const [inputImages, latestPipeline, snapshot, tasks, batches, slots] = await Promise.all([
       deps.repository.getInputImages(suite.id),
       pipelineRepository.getLatestRun(suite.id),
       deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null),
@@ -637,6 +637,32 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     const cards = resolveDeliverySlots(taskAggregates, imageEditChildren, {
       defaultTemplateVersionId: snapshot?.templateVersionId ?? null,
     });
+    let pipeline = latestPipeline;
+    if (
+      pipeline &&
+      (pipeline.status === "partial_failed" || pipeline.status === "failed") &&
+      cards.length > 0 &&
+      cards.every((card) => card.sourceRole !== "pending")
+    ) {
+      const convergedAt = now();
+      const updated = await pipelineRepository.updateRun(pipeline.id, {
+        status: "completed",
+        currentPhase: "done",
+        errorCode: null,
+        errorMessage: null,
+        updatedAt: convergedAt,
+        completedAt: pipeline.completedAt ?? convergedAt,
+      });
+      pipeline = updated ?? {
+        ...pipeline,
+        status: "completed",
+        currentPhase: "done",
+        errorCode: null,
+        errorMessage: null,
+        updatedAt: convergedAt,
+        completedAt: pipeline.completedAt ?? convergedAt,
+      };
+    }
     const otherLimit =
       pipeline?.config && typeof pipeline.config === "object"
         ? pipeline.config.mode === "smart"

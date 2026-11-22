@@ -215,16 +215,27 @@ export function BatchResults({
     slots = s.cards,
     ready = slots.filter((x) => x.previewUrl),
     total = slots.length || totalImages(c);
+  const convergedComplete =
+    !running &&
+    slots.length > 0 &&
+    ready.length === slots.length &&
+    (run?.status === "partial_failed" || run?.status === "failed");
+  const effectiveStatus = convergedComplete ? "completed" : run?.status;
+  const effectiveRun = convergedComplete && run
+    ? { ...run, status: "completed" as const, errorCode: null, errorMessage: null }
+    : run;
   const progressModel = showProgress
-    ? buildProgressModel(run, s.listingCopy, c.listingCopy, s.progress.completed, total)
+    ? buildProgressModel(effectiveRun, s.listingCopy, c.listingCopy, s.progress.completed, total)
     : null;
-  const persistedMessage = run?.errorMessage?.trim();
-  const errorMessage = persistedMessage && !/^[A-Z][A-Z0-9_]*$/.test(persistedMessage)
-    ? persistedMessage
-    : run && (run.errorCode || persistedMessage)
-      ? pipelineErrorMessages[run.errorCode ?? persistedMessage ?? ""] ??
-        pipelineErrorMessages[phaseErrors[run.currentPhase]] ?? pipelineErrorMessages.PIPELINE_FAILED
-      : null;
+  const persistedMessage = convergedComplete ? "" : run?.errorMessage?.trim();
+  const errorMessage = convergedComplete
+    ? null
+    : persistedMessage && !/^[A-Z][A-Z0-9_]*$/.test(persistedMessage)
+      ? persistedMessage
+      : run && (run.errorCode || persistedMessage)
+        ? pipelineErrorMessages[run.errorCode ?? persistedMessage ?? ""] ??
+          pipelineErrorMessages[phaseErrors[run.currentPhase]] ?? pipelineErrorMessages.PIPELINE_FAILED
+        : null;
   const [picked, setPicked] = useState<string[]>([]),
     [menu, setMenu] = useState(false),
     [busy, setBusy] = useState(false),
@@ -291,11 +302,11 @@ export function BatchResults({
             {new Date(s.suite.createdAt).toLocaleString()} · {slots.length} 张结果
           </small>
         </div>
-        <span data-status={run?.status ?? "historical"} className="ss-status">
+        <span data-status={effectiveStatus ?? "historical"} className="ss-status">
           {running && <span className="ss-status-dot" aria-hidden="true" />}
           {running
             ? runningBadgeText(run.currentPhase, s.progress.completed, total)
-            : (statuses[run?.status ?? ""] ?? "历史批次")}
+            : (statuses[effectiveStatus ?? ""] ?? "历史批次")}
         </span>
         {(listingCopyStatus === "running" ||
           listingCopyStatus === "succeeded" ||
@@ -454,7 +465,7 @@ export function BatchResults({
           )}
         </div>
       )}
-      {run?.errorCode === "PIPELINE_INTERRUPTED" && (
+      {!convergedComplete && run?.errorCode === "PIPELINE_INTERRUPTED" && (
         <button disabled={busy} onClick={() => resume("resume_after_interrupt")}>
           继续中断的批次
         </button>

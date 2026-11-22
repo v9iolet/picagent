@@ -395,7 +395,9 @@ function llmSource(client: LlmClient) {
   return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };
 }
 
-export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> } }): SuiteStudioApp {
+export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
+  const imageGenerationConcurrency = Math.max(1, Math.floor(Number.isFinite(deps.imageGenerationConcurrency) ? deps.imageGenerationConcurrency! : 3));
+  const imageRetryDelayMs = Math.max(0, Math.floor(Number.isFinite(deps.imageRetryDelayMs) ? deps.imageRetryDelayMs! : 1500));
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
   const resolveImage = async () => {
     const selected = await resolveModel("image");
@@ -662,9 +664,29 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
-      for (const attempt of attempts) void executeTaskAttempt(attempt, tasks.find((task) => task.id === attempt.contextSnapshot.suiteTaskId) ?? tasks[attempts.indexOf(attempt)], slots.find((slot) => slot.id === attempt.slotId)!, provider);
+      const jobs = attempts.map((attempt, index) => ({
+        attempt,
+        task: tasks.find((task) => task.id === attempt.contextSnapshot.suiteTaskId) ?? tasks[index],
+        slot: slots.find((slot) => slot.id === attempt.slotId)!,
+      }));
+      let cursor = 0;
+      const workerCount = Math.min(imageGenerationConcurrency, jobs.length);
+      for (let worker = 0; worker < workerCount; worker += 1) {
+        void (async () => {
+          while (cursor < jobs.length) {
+            const job = jobs[cursor++];
+            await executeTaskAttempt(job.attempt, job.task, job.slot, provider);
+          }
+        })();
+      }
     }
     return reservation;
+  };
+
+  const classifyTaskImageError = (error: unknown) => {
+    if (error instanceof Error && error.message === "IMAGE_SIZE_UNSUPPORTED") return "IMAGE_SIZE_UNSUPPORTED";
+    if (error instanceof Error && error.message.includes("TIMEOUT")) return "TASK_IMAGE_PROVIDER_TIMEOUT";
+    return "TASK_IMAGE_PROVIDER_FAILED";
   };
 
   const executeTaskAttempt = async (attempt: TaskGenerationAttempt, task: SuiteTask, slot: TaskResultSlot, provider: ImageProvider | undefined) => {
@@ -681,14 +703,46 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return;
       }
       if (images.length > 1 && provider.supportsMultipleImages === false) { await deps.taskRepository.failAttempt(attempt.id, "TASK_PROVIDER_MULTI_IMAGE_UNSUPPORTED", "当前图片模型不支持多图输入", finish); return; }
-      const generated = await provider.edit({ requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality: "medium", n: 1, responseFormat: "b64_json" });
+      const editRequest: Parameters<ImageProvider["edit"]>[0] = { requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality: "medium", n: 1, responseFormat: "b64_json" };
+      let generated: Awaited<ReturnType<ImageProvider["edit"]>>;
+      try {
+        generated = await provider.edit(editRequest);
+      } catch (firstError) {
+        const firstCode = classifyTaskImageError(firstError);
+        if (firstCode !== "TASK_IMAGE_PROVIDER_FAILED" && firstCode !== "TASK_IMAGE_PROVIDER_TIMEOUT") {
+          throw firstError;
+        }
+        if (imageRetryDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, imageRetryDelayMs));
+        }
+        generated = await provider.edit(editRequest);
+      }
       const processed = await processGeneratedImage(generated.bytes);
       const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
       await deps.storage.put({ key: objectKey, bytes: processed.bytes, contentType: processed.mimeType });
       await deps.taskRepository.completeAttempt({ attemptId: attempt.id, slotId: slot.id, taskId: task.id, objectKey, processObjectKeys: [], sha256: processed.sha256, width: processed.width, height: processed.height, mimeType: processed.mimeType, completedAt: new Date().toISOString() });
+      const latestRun = await pipelineRepository.getLatestRun(task.suiteId);
+      if (latestRun && (latestRun.status === "partial_failed" || latestRun.status === "failed")) {
+        const activeTasks = (await deps.taskRepository.listTasks(task.suiteId)).filter((item) => item.status !== "archived");
+        if (activeTasks.length > 0) {
+          const histories = await Promise.all(activeTasks.map((item) => deps.taskRepository!.listTaskVersions(item.id)));
+          if (histories.every((history) => history.versions.some((version) => version.isCurrent))) {
+            const convergedAt = new Date().toISOString();
+            await pipelineRepository.updateRun(latestRun.id, {
+              status: "completed",
+              currentPhase: "done",
+              errorCode: null,
+              errorMessage: null,
+              updatedAt: convergedAt,
+              completedAt: latestRun.completedAt ?? convergedAt,
+            });
+          }
+        }
+      }
     } catch (error) {
-      const code = error instanceof Error && error.message === "IMAGE_SIZE_UNSUPPORTED" ? "IMAGE_SIZE_UNSUPPORTED" : error instanceof Error && error.message.includes("TIMEOUT") ? "TASK_IMAGE_PROVIDER_TIMEOUT" : "TASK_IMAGE_PROVIDER_FAILED";
-      await deps.taskRepository.failAttempt(attempt.id, code, errorMessages[code], new Date().toISOString()).catch(() => undefined);
+      const code = classifyTaskImageError(error);
+      const errorMessage = errorMessages[code] ?? (code === "TASK_IMAGE_PROVIDER_TIMEOUT" ? errorMessages.IMAGE_PROVIDER_TIMEOUT : errorMessages.TASK_IMAGE_PROVIDER_FAILED);
+      await deps.taskRepository.failAttempt(attempt.id, code, errorMessage, new Date().toISOString()).catch(() => undefined);
     }
   };
 

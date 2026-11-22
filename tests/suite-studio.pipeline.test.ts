@@ -30,6 +30,9 @@ async function pipelineFixture(options: {
   maxMissingFacts?: boolean;
   providerFails?: boolean;
   beforeImage?: (call: number) => Promise<void>;
+  providerEdit?: (call: number, defaultResult: { bytes: Buffer; mimeType: string }) => Promise<{ bytes: Buffer; mimeType: string }>;
+  imageGenerationConcurrency?: number;
+  imageRetryDelayMs?: number;
   beforeCategory?: (call: number, input: CategoryPromptLlmInput) => Promise<void>;
   structureTemplate?: string;
   beforePlan?: (input: PlanLlmInput) => void;
@@ -75,8 +78,11 @@ async function pipelineFixture(options: {
   const createApp = () => createSuiteStudioApp({
     repository, storage, pipelineRepository: pipeline, promptRepository: prompts,
     planRepository, categoryPromptRepository, taskRepository,
+    imageGenerationConcurrency: options.imageGenerationConcurrency,
+    imageRetryDelayMs: options.imageRetryDelayMs ?? 0,
     provider: { async edit() {
       providerCalls += 1;
+      if (options.providerEdit) return options.providerEdit(providerCalls, { bytes, mimeType: "image/png" });
       await options.beforeImage?.(providerCalls);
       if (providerFails) throw new Error("IMAGE_PROVIDER_FAILED");
       return { bytes, mimeType: "image/png" };
@@ -599,7 +605,10 @@ test("category_prompting restart reuses the confirmed snapshot after an in-fligh
 
 test("image_generating restart completes a partial batch by rendering only the missing card", async (t) => {
   const secondImage = Promise.withResolvers<void>();
-  const fixture = await pipelineFixture({ beforeImage: async (call) => { if (call === 2) await secondImage.promise; } });
+  const fixture = await pipelineFixture({ beforeImage: async (call) => {
+    if (call === 2) await secondImage.promise;
+    if (call === 3) throw new Error("provider disconnected");
+  } });
   const { app, suite, taskRepository } = fixture;
   const oldPoll = t.mock.method(taskRepository, "getBatch", stopped);
   assert.equal((await start(app, suite.id, "image-interrupt", twoCards)).status, 202);
@@ -642,14 +651,14 @@ test("image_generating restart completes a partial batch by rendering only the m
 test("current task versions distinguish partial from complete image failure and preserve attempt errors", async () => {
   for (const expected of ["partial_failed", "failed"]) {
     const fixture = await pipelineFixture({ beforeImage: async (call) => {
-      if (call === 2 || expected === "failed") throw new Error("image failure");
+      if (call >= 2 || expected === "failed") throw new Error("image failure");
     } });
     assert.equal((await start(fixture.app, fixture.suite.id, "failed-images", twoCards)).status, 202);
     const done = await waitPipeline(fixture.app, fixture.suite.id, [expected]);
     assert.equal(done.errorCode, "TASK_IMAGE_PROVIDER_FAILED");
     assert.equal(done.errorMessage, "套图图片生成失败");
     assert.equal(done.taskIds.length, 2);
-    assert.equal(fixture.providerCallCount(), 2);
+    assert.equal(fixture.providerCallCount(), expected === "failed" ? 4 : 3);
   }
 });
 
@@ -773,4 +782,122 @@ test("waitUntil backs off progressively and throws PIPELINE_TIMEOUT when expired
     /PIPELINE_TIMEOUT/,
   );
   assert.ok(timeoutCalls >= 2 && timeoutCalls <= 8, `expected bounded backoff polls, got ${timeoutCalls}`);
+});
+
+test("batch image generation enforces configured concurrency ceiling across six cards", async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fixture = await pipelineFixture({
+    imageGenerationConcurrency: 2,
+    imageRetryDelayMs: 0,
+    providerEdit: async (_call, defaultResult) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return defaultResult;
+      } finally {
+        inFlight -= 1;
+      }
+    },
+  });
+  const sixCards = { platform: "淘宝", mode: "custom", counts: { main: 2, selling_points: 4, lifestyle: 0, other: 0 } };
+  assert.equal((await start(fixture.app, fixture.suite.id, "concurrency-cap-6", sixCards)).status, 202);
+  const done = await waitPipeline(fixture.app, fixture.suite.id, ["completed"]);
+  assert.equal(done.status, "completed");
+  assert.equal(fixture.providerCallCount(), 6);
+  assert.equal(maxInFlight, 2);
+  const state = await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/studio-state`);
+  assert.equal(state.status, 200);
+  assert.equal((state.body as any).data.cards.length, 6);
+});
+
+test("transient image provider failures retry once while IMAGE_SIZE_UNSUPPORTED fails immediately", async () => {
+  const retryTimes: number[] = [];
+  const transientFailed = await pipelineFixture({
+    imageRetryDelayMs: 15,
+    providerEdit: async (call, defaultResult) => {
+      retryTimes.push(Date.now());
+      if (call === 1) throw new Error("IMAGE_PROVIDER_FAILED");
+      return defaultResult;
+    },
+  });
+  assert.equal((await start(transientFailed.app, transientFailed.suite.id, "retry-transient-fail", oneCard)).status, 202);
+  const recovered = await waitPipeline(transientFailed.app, transientFailed.suite.id, ["completed"]);
+  assert.equal(recovered.status, "completed");
+  assert.equal(transientFailed.providerCallCount(), 2);
+  assert.ok(retryTimes[1] - retryTimes[0] >= 10, `expected retry delay >= 10ms, got ${retryTimes[1] - retryTimes[0]}ms`);
+
+  const transientTimeout = await pipelineFixture({
+    imageRetryDelayMs: 0,
+    providerEdit: async (call, defaultResult) => {
+      if (call === 1) throw new Error("IMAGE_PROVIDER_TIMEOUT");
+      return defaultResult;
+    },
+  });
+  assert.equal((await start(transientTimeout.app, transientTimeout.suite.id, "retry-transient-timeout", oneCard)).status, 202);
+  const timeoutRecovered = await waitPipeline(transientTimeout.app, transientTimeout.suite.id, ["completed"]);
+  assert.equal(timeoutRecovered.status, "completed");
+  assert.equal(transientTimeout.providerCallCount(), 2);
+
+  const unsupportedSize = await pipelineFixture({
+    imageRetryDelayMs: 0,
+    providerEdit: async () => {
+      throw new Error("IMAGE_SIZE_UNSUPPORTED");
+    },
+  });
+  assert.equal((await start(unsupportedSize.app, unsupportedSize.suite.id, "no-retry-size", oneCard)).status, 202);
+  const failed = await waitPipeline(unsupportedSize.app, unsupportedSize.suite.id, ["failed"]);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.errorCode, "IMAGE_SIZE_UNSUPPORTED");
+  assert.equal(unsupportedSize.providerCallCount(), 1);
+});
+
+test("partial_failed pipeline converges to completed once single-card retry fills all cards", async () => {
+  const fixture = await pipelineFixture({
+    imageRetryDelayMs: 0,
+    providerEdit: async (call, defaultResult) => {
+      if (call === 2 || call === 3) throw new Error("IMAGE_PROVIDER_FAILED");
+      return defaultResult;
+    },
+  });
+  assert.equal((await start(fixture.app, fixture.suite.id, "partial-then-retry", twoCards)).status, 202);
+  const partial = await waitPipeline(fixture.app, fixture.suite.id, ["partial_failed"]);
+  assert.equal(partial.status, "partial_failed");
+  assert.equal(partial.errorCode, "TASK_IMAGE_PROVIDER_FAILED");
+
+  const beforeRetryState = await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/studio-state`);
+  assert.equal(beforeRetryState.status, 200);
+  const pendingCard = (beforeRetryState.body as any).data.cards.find((card: any) => card.sourceRole === "pending");
+  assert.ok(pendingCard);
+
+  const retried = await fixture.app.request("POST", `/api/suite-tasks/${pendingCard.parentTaskId}/generation`, {
+    headers: { "Idempotency-Key": "single-card-retry-converge" },
+  });
+  assert.equal(retried.status, 202);
+  const retryBatchId = (retried.body as any).data.batchId;
+  await eventually(async () => (await fixture.taskRepository.getBatch(retryBatchId))?.status === "completed");
+
+  const afterRetryState = await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/studio-state`);
+  assert.equal(afterRetryState.status, 200);
+  assert.equal((afterRetryState.body as any).data.pipeline.status, "completed");
+  assert.equal((afterRetryState.body as any).data.pipeline.currentPhase, "done");
+  assert.equal((afterRetryState.body as any).data.pipeline.errorCode, null);
+  assert.equal((afterRetryState.body as any).data.pipeline.errorMessage, null);
+  assert.ok((afterRetryState.body as any).data.cards.every((card: any) => card.sourceRole !== "pending"));
+
+  // Also verify getStudioState directly converges a persisted stale partial_failed run when all cards are ready.
+  await fixture.pipeline.updateRun(partial.id, {
+    status: "partial_failed",
+    errorCode: "TASK_IMAGE_PROVIDER_FAILED",
+    errorMessage: "套图图片生成失败",
+  });
+  const convergedState = await fixture.app.request("GET", `/api/suites/${fixture.suite.id}/studio-state`);
+  assert.equal(convergedState.status, 200);
+  assert.equal((convergedState.body as any).data.pipeline.status, "completed");
+  assert.equal((convergedState.body as any).data.pipeline.errorCode, null);
+  assert.equal((convergedState.body as any).data.pipeline.errorMessage, null);
+  const persisted = await fixture.pipeline.getRun(partial.id);
+  assert.equal(persisted?.status, "completed");
+  assert.equal(persisted?.errorCode, null);
 });

@@ -19,7 +19,7 @@ import { DETAIL_CATEGORIES } from "../shared/suite-categories.js";
 const PHOTO_PATH = "public/assets/gan65-product.jpg";
 const LAST_SUITE_STORAGE_KEY = "picagent:suite-studio:last-suite-id";
 
-async function offlineProgressFixture(t, { imageGate, copyGate } = {}) {
+async function offlineProgressFixture(t, { imageGate, copyGate, providerEdit, imageRetryDelayMs = 0, interceptApi } = {}) {
   const sample = await readFile(PHOTO_PATH);
   const prompts = new MemoryPromptRepository();
   const library = new MemoryLibraryRepository();
@@ -69,6 +69,7 @@ async function offlineProgressFixture(t, { imageGate, copyGate } = {}) {
     },
   ];
   const calls = [];
+  let imageCalls = 0;
   const app = createSuiteStudioApp({
     repository: new MemorySuiteRepository(),
     storage: new MemoryStorage(),
@@ -77,12 +78,15 @@ async function offlineProgressFixture(t, { imageGate, copyGate } = {}) {
     taskRepository: new MemoryTaskRepository(),
     planRepository: new MemoryPlanRepository(),
     categoryPromptRepository: new MemoryCategoryPromptRepository(),
+    imageRetryDelayMs,
     platformRepository: {
       listEnabled: async () => platforms,
       find: async (code) => platforms.find((p) => p.code === code),
     },
     provider: {
       async edit() {
+        imageCalls += 1;
+        if (providerEdit) return providerEdit(imageCalls, { bytes: sample, mimeType: "image/jpeg" });
         if (imageGate) await imageGate;
         return { bytes: sample, mimeType: "image/jpeg" };
       },
@@ -193,10 +197,11 @@ async function offlineProgressFixture(t, { imageGate, copyGate } = {}) {
               } else {
                 const body = buf.length ? JSON.parse(buf.toString()) : undefined;
                 calls.push({ method: req.method, path, body });
-                response =
+                const execute = async () =>
                   path === "/api/model-settings"
                     ? { status: 200, body: { data: { channels: [], preferences: { image: null, vision: null } } } }
-                    : await app.request(req.method, path, { headers: req.headers, body });
+                    : app.request(req.method, path, { headers: req.headers, body });
+                response = interceptApi ? await interceptApi({ method: req.method, path, body, next: execute }) : await execute();
               }
               res.writeHead(
                 response.status,
@@ -388,4 +393,125 @@ test("sessionStorage 指向已删除的 suiteId 时静默清除并停留在空�
     await page.evaluate((key) => window.sessionStorage.getItem(key), LAST_SUITE_STORAGE_KEY),
     null,
   );
+});
+
+async function seedSuiteBatch(app, sample, { name, idempotencyKey, counts, expectedStatuses = ["completed"] }) {
+  const created = await app.request("POST", "/api/suites", { body: { name } });
+  assert.equal(created.status, 201);
+  const suiteId = created.body.data.id;
+  const uploaded = await app.upload(suiteId, {
+    filename: "gan65-product.jpg",
+    mimeType: "image/jpeg",
+    bytes: sample,
+  });
+  assert.equal(uploaded.status, 201);
+  const started = await app.request("POST", "/api/suites/one-click-generate", {
+    headers: { "idempotency-key": idempotencyKey },
+    body: {
+      suiteId,
+      config: {
+        platform: "amazon",
+        targetMarket: "美国",
+        outputLanguage: "英文",
+        aspectRatio: "1:1",
+        size: "1K",
+        mode: "custom",
+        counts,
+        sellingPoints: `产品名称：${name}\n核心卖点：长效保温`,
+        listingCopy: false,
+      },
+    },
+  });
+  assert.equal(started.status, 202);
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const state = await app.request("GET", `/api/suites/${suiteId}/studio-state`);
+    const status = state.body?.data?.pipeline?.status;
+    if (expectedStatuses.includes(status)) return suiteId;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`Suite ${suiteId} did not reach ${expectedStatuses.join(" or ")}`);
+}
+
+test("历史批次并发拉取 studio-state 峰值不超过 3，且单条 500 失败不阻断其余 5 条批次也不弹告警", async (t) => {
+  let brokenSuiteId = "";
+  let inFlightStates = 0;
+  let maxInFlightStates = 0;
+  const { app, page, url, sample } = await offlineProgressFixture(t, {
+    interceptApi: async ({ method, path, next }) => {
+      const match = method === "GET" ? path.match(/^\/api\/suites\/([^/]+)\/studio-state$/) : null;
+      if (!match) return next();
+      inFlightStates += 1;
+      maxInFlightStates = Math.max(maxInFlightStates, inFlightStates);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        if (match[1] === brokenSuiteId) {
+          return { status: 500, body: { error: { code: "INTERNAL_ERROR", message: "服务暂时不可用，请重试" } } };
+        }
+        return await next();
+      } finally {
+        inFlightStates -= 1;
+      }
+    },
+  });
+
+  const seeded = [];
+  for (let i = 1; i <= 6; i += 1) {
+    const name = `历史套图批次-${i}`;
+    const id = await seedSuiteBatch(app, sample, {
+      name,
+      idempotencyKey: `feed-history-${i}`,
+      counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 },
+    });
+    seeded.push({ id, name });
+  }
+  brokenSuiteId = seeded[2].id;
+
+  await page.goto(url + "create/suite");
+  const regions = page.getByRole("region", { name: "生成批次" });
+  await page.waitForFunction(
+    () => document.querySelectorAll('section[aria-label="生成批次"]').length === 5,
+    undefined,
+    { timeout: 10000 },
+  );
+  assert.equal(await regions.count(), 5);
+  assert.ok(maxInFlightStates >= 2 && maxInFlightStates <= 3, `期望在途并发峰值在 2..3，实际为 ${maxInFlightStates}`);
+  assert.equal(await page.getByRole("alert").count(), 0, "单条历史批次 500 时不得弹出全页告警");
+  for (const item of seeded) {
+    if (item.id === brokenSuiteId) {
+      assert.equal(await page.getByRole("heading", { name: item.name, exact: true }).count(), 0);
+    } else {
+      await page.getByRole("heading", { name: item.name, exact: true }).waitFor();
+    }
+  }
+});
+
+test("partial_failed 批次单卡点击失败重试成功后，批次徽标立即收敛为已完成且清除失败告警", async (t) => {
+  const { app, page, url, sample } = await offlineProgressFixture(t, {
+    imageRetryDelayMs: 0,
+    providerEdit: async (call, defaultResult) => {
+      if (call === 2 || call === 3) throw new Error("IMAGE_PROVIDER_FAILED");
+      return defaultResult;
+    },
+  });
+
+  const suiteId = await seedSuiteBatch(app, sample, {
+    name: "部分失败重试收敛批次",
+    idempotencyKey: "partial-failed-browser-retry",
+    counts: { main: 1, selling_points: 1, lifestyle: 0, other: 0 },
+    expectedStatuses: ["partial_failed"],
+  });
+
+  await page.goto(url + `create/suite/${suiteId}`);
+  const batch = page.getByRole("region", { name: "生成批次" });
+  await batch.locator('[data-status="partial_failed"]').waitFor();
+  assert.equal(await batch.locator('[data-status="partial_failed"]').textContent(), "部分失败");
+  await batch.getByText("套图图片生成失败", { exact: true }).waitFor();
+  assert.equal(await batch.locator("[data-result-card] img").count(), 1);
+
+  await batch.getByRole("button", { name: "失败重试", exact: true }).click();
+  await batch.locator('[data-status="completed"]').waitFor({ timeout: 12000 });
+  assert.equal(await batch.locator('[data-status="completed"]').textContent(), "已完成");
+  assert.equal(await batch.getByText("套图图片生成失败", { exact: true }).count(), 0);
+  assert.equal(await batch.locator("[data-result-card] img").count(), 2);
 });

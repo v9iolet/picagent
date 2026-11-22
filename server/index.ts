@@ -32,7 +32,7 @@ import { initializeObservability, shutdownObservability } from "./observability.
 
 const config = loadServerConfig();
 initializeObservability();
-const pool = new Pool({ ...config.postgres, max: 6, connectionTimeoutMillis: 30_000, idleTimeoutMillis: 60_000 });
+const pool = new Pool({ ...config.postgres, max: Math.max(6, Number(process.env.PG_POOL_MAX) || 16), connectionTimeoutMillis: 30_000, idleTimeoutMillis: 60_000 });
 const minio = new MinioClient(config.minio);
 await pool.query("SELECT 1");
 await runMigrations(pool, { recoverStaleAttempts: true });
