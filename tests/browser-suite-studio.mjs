@@ -178,6 +178,7 @@ async function offlineStudio() {
   };
   const calls = [];
   const vite = await createServer({
+    cacheDir: "node_modules/.vite-browser-suite-studio",
     configFile: false,
     server: { host: "127.0.0.1", port: 0 },
     esbuild: { jsx: "automatic" },
