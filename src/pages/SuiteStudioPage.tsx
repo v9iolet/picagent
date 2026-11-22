@@ -45,6 +45,27 @@ function EmptyStudio() {
 
 const LAST_SUITE_STORAGE_KEY = "picagent:suite-studio:last-suite-id";
 const POLL_INTERVAL_MS = 2500;
+const FEED_STATE_CONCURRENCY = 3;
+
+async function loadStatesWithConcurrency(
+  ids: readonly string[],
+  concurrency: number,
+  load: (id: string) => Promise<StudioState>,
+): Promise<PromiseSettledResult<StudioState>[]> {
+  const results: PromiseSettledResult<StudioState>[] = new Array(ids.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), ids.length);
+  await Promise.allSettled(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < ids.length) {
+        const current = nextIndex++;
+        const [settled] = await Promise.allSettled([load(ids[current])]);
+        results[current] = settled;
+      }
+    }),
+  );
+  return results;
+}
 
 function readLastSuiteId(): string | null {
   try {
@@ -97,7 +118,17 @@ export function SuiteStudioPage({
     feedLock = useRef(false),
     requestSeq = useRef(0),
     appliedSeq = useRef<Record<string, number>>({}),
+    inFlightStates = useRef<Map<string, Promise<StudioState>>>(new Map()),
     end = useRef<HTMLButtonElement>(null);
+  const fetchStudioState = useCallback((id: string) => {
+    const existing = inFlightStates.current.get(id);
+    if (existing) return existing;
+    const pending = studioApi.state(id).finally(() => {
+      if (inFlightStates.current.get(id) === pending) inFlightStates.current.delete(id);
+    });
+    inFlightStates.current.set(id, pending);
+    return pending;
+  }, []);
   const putMany = useCallback((items: StudioState[], seq: number) => {
     setStates((prev) => {
       let next: Record<string, StudioState> | null = null;
@@ -126,8 +157,20 @@ export function SuiteStudioPage({
     const seq = ++requestSeq.current;
     try {
       const page = await studioApi.feed(offset.current);
-      const items = await Promise.all(page.items.map((i) => studioApi.state(i.suite.id)));
-      putMany(items, seq);
+      const ids = page.items.map((i) => i.suite.id);
+      const toFetch = ids.filter((id) => !(id === hydrated.current && appliedSeq.current[id]));
+      const settled = await loadStatesWithConcurrency(toFetch, FEED_STATE_CONCURRENCY, fetchStudioState);
+      const items: StudioState[] = [];
+      let firstError: unknown;
+      for (const result of settled) {
+        if (result.status === "fulfilled") items.push(result.value);
+        else if (firstError === undefined) firstError = result.reason;
+      }
+      if (items.length) putMany(items, seq);
+      const alreadyHydratedCount = ids.length - toFetch.length;
+      if (page.items.length > 0 && items.length + alreadyHydratedCount === 0 && firstError !== undefined) {
+        setNotice(message(firstError));
+      }
       offset.current += page.items.length;
       setMore(offset.current < page.total);
     } catch (e) {
@@ -136,7 +179,7 @@ export function SuiteStudioPage({
       feedLock.current = false;
       setLoadingFeed(false);
     }
-  }, [putMany]);
+  }, [fetchStudioState, putMany]);
   useEffect(() => {
     void loadPage();
   }, [loadPage]);
@@ -197,8 +240,7 @@ export function SuiteStudioPage({
     if (targetId) {
       setBusy(true);
       const seq = ++requestSeq.current;
-      studioApi
-        .state(targetId)
+      fetchStudioState(targetId)
         .then((s) => {
           if (!live) return;
           put(s, seq);
@@ -229,7 +271,7 @@ export function SuiteStudioPage({
     return () => {
       live = false;
     };
-  }, [suiteId, navigate, put]);
+  }, [suiteId, navigate, put, fetchStudioState]);
   const runningIdsKey = Object.values(states)
     .filter(isBatchPolling)
     .map((s) => s.suite.id)
