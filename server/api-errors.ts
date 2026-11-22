@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { pipelineErrorMessages } from "../shared/suite-pipeline-errors.js";
 import type { AppResponse } from "./api-response.js";
 
 export const errorMessages: Record<string, string> = {
+  ...pipelineErrorMessages,
   INVALID_SUITE_ID: "方案不存在",
   INVALID_STYLE_OVERRIDE: "画布风格覆盖必须为文本或空值",
   DELIVERY_EMPTY: "当前方案尚无可交付的图片版本",
@@ -33,6 +35,7 @@ export const errorMessages: Record<string, string> = {
   IMAGE_PROVIDER_FAILED: "图像生成服务调用失败",
   INVALID_GENERATED_IMAGE: "图像生成服务返回了无效图片",
   INPUT_OBJECT_NOT_FOUND: "原图对象不存在",
+  PLAN_INPUT_IMAGE_NOT_FOUND: "找不到用于规划的商品原图，请重新上传。",
   INPUT_OBJECT_READ_FAILED: "原图对象读取失败",
   INPUT_IMAGE_HAS_HISTORY: "已有生成记录的原图不能取消",
   STORAGE_WRITE_FAILED: "生成图片保存失败",
@@ -55,7 +58,6 @@ export const errorMessages: Record<string, string> = {
   INVALID_CATEGORY_PROMPT_REQUEST: "类别提示词请求不存在",
   CATEGORY_PROMPT_INVALID: "类别提示词输出不符合类别或事实约束",
   CATEGORY_PROMPT_COUNT_MISMATCH: "类别提示词数量与确认数量不一致，请重试",
-  CATEGORY_PROMPT_FAILED: "类别提示词生成失败",
   CATEGORY_PROMPT_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
   CATEGORY_PROMPTS_NOT_READY: "类别提示词尚未全部成功，请重试失败类别",
   LLM_PROVIDER_FAILED: "LLM 计划生成失败",

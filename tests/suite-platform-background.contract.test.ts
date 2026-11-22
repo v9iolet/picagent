@@ -9,13 +9,14 @@ import { MemoryStorage } from "../server/storage/memory-storage.js";
 
 const expectedBackgrounds = {
   amazon: "pure_white_required", walmart: "pure_white_required", tiktok_shop: "pure_white_required",
-  jd: "white_preferred", shopee: "white_preferred", lazada: "white_preferred", aliexpress: "white_preferred", temu: "white_preferred",
-  taobao: "flexible", pinduoduo: "flexible", douyin: "flexible", xiaohongshu: "flexible", "1688": "flexible", ebay: "flexible", etsy: "flexible", shopify: "flexible",
+  shopee: "pure_white_required", lazada: "pure_white_required", aliexpress: "pure_white_required", temu: "pure_white_required",
+  ebay: "pure_white_required", etsy: "pure_white_required", shopify: "pure_white_required",
+  taobao: "flexible", jd: "flexible", pinduoduo: "flexible", douyin: "flexible", xiaohongshu: "flexible", "1688": "flexible",
 };
 
 // Opt in against a PostgreSQL test connection; all changes use a unique schema
 // inside a rolled-back transaction, leaving application data untouched.
-test("migrated platform API and repository expose the specified backgrounds for all 16 platforms", { skip: process.env.PLATFORM_MIGRATION_TEST !== "1" }, async () => {
+test("028 migrates all 16 platform backgrounds by market scope and preserves legacy CHECK values", { skip: process.env.PLATFORM_MIGRATION_TEST !== "1" }, async () => {
   const pool = new Pool({
     host: process.env.PG_HOST, port: Number(process.env.PG_PORT || 5432),
     database: process.env.PG_DATABASE, user: process.env.PG_USER, password: process.env.PG_PASSWORD,
@@ -33,15 +34,20 @@ test("migrated platform API and repository expose the specified backgrounds for 
   try {
     await client.query("BEGIN");
     await client.query(`CREATE SCHEMA ${schema}`);
+    await client.query(`SET LOCAL search_path TO ${schema}`);
     const seed = await readFile("db/migrations/009_platform_profiles.sql", "utf8");
     const migration = await readFile("db/migrations/025_platform_main_background.sql", "utf8");
+    const marketMigration = await readFile("db/migrations/028_platform_market_white_background.sql", "utf8");
     await scopedPool.query(seed);
     await scopedPool.query(migration);
+    await scopedPool.query(marketMigration);
     // Startup replays migrations, so backfills and source notes must be stable.
     const repository = new PostgresPlatformRepository(scopedPool);
     const first = await repository.listEnabled();
     await scopedPool.query(seed);
     await scopedPool.query(migration);
+    await scopedPool.query(marketMigration);
+    await scopedPool.query(marketMigration);
     assert.deepEqual(await repository.listEnabled(), first);
     const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), platformRepository: repository });
     const response = await api.request("GET", "/api/platforms");
@@ -50,15 +56,21 @@ test("migrated platform API and repository expose the specified backgrounds for 
     assert.deepEqual(Object.fromEntries(response.body.data.map((profile: { code: string; mainImageBackground: string }) => [profile.code, profile.mainImageBackground])), expectedBackgrounds);
     for (const [code, background] of Object.entries(expectedBackgrounds)) {
       const profile = await repository.find(code);
-      assert.equal(profile?.mainImageBackground, background, code);
-      assert.match(profile!.sourceNote, /009_platform_profiles|商品图片|主图/);
+      assert.ok(profile, code);
+      assert.equal(profile.mainImageBackground, background, code);
       if (background === "pure_white_required") {
-        assert.match(profile!.mainImageStrategy, /纯白.*RGB\s*255[，,]\s*255[，,]\s*255/);
-        assert.doesNotMatch(profile!.mainImageStrategy, /优先纯白|需要时优先白底/);
+        assert.match(profile.mainImageStrategy, /纯白.*RGB\s*255[，,]\s*255[，,]\s*255.*不得添加文字、Logo、水印.*装饰/);
+        assert.equal(profile.sourceNote.split("[主图背景规范 v2]").length - 1, 1);
+      } else {
+        assert.doesNotMatch(profile.sourceNote, /\[主图背景规范 v2\]/);
       }
     }
     await client.query(`INSERT INTO ${schema}.platform_profiles (code, name, market_scope, main_image_strategy, gallery_strategy, text_strategy, model_strategy) VALUES ('custom', 'Custom', 'overseas', '', '', '', '')`);
     assert.equal((await repository.find("custom"))?.mainImageBackground, "flexible");
+    await client.query(`UPDATE ${schema}.platform_profiles SET main_image_background = 'white_preferred' WHERE code = 'custom'`);
+    assert.equal((await repository.find("custom"))?.mainImageBackground, "white_preferred");
+    await scopedPool.query(marketMigration);
+    assert.equal((await repository.find("custom"))?.mainImageBackground, "pure_white_required");
     await assert.rejects(client.query(`UPDATE ${schema}.platform_profiles SET main_image_background = 'unknown' WHERE code = 'custom'`), { code: "23514" });
   } finally {
     await client.query("ROLLBACK");

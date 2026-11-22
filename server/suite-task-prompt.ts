@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PURE_WHITE_MAIN_IMAGE_REQUIREMENTS } from "../shared/platform-main-background.js";
 import type { CategoryPromptItem, CategoryPromptRequest, PlanItem, PlanSnapshot } from "./types.js";
 
 function stableValue(value: unknown): unknown {
@@ -98,7 +99,12 @@ export function materializeCategoryPlanItems(snapshot: PlanSnapshot, requests: C
       const key = id;
       if (existingKeys.has(key)) continue;
       const factText = output.factRefs.map((ref) => ref === "human_supplement" ? humanSupplement : factsById.get(ref)?.content ?? "").filter(Boolean).join("\n");
-      const prompt = composeSuiteTaskPrompt({ globalStyleCard: style, categoryPrompt: output.prompt, platformConstraints: platform, factConstraints: factText || undefined });
+      const pureWhiteMain = code === "main" && snapshot.requestSummary.useOriginalImages === true &&
+        snapshot.dynamicInput.main_image_background === "pure_white_required";
+      const platformConstraints = pureWhiteMain
+        ? [PURE_WHITE_MAIN_IMAGE_REQUIREMENTS + "此要求优先于风格与场景要求。", platform].filter(Boolean).join(" ")
+        : platform;
+      const prompt = composeSuiteTaskPrompt({ globalStyleCard: style, categoryPrompt: output.prompt, platformConstraints, factConstraints: factText || undefined });
       items.push({
         id, ordinal: items.length + 1, imageType: code === "main" ? "main" : "detail", title: output.title, purpose: output.purpose,
         prompt, categoryCode: code, referenceImageIds: output.referenceImageIds, factRefs: output.factRefs, allowsTextOverlay: output.allowsTextOverlay,

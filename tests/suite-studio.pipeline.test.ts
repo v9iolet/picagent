@@ -16,7 +16,7 @@ import pg from "pg";
 import { PostgresPipelineRepository } from "../server/repositories/postgres-pipeline-repository.js";
 import { readZipEntries } from "../server/zip.js";
 import type { AppResponse, SuiteStudioApp } from "../server/app.js";
-import type { SuitePipelineRun } from "../server/types.js";
+import type { CategoryPromptLlmInput, PlanLlmInput, SuitePipelineRun } from "../server/types.js";
 
 const originalFact = "轻量化铝合金机身";
 const addedFact = "支持 IP67 防水";
@@ -29,25 +29,35 @@ async function pipelineFixture(options: {
   maxMissingFacts?: boolean;
   providerFails?: boolean;
   beforeImage?: (call: number) => Promise<void>;
-  beforeCategory?: (call: number) => Promise<void>;
+  beforeCategory?: (call: number, input: CategoryPromptLlmInput) => Promise<void>;
+  structureTemplate?: string;
+  beforePlan?: (input: PlanLlmInput) => void;
+  publishCategoryTemplate?: boolean;
+  imageCount?: number;
 } = {}) {
   const repository = new MemorySuiteRepository();
   const storage = new MemoryStorage();
   const prompts = new MemoryPromptRepository();
-  for (const name of ["general-structure-plan-groups.md", "general-category-prompt-groups.md", "general-base-refine.md"]) {
+  for (const name of [
+    options.structureTemplate ?? "general-structure-plan-groups.md",
+    ...(options.publishCategoryTemplate === false ? [] : ["general-category-prompt-groups.md"]),
+    "general-base-refine.md",
+  ]) {
     const record = parseNormalizedPromptMarkdown(await readFile(new URL(`../prompt/normalized/${name}`, import.meta.url), "utf8"), name);
     const [version] = await prompts.importRecords([record]);
     await prompts.publishVersion(version.templateVersionId);
   }
   const suite = await repository.createSuite("流水线测试");
   const bytes = await sharp({ create: { width: 16, height: 16, channels: 3, background: "white" } }).png().toBuffer();
-  const inputId = randomUUID();
-  const originalKey = `suites/${suite.id}/inputs/${inputId}/original`;
-  const thumbKey = `suites/${suite.id}/inputs/${inputId}/thumbnail`;
-  await storage.put({ key: originalKey, bytes, contentType: "image/png" });
-  await storage.put({ key: thumbKey, bytes, contentType: "image/png" });
-  await storage.put({ key: originalKey.replace(/\/original$/, "/generation-input.jpg"), bytes, contentType: "image/jpeg" });
-  await repository.createInputImage({ id: inputId, suiteId: suite.id, ordinal: 1, originalObjectKey: originalKey, thumbnailObjectKey: thumbKey, sha256: randomUUID().replaceAll("-", "").padEnd(64, "0"), width: 16, height: 16, mimeType: "image/png", originalFilename: "商品.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
+  const imageIds = Array.from({ length: options.imageCount ?? 1 }, () => randomUUID());
+  for (const [index, id] of imageIds.entries()) {
+    const originalKey = `suites/${suite.id}/inputs/${id}/original`;
+    const thumbKey = `suites/${suite.id}/inputs/${id}/thumbnail`;
+    await storage.put({ key: originalKey, bytes, contentType: "image/png" });
+    await storage.put({ key: thumbKey, bytes, contentType: "image/png" });
+    await storage.put({ key: originalKey.replace(/\/original$/, "/generation-input.jpg"), bytes, contentType: "image/jpeg" });
+    await repository.createInputImage({ id, suiteId: suite.id, ordinal: index + 1, originalObjectKey: originalKey, thumbnailObjectKey: thumbKey, sha256: randomUUID().replaceAll("-", "").padEnd(64, "0"), width: 16, height: 16, mimeType: "image/png", originalFilename: "商品.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
+  }
   const pipeline = new MemoryPipelineRepository();
   let providerFails = Boolean(options.providerFails);
   let providerCalls = 0;
@@ -67,7 +77,8 @@ async function pipelineFixture(options: {
     } },
     platformRepository: {
       find: async (value) => ({
-        code: value, name: value, marketScope: "domestic", mainImageBackground: value === "Amazon" ? "pure_white_required" : "flexible",
+        code: value, name: value, marketScope: value === "eBay" ? "overseas" : "domestic",
+        mainImageBackground: value === "Amazon" ? "pure_white_required" : "white_preferred",
         mainImageStrategy: "", galleryStrategy: "", textStrategy: "", modelStrategy: "", sourceNote: "", sortOrder: 1,
       }),
       listEnabled: async () => [],
@@ -75,15 +86,16 @@ async function pipelineFixture(options: {
     llmClient: {
       provider: "fake", model: "fake", isFake: true,
       async generatePlan(input) {
+        options.beforePlan?.(input);
         const supplement = String(input.dynamicInput.human_supplement ?? "");
         supplements.push(supplement);
         const missing = options.missingFacts && ![originalFact, addedFact].every((fact) => supplement.includes(fact));
         const imageId = input.inputImageIds[0];
-        const groups = JSON.parse(String(input.dynamicInput.category_groups));
-        const details = groups.selling_points.count;
+        const groups = input.dynamicInput.category_groups ? JSON.parse(String(input.dynamicInput.category_groups)) : null;
+        const details = groups?.selling_points.count ?? 0;
         return {
           schemaVersion: "suite-structure-plan-v2", status: missing ? "NEEDS_HUMAN_INPUT" : "READY_FOR_REVIEW",
-          mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [imageId], factRefs: [], missingFacts: [] },
+          mainAllocation: { category: "main", count: Number(input.dynamicInput.main_image_count), reason: "主图", sourceImageIds: [imageId], factRefs: [], missingFacts: [] },
           detailImageCount: details,
           categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({
             category, requirement: "optional", count: category === "feature_benefit" ? details : 0, reason: "", sourceImageIds: [imageId], factRefs: [],
@@ -94,7 +106,7 @@ async function pipelineFixture(options: {
       },
       async generateCategoryPrompt(input) {
         categoryCalls += 1;
-        await options.beforeCategory?.(categoryCalls);
+        await options.beforeCategory?.(categoryCalls, input);
         return {
           schemaVersion: "suite-category-prompt-v1", category: input.categoryCode,
           items: Array.from({ length: input.requestedCount }, (_, index) => ({
@@ -106,7 +118,7 @@ async function pipelineFixture(options: {
     },
   });
   return {
-    app: createApp(), newApp: createApp, repository, pipeline, suite, inputId, taskRepository, categoryPromptRepository, planRepository,
+    app: createApp(), newApp: createApp, repository, pipeline, suite, inputId: imageIds[0], imageIds, taskRepository, categoryPromptRepository, planRepository, prompts, storage,
     supplements, planCallCount: () => supplements.length, categoryPromptCallCount: () => categoryCalls,
     providerCallCount: () => providerCalls, setProviderFails: (value: boolean) => { providerFails = value; },
   };
@@ -128,7 +140,7 @@ function expectError(response: AppResponse, status: number, code: string) {
   assert.equal(response.body.error.code, code);
 }
 
-async function waitPipeline(app: ReturnType<typeof createSuiteStudioApp>, suiteId: string, statuses = ["completed", "failed", "partial_failed", "waiting_human_input", "waiting_base_refine_decision"] as string[]) {
+async function waitPipeline(app: ReturnType<typeof createSuiteStudioApp>, suiteId: string, statuses: string[]) {
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
     const response = await app.request("GET", `/api/suites/${suiteId}/studio-state`);
@@ -139,6 +151,17 @@ async function waitPipeline(app: ReturnType<typeof createSuiteStudioApp>, suiteI
     await new Promise((resolve) => setTimeout(resolve, 4));
   }
   assert.fail(`Pipeline ${suiteId} did not reach ${statuses.join(" or ")}`);
+}
+
+async function seedLegacyRefinePause(fixture: Awaited<ReturnType<typeof pipelineFixture>>, platform: string) {
+  const timestamp = new Date().toISOString();
+  await fixture.pipeline.createRun({
+    id: randomUUID(), suiteId: fixture.suite.id, idempotencyKey: "legacy-refine",
+    status: "waiting_base_refine_decision", currentPhase: "base_refining",
+    config: { ...oneCard, platform, refineBaseImages: true },
+    errorCode: "BASE_REFINE_FAILED", errorMessage: "白底精修失败",
+    createdAt: timestamp, updatedAt: timestamp, completedAt: null,
+  });
 }
 
 test("Postgres createRun binds one parameter for each of its 15 insert columns", async (t) => {
@@ -243,6 +266,166 @@ test("exact missing facts pauses and submit_missing_facts resumes the same run",
   }
 });
 
+test("outdated published structure templates fail before creating a planning attempt", async () => {
+  for (const mode of ["smart", "custom"]) {
+    const { app, suite, planRepository } = await pipelineFixture({ structureTemplate: "general-structure-plan.md" });
+    assert.equal((await start(app, suite.id, "old-template", { ...oneCard, mode })).status, 202);
+    const run = await waitPipeline(app, suite.id, ["failed"]);
+    assert.equal(run.currentPhase, "structure_planning");
+    assert.equal(run.errorCode, "PLAN_TEMPLATE_OUTDATED");
+    assert.match(run.errorMessage, /模板库.*发布.*最新版结构计划模板/);
+    assert.equal(await planRepository.getLatestAttempt(suite.id), null);
+  }
+});
+
+test("pipeline preserves the structure attempt and category request errors", async () => {
+  const timeout = () => { throw new Error("LLM_TIMEOUT"); };
+  for (const [phase, options] of [
+    ["structure_planning", { beforePlan: timeout }],
+    ["category_prompting", { beforeCategory: async () => timeout() }],
+  ] as const) {
+    const { app, suite } = await pipelineFixture(options);
+    assert.equal((await start(app, suite.id, "llm-timeout")).status, 202);
+    const run = await waitPipeline(app, suite.id, ["failed"]);
+    assert.equal(run.currentPhase, phase);
+    assert.equal(run.errorCode, "LLM_TIMEOUT");
+    assert.equal(run.errorMessage, "计划生成超时，请重试");
+  }
+});
+
+test("pipeline preserves the category prompt API error envelope", async () => {
+  const { app, suite } = await pipelineFixture({ publishCategoryTemplate: false });
+  assert.equal((await start(app, suite.id, "no-category-template")).status, 202);
+  const run = await waitPipeline(app, suite.id, ["failed"]);
+  assert.equal(run.errorCode, "CATEGORY_PROMPT_TEMPLATE_NOT_FOUND");
+  assert.equal(run.errorMessage, "类别提示词模板未发布或阶段不匹配");
+});
+
+test("pipeline preserves the structure, task materialization, and generation API error envelopes", async (t) => {
+  const structure = await pipelineFixture();
+  await structure.storage.delete((await structure.repository.getInputImages(structure.suite.id))[0].originalObjectKey);
+  assert.equal((await start(structure.app, structure.suite.id, "missing-original")).status, 202);
+  const structureRun = await waitPipeline(structure.app, structure.suite.id, ["failed"]);
+  assert.equal(structureRun.errorCode, "PLAN_INPUT_IMAGE_NOT_FOUND");
+  assert.equal(structureRun.errorMessage, "找不到用于规划的商品原图，请重新上传。");
+
+  const materialization = await pipelineFixture();
+  const { categoryPromptRepository } = materialization;
+  const list = categoryPromptRepository.listRequests.bind(categoryPromptRepository);
+  let successfulPoll = false;
+  t.mock.method(categoryPromptRepository, "listRequests", async (id: string) => {
+    if (successfulPoll) return [];
+    const requests = await list(id);
+    successfulPoll = requests.some((row) => row.status === "succeeded");
+    return requests;
+  });
+  assert.equal((await start(materialization.app, materialization.suite.id, "missing-category-results")).status, 202);
+  const tasksRun = await waitPipeline(materialization.app, materialization.suite.id, ["failed"]);
+  assert.equal(tasksRun.errorCode, "CATEGORY_PROMPTS_NOT_READY");
+  assert.equal(tasksRun.errorMessage, "类别提示词尚未全部成功，请重试失败类别");
+
+  const generation = await pipelineFixture();
+  t.mock.method(generation.repository, "getInputImage", async () => null);
+  assert.equal((await start(generation.app, generation.suite.id, "missing-task-source")).status, 202);
+  const imageRun = await waitPipeline(generation.app, generation.suite.id, ["failed"]);
+  assert.equal(imageRun.errorCode, "TASK_INVALID_SOURCE");
+  assert.equal(imageRun.errorMessage, "套图任务没有可用输入图");
+});
+
+test("structure planning omits dynamic inputs outside the published schema", async (t) => {
+  const { app, suite, planRepository, prompts } = await pipelineFixture();
+  const [published] = await prompts.listPublished("structure_plan");
+  const runtime = await prompts.getPublishedVersion(published.templateVersionId, "structure_plan");
+  assert.ok(runtime);
+  const inputSchema = runtime.inputSchema.filter((field) => field.key !== "emphasis_requirements");
+  const list = prompts.listPublished.bind(prompts);
+  const get = prompts.getPublishedVersion.bind(prompts);
+  t.mock.method(prompts, "listPublished", async (stage?: Parameters<typeof list>[0]) =>
+    stage === "structure_plan" ? [{ ...published, inputSchema }] : list(stage));
+  t.mock.method(prompts, "getPublishedVersion", async (id: string, stage?: Parameters<typeof get>[1]) =>
+    id === runtime.templateVersionId ? { ...runtime, inputSchema } : get(id, stage));
+  assert.equal((await start(app, suite.id, "subset-schema")).status, 202);
+  await waitPipeline(app, suite.id, ["completed"]);
+  const attempt = await planRepository.getLatestAttempt(suite.id);
+  assert.ok(attempt);
+  assert.equal(Object.hasOwn(attempt.dynamicInput, "emphasis_requirements"), false);
+});
+
+test("three originals yield one overseas white-background main card without base refinement", async () => {
+  const fixture = await pipelineFixture({
+    imageCount: 3,
+    beforePlan: (input) => {
+      assert.equal(input.platformProfile?.mainImageBackground, "pure_white_required");
+      assert.match(input.platformProfile.mainImageStrategy, /RGB 255,255,255/);
+    },
+  });
+  const { app, suite, repository, planRepository, imageIds, taskRepository } = fixture;
+  const started = await start(app, suite.id, "overseas-main", { ...oneCard, platform: "eBay", refineBaseImages: true });
+  assert.equal(started.status, 202);
+  assert.ok("data" in started.body);
+  assert.equal((started.body.data as { pipeline: SuitePipelineRun }).pipeline.currentPhase, "structure_planning");
+  await waitPipeline(app, suite.id, ["completed"]);
+  const attempt = await planRepository.getLatestAttempt(suite.id);
+  assert.deepEqual(attempt?.inputImageIds, imageIds);
+  assert.equal(attempt?.dynamicInput.main_image_background, "pure_white_required");
+  const tasks = await taskRepository.listTasks(suite.id);
+  assert.deepEqual(tasks.map((task) => task.categoryCode), ["main"]);
+  assert.match(tasks[0].promptDraft, /纯白背景.*RGB 255,255,255/);
+  const history = await taskRepository.listTaskVersions(tasks[0].id);
+  assert.equal(history.versions.length, 1);
+  assert.match(String(history.attempts[0].promptSnapshot.finalPrompt), /纯白背景.*RGB 255,255,255/);
+  for (const id of imageIds) assert.deepEqual(await repository.listGenerationAttempts(suite.id, id), []);
+  assert.equal(fixture.providerCallCount(), 1);
+});
+
+test("smart mode uses one main card even after retaining a larger custom count", async () => {
+  const { app, suite, taskRepository } = await pipelineFixture();
+  assert.equal((await start(app, suite.id, "smart-main", {
+    ...oneCard, platform: "eBay", mode: "smart", counts: { ...oneCard.counts, main: 3 },
+  })).status, 202);
+  await waitPipeline(app, suite.id, ["completed"]);
+  assert.deepEqual((await taskRepository.listTasks(suite.id)).map((task) => task.categoryCode), ["main"]);
+});
+
+test("domestic planning sends flexible and skips a legacy request to refine all originals", async () => {
+  const fixture = await pipelineFixture();
+  const { app, suite, planRepository } = fixture;
+  assert.equal((await start(app, suite.id, "domestic-main", { ...twoCards, refineBaseImages: true })).status, 202);
+  await waitPipeline(app, suite.id, ["completed"]);
+  assert.equal((await planRepository.getLatestAttempt(suite.id))?.dynamicInput.main_image_background, "flexible");
+  assert.equal(fixture.providerCallCount(), 2);
+});
+
+test("one-click detail cards still use the original when a single-image base refinement already exists", async () => {
+  const fixture = await pipelineFixture({
+    beforeCategory: async (_call, input) => {
+      assert.deepEqual(input.visionImages?.map((image) => image.sourceKind), ["original"]);
+    },
+  });
+  const { app, suite, inputId, prompts, repository, taskRepository } = fixture;
+  const [baseTemplate] = await prompts.listPublished("base_refine");
+  const refined = await app.request("POST", `/api/suites/${suite.id}/input-images/${inputId}/base-generation`, {
+    headers: { "idempotency-key": "one-image-refine" },
+    body: {
+      templateVersionId: baseTemplate.templateVersionId,
+      dynamicInput: { source_image_ids: inputId, background_target: "白底" },
+    },
+  });
+  assert.equal(refined.status, 202);
+  await eventually(async () => (await repository.listGenerationAttempts(suite.id, inputId))[0]?.status === "succeeded");
+  assert.ok((await repository.getInputImage(suite.id, inputId))?.currentBaseVersionId);
+
+  assert.equal((await start(app, suite.id, "original-detail", { ...twoCards, platform: "eBay" })).status, 202);
+  await waitPipeline(app, suite.id, ["completed"]);
+  const detail = (await taskRepository.listTasks(suite.id)).find((task) => task.categoryCode === "feature_benefit");
+  assert.ok(detail);
+  assert.doesNotMatch(detail.promptDraft, /主图必须使用纯白背景/);
+  const { attempts } = await taskRepository.listTaskVersions(detail.id);
+  assert.equal(attempts[0].sourceKind, "original");
+  assert.equal(attempts[0].sourceInputImageId, inputId);
+  assert.equal((await repository.listGenerationAttempts(suite.id, inputId)).length, 1);
+});
+
 test("max group can generate fewer images and studio state reports missing reasons after cards exist", async () => {
   const fixture = await pipelineFixture({ maxMissingFacts: true });
   const started = await fixture.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "max-group" }, body: { suiteId: fixture.suite.id, config: { platform: "淘宝", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 1 } } } });
@@ -255,25 +438,19 @@ test("max group can generate fewer images and studio state reports missing reaso
   assert.ok((state.body as any).data.planning.notGeneratedReasons.some((item: any) => item.category === "comparison" && item.reasons.includes("缺少对比事实")));
 });
 
-test("Amazon refinement failure waits for a decision and skip is rejected while flexible platforms may skip", async () => {
-  const amazon = await pipelineFixture({ providerFails: true });
-  const started = await amazon.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "amazon-refine" }, body: { suiteId: amazon.suite.id, config: { platform: "Amazon", counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
-  assert.equal(started.status, 202);
-  await waitPipeline(amazon.app, amazon.suite.id, ["waiting_base_refine_decision"]);
+test("legacy refinement pauses still allow retries and flexible platforms may skip", async () => {
+  const amazon = await pipelineFixture();
+  await seedLegacyRefinePause(amazon, "Amazon");
   expectError(await resume(amazon.app, amazon.suite.id, "skip_base_refine", "skip-amazon"), 409, "PURE_WHITE_REQUIRED");
-  const failedRefineCalls = amazon.providerCallCount();
-  amazon.setProviderFails(false);
   assert.equal((await amazon.app.request("POST", `/api/suites/${amazon.suite.id}/one-click-generate/resume`, { headers: { "idempotency-key": "amazon-retry" }, body: { action: "retry_base_refine" } })).status, 202);
   const amazonDone = await waitPipeline(amazon.app, amazon.suite.id, ["completed"]);
   assert.equal(amazonDone.status, "completed", JSON.stringify(amazonDone));
-  assert.ok(amazon.providerCallCount() > failedRefineCalls);
+  assert.equal(amazon.providerCallCount(), 2);
   for (const action of ["retry_base_refine", "submit_missing_facts", "resume_after_interrupt"]) {
     expectError(await resume(amazon.app, amazon.suite.id, action, action), 409, "PIPELINE_ACTION_NOT_ALLOWED");
   }
-  const taobao = await pipelineFixture({ providerFails: true });
-  await taobao.app.request("POST", "/api/suites/one-click-generate", { headers: { "idempotency-key": "taobao-refine" }, body: { suiteId: taobao.suite.id, config: { platform: "淘宝", refineBaseImages: true, counts: { main: 1, selling_points: 0, lifestyle: 0, other: 0 } } } });
-  await waitPipeline(taobao.app, taobao.suite.id, ["waiting_base_refine_decision"]);
-  taobao.setProviderFails(false);
+  const taobao = await pipelineFixture();
+  await seedLegacyRefinePause(taobao, "淘宝");
   assert.equal((await resume(taobao.app, taobao.suite.id, "skip_base_refine", "skip-taobao")).status, 202);
   assert.equal((await waitPipeline(taobao.app, taobao.suite.id, ["completed"])).status, "completed");
 });
@@ -392,14 +569,15 @@ test("image_generating restart completes a partial batch by rendering only the m
   assert.deepEqual(batches[0].taskIds, [second.id]);
 });
 
-test("current task versions distinguish partial image failure from complete failure", async () => {
+test("current task versions distinguish partial from complete image failure and preserve attempt errors", async () => {
   for (const expected of ["partial_failed", "failed"]) {
     const fixture = await pipelineFixture({ beforeImage: async (call) => {
       if (call === 2 || expected === "failed") throw new Error("image failure");
     } });
     assert.equal((await start(fixture.app, fixture.suite.id, "failed-images", twoCards)).status, 202);
-    const done = await waitPipeline(fixture.app, fixture.suite.id);
-    assert.equal(done.status, expected);
+    const done = await waitPipeline(fixture.app, fixture.suite.id, [expected]);
+    assert.equal(done.errorCode, "TASK_IMAGE_PROVIDER_FAILED");
+    assert.equal(done.errorMessage, "套图图片生成失败");
     assert.equal(done.taskIds.length, 2);
     assert.equal(fixture.providerCallCount(), 2);
   }
@@ -435,13 +613,12 @@ test("resume requires a header and deduplicates concurrent and delayed retries a
   const fixture = await pipelineFixture({ providerFails: true });
   const { app, suite } = fixture;
   const action = "retry_base_refine";
-  assert.equal((await start(app, suite.id, "base", { ...oneCard, platform: "Amazon" })).status, 202);
-  await waitPipeline(app, suite.id, ["waiting_base_refine_decision"]);
+  await seedLegacyRefinePause(fixture, "Amazon");
   expectError(await resume(app, suite.id, action, undefined, { idempotencyKey: "body-key" }), 400, "MISSING_IDEMPOTENCY_KEY");
   const duplicates = await Promise.all([resume(app, suite.id, action, "k1"), resume(app, suite.id, action, "k1")]);
   assert.deepEqual(duplicates.map((result) => result.status), [202, 202]);
   assert.equal((await waitPipeline(app, suite.id, ["waiting_base_refine_decision"])).resumeCount, 1);
-  assert.equal(fixture.providerCallCount(), 2);
+  assert.equal(fixture.providerCallCount(), 1);
   assert.equal((await resume(app, suite.id, action, "k2")).status, 202);
   assert.equal((await waitPipeline(app, suite.id, ["waiting_base_refine_decision"])).resumeCount, 2);
   const restarted = fixture.newApp();
@@ -449,11 +626,11 @@ test("resume requires a header and deduplicates concurrent and delayed retries a
   assert.equal(replay.status, 202);
   assert.equal((replay.body as any).data.pipeline.status, "waiting_base_refine_decision");
   assert.equal((replay.body as any).data.pipeline.resumeCount, 2);
-  assert.equal(fixture.providerCallCount(), 3);
+  assert.equal(fixture.providerCallCount(), 2);
   fixture.setProviderFails(false);
   assert.equal((await resume(restarted, suite.id, action, "k3")).status, 202);
   assert.equal((await waitPipeline(restarted, suite.id, ["completed"])).resumeCount, 3);
-  assert.equal(fixture.providerCallCount(), 5);
+  assert.equal(fixture.providerCallCount(), 4);
 });
 
 test("feed excludes empty drafts, paginates by created time, and export honors taskIds", async () => {

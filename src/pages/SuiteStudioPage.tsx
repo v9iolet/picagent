@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { modelSettingsApi, suiteApi, type ApiImage, type ApiPlatformProfile } from "../api/client";
 import { defaultImageOptions } from "../../shared/model-settings";
+import { productNameFor } from "../../shared/product-name";
 import { AppShell } from "../components/AppShell";
 import { createTools } from "../features/create/tool-registry";
 import { ConfigPanel } from "../components/suite-studio/ConfigPanel";
@@ -195,7 +196,7 @@ export function SuiteStudioPage({
         throw Error("请上传 PNG、JPEG 或 WebP 格式的图片。");
       let id = suiteId;
       if (!id) {
-        id = (await suiteApi.create(files[0].name.replace(/\.[^.]+$/, "") || "未命名商品套图")).id;
+        id = (await suiteApi.create(productNameFor(undefined, files[0].name))).id;
         route(id);
       }
       for (const [i, file] of files.entries()) {
@@ -213,12 +214,7 @@ export function SuiteStudioPage({
     setBusy(true);
     setNotice("");
     try {
-      if (!clone) {
-        const name =
-          effective.sellingPoints.trim().split("\n")[0].slice(0, 30) ||
-          images[0].originalFilename.replace(/\.[^.]+$/, "");
-        if (name) await suiteApi.rename(suiteId, name);
-      }
+      if (!clone) await suiteApi.rename(suiteId, productNameFor(effective.sellingPoints, images[0].originalFilename));
       const result = await studioApi.start(
         clone ? { cloneFrom: { suiteId, imageIds: images.map((i) => i.id) } } : { suiteId },
         effective,

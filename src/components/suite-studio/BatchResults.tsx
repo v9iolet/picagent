@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { suiteApi, type ApiPlatformProfile, type ApiWorkbench } from "../../api/client";
 import { SUITE_CATEGORY_GROUPS, SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
+import { pipelineErrorMessages } from "../../../shared/suite-pipeline-errors";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { DeliveryGalleryView } from "../DeliveryGalleryView";
 import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
@@ -22,6 +23,12 @@ const statuses: Record<string, string> = {
   failed: "生成失败",
   waiting_human_input: "等待补录",
   waiting_base_refine_decision: "精修暂停",
+};
+const phaseErrors: Record<string, string> = {
+  structure_planning: "STRUCTURE_PLAN_FAILED",
+  category_prompting: "CATEGORY_PROMPT_FAILED",
+  image_generating: "IMAGE_GENERATION_FAILED",
+  done: "IMAGE_GENERATION_FAILED",
 };
 type Props = {
   state: StudioState;
@@ -83,6 +90,13 @@ export function BatchResults({
     slots = s.cards,
     ready = slots.filter((x) => x.previewUrl),
     total = slots.length || totalImages(c);
+  const persistedMessage = run?.errorMessage?.trim();
+  const errorMessage = persistedMessage && !/^[A-Z][A-Z0-9_]*$/.test(persistedMessage)
+    ? persistedMessage
+    : run && (run.errorCode || persistedMessage)
+      ? pipelineErrorMessages[run.errorCode ?? persistedMessage ?? ""] ??
+        pipelineErrorMessages[phaseErrors[run.currentPhase]] ?? pipelineErrorMessages.PIPELINE_FAILED
+      : null;
   const [picked, setPicked] = useState<string[]>([]),
     [menu, setMenu] = useState(false),
     [busy, setBusy] = useState(false),
@@ -216,7 +230,7 @@ export function BatchResults({
           <progress value={s.progress.completed} max={total} />
         </div>
       )}
-      {run?.errorMessage && !running && <p className="ss-note">{run.errorMessage}</p>}
+      {errorMessage && !running && <p className="ss-note">{errorMessage}</p>}
       {run?.status === "waiting_base_refine_decision" && (
         <div className="ss-pause">
           <b>白底精修失败</b>
