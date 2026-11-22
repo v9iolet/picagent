@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { parsePromptMarkdown } from "../server/prompt-library.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
@@ -30,14 +30,14 @@ async function setup() {
   const prompts = new MemoryPromptRepository();
   const [version] = await prompts.importRecords(parsePromptMarkdown(`### 产品图转干净产品底图返修提示词\n\n\`\`\`plain\n${prompt}\n\`\`\``, "prompt.md"));
   await prompts.publishVersion(version.templateVersionId);
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage, provider, promptRepository: prompts });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage, provider, promptRepository: prompts });
   const suite = await api.request("POST", "/api/suites", { body: { name: "鼠标套图" } });
   const suiteId = suite.body.data.id as string;
   const uploaded = await api.upload(suiteId, { filename: "鼠标1.png", mimeType: "image/png", bytes: png1x1 });
   return { api, provider, storage, suiteId, inputImageId: uploaded.body.data.id as string, templateVersionId: version.templateVersionId };
 }
 
-async function generate(api: ReturnType<typeof createTicket02App>, suiteId: string, inputImageId: string, key: string, templateVersionId: string) {
+async function generate(api: ReturnType<typeof createSuiteStudioApp>, suiteId: string, inputImageId: string, key: string, templateVersionId: string) {
   const path = `/api/suites/${suiteId}/input-images/${inputImageId}/base-generation`;
   const options = {
     headers: { "idempotency-key": key }, body: { templateVersionId, dynamicInput: {} },
@@ -141,7 +141,7 @@ test("generation starts in the background and exposes running history without ho
   const prompts = new MemoryPromptRepository();
   const [version] = await prompts.importRecords(parsePromptMarkdown(`### 产品图转干净产品底图返修提示词\n\n\`\`\`plain\n${prompt}\n\`\`\``, "prompt.md"));
   await prompts.publishVersion(version.templateVersionId);
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage, provider, promptRepository: prompts });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage, provider, promptRepository: prompts });
   const suite = await api.request("POST", "/api/suites", { body: { name: "后台精修" } });
   const suiteId = suite.body.data.id as string;
   const uploaded = await api.upload(suiteId, { filename: "mouse.png", mimeType: "image/png", bytes: png1x1 });
@@ -182,7 +182,7 @@ test("provider timeout is recorded as a failed attempt instead of leaving genera
   const prompts = new MemoryPromptRepository();
   const [version] = await prompts.importRecords(parsePromptMarkdown(`### 产品图转干净产品底图返修提示词\n\n\`\`\`plain\n${prompt}\n\`\`\``, "prompt.md"));
   await prompts.publishVersion(version.templateVersionId);
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage, provider, promptRepository: prompts });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage, provider, promptRepository: prompts });
   const suite = await api.request("POST", "/api/suites", { body: { name: "超时测试" } });
   const suiteId = suite.body.data.id as string;
   const uploaded = await api.upload(suiteId, { filename: "mouse.png", mimeType: "image/png", bytes: png1x1 });

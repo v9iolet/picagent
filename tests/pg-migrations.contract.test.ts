@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { Client, escapeIdentifier, type Pool, type QueryResultRow } from "pg";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { loadPostgresConfig } from "../server/config.js";
 import type { ListingImage, ListingJob, ListingVersion } from "../server/listing-copy.js";
 import { runMigrations } from "../server/migrations.js";
@@ -183,7 +183,7 @@ test("026 persists a pipeline and maps competing running inserts to HTTP 409", {
       }
     }
 
-    const app = createTicket02App({ repository: suites, pipelineRepository: pipelines, storage: new MemoryStorage() });
+    const app = createSuiteStudioApp({ repository: suites, pipelineRepository: pipelines, storage: new MemoryStorage() });
     const response = await app.request("POST", "/api/suites/one-click-generate", {
       headers: { "Idempotency-Key": "another-key" }, body: { suiteId, config: initial.config },
     });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
@@ -21,7 +21,7 @@ async function fixture() {
   library.addResource(resource({ id: "prompt:task-v1", title: "单卡模板", templateVersionId: "task-v1", resourceVersionId: "task-v1", stage: "task_image" }));
   library.addResource(resource({ id: "input:image-1", resourceType: "input_image", title: "鼠标原图", summary: "商品实拍", suiteId: suite.id, templateVersionId: null, resourceVersionId: "image-1", stage: null, source: { objectKey: "input/image-1" }, previewUrl: "/api/library/resources/input:image-1/preview" }));
   await storage.put({ key: "input/image-1", bytes: Buffer.from("preview"), contentType: "image/png" });
-  const api = createTicket02App({ repository: suites, storage, libraryRepository: library });
+  const api = createSuiteStudioApp({ repository: suites, storage, libraryRepository: library });
   return { api, suite, library };
 }
 
@@ -72,7 +72,7 @@ test("template copy endpoint returns only a published template from the requeste
   const prompts = new MemoryPromptRepository();
   const [draft] = await prompts.importRecords(parsePromptMarkdown("### 计划模板\n\n```plain\n保持商品事实。\n```", "copy.md"));
   await prompts.publishVersion(draft.templateVersionId);
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts });
   const copied = await api.request("GET", `/api/prompt-templates/${draft.templateVersionId}/copy?stage=plan`);
   assert.equal(copied.status, 200); assert.equal((copied.body as any).data.body, "保持商品事实。");
   const mismatch = await api.request("GET", `/api/prompt-templates/${draft.templateVersionId}/copy?stage=task_image`);

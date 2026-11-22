@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { Client as MinioClient } from "minio";
 import { Pool } from "pg";
-import { createTicket02App } from "./app.js";
+import { createSuiteStudioApp } from "./app.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { dispatchInputImageUpload, parseMultipartFile } from "./multipart.js";
@@ -139,7 +139,7 @@ const validateImageEditSource = async (sourceCardId: string, sourceVersionId: st
   return Boolean(result.rows[0]?.valid);
 };
 const imageEditorApi = createImageEditorApi(new ImageEditorService(new PostgresImageEditorRepository(pool), resolveImageEditorProvider, storage, resolveImageSource, resolveOcrProvider, validateImageEditSource));
-const app = createTicket02App({
+const app = createSuiteStudioApp({
   repository: new PostgresSuiteRepository(pool),
   storage,
   modelSettings,

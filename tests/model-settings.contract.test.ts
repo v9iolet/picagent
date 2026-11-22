@@ -4,7 +4,7 @@ import { MemoryPromptRepository } from "../server/repositories/memory-prompt-rep
 import { parsePromptMarkdown } from "../server/prompt-library.js";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { ModelSettings, type ModelSettingsState } from "../server/model-settings.js";
@@ -25,7 +25,7 @@ function setup() {
     read: async () => structuredClone(state),
     update: async (change) => { state = change(structuredClone(state)); return structuredClone(state); },
   });
-  const createApp = () => createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), modelSettings: settings });
+  const createApp = () => createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), modelSettings: settings });
   return { api: createApp(), settings, createApp };
 }
 
@@ -103,7 +103,7 @@ test("base refinement uses the selected channel, retains its source, and switche
   const prompts = new MemoryPromptRepository();
   const [version] = await prompts.importRecords(parsePromptMarkdown("### 产品图转干净产品底图返修提示词\n\n```plain\n白底精修\n```", "prompt.md"));
   await prompts.publishVersion(version.templateVersionId);
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), modelSettings: settings, promptRepository: prompts });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), modelSettings: settings, promptRepository: prompts });
   const suite = await api.request("POST", "/api/suites", { body: { name: "白底精修" } });
   const uploaded = await api.upload(suite.body.data.id, { bytes: png, filename: "product.png", mimeType: "image/png" });
   const imagePath = `/api/suites/${suite.body.data.id}/input-images/${uploaded.body.data.id}`;

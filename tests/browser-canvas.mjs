@@ -5,7 +5,7 @@ import test from "node:test";
 import { setTimeout } from "node:timers/promises";
 import { chromium } from "playwright";
 import { createServer } from "vite";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
@@ -15,7 +15,7 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
   const sample = await readFile("public/assets/gan65-product.jpg");
   const libraryRepository = new MemoryLibraryRepository();
   const calls = [];
-  const api = createTicket02App({
+  const api = createSuiteStudioApp({
     repository: new MemorySuiteRepository(),
     taskRepository: new MemoryTaskRepository(),
     libraryRepository,

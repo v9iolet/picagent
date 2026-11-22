@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import sharp from "sharp";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
@@ -16,7 +16,7 @@ async function fixture() {
   const input = await repository.createInputImage({ id: randomUUID(), suiteId: suite.id, ordinal: 1, originalObjectKey: "input/original.png", thumbnailObjectKey: "input/original.png", sha256: "a".repeat(64), width: 64, height: 64, mimeType: "image/png", originalFilename: "source.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
   const snapshot: PlanSnapshot = { id: randomUUID(), suiteId: suite.id, revisionNumber: 1, revisionKind: "human", parentSnapshotId: null, templateVersionId: randomUUID(), dynamicInput: {}, humanInput: {}, chunks: [], inputImageIds: [input.id], baseVersionIds: [], provider: { name: "fake", model: "fake", isFake: true }, requestSummary: {}, rawOutputSummary: {}, schemaVersion: "suite-plan-v1", items: [{ id: randomUUID(), ordinal: 1, imageType: "main", title: "主图一", purpose: "展示主体", prompt: "main" }, { id: randomUUID(), ordinal: 2, imageType: "detail", title: "详情一", purpose: "展示细节", prompt: "detail" }], createdAt: new Date().toISOString() };
   await plans.appendRevision(snapshot);
-  const api = createTicket02App({ repository, storage, planRepository: plans, taskRepository: tasks, provider: { edit: async (request) => { providerInputs.push(request.image); return { bytes, mimeType: "image/png" }; } } });
+  const api = createSuiteStudioApp({ repository, storage, planRepository: plans, taskRepository: tasks, provider: { edit: async (request) => { providerInputs.push(request.image); return { bytes, mimeType: "image/png" }; } } });
   return { api, suite, snapshot, plans, providerInputs, bytes };
 }
 
@@ -30,7 +30,7 @@ test("start-creation-check accepts original images without a white-background re
 test("start-creation-check still requires input images and a usable plan", async () => {
   const repository = new MemorySuiteRepository();
   const plans = new MemoryPlanRepository();
-  const api = createTicket02App({ repository, storage: new MemoryStorage(), planRepository: plans });
+  const api = createSuiteStudioApp({ repository, storage: new MemoryStorage(), planRepository: plans });
   const suite = await repository.createSuite("未精修原图");
   const path = `/api/suites/${suite.id}/start-creation-check`;
   const empty = await api.request("POST", path);

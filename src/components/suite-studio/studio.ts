@@ -1,3 +1,4 @@
+import type { ListingConfig } from "../../../shared/listing-config";
 import {
   createIdempotencyKey,
   type ApiImage,
@@ -15,13 +16,9 @@ import {
 } from "../../../shared/suite-categories";
 
 export type Counts = Record<SuiteCategoryGroupCode, number>;
-export interface Config {
-  platform: string;
-  targetMarket: string;
-  outputLanguage: string;
+export interface Config extends ListingConfig {
   aspectRatio: string;
   size: string;
-  sellingPoints: string;
   mode: "smart" | "custom";
   counts: Counts;
   listingCopy: boolean;

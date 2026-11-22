@@ -1,3 +1,4 @@
+import type { ListingConfig } from "../../shared/listing-config";
 import type { ModelChannelInput, ModelChannelSnapshot, ModelPreferences, ModelSettingsView } from "../../shared/model-settings";
 
 export interface ApiImage {
@@ -96,7 +97,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload?.data as T;
 }
 
-export type ListingConfig = { platform: string; targetMarket: string; outputLanguage: string; sellingPoints: string };
+export type { ListingConfig } from "../../shared/listing-config";
 export interface ApiListingSummary extends Omit<ListingConfig, "sellingPoints"> {
   id: string;
   sourceSuiteId: string | null;

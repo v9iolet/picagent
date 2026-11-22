@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { isNormalizedPromptMarkdown, parseNormalizedPromptMarkdown, parsePromptMarkdown, validateDynamicInput } from "../server/prompt-library.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
@@ -121,7 +121,7 @@ test("template API exposes only published stage metadata and schema", async () =
   const prompts = new MemoryPromptRepository();
   const [draft] = await prompts.importRecords(parsePromptMarkdown(markdown("计划模板", "用户输入区：\n- 产品名称："), "prompt.md"));
   await prompts.publishVersion(draft.templateVersionId);
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts });
   const response = await api.request("GET", "/api/prompt-templates?stage=plan");
   assert.equal(response.status, 200);
   assert.equal(response.body.data[0].templateVersionId, draft.templateVersionId);
@@ -130,7 +130,7 @@ test("template API exposes only published stage metadata and schema", async () =
 });
 
 test("platform API exposes maintained dropdown options without prompt bodies", async () => {
-  const api = createTicket02App({
+  const api = createSuiteStudioApp({
     repository: new MemorySuiteRepository(),
     storage: new MemoryStorage(),
     platformRepository: {
@@ -154,7 +154,7 @@ test("base generation loads a published PG template and freezes its version and 
   const calls: ImageEditRequest[] = [];
   const provider: ImageProvider = { edit: async (request) => { calls.push(request); return { bytes: png1x1, mimeType: "image/png" }; } };
   const repository = new MemorySuiteRepository();
-  const api = createTicket02App({ repository, storage: new MemoryStorage(), provider, promptRepository: prompts });
+  const api = createSuiteStudioApp({ repository, storage: new MemoryStorage(), provider, promptRepository: prompts });
   const suite = await api.request("POST", "/api/suites", { body: { name: "模板快照" } });
   const uploaded = await api.upload(suite.body.data.id, { filename: "product.png", mimeType: "image/png", bytes: png1x1 });
   const path = `/api/suites/${suite.body.data.id}/input-images/${uploaded.body.data.id}/base-generation`;

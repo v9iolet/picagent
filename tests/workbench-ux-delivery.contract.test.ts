@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import sharp from "sharp";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
@@ -29,7 +29,7 @@ test("style override injects forward into new generation attempts without mutati
   const pngA = await tinyPng({ r: 220, g: 120, b: 60 });
   const pngB = await tinyPng({ r: 40, g: 140, b: 220 });
 
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository,
     planRepository,
     taskRepository,
@@ -174,7 +174,7 @@ test("delivery ZIP export merges parent and edit-child slots with manifest.json 
     async () => ({ bytes: parentPng, mimeType: "image/png", width: 32, height: 32, generationPrompt: "主图原提示词" }),
   );
 
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository,
     planRepository,
     taskRepository,
@@ -284,7 +284,7 @@ test("seedDemoShowcase creates a complete end-to-end showcase suite and is idemp
   assert.equal(second.suiteId, first.suiteId);
   assert.equal((await repository.listSuites()).length, 1);
 
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository,
     planRepository,
     taskRepository,
@@ -311,7 +311,7 @@ test("multi-platform preset ZIP export resizes images, converts format, and stit
   const storage = new MemoryStorage();
 
   const seeded = await seedDemoShowcase({ repository, planRepository, taskRepository, reverseRepository, imageEditorRepository, storage });
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository,
     planRepository,
     taskRepository,
@@ -359,7 +359,7 @@ test("cross-border image text translation, custom canvas tasks, batch param sync
   const storage = new MemoryStorage();
   const samplePng = await tinyPng({ r: 80, g: 130, b: 210 });
 
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository,
     planRepository,
     taskRepository,
@@ -460,7 +460,7 @@ test("task generation sends selected pixel size, freezes retries, and applies ch
   const taskRepository = new MemoryTaskRepository();
   const png = await tinyPng({ r: 50, g: 90, b: 130 });
   const sizes: string[] = [];
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository: new MemorySuiteRepository(), taskRepository, storage: new MemoryStorage(),
     provider: { async edit(request) { sizes.push(request.size); throw new Error("IMAGE_SIZE_UNSUPPORTED"); } },
   });
@@ -499,7 +499,7 @@ test("changing task params while an attempt is reserved cannot change the dispat
   };
   const png = await tinyPng({ r: 10, g: 30, b: 70 });
   const sizes: string[] = [];
-  const app = createTicket02App({
+  const app = createSuiteStudioApp({
     repository: new MemorySuiteRepository(), taskRepository, storage: new MemoryStorage(),
     provider: { async edit(request) { sizes.push(request.size); return { bytes: png, mimeType: "image/png" }; } },
   });
@@ -529,7 +529,7 @@ test("a tier-only image model dispatches the selected tier without pixel convers
     sizes.push((init.body as FormData).get("size")!);
     return new Response(JSON.stringify({ data: [{ b64_json: png.toString("base64") }] }));
   });
-  const app = createTicket02App({ repository: new MemorySuiteRepository(), taskRepository, storage: new MemoryStorage(), modelSettings: settings });
+  const app = createSuiteStudioApp({ repository: new MemorySuiteRepository(), taskRepository, storage: new MemoryStorage(), modelSettings: settings });
   const suiteId = (await app.request("POST", "/api/suites", { body: { name: "档位透传" } })).body.data.id;
   await app.upload(suiteId, { filename: "product.png", mimeType: "image/png", bytes: png });
   const task = (await app.request("POST", "/api/suites/" + suiteId + "/tasks/custom", {

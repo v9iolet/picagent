@@ -26,7 +26,7 @@
 - 底图精修提交立即返回后台任务，页面每秒拉取生成历史，成功或失败后自动退出“生成中”。
 - 桌面端图片使用稳定容器约束，缩略图删除按钮位于卡片内部，长文件信息不会撑破卡片。
 - 现有对话确认的 26 个名称中，有 5 个在源 Markdown 中没有 fenced code block，因此本 ticket 不猜测正文、不入库：美妆日化详情页、服饰主图、老檀木主图、老檀木详情页、家具纯视觉主图。补齐代码块后重新执行导入即可。
-- `npx tsx --test tests/prompt-library.ticket.test.ts tests/ticket02.contract.test.ts tests/ticket02.encoding.test.ts tests/ticket03.contract.test.ts` 通过。
+- `npx tsx --test tests/prompt-library.ticket.test.ts tests/suite-input-images.contract.test.ts tests/multipart-encoding.test.ts tests/ticket03.contract.test.ts` 通过。
 - `npm run build` 通过。
 
 ## 使用

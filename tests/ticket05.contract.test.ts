@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTicket02App, planOutputMatchesRequestedCounts } from "../server/app.js";
+import { createSuiteStudioApp, planOutputMatchesRequestedCounts } from "../server/app.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
@@ -26,7 +26,7 @@ async function setup(options: { output?: unknown; llm?: boolean; chunks?: RagChu
     provider: "deterministic_fake", model: "ticket05-fixed", isFake: true,
     async generatePlan() { return options.output ?? { schemaVersion: "suite-plan-v1", items: [{ title: "白底首图", purpose: "展示商品", prompt: "保持黑色鼠标真实外观，纯白背景。" }] }; },
   };
-  return { app: createTicket02App({ repository: suites, storage: new MemoryStorage(), promptRepository: prompts, planRepository: plans, ragClient: rag, llmClient: llm }), suite, template, plans };
+  return { app: createSuiteStudioApp({ repository: suites, storage: new MemoryStorage(), promptRepository: prompts, planRepository: plans, ragClient: rag, llmClient: llm }), suite, template, plans };
 }
 
 async function waitForTerminal(app: Awaited<ReturnType<typeof setup>>["app"], attemptId: string) {
@@ -66,8 +66,8 @@ test("LLM timeout is persisted as LLM_TIMEOUT with retryable user message", asyn
   const timeoutSuites = new MemorySuiteRepository(); const timeoutPrompts = new MemoryPromptRepository();
   const [timeoutTemplate] = await timeoutPrompts.importRecords(parsePromptMarkdown(planMarkdown, "timeout.md")); await timeoutPrompts.publishVersion(timeoutTemplate.templateVersionId);
   const timeoutSuite = await timeoutSuites.createSuite("timeout"); const timeoutPlans = new MemoryPlanRepository();
-  const started = await createTicket02App({ repository: timeoutSuites, storage: new MemoryStorage(), promptRepository: timeoutPrompts, planRepository: timeoutPlans, ragClient: { async search(){return []}, async getByIds(){return []} }, llmClient: { provider: "dashscope", model: "timeout", isFake: false, async generatePlan(){ throw new Error("LLM_TIMEOUT"); } } }).request("POST", `/api/suites/${timeoutSuite.id}/plan`, { headers: { "idempotency-key": "timeout" }, body: { templateVersionId: timeoutTemplate.templateVersionId, dynamicInput: { product_name: "鼠标" }, selectedChunks: [] } });
-  const terminal = await waitForTerminal(createTicket02App({ repository: timeoutSuites, storage: new MemoryStorage(), promptRepository: timeoutPrompts, planRepository: timeoutPlans, ragClient: { async search(){return []}, async getByIds(){return []} }, llmClient: { provider: "dashscope", model: "timeout", isFake: false, async generatePlan(){ throw new Error("LLM_TIMEOUT"); } } }), (started.body as any).data.attemptId);
+  const started = await createSuiteStudioApp({ repository: timeoutSuites, storage: new MemoryStorage(), promptRepository: timeoutPrompts, planRepository: timeoutPlans, ragClient: { async search(){return []}, async getByIds(){return []} }, llmClient: { provider: "dashscope", model: "timeout", isFake: false, async generatePlan(){ throw new Error("LLM_TIMEOUT"); } } }).request("POST", `/api/suites/${timeoutSuite.id}/plan`, { headers: { "idempotency-key": "timeout" }, body: { templateVersionId: timeoutTemplate.templateVersionId, dynamicInput: { product_name: "鼠标" }, selectedChunks: [] } });
+  const terminal = await waitForTerminal(createSuiteStudioApp({ repository: timeoutSuites, storage: new MemoryStorage(), promptRepository: timeoutPrompts, planRepository: timeoutPlans, ragClient: { async search(){return []}, async getByIds(){return []} }, llmClient: { provider: "dashscope", model: "timeout", isFake: false, async generatePlan(){ throw new Error("LLM_TIMEOUT"); } } }), (started.body as any).data.attemptId);
   assert.equal((terminal.body as any).data.errorCode, "LLM_TIMEOUT"); assert.equal((terminal.body as any).data.errorMessage, "计划生成超时，请重试");
 });
 
@@ -110,6 +110,6 @@ test("fixed main and detail counts reject an incomplete model plan", () => {
 test("a missing historical object returns 404 instead of crashing the API", async () => {
   const suites=new MemorySuiteRepository(); const suite=await suites.createSuite("missing object");
   const image=await suites.createInputImage({id:"00000000-0000-4000-8000-000000000001",suiteId:suite.id,ordinal:1,originalObjectKey:`suites/${suite.id}/inputs/00000000-0000-4000-8000-000000000001/original`,thumbnailObjectKey:`suites/${suite.id}/inputs/00000000-0000-4000-8000-000000000001/thumbnail`,sha256:"b".repeat(64),width:1,height:1,mimeType:"image/png",originalFilename:"missing.png",currentBaseVersionId:null,createdAt:new Date().toISOString()});
-  const storage={...new MemoryStorage(),put:async()=>{},get:async()=>null,delete:async()=>{},previewUrl:async()=>{throw new Error("OBJECT_NOT_FOUND");}}; const app=createTicket02App({repository:suites,storage});
+  const storage={...new MemoryStorage(),put:async()=>{},get:async()=>null,delete:async()=>{},previewUrl:async()=>{throw new Error("OBJECT_NOT_FOUND");}}; const app=createSuiteStudioApp({repository:suites,storage});
   const response=await app.preview(suite.id,image.id,"original"); assert.equal(response.status,404);
 });

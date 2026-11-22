@@ -1,5 +1,6 @@
+import { LISTING_CONFIG_FIELDS, type ListingConfigInput } from "../shared/listing-config.js";
 import { randomUUID } from "node:crypto";
-import type { AppResponse } from "./app.js";
+import { now, ok, type AppResponse } from "./api-response.js";
 import { processImage } from "./image.js";
 import {
   ListingError,
@@ -22,12 +23,10 @@ import type {
 type Params = Record<string, unknown>;
 const root = "/api/listing-copies";
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-const now = () => new Date().toISOString();
-const ok = (data: unknown, status = 200): AppResponse => ({ status, body: { data, requestId: randomUUID() } });
 const conflict = () => new ListingError("LISTING_JOB_CHANGED", 409);
-function configure(job: ListingJob, params: Params) {
+function applyListingConfig(job: ListingJob, params: ListingConfigInput) {
   let invalid = false;
-  for (const k of ["platform", "targetMarket", "outputLanguage", "sellingPoints"] as const) {
+  for (const k of LISTING_CONFIG_FIELDS) {
     if (params[k] === undefined) continue;
     if (typeof params[k] !== "string") {
       invalid = true;
@@ -39,7 +38,7 @@ function configure(job: ListingJob, params: Params) {
   if (invalid) throw new ListingError("INVALID_LISTING_CONFIG");
   return job;
 }
-function draft(sourceSuiteId: string | null = null, id: string = randomUUID()): ListingJob {
+function newListingDraft(sourceSuiteId: string | null = null, id: string = randomUUID()): ListingJob {
   const date = now();
   return {
     id,
@@ -57,7 +56,7 @@ function draft(sourceSuiteId: string | null = null, id: string = randomUUID()): 
     updatedAt: date,
   };
 }
-function fromSuite(i: ListingImage): ListingImage {
+function copySuiteImageReference(i: ListingImage): ListingImage {
   const { id, ordinal, originalObjectKey, thumbnailObjectKey, mimeType, width, height, sha256, originalFilename } = i;
   return { id, ordinal, originalObjectKey, thumbnailObjectKey, mimeType, width, height, sha256, originalFilename };
 }
@@ -71,13 +70,13 @@ export function createListingCopyApi(deps: {
   platforms?: PlatformRepository;
   vision: () => Promise<LlmClient | undefined>;
 }) {
-  async function save(job: ListingJob, old: ListingJob | null) {
+  async function saveListingJob(job: ListingJob, old: ListingJob | null) {
     job.revision = (old?.revision ?? 0) + 1;
     job.updatedAt = now();
     if (!(await deps.jobs.save(job, old))) throw conflict();
     return job;
   }
-  async function rulesFor(platform: string) {
+  async function loadListingRules(platform: string) {
     const profile = platform && (await deps.platforms?.find(platform));
     if (!profile) throw new ListingError("PLATFORM_NOT_FOUND");
     const rules = profile.listingCopyRules;
@@ -94,9 +93,9 @@ export function createListingCopyApi(deps: {
       throw new ListingError("LISTING_RULES_NOT_CONFIGURED");
     return rules;
   }
-  async function generate(job: ListingJob) {
+  async function generateListingVersion(job: ListingJob) {
     try {
-      const rules = await rulesFor(job.platform);
+      const rules = await loadListingRules(job.platform);
       const listed = (await deps.prompts?.listPublished("listing_copy"))?.find((t) => t.code === "general.listing-copy");
       const template = listed && (await deps.prompts?.getPublishedVersion(listed.templateVersionId, "listing_copy"));
       if (!template) throw new ListingError("LISTING_TEMPLATE_NOT_PUBLISHED");
@@ -150,69 +149,69 @@ export function createListingCopyApi(deps: {
           model: { name: llm.provider, model: llm.model, isFake: llm.isFake, channel: llm.channel },
         },
       };
-      await save({ ...job, status: "succeeded", versions: [...job.versions, version] }, job);
+      await saveListingJob({ ...job, status: "succeeded", versions: [...job.versions, version] }, job);
     } catch (e) {
-      await save(
+      await saveListingJob(
         { ...job, status: "failed", errorCode: e instanceof ListingError ? e.message : "LISTING_GENERATION_FAILED" },
         job,
       );
     }
   }
-  async function start(job: ListingJob, old: ListingJob | null) {
+  async function startListingGeneration(job: ListingJob, old: ListingJob | null) {
     if (!job.inputImages.length) throw new ListingError("INPUT_IMAGES_REQUIRED");
-    const running = await save({ ...job, status: "running", errorCode: null }, old);
-    void generate(running).catch(() => console.error("Could not persist listing copy result", running.id));
+    const running = await saveListingJob({ ...job, status: "running", errorCode: null }, old);
+    void generateListingVersion(running).catch(() => console.error("Could not persist listing copy result", running.id));
     return ok(running, 202);
   }
   // Claim the run ID before interpreting inherited data. A bad historical field must
   // leave a visible, retryable result rather than disappearing from studio-state.
-  async function startFromSuite(job: ListingJob, config: Params) {
-    const claimed = await save({ ...job, status: "running" }, null);
+  async function startSuiteListingGeneration(job: ListingJob, config: ListingConfigInput) {
+    const claimed = await saveListingJob({ ...job, status: "running" }, null);
     const configured = structuredClone(claimed);
     try {
-      configure(configured, config);
+      applyListingConfig(configured, config);
       if (!configured.inputImages.length) throw new ListingError("INPUT_IMAGES_REQUIRED");
     } catch (e) {
       if (!(e instanceof ListingError)) throw e;
-      return ok(await save({ ...configured, status: "failed", errorCode: e.message }, claimed), 202);
+      return ok(await saveListingJob({ ...configured, status: "failed", errorCode: e.message }, claimed), 202);
     }
-    return start(configured, claimed);
+    return startListingGeneration(configured, claimed);
   }
   // A pipeline run has one deterministic job ID, so replay/resume never creates a second job.
-  async function startPipeline(runId: string, suiteId: string, config: Params, images: ListingImage[]) {
+  async function startPipeline(runId: string, suiteId: string, config: ListingConfigInput, images: ListingImage[]) {
     if (await deps.jobs.summary(runId)) return;
-    const job = draft(suiteId, runId);
-    job.inputImages = images.map(fromSuite);
+    const job = newListingDraft(suiteId, runId);
+    job.inputImages = images.map(copySuiteImageReference);
     try {
-      await startFromSuite(job, config);
+      await startSuiteListingGeneration(job, config);
     } catch (e) {
       if (!(e instanceof ListingError && e.status === 409)) throw e;
     }
   }
-  async function create(params: Params) {
+  async function createListingJob(params: Params) {
     const source = params.sourceSuiteId;
     if (source !== undefined && (typeof source !== "string" || !uuid.test(source) || !(await deps.suites.getSuite(source))))
       throw new ListingError("INVALID_SUITE_ID", 404);
-    const job = draft(source ?? null);
+    const job = newListingDraft(source ?? null);
     const generateNow = params.generate === true;
     if (source) {
       const run = await deps.pipelines.getLatestRun(source);
       const plan = !run && (await deps.plans?.getLatestSnapshot(source));
       const v = (plan && plan.dynamicInput) || {};
-      const inherited = run?.config ?? {
+      const inherited: ListingConfigInput = run?.config ?? {
         platform: v.platform,
         targetMarket: v.target_market_country,
         outputLanguage: v.output_language,
         sellingPoints: v.human_supplement,
       };
-      job.inputImages = (await deps.suites.getInputImages(source)).map(fromSuite);
+      job.inputImages = (await deps.suites.getInputImages(source)).map(copySuiteImageReference);
       params = { ...inherited, ...params };
-      if (generateNow) return startFromSuite(job, params);
+      if (generateNow) return startSuiteListingGeneration(job, params);
     }
-    configure(job, params);
-    return generateNow ? start(job, null) : ok(await save(job, null), 201);
+    applyListingConfig(job, params);
+    return generateNow ? startListingGeneration(job, null) : ok(await saveListingJob(job, null), 201);
   }
-  function editable(job: ListingJob) {
+  function requireEditableListing(job: ListingJob) {
     if (job.status === "running") throw new ListingError("LISTING_JOB_RUNNING", 409);
   }
   function deleteOwnedImages(id: string, images: ListingImage[]) {
@@ -223,9 +222,9 @@ export function createListingCopyApi(deps: {
         .map((k) => deps.storage.delete(k)),
     );
   }
-  async function upload(old: ListingJob | null, body: Params) {
-    if (old) editable(old);
-    const job = old ? structuredClone(old) : draft();
+  async function uploadListingImage(old: ListingJob | null, body: Params) {
+    if (old) requireEditableListing(old);
+    const job = old ? structuredClone(old) : newListingDraft();
     if (job.inputImages.length >= 6) throw new ListingError("INPUT_IMAGE_LIMIT", 409);
     if (!Buffer.isBuffer(body.bytes) || typeof body.mimeType !== "string" || typeof body.filename !== "string")
       throw new ListingError("INVALID_INPUT_IMAGE");
@@ -251,15 +250,15 @@ export function createListingCopyApi(deps: {
       await deps.storage.put({ key: image.thumbnailObjectKey, bytes: p.thumbnail, contentType: "image/jpeg" });
       job.inputImages.push(image);
       job.inputImages.sort((a, b) => a.ordinal - b.ordinal);
-      return ok(await save(job, old), 201);
+      return ok(await saveListingJob(job, old), 201);
     } catch (e) {
       await deleteOwnedImages(job.id, [image]);
       throw e;
     }
   }
-  async function route(method: string, url: URL, params: Params): Promise<AppResponse> {
+  async function routeListingCopyRequest(method: string, url: URL, params: Params): Promise<AppResponse> {
     const path = url.pathname;
-    if (path === root && method === "POST") return create(params);
+    if (path === root && method === "POST") return createListingJob(params);
     if (path === root && method === "GET") {
       const limit = Number(url.searchParams.get("limit") || 20),
         offset = Number(url.searchParams.get("offset") || 0);
@@ -267,14 +266,14 @@ export function createListingCopyApi(deps: {
         throw new ListingError("INVALID_PAGINATION");
       return ok({ items: await deps.jobs.list(limit, offset), limit, offset });
     }
-    if (path === `${root}/draft/input-images` && method === "POST") return upload(null, params);
+    if (path === `${root}/draft/input-images` && method === "POST") return uploadListingImage(null, params);
     const segments = path.slice(root.length + 1).split("/");
     if (segments.includes("")) throw new ListingError("NOT_FOUND", 404);
     const [id, action, imageId, preview, kind, ...extra] = segments;
     const job = uuid.test(id) && (await deps.jobs.get(id));
     if (!job || extra.length) throw new ListingError("LISTING_JOB_NOT_FOUND", 404);
     if (action === "input-images") {
-      if (!imageId && method === "POST") return upload(job, params);
+      if (!imageId && method === "POST") return uploadListingImage(job, params);
       const img = job.inputImages.find((i) => i.id === imageId);
       if (!img) throw new ListingError("INPUT_IMAGE_NOT_FOUND", 404);
       if (method === "GET" && preview === "preview" && (kind === "original" || kind === "thumbnail")) {
@@ -287,19 +286,19 @@ export function createListingCopyApi(deps: {
         };
       }
       if (method === "DELETE" && !preview) {
-        editable(job);
-        const next = await save({ ...job, inputImages: job.inputImages.filter((i) => i.id !== img.id) }, job);
+        requireEditableListing(job);
+        const next = await saveListingJob({ ...job, inputImages: job.inputImages.filter((i) => i.id !== img.id) }, job);
         await deleteOwnedImages(id, [img]);
         return ok(next);
       }
     }
     if (method === "GET" && !action) return ok(job);
     if (!imageId && method === "POST" && (action === "generate" || action === "regenerate")) {
-      editable(job);
-      return start(configure(structuredClone(job), params), job);
+      requireEditableListing(job);
+      return startListingGeneration(applyListingConfig(structuredClone(job), params), job);
     }
     if (!action && method === "PUT") {
-      editable(job);
+      requireEditableListing(job);
       const previous = job.versions.at(-1);
       if (!previous) throw new ListingError("LISTING_VERSION_REQUIRED", 409);
       const edits = params.content;
@@ -310,7 +309,7 @@ export function createListingCopyApi(deps: {
         !["title", "bulletPoints", "description", "searchTerms", "missingFacts"].some((key) => Object.hasOwn(edits, key))
       )
         throw new ListingError("LISTING_INVALID_CONTENT");
-      const content = validateContent({ ...previous.content, ...edits }, await rulesFor(job.platform));
+      const content = validateContent({ ...previous.content, ...edits }, await loadListingRules(job.platform));
       const version = {
         id: randomUUID(),
         createdAt: now(),
@@ -318,10 +317,10 @@ export function createListingCopyApi(deps: {
         content,
         promptSnapshot: { ...previous.promptSnapshot, editedFromVersionId: previous.id },
       };
-      return ok(await save({ ...job, status: "succeeded", errorCode: null, versions: [...job.versions, version] }, job));
+      return ok(await saveListingJob({ ...job, status: "succeeded", errorCode: null, versions: [...job.versions, version] }, job));
     }
     if (!action && method === "DELETE") {
-      editable(job);
+      requireEditableListing(job);
       if (!(await deps.jobs.remove(id, job.revision))) throw conflict();
       await deleteOwnedImages(id, job.inputImages);
       return ok({ id });
@@ -332,7 +331,7 @@ export function createListingCopyApi(deps: {
     startPipeline,
     async request(method: string, path: string, body: unknown) {
       try {
-        return await route(method, new URL(path, "http://localhost"), (body ?? {}) as Params);
+        return await routeListingCopyRequest(method, new URL(path, "http://localhost"), (body ?? {}) as Params);
       } catch (e) {
         if (!(e instanceof ListingError)) throw e;
         return { status: e.status, body: { error: { code: e.message, message: e.message }, requestId: randomUUID() } };

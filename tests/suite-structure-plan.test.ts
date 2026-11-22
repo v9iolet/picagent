@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
@@ -94,7 +94,7 @@ async function setup(llmOutput: unknown = output, plans = new MemoryPlanReposito
   await repository.createInputImage({ id: "img-1", suiteId: suite.id, ordinal: 1, originalObjectKey: `suites/${suite.id}/img-1`, thumbnailObjectKey: `suites/${suite.id}/img-1-thumb`, sha256: "a".repeat(64), width: 1, height: 1, mimeType: "image/png", originalFilename: "product.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
   await storage.put({ key: `suites/${suite.id}/img-1`, bytes: image, contentType: "image/png" });
   const inputs: Record<string, unknown>[] = [];
-  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: plans, llmClient: { provider: "fake", model: "structure", isFake: true, async generatePlan(input) { inputs.push(input.dynamicInput); return llmOutput; } } });
+  const app = createSuiteStudioApp({ repository, storage, promptRepository: prompts, planRepository: plans, llmClient: { provider: "fake", model: "structure", isFake: true, async generatePlan(input) { inputs.push(input.dynamicInput); return llmOutput; } } });
   return { app, suite, template, plans, inputs };
 }
 
