@@ -193,3 +193,47 @@ test("生图画布：新建任务与检查器仅在选择 4K 时提示耗时和�
   await note.waitFor();
   assert.equal(calls.length, 0);
 });
+
+test("默认生图模型：套图配置、新建任务与检查器可选七种比例，详情默认 3:4", async (t) => {
+  const { page, url } = await offlineCanvas(t);
+  const modelId = "gpt-image-2.5-flare-special";
+  await page.route("**/api/model-settings", route => route.fulfill({ json: { data: {
+    channels: [{ id: "offline", models: [{ id: modelId, capabilities: ["image"] }] }],
+    preferences: { image: { channelId: "offline", modelId }, vision: null },
+  } } }));
+  const ratios = ["1:1", "2:3", "3:2", "3:4", "4:3", "16:9", "9:16"];
+  async function assertRatioOptions(select, initial) {
+    await select.getByRole("option", { name: "9:16", exact: true }).waitFor({ state: "attached" });
+    assert.deepEqual(await select.locator("option:enabled").allTextContents(), ratios);
+    assert.equal(await select.inputValue(), initial);
+  }
+
+  await page.goto(url + "create/suite");
+  const config = page.getByRole("combobox", { name: "比例", exact: true });
+  await assertRatioOptions(config, "1:1");
+  await config.selectOption("16:9");
+  assert.equal(await config.inputValue(), "16:9");
+
+  await page.getByRole("link", { name: "生图画布", exact: true }).click();
+  await page.getByRole("button", { name: "新建空白画布" }).click();
+  await page.getByRole("button", { name: "新建任务卡" }).click();
+  const modal = page.getByRole("dialog", { name: "自由新增画布任务卡" });
+  const modalRatio = modal.getByRole("combobox", { name: /^画面比例/ });
+  await assertRatioOptions(modalRatio, "3:4");
+  await modalRatio.selectOption("4:3");
+  assert.equal(await modalRatio.inputValue(), "4:3");
+  const type = modal.getByRole("combobox", { name: /^坑位类型/ });
+  await type.selectOption("main");
+  assert.equal(await modalRatio.inputValue(), "1:1");
+  await type.selectOption("detail");
+  assert.equal(await modalRatio.inputValue(), "3:4");
+  await modal.getByLabel("任务标题 *", { exact: true }).fill("比例样例");
+  await modal.getByLabel("生图提示词 *", { exact: true }).fill("展示商品外观");
+  await modal.getByRole("button", { name: "加入创作画布" }).click();
+  await modal.waitFor({ state: "hidden" });
+  const inspector = page.getByRole("combobox", { name: /^比例/ });
+  await assertRatioOptions(inspector, "3:4");
+  await inspector.selectOption("9:16");
+  const card = page.locator("article").filter({ has: page.getByRole("heading", { name: "比例样例" }) });
+  await card.getByText("9:16", { exact: true }).waitFor();
+});

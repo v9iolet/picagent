@@ -177,7 +177,7 @@ test("image options round-trip through channels and resolve with legacy model de
     ...channel, models: [{ id: saved.models[0].id, capabilities: ["image"] }],
   } });
   assert.deepEqual((await settings.resolve("image"))?.imageOptions, {
-    sizes: ["1K", "2K", "4K"], aspectRatios: ["1:1", "2:3", "3:2"], sizeMode: "pixels",
+    sizes: ["1K", "2K", "4K"], aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "16:9", "9:16"], sizeMode: "pixels",
   });
   await api.request("PATCH", path + "/preferences", { body: { image: null } });
   await api.request("PUT", path + "/channels/" + saved.id, { body: channel });
@@ -200,12 +200,19 @@ test("invalid image options are rejected without losing the saved capability con
   assert.deepEqual((await api.request("GET", path)).body.data.channels, []);
 });
 
-test("pixel conversion reproduces measured dimensions and caps the square 4K baseline at 2880", () => {
-  assert.equal(resolveImageSize("1K", "1:1", "pixels"), "1024x1024");
-  assert.equal(resolveImageSize("1K", "2:3", "pixels"), "1024x1536");
-  assert.equal(resolveImageSize("1K", "3:2", "pixels"), "1536x1024");
-  assert.equal(resolveImageSize("2K", "1:1", "pixels"), "2048x2048");
-  assert.equal(resolveImageSize("4K", "1:1", "pixels"), "2880x2880");
+test("pixel conversion maps seven aspect ratios at 1K, 2K and 4K", () => {
+  const cases = [
+    ["1:1", "1024x1024", "2048x2048", "2880x2880"],
+    ["2:3", "1024x1536", "2048x3072", "2880x4320"],
+    ["3:2", "1536x1024", "3072x2048", "4320x2880"],
+    ["3:4", "1024x1360", "2048x2736", "2880x3840"],
+    ["4:3", "1360x1024", "2736x2048", "3840x2880"],
+    ["16:9", "1824x1024", "3648x2048", "5120x2880"],
+    ["9:16", "1024x1824", "2048x3648", "2880x5120"],
+  ];
+  for (const [ratio, ...pixels] of cases) {
+    assert.deepEqual(["1K", "2K", "4K"].map((size) => resolveImageSize(size, ratio, "pixels")), pixels, ratio);
+  }
   assert.equal(resolveImageSize("2K", "3:4", "tier"), "2K");
   assert.throws(() => resolveImageSize("8K", "1:1", "pixels"), /IMAGE_SIZE_UNSUPPORTED/);
   assert.throws(() => resolveImageSize("1K", "0:1", "pixels"), /IMAGE_SIZE_UNSUPPORTED/);
