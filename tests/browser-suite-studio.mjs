@@ -138,7 +138,7 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
             stableId: `${input.categoryCode}-${i}`,
             category: input.categoryCode,
             title: {
-              main: "产品全貌",
+              main: "便携键盘产品全貌与折叠收纳结构的正面展示",
               feature_benefit: "折叠插脚",
               lifestyle_use: "桌面充电",
               comparison: "规格对比",
@@ -303,11 +303,16 @@ test("商品套图：空态、静默草稿、平台联动、七张实图与选�
   const cards = batch.locator("[data-result-card]");
   assert.equal(await cards.count(), 7);
   assert.equal(await cards.locator("img").count(), 7);
-  const badges = await cards.locator("[data-type-badge]").allTextContents();
-  assert.deepEqual(
-    badges.map((s) => s.split("：")[0]).sort(),
-    ["主图", "信息卖点图", "信息卖点图", "信息卖点图", "生活场景图", "生活场景图", "对比图"].sort(),
-  );
+  const badges = await cards.evaluateAll((elements) => elements.map((card) => {
+    const badge = card.querySelector("[data-type-badge]");
+    return [badge?.textContent, badge?.title];
+  }));
+  assert.deepEqual(badges.sort(), [
+    ["主图", "便携键盘产品全貌与折叠收纳结构的正面展示"],
+    ["信息卖点图", "折叠插脚"], ["信息卖点图", "折叠插脚"], ["信息卖点图", "折叠插脚"],
+    ["生活场景图", "桌面充电"], ["生活场景图", "桌面充电"],
+    ["对比图", "规格对比"],
+  ].sort());
   await batch.getByLabel("全选本批次").check();
   assert.equal(await cards.locator("input:checked").count(), 7);
   await batch.getByLabel("全选本批次").uncheck();

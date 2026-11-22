@@ -31,6 +31,20 @@ test("listing_copy 模板声明视觉输入、平台规则和独立的输出契�
     "schemaVersion", "title", "bulletPoints", "description", "missingFacts", "itemHighlights", "searchTerms",
     "tags", "seoTitle", "seoDescription", "subtitle", "hashtags",
   ]);
+  assert.match(record.body, /`schemaVersion`：固定字符串 `"listing-copy-v1"`，必填/);
+  for (const [key, type] of [
+    ["title", "字符串"], ["bulletPoints", "字符串数组"], ["description", "字符串"], ["missingFacts", "字符串数组"],
+  ]) {
+    assert.ok(record.body.includes(`\`${key}\`：${type}，必填`), key);
+  }
+  for (const [key, type] of [
+    ["itemHighlights", "字符串"], ["searchTerms", "字符串数组"], ["tags", "字符串数组"],
+    ["seoTitle", "字符串"], ["seoDescription", "字符串"], ["subtitle", "字符串"], ["hashtags", "字符串数组"],
+  ]) {
+    assert.ok(record.body.includes(`\`${key}\`：${type}，可选`), key);
+  }
+  assert.match(record.body, /`searchTerms`：[^\n]+UTF-8 字节数[^\n]+`searchTermsMaxBytes`/);
+  assert.match(record.body, /`hashtags`：[^\n]+每项以 `#` 开头/);
   assert.throws(() => validatePromptTemplateContract({ ...record, inputSchema: [] }));
   assert.throws(() => validatePromptTemplateContract({ ...record, executionTarget: "image_model" }));
 });
@@ -180,6 +194,97 @@ test("Amazon 超限文案照常生成并保存，返回字符、字节与条数�
   assert.equal((await f.req("GET", root + "?limit=1&offset=0")).items[0].id, job.id);
 });
 
+test("模型省略版本和描述并返回字符串搜索词时，生成和重生成仍保存文案及超限警告", async () => {
+  const legacyOutput = {
+    title: "杯子",
+    bulletPoints: "- 白色\r\n\n• 折叠手柄\n3. 带杯盖\n（4）易收纳",
+    searchTerms: `  ${"杯".repeat(83)} 茶,\n 水杯  `,
+    missingFacts: null,
+    itemHighlights: null,
+    tags: ["无关标签"],
+    metadata: { source: "model" },
+    ["__proto__"]: { subtitle: "无关副标题" },
+  };
+  let output: unknown = legacyOutput;
+  const f = await fixture(async () => output);
+  const draft = await f.upload("draft");
+  const path = `${root}/${draft.id}`;
+  const expected = {
+    schemaVersion: "listing-copy-v1",
+    title: "杯子",
+    description: "",
+    bulletPoints: ["白色", "折叠手柄", "带杯盖", "易收纳"],
+    searchTerms: ["杯".repeat(83), "茶", "水杯"],
+    missingFacts: [],
+  };
+  await f.req("POST", `${path}/generate`, { platform: "amazon" }, 202);
+  const generated = await eventual(() => f.req("GET", path), (j) => j.status === "succeeded");
+  assert.deepEqual(generated.versions[0].content, expected);
+  assert.deepEqual(evaluateListingWarnings(generated.versions[0].content, platformRules.amazon), [
+    { field: "searchTerms", actual: 260, limit: 250, unit: "bytes" },
+  ]);
+
+  output = { ...legacyOutput, type: "listing-copy-v1" };
+  await f.req("POST", `${path}/regenerate`, {}, 202);
+  const regenerated = await eventual(() => f.req("GET", path), (j) => j.status === "succeeded");
+  assert.equal(regenerated.versions.length, 2);
+  assert.deepEqual(regenerated.versions[0], generated.versions[0]);
+  assert.deepEqual(regenerated.versions[1].content, expected);
+});
+
+test("生成文案在拆分和丢弃字段之前仍拦截禁用词，并记录安全的失败摘要", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  let output: unknown = content;
+  const f = await fixture(async () => output);
+  const draft = await f.upload("draft");
+  const path = `${root}/${draft.id}`;
+  for (const [platform, fields] of [
+    ["amazon", { searchTerms: "cup Ｂｅｓｔ Ｓｅｌｌｅｒ mug" }],
+    ["amazon", { searchTerms: "cup best,\n seller mug" }],
+    ["taobao", { searchTerms: "cup best seller mug" }],
+    ["taobao", { searchTerms: "cup best,\n seller mug" }],
+    ["taobao", { seoDescription: "Best Seller" }],
+  ] as const) {
+    output = { ...content, ...fields };
+    await f.req("POST", `${path}/generate`, { platform }, 202);
+    const failed = await eventual(() => f.req("GET", path), (j) => j.status === "failed");
+    assert.equal(failed.errorCode, "LISTING_FORBIDDEN_WORD");
+    assert.deepEqual(failed.versions, []);
+  }
+  assert.equal(errors.mock.callCount(), 5);
+  for (const call of errors.mock.calls) {
+    assert.deepEqual(call.arguments, [`[listing-copy] jobId=${draft.id} errorCode=LISTING_FORBIDDEN_WORD reason=校验模型输出失败`]);
+  }
+});
+
+test("生成文案可修正空值，但拒绝非普通对象和不可修正的字段类型", async () => {
+  let output: unknown = {
+    title: "杯子", bulletPoints: null, description: null, searchTerms: null, itemHighlights: null,
+  };
+  const f = await fixture(async () => output);
+  const draft = await f.upload("draft");
+  const path = `${root}/${draft.id}`;
+  await f.req("POST", `${path}/generate`, { platform: "amazon" }, 202);
+  const generated = await eventual(() => f.req("GET", path), (j) => j.status === "succeeded");
+  assert.deepEqual(generated.versions[0].content, {
+    schemaVersion: "listing-copy-v1", title: "杯子", description: "", bulletPoints: [], missingFacts: [],
+  });
+
+  for (const bad of [
+    null, [content], Object.assign(new Date(), content),
+    { ...content, schemaVersion: "listing-copy-v2", type: "listing-copy-v1" },
+    { ...content, title: undefined }, { ...content, title: 1 }, { ...content, description: {} },
+    { ...content, bulletPoints: undefined }, { ...content, bulletPoints: 1 },
+    { ...content, missingFacts: "容量" }, { ...content, searchTerms: [1] },
+  ]) {
+    output = bad;
+    await f.req("POST", `${path}/regenerate`, {}, 202);
+    const failed = await eventual(() => f.req("GET", path), (j) => j.status === "failed");
+    assert.equal(failed.errorCode, "LISTING_INVALID_CONTENT");
+    assert.deepEqual(failed.versions, generated.versions);
+  }
+});
+
 test("淘宝只保存适用字段，所有文本字段的禁用词和非法字段类型均硬拦截", async () => {
   const f = await fixture(async () => ({ ...content, subtitle: "折叠收纳" })),
     draft = await f.upload("draft"),
@@ -207,7 +312,10 @@ test("淘宝只保存适用字段，所有文本字段的禁用词和非法字�
     assert.equal(res.status, 400);
     assert.equal((res.body as any).error.code, "LISTING_FORBIDDEN_WORD");
   }
-  for (const changes of [{ searchTerms: "unused" }, { subtitle: null }, { tags: [1] }, { unknown: "text" }]) {
+  for (const changes of [
+    { searchTerms: "unused" }, { bulletPoints: "- 白色\n- 折叠" }, { description: null }, { missingFacts: null },
+    { subtitle: null }, { tags: [1] }, { unknown: "text" },
+  ]) {
     const res = await f.app.request("PUT", path, { body: { content: changes } });
     assert.equal(res.status, 400);
     assert.equal((res.body as any).error.code, "LISTING_INVALID_CONTENT");
@@ -226,7 +334,11 @@ test("16 平台只保存各自专属字段，专属字段超限仍可交付并�
     subtitle: "携".repeat(41),
     hashtags: Array.from({ length: 11 }, (_, i) => `#杯${i}`),
   };
-  const f = await fixture(async () => ({ ...base, ...special }));
+  const f = await fixture(async () => ({
+    ...base, ...special,
+    tags: ` ${special.tags[0]}、\n${special.tags.slice(1).join(",")} `,
+    hashtags: ` ${special.hashtags.slice(0, 2).join(",\n")} ${special.hashtags.slice(2).join(" ")} `,
+  }));
   const pairs = [
     [["amazon"], { searchTerms, itemHighlights: special.itemHighlights }, []],
     [["etsy"], { tags: special.tags }, [

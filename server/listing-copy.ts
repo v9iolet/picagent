@@ -106,6 +106,50 @@ const optionalText = ["itemHighlights", "seoTitle", "seoDescription", "subtitle"
 const optionalLists = ["searchTerms", "tags", "hashtags"] as const;
 const fieldNames = new Set<string>(["schemaVersion", ...requiredText, ...requiredLists, ...optionalText, ...optionalLists]);
 const normalized = (text: string) => text.normalize("NFKC").toLowerCase();
+const listSeparators = {
+  searchTerms: /[\s,，]+/u,
+  tags: /[,，、\r\n]+/u,
+  hashtags: /[\s,，]+/u,
+  bulletPoints: /[\r\n]+/u,
+};
+const bulletPrefix = /^(?:[-+*•●▪◦‣–—]|\d+(?:[)）、]|[.．](?=\s))|[（(]\d+[）)])\s*/u;
+
+function rejectForbiddenWords(texts: string[], rules: ListingRules) {
+  const fields = texts.map(normalized);
+  if (rules.forbiddenWords.some((word) => word && fields.some((field) => field.includes(normalized(word)))))
+    throw new ListingError("LISTING_FORBIDDEN_WORD");
+}
+
+export function normalizeListingModelOutput(raw: unknown, rules: ListingRules): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const prototype = Object.getPrototypeOf(raw);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+
+  const content: Record<string, unknown> = Object.fromEntries(Object.entries(raw).filter(([field]) => fieldNames.has(field)));
+  const rawTexts = [...requiredText, ...requiredLists, ...optionalText, ...optionalLists]
+    .flatMap((field) => content[field] ?? [])
+    .filter((value): value is string => typeof value === "string");
+
+  if (content.schemaVersion === undefined) content.schemaVersion = "listing-copy-v1";
+  content.description ??= "";
+  content.missingFacts ??= [];
+  if (content.bulletPoints === null) content.bulletPoints = [];
+
+  for (const [field, separator] of Object.entries(listSeparators)) {
+    const value = content[field];
+    if (typeof value !== "string") continue;
+    content[field] = value.split(separator)
+      .map((item) => field === "bulletPoints" ? item.trim().replace(bulletPrefix, "").trim() : item.trim())
+      .filter(Boolean);
+  }
+  // Check raw text even for disabled fields, and search terms in their space-joined form.
+  if (strings(content.searchTerms)) rawTexts.push(content.searchTerms.join(" "));
+  rejectForbiddenWords(rawTexts, rules);
+  for (const field of [...optionalText, ...optionalLists]) {
+    if (content[field] === null || !listingFieldEnabled(field, rules)) delete content[field];
+  }
+  return content;
+}
 
 export function validateContent(raw: unknown, rules: ListingRules): ListingContent {
   const c = raw as ListingContent;
@@ -119,11 +163,8 @@ export function validateContent(raw: unknown, rules: ListingRules): ListingConte
     optionalLists.some((field) => c[field] !== undefined && !strings(c[field]))
   )
     throw new ListingError("LISTING_INVALID_CONTENT");
-  const fields = [...requiredText, ...requiredLists, ...optionalText, ...optionalLists]
-    .flatMap((field) => c[field] ?? [])
-    .map(normalized);
-  if (rules.forbiddenWords.some((word) => word && fields.some((field) => field.includes(normalized(word)))))
-    throw new ListingError("LISTING_FORBIDDEN_WORD");
+  rejectForbiddenWords([...requiredText, ...requiredLists, ...optionalText, ...optionalLists]
+    .flatMap((field) => c[field] ?? []), rules);
   const content = { ...c };
   for (const field of [...optionalText, ...optionalLists]) {
     if (!listingFieldEnabled(field, rules)) delete content[field];

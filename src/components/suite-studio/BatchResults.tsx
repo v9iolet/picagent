@@ -328,8 +328,8 @@ export function BatchResults({
                 ) : (
                   <span>{running ? "等待出图" : "未生成"}</span>
                 )}
-                <strong data-type-badge>
-                  {type}：{card.title}
+                <strong data-type-badge title={card.title}>
+                  {type}
                 </strong>
               </div>
               <div className="ss-actions">

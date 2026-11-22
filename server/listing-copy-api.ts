@@ -4,6 +4,7 @@ import { now, ok, type AppResponse } from "./api-response.js";
 import { processImage } from "./image.js";
 import {
   ListingError,
+  normalizeListingModelOutput,
   validateContent,
   type ListingImage,
   type ListingJob,
@@ -94,6 +95,7 @@ export function createListingCopyApi(deps: {
     return rules;
   }
   async function generateListingVersion(job: ListingJob) {
+    let stage = "准备生成输入";
     try {
       const rules = await loadListingRules(job.platform);
       const listed = (await deps.prompts?.listPublished("listing_copy"))?.find((t) => t.code === "general.listing-copy");
@@ -122,6 +124,7 @@ export function createListingCopyApi(deps: {
         listing_copy_rules: rules,
         image_ids: visionImages.map((i) => i.id),
       };
+      stage = "调用文案模型";
       const output = await llm.generatePlan({
         flow: "listing-copy",
         requestId: randomUUID(),
@@ -135,7 +138,8 @@ export function createListingCopyApi(deps: {
         baseVersionIds: [],
         visionImages,
       });
-      const content = validateContent(output, rules);
+      stage = "校验模型输出";
+      const content = validateContent(normalizeListingModelOutput(output, rules), rules);
       const version: ListingVersion = {
         id: randomUUID(),
         versionNumber: job.versions.length + 1,
@@ -149,12 +153,12 @@ export function createListingCopyApi(deps: {
           model: { name: llm.provider, model: llm.model, isFake: llm.isFake, channel: llm.channel },
         },
       };
+      stage = "保存生成结果";
       await saveListingJob({ ...job, status: "succeeded", versions: [...job.versions, version] }, job);
     } catch (e) {
-      await saveListingJob(
-        { ...job, status: "failed", errorCode: e instanceof ListingError ? e.message : "LISTING_GENERATION_FAILED" },
-        job,
-      );
+      const errorCode = e instanceof ListingError ? e.message : "LISTING_GENERATION_FAILED";
+      console.error(`[listing-copy] jobId=${job.id} errorCode=${errorCode} reason=${stage}失败`);
+      await saveListingJob({ ...job, status: "failed", errorCode }, job);
     }
   }
   async function startListingGeneration(job: ListingJob, old: ListingJob | null) {
