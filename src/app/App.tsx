@@ -6,6 +6,7 @@ import { CanvasListPage } from "../pages/CanvasListPage";
 import { ImageAssetsPage } from "../pages/ImageAssetsPage";
 import { PromptTemplatesPage } from "../pages/PromptTemplatesPage";
 import { ReversePage } from "../pages/ReversePage";
+import { ListingCopyPage } from "../pages/ListingCopyPage";
 
 export function App() {
   const [path, setPath] = useState(window.location.pathname);
@@ -43,5 +44,7 @@ export function App() {
     return tab === "templates" ? <PromptTemplatesPage navigate={navigate} /> : <ImageAssetsPage navigate={navigate} />;
   }
   if (path === "/reverse" || reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;
+  const listing = path.match(/^\/create\/listing-copy(?:\/([^/]+))?\/?$/);
+  if (listing) return <ListingCopyPage jobId={listing[1]} navigate={navigate} />;
   return <SuiteStudioPage suiteId={canonical.match(/^\/create\/suite\/([^/]+)\/?$/)?.[1]} navigate={navigate} />;
 }

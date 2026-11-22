@@ -11,6 +11,7 @@
     "seed:demo": "tsx server/seed-demo.ts",
     "test:ticket05": "tsx --test tests/ticket05.contract.test.ts tests/ticket05.input.test.ts",
     "test:ticket02": "tsx --test tests/ticket02.contract.test.ts tests/ticket02.encoding.test.ts",
+    "test:pg": "PG_CONTRACT_TEST=1 PLATFORM_MIGRATION_TEST=1 tsx --env-file-if-exists=.env --test tests/pg-migrations.contract.test.ts tests/suite-platform-background.contract.test.ts",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false"
   },

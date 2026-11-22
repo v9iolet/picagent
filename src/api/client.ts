@@ -26,7 +26,7 @@ export interface ApiPromptInputField {
 }
 export interface ApiPromptTemplate {
   templateId: string; templateVersionId: string; versionNo: number; code: string; name: string;
-  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt"; executionTarget: "llm" | "image_model";
+  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy"; executionTarget: "llm" | "image_model";
   inputSchema: ApiPromptInputField[]; applicability: Record<string, unknown>;
 }
 export interface ApiPromptTemplateCopy extends ApiPromptTemplate { body: string; userPromptTemplate: string; outputSchema?: Record<string, unknown>; status?: "draft" | "published" | "retired" }
@@ -95,6 +95,49 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) throw new Error(payload?.error?.message ?? "请求失败");
   return payload?.data as T;
 }
+
+export type ListingConfig = { platform: string; targetMarket: string; outputLanguage: string; sellingPoints: string };
+export interface ApiListingSummary extends Omit<ListingConfig, "sellingPoints"> {
+  id: string;
+  sourceSuiteId: string | null;
+  input: { sellingPoints: string };
+  status: "draft" | "running" | "succeeded" | "failed";
+  errorCode: string | null;
+  updatedAt: string;
+}
+export interface ApiListingContent {
+  title: string;
+  bulletPoints: string[];
+  description: string;
+  searchTerms?: string[];
+  missingFacts: string[];
+}
+export interface ApiListingJob extends ApiListingSummary {
+  inputImages: { id: string; originalFilename: string }[];
+  versions: { id: string; versionNumber: number; createdAt: string; content: ApiListingContent }[];
+}
+
+const listingPath = "/api/listing-copies";
+const listingJobPath = (id: string) => `${listingPath}/${encodeURIComponent(id)}`;
+const listingImagePath = (id: string, image: string) => `${listingJobPath(id)}/input-images/${encodeURIComponent(image)}`;
+const listingWrite = (path: string, method: "POST" | "PUT", body: object) =>
+  request<ApiListingJob>(path, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+export const listingCopyApi = {
+  list: (limit: number, offset: number) => request<{ items: ApiListingSummary[] }>(`${listingPath}?limit=${limit}&offset=${offset}`),
+  get: (id: string) => request<ApiListingJob>(listingJobPath(id)),
+  fromSuite: (sourceSuiteId: string) => listingWrite(listingPath, "POST", { sourceSuiteId }),
+  upload(id: string | undefined, file: File) {
+    const body = new FormData();
+    body.append("file", file);
+    return request<ApiListingJob>(`${listingJobPath(id ?? "draft")}/input-images`, { method: "POST", body });
+  },
+  removeImage: (id: string, image: string) => request<ApiListingJob>(listingImagePath(id, image), { method: "DELETE" }),
+  thumbnail: (id: string, image: string) => `${listingImagePath(id, image)}/preview/thumbnail`,
+  generate: (id: string, action: "generate" | "regenerate", config: Partial<ListingConfig> = {}) =>
+    listingWrite(`${listingJobPath(id)}/${action}`, "POST", config),
+  save: (id: string, content: ApiListingContent) => listingWrite(listingJobPath(id), "PUT", { content }),
+};
 
 const settingsPath = "/api/model-settings";
 export const modelSettingsApi = {

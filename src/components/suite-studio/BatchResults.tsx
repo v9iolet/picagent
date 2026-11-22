@@ -3,6 +3,7 @@ import { suiteApi, type ApiPlatformProfile, type ApiWorkbench } from "../../api/
 import { SUITE_CATEGORY_GROUPS, SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { DeliveryGalleryView } from "../DeliveryGalleryView";
+import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
 import { EditTextDialog, StudioDialog } from "./StudioDialog";
 
@@ -93,6 +94,7 @@ export function BatchResults({
   const [editJob, setEditJob] = useState(""),
     [retryJob, setRetryJob] = useState(""),
     [retrySize, setRetrySize] = useState<Record<string, string>>({});
+  const [showListingCopy, setShowListingCopy] = useState(false);
   const act = async (fn: () => Promise<void>) => {
     if (busy) return;
     setBusy(true);
@@ -151,6 +153,7 @@ export function BatchResults({
         <span data-status={run?.status ?? "historical"} className="ss-status">
           {statuses[run?.status ?? ""] ?? "历史批次"}
         </span>
+        <button onClick={() => setShowListingCopy(true)}>上架文案</button>
         <button
           disabled={!selected.length || busy}
           onClick={() => void act(() => download(studioApi.exportUrl(id, selected), `${s.suite.name}.zip`))}
@@ -379,6 +382,7 @@ export function BatchResults({
           {notice}
         </p>
       )}
+      {showListingCopy && <ListingCopyDrawer state={s} profiles={profiles} close={() => setShowListingCopy(false)} />}
       {gallery && (
         <StudioDialog title="货架预览导出" wide close={() => setGallery(null)}>
           <DeliveryGalleryView

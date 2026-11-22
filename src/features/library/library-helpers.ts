@@ -16,6 +16,7 @@ export const stageLabel = (stage: ApiLibraryResource["stage"]) => ({
   category_prompt: "类别提示词",
   task_image: "单卡创作",
   reverse_prompt: "爆品图反推",
+  listing_copy: "上架文案",
 } as Record<string, string>)[stage ?? ""] ?? "工作台资源";
 
 export const statusLabel = (status: ApiLibraryResource["status"]) =>
