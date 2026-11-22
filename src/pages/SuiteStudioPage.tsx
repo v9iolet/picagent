@@ -43,12 +43,43 @@ function EmptyStudio() {
   );
 }
 
+const LAST_SUITE_STORAGE_KEY = "picagent:suite-studio:last-suite-id";
+const POLL_INTERVAL_MS = 2500;
+
+function readLastSuiteId(): string | null {
+  try {
+    return window.sessionStorage.getItem(LAST_SUITE_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveLastSuiteId(id: string) {
+  try {
+    window.sessionStorage.setItem(LAST_SUITE_STORAGE_KEY, id);
+  } catch {
+    // Ignore storage quota or privacy-mode errors.
+  }
+}
+
+function clearLastSuiteId() {
+  try {
+    window.sessionStorage.removeItem(LAST_SUITE_STORAGE_KEY);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function isBatchPolling(state: StudioState): boolean {
+  return state.pipeline?.status === "running" || state.listingCopy?.status === "running";
+}
+
 export function SuiteStudioPage({
   suiteId,
   navigate,
 }: {
   suiteId?: string;
-  navigate: (path: string) => void;
+  navigate: (path: string, options?: { replace?: boolean }) => void;
 }) {
   const [config, setConfig] = useState<Config>(initialConfig),
     [profiles, setProfiles] = useState<ApiPlatformProfile[]>([]),
@@ -60,21 +91,43 @@ export function SuiteStudioPage({
   const [states, setStates] = useState<Record<string, StudioState>>({}),
     [hasMore, setMore] = useState(false),
     [loadingFeed, setLoadingFeed] = useState(true),
-    [active, setActive] = useState(suiteId);
+    [active, setActive] = useState<string | undefined>(() => suiteId ?? readLastSuiteId() ?? undefined);
   const hydrated = useRef<string | undefined>(undefined),
     offset = useRef(0),
     feedLock = useRef(false),
+    requestSeq = useRef(0),
+    appliedSeq = useRef<Record<string, number>>({}),
     end = useRef<HTMLButtonElement>(null);
-  const put = useCallback((s: StudioState) => setStates((prev) => ({ ...prev, [s.suite.id]: s })), []);
-  const refresh = useCallback(async (id: string) => put(await studioApi.state(id)), [put]);
+  const putMany = useCallback((items: StudioState[], seq: number) => {
+    setStates((prev) => {
+      let next: Record<string, StudioState> | null = null;
+      for (const s of items) {
+        const id = s.suite.id;
+        const last = appliedSeq.current[id] ?? 0;
+        if (seq < last) continue;
+        appliedSeq.current[id] = seq;
+        if (!next) next = { ...prev };
+        next[id] = s;
+      }
+      return next ?? prev;
+    });
+  }, []);
+  const put = useCallback((s: StudioState, seq?: number) => {
+    putMany([s], seq ?? ++requestSeq.current);
+  }, [putMany]);
+  const refresh = useCallback(async (id: string) => {
+    const seq = ++requestSeq.current;
+    put(await studioApi.state(id), seq);
+  }, [put]);
   const loadPage = useCallback(async () => {
     if (feedLock.current) return;
     feedLock.current = true;
     setLoadingFeed(true);
+    const seq = ++requestSeq.current;
     try {
       const page = await studioApi.feed(offset.current);
       const items = await Promise.all(page.items.map((i) => studioApi.state(i.suite.id)));
-      setStates((old) => ({ ...Object.fromEntries(items.map((s) => [s.suite.id, s])), ...old }));
+      putMany(items, seq);
       offset.current += page.items.length;
       setMore(offset.current < page.total);
     } catch (e) {
@@ -83,7 +136,7 @@ export function SuiteStudioPage({
       feedLock.current = false;
       setLoadingFeed(false);
     }
-  }, []);
+  }, [putMany]);
   useEffect(() => {
     void loadPage();
   }, [loadPage]);
@@ -126,27 +179,45 @@ export function SuiteStudioPage({
     setConfig(fromRun(s.pipeline));
     setClone(!!s.pipeline || s.cards.length > 0);
   };
+  const currentSuiteId = suiteId ?? active;
   useEffect(() => {
-    setActive(suiteId);
-    if (suiteId === hydrated.current) return;
+    const savedId = suiteId ? null : readLastSuiteId();
+    const targetId = suiteId ?? savedId ?? undefined;
+    setActive(targetId);
+    if (targetId === hydrated.current) {
+      if (targetId) saveLastSuiteId(targetId);
+      if (!suiteId && targetId) navigate(`/create/suite/${targetId}`, { replace: true });
+      return;
+    }
     let live = true;
     setNotice("");
     setImages([]);
     setConfig(initialConfig);
     setClone(false);
-    if (suiteId) {
+    if (targetId) {
       setBusy(true);
+      const seq = ++requestSeq.current;
       studioApi
-        .state(suiteId)
+        .state(targetId)
         .then((s) => {
-          if (live) {
-            put(s);
-            hydrate(s);
-            hydrated.current = suiteId;
-          }
+          if (!live) return;
+          put(s, seq);
+          hydrate(s);
+          hydrated.current = s.suite.id;
+          setActive(s.suite.id);
+          saveLastSuiteId(s.suite.id);
+          if (!suiteId) navigate(`/create/suite/${s.suite.id}`, { replace: true });
         })
         .catch((e) => {
-          if (live) setNotice(message(e));
+          if (!live) return;
+          if (!suiteId) {
+            clearLastSuiteId();
+            hydrated.current = undefined;
+            setActive(undefined);
+          } else {
+            if (readLastSuiteId() === suiteId) clearLastSuiteId();
+            setNotice(message(e));
+          }
         })
         .finally(() => {
           if (live) setBusy(false);
@@ -158,33 +229,60 @@ export function SuiteStudioPage({
     return () => {
       live = false;
     };
-  }, [suiteId, put]);
-  const activeRunning = active && states[active]?.pipeline?.status === "running";
+  }, [suiteId, navigate, put]);
+  const runningIdsKey = Object.values(states)
+    .filter(isBatchPolling)
+    .map((s) => s.suite.id)
+    .sort()
+    .join(",");
   useEffect(() => {
-    if (!active || !activeRunning) return;
-    let live = true,
-      timer: ReturnType<typeof setTimeout>;
+    if (!runningIdsKey) return;
+    const ids = runningIdsKey.split(",");
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     async function poll() {
-      try {
-        const s = await studioApi.state(active!);
-        if (!live) return;
-        put(s);
-        if (s.pipeline?.status !== "running") return;
-      } catch (e) {
-        if (live) setNotice(message(e));
+      const seq = ++requestSeq.current;
+      const settled = await Promise.allSettled(ids.map((id) => studioApi.state(id)));
+      if (!live) return;
+      const updates: StudioState[] = [];
+      let firstError: unknown;
+      for (const result of settled) {
+        if (result.status === "fulfilled") updates.push(result.value);
+        else if (firstError === undefined) firstError = result.reason;
       }
-      if (live) timer = setTimeout(() => void poll(), 3000);
+      if (updates.length) putMany(updates, seq);
+      if (firstError !== undefined) setNotice(message(firstError));
+      const updatedById = new Map(updates.map((s) => [s.suite.id, s]));
+      const stillRunning = ids.some((id) => {
+        const next = updatedById.get(id);
+        return next ? isBatchPolling(next) : true;
+      });
+      if (live && stillRunning) timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
     }
-    timer = setTimeout(() => void poll(), 3000);
+    timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
     return () => {
       live = false;
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     };
-  }, [active, activeRunning, put]);
+  }, [runningIdsKey, putMany]);
   const route = (id: string) => {
     hydrated.current = id;
     setActive(id);
+    saveLastSuiteId(id);
     if (id !== suiteId) navigate(`/create/suite/${id}`);
+  };
+  const startNewSuite = () => {
+    clearLastSuiteId();
+    if (suiteId) {
+      navigate("/create/suite");
+    } else {
+      hydrated.current = undefined;
+      setActive(undefined);
+      setNotice("");
+      setImages([]);
+      setConfig(initialConfig);
+      setClone(false);
+    }
   };
   const upload = async (files: File[]) => {
     if (busy || clone || !files.length) return;
@@ -194,7 +292,7 @@ export function SuiteStudioPage({
       if (files.length + images.length > 6) throw Error("每个批次最多上传 6 张商品原图。");
       if (files.some((f) => !["image/png", "image/jpeg", "image/webp"].includes(f.type)))
         throw Error("请上传 PNG、JPEG 或 WebP 格式的图片。");
-      let id = suiteId;
+      let id = currentSuiteId;
       if (!id) {
         id = (await suiteApi.create(productNameFor(undefined, files[0].name))).id;
         route(id);
@@ -210,19 +308,21 @@ export function SuiteStudioPage({
     }
   };
   const generate = async () => {
-    if (!suiteId || !images.length || busy) return;
+    if (!currentSuiteId || !images.length || busy) return;
     setBusy(true);
     setNotice("");
     try {
-      if (!clone) await suiteApi.rename(suiteId, productNameFor(effective.sellingPoints, images[0].originalFilename));
+      if (!clone)
+        await suiteApi.rename(currentSuiteId, productNameFor(effective.sellingPoints, images[0].originalFilename));
       const result = await studioApi.start(
-        clone ? { cloneFrom: { suiteId, imageIds: images.map((i) => i.id) } } : { suiteId },
+        clone ? { cloneFrom: { suiteId: currentSuiteId, imageIds: images.map((i) => i.id) } } : { suiteId: currentSuiteId },
         effective,
       );
       route(result.suiteId);
       setClone(true);
+      const seq = ++requestSeq.current;
       const latest = await studioApi.state(result.suiteId);
-      put(latest);
+      put(latest, seq);
       setImages(latest.inputImages);
     } catch (e) {
       setNotice(message(e));
@@ -273,10 +373,10 @@ export function SuiteStudioPage({
           upload={(files) => void upload(files)}
           generate={() => void generate()}
           remove={async (im) => {
-            if (!suiteId) return;
+            if (!currentSuiteId) return;
             setBusy(true);
             try {
-              if (!clone) await suiteApi.removeInputImage(suiteId, im.id);
+              if (!clone) await suiteApi.removeInputImage(currentSuiteId, im.id);
               setImages((a) => a.filter((x) => x.id !== im.id));
             } catch (e) {
               setNotice(message(e));
@@ -291,8 +391,8 @@ export function SuiteStudioPage({
               <div className="ss-eyebrow">WORKSPACE / RESULTS</div>
               <h2>生成结果</h2>
             </div>
-            {suiteId && (
-              <button disabled={busy} onClick={() => navigate("/create/suite")}>
+            {currentSuiteId && (
+              <button disabled={busy} onClick={startNewSuite}>
                 ＋ 新建套图
               </button>
             )}
@@ -326,8 +426,10 @@ export function SuiteStudioPage({
                   delete next[id];
                   return next;
                 });
+                delete appliedSeq.current[id];
                 offset.current = Math.max(0, offset.current - 1);
-                if (suiteId === id) navigate("/create/suite");
+                if (readLastSuiteId() === id) clearLastSuiteId();
+                if (currentSuiteId === id) startNewSuite();
               }}
             />
           ))}
