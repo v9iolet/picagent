@@ -79,6 +79,14 @@ fields:
     label: "分组数量配置（JSON 字符串）"
     type: textarea
     required: false
+  - key: visual_style
+    label: "视觉风格"
+    type: text
+    required: false
+  - key: selling_point_layouts
+    label: "卖点图版式参考（JSON 字符串）"
+    type: textarea
+    required: false
 ```
 
 ## System Prompt
@@ -93,6 +101,9 @@ fields:
 
 本阶段只输出符合 suite-structure-plan-v2 的 JSON 结构计划，不输出任何单卡完整生图提示词。全局风格卡固定为 `{ "promptPrefix": string }`，内容必须可直接加入后续每张图片提示词前部。
 
+全局风格卡只定调品牌视觉的一致性与商品材质的真实感。提供非空的 `visual_style` 时，将其融入风格规划。根据主图、卖点图、场景图和辅助图的职责，安排不同景别、构图角度、明暗光影、背景色阶和商业排版，使类别之间及同类别各张图都呈现清晰的视觉节奏。禁止全套套用相同的灰白背景、平光和摆拍视角。
+
+提供 `selling_point_layouts` 时，可参考其构图差异规划卖点图组的展示节奏；版式不提供商品事实，也不改变分组数量约束，具体版式由第二阶段落实到单卡。
 
 ### 分组数量规则
 
@@ -143,7 +154,7 @@ main_image_background 为 pure_white_required 时，主图必须是 RGB 255 纯�
       "missingFacts": []
     }
   ],
-  "globalStyleCard": { "promptPrefix": "统一且可直接执行的背景、光线、色彩、构图和质感要求" }
+  "globalStyleCard": { "promptPrefix": "统一的品牌色彩基调及真实的商品材质表达，按各图职责变化景别、光影和排版" }
 }
 ```
 
