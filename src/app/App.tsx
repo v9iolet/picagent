@@ -7,11 +7,13 @@ import { ImageAssetsPage } from "../pages/ImageAssetsPage";
 import { PromptTemplatesPage } from "../pages/PromptTemplatesPage";
 import { ReversePage } from "../pages/ReversePage";
 
+const readLocation = () => ({ path: window.location.pathname, search: window.location.search });
+
 export function App() {
-  const [path, setPath] = useState(window.location.pathname);
+  const [{ path, search }, setLocation] = useState(readLocation);
 
   useEffect(() => {
-    const onPopState = () => setPath(window.location.pathname);
+    const onPopState = () => setLocation(readLocation());
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
@@ -19,7 +21,7 @@ export function App() {
   const reverseId = useMemo(() => path.match(/^\/reverse\/([^/]+)/)?.[1], [path]);
   const navigate = (to: string) => {
     window.history.pushState({}, "", to);
-    setPath(to);
+    setLocation(readLocation());
     window.scrollTo({ top: 0 });
   };
 
@@ -31,18 +33,18 @@ export function App() {
     : legacy || legacyListing || path === "/" ? "/create/suite" : path;
   useEffect(() => {
     if (path === canonical) return;
-    window.history.replaceState({}, "", canonical);
-    setPath(canonical);
-  }, [path, canonical]);
+    window.history.replaceState({}, "", canonical + search + window.location.hash);
+    setLocation(readLocation());
+  }, [path, canonical, search]);
 
   if (path === "/settings" || path === "/settings/preferences") return <ModelSettingsPage preferences={path.endsWith("/preferences")} navigate={navigate} />;
   if (/^\/create\/canvas\/?$/.test(canonical)) return <CanvasListPage navigate={navigate} />;
   const canvasId = canonical.match(/^\/create\/canvas\/([^/]+)\/?$/)?.[1];
-  if (canvasId) return <BoardPage key={canvasId} suiteId={canvasId} navigate={navigate} />;
+  if (canvasId) return <BoardPage key={`${canvasId}${search}`} suiteId={canvasId} search={search} navigate={navigate} />;
   if (path === "/assets") return <ImageAssetsPage navigate={navigate} />;
   if (path === "/templates") return <PromptTemplatesPage navigate={navigate} />;
   if (path === "/style-library") {
-    const tab = new URLSearchParams(window.location.search).get("tab");
+    const tab = new URLSearchParams(search).get("tab");
     return tab === "templates" ? <PromptTemplatesPage navigate={navigate} /> : <ImageAssetsPage navigate={navigate} />;
   }
   if (path === "/reverse" || reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;

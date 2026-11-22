@@ -97,6 +97,15 @@ export function DeliveryGalleryView({
     }
   };
 
+  const copySnapshot = async (prompt: string) => {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      onNotify("提示词快照已复制");
+    } catch {
+      onNotify("复制失败，请重试");
+    }
+  };
+
   const handleExportZip = async () => {
     if (!deliverableSlots.length || exporting) return;
     setExporting(true);
@@ -241,10 +250,12 @@ export function DeliveryGalleryView({
                     <div><strong>{finalCount}</strong><span>已定终版</span></div>
                     <div><strong>{derivedCount}</strong><span>编辑派生</span></div>
                   </div>
-                  <div className="dg-style-chip">
-                    <strong>当前生效全局风格</strong>
-                    <p>{effectiveStyleGuide}</p>
-                  </div>
+                  {effectiveStyleGuide && (
+                    <details className="dg-style-chip">
+                      <summary>当前生效全局风格</summary>
+                      <p>{effectiveStyleGuide}</p>
+                    </details>
+                  )}
                 </div>
               </section>
 
@@ -375,17 +386,19 @@ export function DeliveryGalleryView({
                 <dt>交付来源</dt><dd>{ROLE_LABELS[selectedSlot.sourceRole].label}{selectedSlot.isEditedDerived ? "（经编辑子卡派生）" : ""}</dd>
                 <dt>导出路径</dt><dd className="mono">{selectedSlot.exportPath ?? "未生成"}</dd>
                 <dt>图片规格</dt><dd>{selectedSlot.width && selectedSlot.height ? `${selectedSlot.width} × ${selectedSlot.height}` : "未记录"}</dd>
-                <dt>模型与渠道</dt><dd>{[selectedSlot.channelName, selectedSlot.model].filter(Boolean).join(" · ") || "未记录"}</dd>
-                <dt>模板版本</dt><dd className="mono">{selectedSlot.templateVersionId ?? "未记录"}</dd>
-                <dt>版本号</dt><dd>{selectedSlot.versionNumber ? `v${selectedSlot.versionNumber}` : "—"}</dd>
               </dl>
-              <div className="dg-snapshot-box">
-                <div className="dg-snapshot-head">
-                  <strong>冻结提示词快照（只读）</strong>
-                  <button type="button" onClick={() => { navigator.clipboard?.writeText(selectedSlot.promptText); onNotify("提示词快照已复制"); }}>复制</button>
+              <details className="dg-snapshot-box" key={selectedSlot.parentTaskId}>
+                <summary>冻结提示词快照（只读）</summary>
+                <div className="dg-snapshot-content">
+                  <dl className="dg-kv">
+                    <dt>模型与渠道</dt><dd>{[selectedSlot.channelName, selectedSlot.model].filter(Boolean).join(" · ") || "未记录"}</dd>
+                    <dt>模板版本</dt><dd className="mono">{selectedSlot.templateVersionId ?? "未记录"}</dd>
+                    <dt>版本号</dt><dd>{selectedSlot.versionNumber ? `v${selectedSlot.versionNumber}` : "—"}</dd>
+                  </dl>
+                  <button type="button" disabled={!selectedSlot.promptText} onClick={() => void copySnapshot(selectedSlot.promptText)}>复制提示词</button>
+                  <pre>{selectedSlot.promptText || "暂无提示词快照"}</pre>
                 </div>
-                <pre>{selectedSlot.promptText || "暂无提示词快照"}</pre>
-              </div>
+              </details>
               <div className="dg-readonly-note">
                 <Icon name="check" />
                 <span>成品交付视图为只读验收态，不会修改任务状态或版本选择；如需微调请切回顶部“创作板”。</span>

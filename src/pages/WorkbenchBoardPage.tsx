@@ -8,8 +8,11 @@ import {
   computeLineageHighlight,
   computeOutpaintPreviewBox,
   computeWorkbenchLanes,
+  extractCardPromptPreview,
   SUPPORTED_OUTPUT_LANGUAGES,
+  type LaneCardSize,
   type LaneLayoutItem,
+  type LaneLayoutOptions,
   type ResolvedDeliverySlot,
 } from "../../shared/workbench-delivery";
 import { modelSettingsApi, suiteApi, type ApiCanvasLayout, type ApiLibraryResource, type ApiPromptTemplateCopy, type ApiProductMaterialRef, type ApiSuiteTask, type ApiTaskVersion, type ApiWorkbench } from "../api/client";
@@ -40,7 +43,6 @@ type BoardData = {
   freeStyle?: boolean;
   originalImage?: boolean;
   referenceCount?: number;
-  displayPrompt?: string;
   lineage?: string;
   isEditChild?: boolean;
   isHighlighted?: boolean;
@@ -166,6 +168,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
   if (!task) return null;
   const version = availableVersions.find((item) => item.id === selectedVersionId) ?? data.version;
   const model = modelFor(task, version);
+  const promptPreview = extractCardPromptPreview(task.promptDraft, task.purpose);
   const missingReference = !data.isEditChild && !hasTaskReference(task);
 
   return (
@@ -206,10 +209,10 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
       <div className="wb-task-stats">
         <span><b>图片</b><strong>{version ? 1 : 0} 张</strong></span>
         <span><b>参考图</b><strong>{data.referenceCount ?? 0} 张</strong></span>
-        <span><b>提示词</b><strong>{(data.displayPrompt ?? task.promptDraft).length} 字</strong></span>
+        <span><b>提示词摘要</b><strong>{promptPreview.length} 字</strong></span>
         <span><b>状态</b><strong>{statusText(task.status)}</strong></span>
       </div>
-      <p className="wb-task-prompt">{data.displayPrompt ?? task.promptDraft}</p>
+      <p className="wb-task-prompt">{promptPreview}</p>
       <div className="wb-card-footer">
         {model && <span title={model}>{model}</span>}
         <span>{ratioFor(task)}</span>
@@ -346,7 +349,7 @@ function projectComposeGraph(
   styleOverride: string | null,
   selectedNodeId: string | null,
   canvasFilter: CanvasFilter,
-  ignoreSavedPositions: boolean,
+  layoutOptions: LaneLayoutOptions,
   handlers: Pick<BoardData, "onPreview" | "onSelect" | "onGenerate" | "onCopy" | "onRegenerate" | "onEdit" | "onCompareVersions" | "onEditStyle" | "onSelectVersion">,
 ) {
   const saved = new Map((layout?.nodes ?? []).map((node) => [node.nodeId, { x: node.x, y: node.y }]));
@@ -393,7 +396,7 @@ function projectComposeGraph(
   });
   syntheticChildren.forEach(({ nodeId, parentNodeId }) => laneItems.push({ id: nodeId, kind: "edit-child", parentId: parentNodeId }));
 
-  const positions = computeWorkbenchLanes(laneItems, saved, { ignoreSavedPositions });
+  const positions = computeWorkbenchLanes(laneItems, saved, layoutOptions);
 
   // 2. Build edges (suppress noisy style-to-all dashed lines unless style card is explicitly selected)
   const rawEdges: Edge[] = [];
@@ -407,7 +410,7 @@ function projectComposeGraph(
     const materialRefs = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
     materialRefs.forEach((ref) => rawEdges.push({ id: `library-base:${ref.resourceVersionId}->${id}`, source: `library-base:${ref.resourceVersionId}`, target: id, type: "default", animated: task.status === "generating" }));
     if (selectedNodeId === styleId) {
-      rawEdges.push({ id: `${styleId}->${id}`, source: styleId, target: id, type: "smoothstep", style: { strokeDasharray: "5 5", stroke: "#d4a414" } });
+      rawEdges.push({ id: `${styleId}->${id}`, source: styleId, target: id, type: "smoothstep", style: { strokeDasharray: "5 5" } });
     }
   });
   const knownNodeIds = new Set(laneItems.map((item) => item.id));
@@ -422,26 +425,15 @@ function projectComposeGraph(
   const { highlightedNodeIds, highlightedEdgeIds } = computeLineageHighlight(hasSelection ? selectedNodeId : null, rawEdges);
 
   const styledEdges: Edge[] = rawEdges.map((edge) => {
-    if (hasSelection) {
-      const isLit = highlightedEdgeIds.has(edge.id);
-      return {
-        ...edge,
-        zIndex: isLit ? 5 : 0,
-        style: {
-          ...(edge.style ?? {}),
-          stroke: isLit ? "#2563eb" : "#cbd5e1",
-          strokeWidth: isLit ? 2.2 : 1,
-          opacity: isLit ? 1 : 0.16,
-        },
-      };
-    }
+    const isLit = highlightedEdgeIds.has(edge.id);
     return {
       ...edge,
+      zIndex: isLit ? 5 : 0,
       style: {
         ...(edge.style ?? {}),
-        stroke: "#cbd5e1",
-        strokeWidth: 1.25,
-        opacity: 0.48,
+        stroke: isLit ? "#2563eb" : "#64748b",
+        strokeWidth: isLit ? 2.6 : 1.8,
+        opacity: hasSelection ? (isLit ? 1 : 0.28) : 0.85,
       },
     };
   });
@@ -528,9 +520,6 @@ function projectComposeGraph(
   active.forEach((task) => {
     const id = `task:${task.id}`;
     const currentVersion = task.versions.find((version) => version.isCurrent) ?? task.versions[0];
-    const displayPrompt = styleOverride && task.originKind !== "reverse_import"
-      ? applyStyleOverrideToPrompt(task.promptDraft, styleOverride)
-      : task.promptDraft;
     nodes.push({
       id,
       type: "boardCard",
@@ -543,7 +532,6 @@ function projectComposeGraph(
         imageUrl: currentVersion?.previewUrl,
         referenceCount: Array.isArray(task.generationParams?.productMaterialRefs) && task.generationParams.productMaterialRefs.length > 0
           ? task.generationParams.productMaterialRefs.length : hasTaskReference(task) ? 1 : 0,
-        displayPrompt,
         ...nodeHighlightProps(id, "task", task, false),
         ...handlers,
       },
@@ -592,7 +580,6 @@ function projectComposeGraph(
         imageUrl: childVersion?.previewUrl,
         beforeImageUrl: beforeSource?.url ?? null,
         beforeLabel: beforeSource?.label,
-        displayPrompt: synthetic.promptDraft,
         lineage,
         isEditChild: true,
         ...nodeHighlightProps(nodeId, "task", synthetic, true),
@@ -1431,13 +1418,15 @@ function ImageEditorModal({
   );
 }
 
-export function WorkbenchBoardPage({ suiteId, navigate }: { suiteId: string; navigate: (to: string) => void }) {
-  return <ReactFlowProvider><WorkbenchBoardInner suiteId={suiteId} navigate={navigate} /></ReactFlowProvider>;
+export type WorkbenchBoardPageProps = { suiteId: string; search?: string; navigate: (to: string) => void };
+
+export function WorkbenchBoardPage(props: WorkbenchBoardPageProps) {
+  return <ReactFlowProvider><WorkbenchBoardInner {...props} /></ReactFlowProvider>;
 }
 
-function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate: (to: string) => void }) {
+function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPageProps) {
   const [workbench, setWorkbench] = useState<ApiWorkbench | null>(null);
-  const [mode, setMode] = useState<BoardMode>("compose");
+  const [mode, setMode] = useState<BoardMode>(() => new URLSearchParams(search).get("view") === "gallery" ? "gallery" : "compose");
   const [canvasFilter, setCanvasFilter] = useState<CanvasFilter>("all");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -1462,7 +1451,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
   const latestWorkbench = useRef<ApiWorkbench | null>(null);
   const layoutVersionRef = useRef(0);
   const layoutSaveQueue = useRef<Promise<void>>(Promise.resolve());
-  const { fitView } = useReactFlow();
+  const { fitView, getInternalNode } = useReactFlow<BoardNode>();
 
   const planStyleGuide = useMemo(() => workbench ? fallbackPlanStyle(workbench) : "", [workbench]);
   const styleOverride = workbench?.styleOverride ?? workbench?.suite.styleOverride ?? null;
@@ -1538,7 +1527,12 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
     const nextPlanStyle = fallbackPlanStyle(nextWb);
     const nextOverride = nextWb.styleOverride ?? nextWb.suite.styleOverride ?? null;
     const nextEffective = nextWb.effectiveStyleGuide?.trim() || nextOverride?.trim() || nextPlanStyle;
-    const projected = projectComposeGraph(nextWb, nextWb.layout, nextEffective, nextOverride, focusNodeId, activeFilter, ignoreSavedPositions, {
+    const measuredSizes = new Map<string, LaneCardSize>();
+    for (const node of nodesRef.current) {
+      const { width, height } = getInternalNode(node.id)?.measured ?? {};
+      if (width && height) measuredSizes.set(node.id, { width, height });
+    }
+    const projected = projectComposeGraph(nextWb, nextWb.layout, nextEffective, nextOverride, focusNodeId, activeFilter, { ignoreSavedPositions, measuredSizes }, {
       onPreview: setPreview,
       onSelect: (task, nodeId) => { setSelectedTaskId(task.id); setSelectedNodeId(nodeId); },
       onGenerate: (task) => generateOne(task).catch((error) => notify(error instanceof Error ? error.message : "生成提交失败")),
@@ -1549,11 +1543,12 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
       onEditStyle: openStyleDrawer,
       onSelectVersion: (task, versionId, selection) => selectVersion(task, versionId, selection).catch(() => notify("版本选择失败")),
     });
-    nodesRef.current = projected.nodes;
-    setNodes(projected.nodes);
+    const nextNodes = projected.nodes.map((node) => ({ ...node, measured: measuredSizes.get(node.id) }));
+    nodesRef.current = nextNodes;
+    setNodes(nextNodes);
     setEdges(projected.edges);
-    return projected;
-  }, [setNodes, openStyleDrawer, notify]);
+    return nextNodes;
+  }, [setNodes, openStyleDrawer, notify, getInternalNode]);
 
   const reload = useCallback(async () => {
     const next = await suiteApi.getWorkbench(suiteId);
@@ -1561,9 +1556,9 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
     setWorkbench(next);
     layoutVersionRef.current = next.layout?.layoutVersion ?? 0;
     setViewport(next.layout?.viewport ?? { x: 0, y: 0, zoom: 1 });
-    const projected = rebuildGraph(next, selectedNodeId, canvasFilter, false);
+    const nextNodes = rebuildGraph(next, selectedNodeId, canvasFilter);
     const savedIds = new Set((next.layout?.nodes ?? []).map((node) => node.nodeId));
-    const needsFit = !next.layout || projected.nodes.some((node) => !savedIds.has(node.id));
+    const needsFit = !next.layout || nextNodes.some((node) => !savedIds.has(node.id));
     if (needsFit) window.setTimeout(() => fitView({ padding: 0.14, duration: 0 }), 0);
     setSelectedTaskId((current) => current && (next.tasks.some((task) => task.id === current) || next.imageEditChildren?.some((child) => String(child.task.id) === current)) ? current : next.tasks.find((task) => task.status !== "archived")?.id ?? null);
   }, [fitView, rebuildGraph, selectedNodeId, canvasFilter, suiteId]);
@@ -1593,8 +1588,8 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
 
   const tidyLayout = async () => {
     if (!latestWorkbench.current) return;
-    const projected = rebuildGraph(latestWorkbench.current, selectedNodeId, canvasFilter, true);
-    await persistLayout(projected.nodes);
+    const nextNodes = rebuildGraph(latestWorkbench.current, selectedNodeId, canvasFilter, true);
+    await persistLayout(nextNodes);
     window.setTimeout(() => fitView({ padding: 0.14, duration: 260 }), 20);
     notify("已按三泳道自动整理画布布局");
   };
@@ -1826,7 +1821,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
       {mode === "gallery" ? (
         <DeliveryGalleryView
           workbench={workbench}
-          effectiveStyleGuide={effectiveStyleGuide}
+          effectiveStyleGuide={workbench.planSnapshot || styleOverride?.trim() ? effectiveStyleGuide : ""}
           onPreview={openDeliveryPreview}
           onNotify={notify}
         />
@@ -1902,6 +1897,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                   }}
                   nodesDraggable
                   nodesConnectable={false}
+                  minZoom={0.1}
                   fitView={false}
                 >
                   <Background gap={20} size={1} color="#e4e7eb" />

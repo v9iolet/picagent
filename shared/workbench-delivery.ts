@@ -98,6 +98,23 @@ export function applyStyleOverrideToPrompt(prompt: string, styleOverride?: strin
   return trimmed ? `${line}\n${trimmed}` : line;
 }
 
+export function extractCardPromptPreview(prompt: string, fallbackPurpose?: string): string {
+  const categoryPrefix = "当前类别提示词：";
+  const categoryStart = prompt.indexOf(categoryPrefix);
+  if (categoryStart >= 0) {
+    const description = prompt.slice(categoryStart + categoryPrefix.length)
+      .replace(/(?:^|\r?\n)[^\S\r\n]*单卡人工补充：\s*无\s*$/, "")
+      .trim();
+    return description.replace(/\r\n/g, "\n") || fallbackPurpose?.trim() || prompt;
+  }
+
+  const constraint = /^\s*(?:系统安全约束|平台约束|商品事实约束|全局风格卡)：/;
+  const lines = prompt.split(/\r?\n/);
+  const description = lines.filter((line) => !constraint.test(line));
+  if (description.length === lines.length && prompt.trim()) return prompt;
+  return description.join("\n").trim() || fallbackPurpose?.trim() || prompt;
+}
+
 export function sanitizeDeliveryName(value: string, fallback: string): string {
   const cleaned = value
     .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_")
@@ -381,69 +398,82 @@ export interface DirectedEdgeLike {
   target: string;
 }
 
-const LANE_CARD_SIZES: Record<LaneNodeKind, { width: number; height: number }> = {
-  style: { width: 256, height: 210 },
-  base: { width: 224, height: 240 },
-  "reverse-ref": { width: 224, height: 240 },
-  task: { width: 296, height: 390 },
-  "edit-child": { width: 296, height: 390 },
+export type LaneCardSize = { width: number; height: number };
+
+export interface LaneLayoutOptions {
+  ignoreSavedPositions?: boolean;
+  measuredSizes?: ReadonlyMap<string, LaneCardSize>;
+}
+
+const LANE_CARD_SIZES: Record<LaneNodeKind, LaneCardSize> = {
+  style: { width: 256, height: 260 },
+  base: { width: 224, height: 280 },
+  "reverse-ref": { width: 224, height: 280 },
+  task: { width: 320, height: 540 },
+  "edit-child": { width: 320, height: 520 },
 };
 
 export function computeWorkbenchLanes(
   items: LaneLayoutItem[],
   savedPositions: ReadonlyMap<string, LanePosition> = new Map(),
-  options: { ignoreSavedPositions?: boolean } = {},
+  { ignoreSavedPositions, measuredSizes }: LaneLayoutOptions = {},
 ): Map<string, LanePosition> {
-  const ignoreSaved = Boolean(options.ignoreSavedPositions);
+  const columnGap = 44;
+  const rowGap = 40;
+  const top = 28;
+  const left = 32;
   const positions = new Map<string, LanePosition>();
-  const occupied: Array<{ x: number; y: number; width: number; height: number }> = [];
+  const savedBoxes: Array<LanePosition & LaneCardSize> = [];
+  const sizeOf = (item: LaneLayoutItem) => measuredSizes?.get(item.id) ?? LANE_CARD_SIZES[item.kind];
 
-  const collides = (pos: LanePosition, size: { width: number; height: number }) =>
-    occupied.some((box) =>
-      pos.x < box.x + box.width + 20 &&
-      pos.x + size.width + 20 > box.x &&
-      pos.y < box.y + box.height + 20 &&
-      pos.y + size.height + 20 > box.y);
-
-  const commit = (id: string, kind: LaneNodeKind, preferred: LanePosition): LanePosition => {
-    const size = LANE_CARD_SIZES[kind];
-    let pos = { ...preferred };
-    for (let attempt = 0; attempt < 80 && collides(pos, size); attempt += 1) {
-      pos = { x: pos.x, y: pos.y + size.height + 24 };
+  // Keep manual positions on reload. Place new cards around those existing cards.
+  if (!ignoreSavedPositions) {
+    for (const item of items) {
+      const saved = savedPositions.get(item.id);
+      if (!saved) continue;
+      positions.set(item.id, { ...saved });
+      savedBoxes.push({ ...saved, ...sizeOf(item) });
     }
-    occupied.push({ ...pos, ...size });
-    positions.set(id, pos);
-    return pos;
+    savedBoxes.sort((a, b) => a.y - b.y);
+  }
+
+  const place = (item: LaneLayoutItem, x: number, startY: number) => {
+    if (positions.has(item.id)) return startY;
+    const { width, height } = sizeOf(item);
+    let y = startY;
+    for (const box of savedBoxes) {
+      if (x < box.x + box.width + columnGap && x + width + columnGap > box.x &&
+        y < box.y + box.height + rowGap && y + height + rowGap > box.y) {
+        y = box.y + box.height + rowGap;
+      }
+    }
+    positions.set(item.id, { x, y });
+    return y + height + rowGap;
   };
 
   const leftItems = items.filter((item) => item.kind === "style" || item.kind === "base" || item.kind === "reverse-ref");
   const taskItems = items.filter((item) => item.kind === "task");
   const childItems = items.filter((item) => item.kind === "edit-child");
 
-  let leftY = 28;
+  let leftY = top;
   for (const item of leftItems) {
-    const saved = ignoreSaved ? undefined : savedPositions.get(item.id);
-    const pos = commit(item.id, item.kind, saved ?? { x: 32, y: leftY });
-    if (!saved) leftY = pos.y + LANE_CARD_SIZES[item.kind].height + 24;
+    leftY = place(item, left, leftY);
   }
 
   const taskColumns = taskItems.length > 3 ? 2 : 1;
+  const taskX = left + Math.max(LANE_CARD_SIZES.style.width, ...leftItems.map((item) => sizeOf(item).width)) + columnGap;
+  const taskWidth = Math.max(LANE_CARD_SIZES.task.width, ...taskItems.map((item) => sizeOf(item).width));
+  const colY = Array<number>(taskColumns).fill(top);
   taskItems.forEach((item, index) => {
-    const saved = ignoreSaved ? undefined : savedPositions.get(item.id);
     const col = index % taskColumns;
-    const row = Math.floor(index / taskColumns);
-    const preferred = saved ?? { x: 348 + col * 336, y: 28 + row * 424 };
-    commit(item.id, item.kind, preferred);
+    colY[col] = place(item, taskX + col * (taskWidth + columnGap), colY[col]);
   });
 
-  const rightLaneX = 348 + taskColumns * 336 + 44;
-  let rightFallbackY = 28;
+  const rightLaneX = taskX + taskColumns * (taskWidth + columnGap);
+  let rightY = top;
   for (const item of childItems) {
-    const saved = ignoreSaved ? undefined : savedPositions.get(item.id);
-    const parentPos = item.parentId ? positions.get(item.parentId) : undefined;
-    const preferred = saved ?? { x: rightLaneX, y: parentPos ? parentPos.y : rightFallbackY };
-    const placed = commit(item.id, item.kind, preferred);
-    if (!saved) rightFallbackY = Math.max(rightFallbackY, placed.y + LANE_CARD_SIZES["edit-child"].height + 24);
+    const parentY = item.parentId ? positions.get(item.parentId)?.y ?? top : top;
+    rightY = place(item, rightLaneX, Math.max(rightY, parentY));
   }
 
   return positions;
