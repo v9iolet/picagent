@@ -7,12 +7,12 @@ import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
 import { EditTextDialog, StudioDialog } from "./StudioDialog";
 
-const phases: Record<string, string> = {
-  base_refining: "白底精修",
-  structure_planning: "规划结构",
-  category_prompting: "生成提示词",
-  image_generating: "逐张出图",
-  done: "完成",
+const phaseOrder: Record<string, number> = {
+  base_refining: 0,
+  structure_planning: 1,
+  category_prompting: 2,
+  image_generating: 3,
+  done: 4,
 };
 const auxiliaryCategories = new Set<string>(SUITE_CATEGORY_GROUPS.other.categories);
 const statuses: Record<string, string> = {
@@ -23,12 +23,135 @@ const statuses: Record<string, string> = {
   waiting_human_input: "等待补录",
   waiting_base_refine_decision: "精修暂停",
 };
+const listingCopyBadgeLabels: Record<"running" | "succeeded" | "failed", string> = {
+  running: "生成文案中…",
+  succeeded: "文案已生成",
+  failed: "文案失败",
+};
 const phaseErrors: Record<string, string> = {
   structure_planning: "STRUCTURE_PLAN_FAILED",
   category_prompting: "CATEGORY_PROMPT_FAILED",
   image_generating: "IMAGE_GENERATION_FAILED",
   done: "IMAGE_GENERATION_FAILED",
 };
+type StepState = "done" | "active" | "pending" | "failed";
+
+function runningBadgeText(phase: string, completed: number, total: number): string {
+  switch (phase) {
+    case "base_refining":
+      return "白底精修中…";
+    case "structure_planning":
+      return "规划结构中…";
+    case "category_prompting":
+      return "生成提示词中…";
+    case "image_generating":
+      return total > 0 ? `生成图片中 ${completed}/${total}` : "生成图片中…";
+    default:
+      return "生成中…";
+  }
+}
+
+function placeholderPhaseText(phase: string, index: number): string {
+  const num = String(index).padStart(2, "0");
+  switch (phase) {
+    case "base_refining":
+      return `白底精修中 · ${num}`;
+    case "structure_planning":
+      return "规划结构中…";
+    case "category_prompting":
+      return "编写提示词中…";
+    case "image_generating":
+      return `生成图片中 · ${num}`;
+    default:
+      return `等待出图 · ${num}`;
+  }
+}
+
+function buildProgressModel(
+  run: StudioState["pipeline"],
+  listingCopy: StudioState["listingCopy"],
+  listingCopyEnabled: boolean,
+  completed: number,
+  total: number,
+) {
+  const running = run?.status === "running";
+  const listingCopyRunning = listingCopy?.status === "running";
+  const currentPhase = run?.currentPhase ?? "structure_planning";
+  const currentOrder = phaseOrder[currentPhase] ?? 1;
+
+  const baseSteps: Array<{ key: string; index: string; label: string; order: number }> = [
+    ...(currentPhase === "base_refining" ? [{ key: "base_refining", index: "0", label: "白底精修", order: 0 }] : []),
+    { key: "structure_planning", index: "1", label: "规划结构", order: 1 },
+    { key: "category_prompting", index: "2", label: "生成提示词", order: 2 },
+    {
+      key: "image_generating",
+      index: "3",
+      label: total > 0 ? `生成图片 (${completed}/${total})` : "生成图片",
+      order: 3,
+    },
+  ];
+
+  const steps: Array<{ key: string; index: string; label: string; state: StepState }> = baseSteps.map((step) => {
+    let state: StepState = "pending";
+    if (running) {
+      if (step.order < currentOrder) state = "done";
+      else if (step.order === currentOrder) state = "active";
+    } else if (run?.status === "completed") {
+      state = "done";
+    } else if (run?.status === "partial_failed" || run?.status === "failed") {
+      const failOrder = currentPhase === "done" ? 3 : currentOrder;
+      if (step.order < failOrder) state = "done";
+      else if (step.order === failOrder) state = "failed";
+    }
+    return { key: step.key, index: step.index, label: step.label, state };
+  });
+
+  let copyStep: { label: string; state: StepState } | null = null;
+  if (listingCopyEnabled || listingCopy) {
+    if (listingCopy?.status === "running") copyStep = { label: "生成文案中…", state: "active" };
+    else if (listingCopy?.status === "succeeded") copyStep = { label: "文案已生成", state: "done" };
+    else if (listingCopy?.status === "failed") copyStep = { label: "文案生成失败", state: "failed" };
+    else copyStep = { label: "等待规划", state: "pending" };
+  }
+
+  let percent = 15;
+  let headline = "正在生成套图…";
+  if (running) {
+    switch (currentPhase) {
+      case "base_refining":
+        percent = 10;
+        headline = "正在进行商品白底精修，优化主体与背景…";
+        break;
+      case "structure_planning":
+        percent = 18;
+        headline = "正在分析商品原图与卖点，规划套图结构…";
+        break;
+      case "category_prompting":
+        percent = 34;
+        headline = listingCopyRunning
+          ? "正在编写各分类生图提示词，同时并行生成上架文案…"
+          : "正在为各分类编写生图提示词与构图指令…";
+        break;
+      case "image_generating": {
+        const ratio = total > 0 ? Math.min(1, completed / total) : 0;
+        percent = Math.round(38 + ratio * (listingCopyRunning ? 54 : 60));
+        headline = listingCopyRunning
+          ? `正在生成商品图片（${completed}/${total}），并行生成上架文案中…`
+          : `正在逐张生成商品图片（已完成 ${completed}/${total} 张）…`;
+        break;
+      }
+      default:
+        percent = 95;
+        headline = "正在整理生成结果…";
+        break;
+    }
+  } else if (listingCopyRunning) {
+    percent = 92;
+    headline = "套图已生成，正在并行生成商品上架文案…";
+  }
+
+  return { steps, copyStep, percent, headline };
+}
 type Props = {
   state: StudioState;
   profiles: ApiPlatformProfile[];
@@ -86,9 +209,15 @@ export function BatchResults({
     run = s.pipeline,
     c = fromRun(run),
     running = run?.status === "running",
+    listingCopyStatus = s.listingCopy?.status,
+    listingCopyRunning = listingCopyStatus === "running",
+    showProgress = running || listingCopyRunning,
     slots = s.cards,
     ready = slots.filter((x) => x.previewUrl),
     total = slots.length || totalImages(c);
+  const progressModel = showProgress
+    ? buildProgressModel(run, s.listingCopy, c.listingCopy, s.progress.completed, total)
+    : null;
   const persistedMessage = run?.errorMessage?.trim();
   const errorMessage = persistedMessage && !/^[A-Z][A-Z0-9_]*$/.test(persistedMessage)
     ? persistedMessage
@@ -163,8 +292,24 @@ export function BatchResults({
           </small>
         </div>
         <span data-status={run?.status ?? "historical"} className="ss-status">
-          {statuses[run?.status ?? ""] ?? "历史批次"}
+          {running && <span className="ss-status-dot" aria-hidden="true" />}
+          {running
+            ? runningBadgeText(run.currentPhase, s.progress.completed, total)
+            : (statuses[run?.status ?? ""] ?? "历史批次")}
         </span>
+        {(listingCopyStatus === "running" ||
+          listingCopyStatus === "succeeded" ||
+          listingCopyStatus === "failed") && (
+          <button
+            type="button"
+            className="ss-copy-status"
+            data-copy-status={listingCopyStatus}
+            onClick={() => setShowListingCopy(true)}
+          >
+            {listingCopyStatus === "running" && <span className="ss-status-dot" aria-hidden="true" />}
+            {listingCopyBadgeLabels[listingCopyStatus]}
+          </button>
+        )}
         <button onClick={() => setShowListingCopy(true)}>上架文案</button>
         <button
           disabled={!selected.length || busy}
@@ -220,12 +365,41 @@ export function BatchResults({
           )}
         </div>
       </header>
-      {running && (
+      {progressModel && (
         <div className="ss-progress">
-          <strong>
-            {phases[run.currentPhase]} · {s.progress.completed}/{total}
-          </strong>
-          <progress value={s.progress.completed} max={total} />
+          <div className="ss-progress-head">
+            <strong>{progressModel.headline}</strong>
+            <span className="ss-progress-pct">{progressModel.percent}%</span>
+          </div>
+          <div
+            className="ss-progress-track"
+            role="progressbar"
+            aria-label="套图生成进度"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progressModel.percent}
+            aria-valuetext={`${progressModel.percent}% · ${progressModel.headline}`}
+          >
+            <div className="ss-progress-fill" style={{ width: `${progressModel.percent}%` }} />
+          </div>
+          <ol className="ss-progress-steps" aria-label="生成阶段进度">
+            {progressModel.steps.map((step) => (
+              <li key={step.key} className="ss-step" data-step-state={step.state}>
+                <span className="ss-step-badge" aria-hidden="true">
+                  {step.state === "done" ? "✓" : step.index}
+                </span>
+                <span>{step.label}</span>
+              </li>
+            ))}
+            {progressModel.copyStep && (
+              <li className="ss-step ss-step-copy" data-step-state={progressModel.copyStep.state}>
+                <span className="ss-step-badge" aria-hidden="true">
+                  {progressModel.copyStep.state === "done" ? "✓" : "文"}
+                </span>
+                <span>上架文案 · {progressModel.copyStep.label}</span>
+              </li>
+            )}
+          </ol>
         </div>
       )}
       {errorMessage && !running && <p className="ss-note">{errorMessage}</p>}
@@ -294,7 +468,7 @@ export function BatchResults({
             <figcaption>原图</figcaption>
           </figure>
         )}
-        {slots.map((card) => {
+        {slots.map((card, index) => {
           const task = card.parentTaskId,
             type =
               SUITE_CATEGORY_NAMES[String(card.promptSnapshot.categoryCode)] ??
@@ -305,7 +479,7 @@ export function BatchResults({
               data-result-card
               className={"ss-card" + (picked.includes(task) ? " selected" : "")}
             >
-              <div className="ss-photo">
+              <div className={"ss-photo" + (!card.previewUrl && running ? " is-pending" : "")}>
                 {card.previewUrl ? (
                   <>
                     <button
@@ -324,7 +498,9 @@ export function BatchResults({
                     />
                   </>
                 ) : (
-                  <span>{running ? "等待出图" : "未生成"}</span>
+                  <span className={running ? "ss-skeleton-label" : undefined}>
+                    {running ? placeholderPhaseText(run.currentPhase, index + 1) : "未生成"}
+                  </span>
                 )}
                 <strong data-type-badge title={card.title}>
                   {type}
@@ -379,8 +555,9 @@ export function BatchResults({
         {running &&
           !slots.length &&
           Array.from({ length: total }, (_, i) => (
-            <div key={i} className="ss-placeholder">
-              等待出图 · {String(i + 1).padStart(2, "0")}
+            <div key={i} className="ss-placeholder is-loading">
+              <span className="ss-skeleton-label">{placeholderPhaseText(run.currentPhase, i + 1)}</span>
+              <small className="ss-placeholder-num">{String(i + 1).padStart(2, "0")}</small>
             </div>
           ))}
       </div>

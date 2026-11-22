@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { createSuiteStudioApp } from "../server/app.js";
+import { waitUntil } from "../server/suite-pipeline.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
@@ -740,4 +741,36 @@ test("feed excludes empty drafts, paginates by created time, and export honors t
   assert.equal(entries.has(omitted.exportPath), false);
   assert.deepEqual(manifest.items.map((item: { parentTaskId: string }) => item.parentTaskId), [selected.parentTaskId]);
   assert.equal(manifest.items[0].exportPath, selected.exportPath);
+});
+
+test("waitUntil backs off progressively and throws PIPELINE_TIMEOUT when expired", async () => {
+  const timestamps: number[] = [];
+  let calls = 0;
+  const result = await waitUntil(
+    async () => {
+      timestamps.push(Date.now());
+      calls += 1;
+      return calls >= 4 ? "done" : "pending";
+    },
+    (value) => value === "done",
+    2_000,
+  );
+  assert.equal(result, "done");
+  assert.equal(calls, 4);
+  assert.ok(timestamps[3] - timestamps[0] >= 25, "expected progressive backoff across retries");
+
+  let timeoutCalls = 0;
+  await assert.rejects(
+    () =>
+      waitUntil(
+        async () => {
+          timeoutCalls += 1;
+          return false;
+        },
+        Boolean,
+        60,
+      ),
+    /PIPELINE_TIMEOUT/,
+  );
+  assert.ok(timeoutCalls >= 2 && timeoutCalls <= 8, `expected bounded backoff polls, got ${timeoutCalls}`);
 });

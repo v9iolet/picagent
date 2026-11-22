@@ -55,12 +55,20 @@ interface SuitePipelineDependencies {
   loadSuiteImageEditChildren(tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]>;
 }
 
-const waitUntil = async <T>(load: () => Promise<T>, done: (value: T) => boolean, timeoutMs = 120_000): Promise<T> => {
+export const waitUntil = async <T>(
+  load: () => Promise<T>,
+  done: (value: T) => boolean,
+  timeoutMs = 300_000,
+): Promise<T> => {
   const started = Date.now();
+  let delayMs = 5;
   while (Date.now() - started < timeoutMs) {
     const value = await load();
     if (done(value)) return value;
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    const remaining = timeoutMs - (Date.now() - started);
+    if (remaining <= 0) break;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, remaining)));
+    delayMs = Math.min(delayMs * 2, 300);
   }
   throw new Error("PIPELINE_TIMEOUT");
 };
@@ -392,6 +400,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           await waitUntil(
             () => taskRepository.getBatch(id),
             (batch) => batch !== null && batch.status !== "running",
+            600_000,
           );
         }
       }

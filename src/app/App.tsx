@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ModelSettingsPage } from "../pages/ModelSettingsPage";
 import { SuiteStudioPage } from "../pages/SuiteStudioPage";
 import { BoardPage } from "../pages/BoardPage";
@@ -19,11 +19,11 @@ export function App() {
   }, []);
 
   const reverseId = useMemo(() => path.match(/^\/reverse\/([^/]+)/)?.[1], [path]);
-  const navigate = (to: string) => {
-    window.history.pushState({}, "", to);
+  const navigate = useCallback((to: string, options?: { replace?: boolean }) => {
+    window.history[options?.replace ? "replaceState" : "pushState"]({}, "", to);
     setLocation(readLocation());
-    window.scrollTo({ top: 0 });
-  };
+    if (!options?.replace) window.scrollTo({ top: 0 });
+  }, []);
 
   const legacy = path.match(/^\/suites\/([^/]+)\/?$/);
   const legacyBoard = path.match(/^\/suites\/([^/]+)\/board\/?$/);
