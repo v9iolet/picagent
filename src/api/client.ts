@@ -1,3 +1,4 @@
+import type { ListingConfig, ListingContent, ListingRules } from "../../shared/listing-config";
 import type { ModelChannelInput, ModelChannelSnapshot, ModelPreferences, ModelSettingsView } from "../../shared/model-settings";
 
 export interface ApiImage {
@@ -6,7 +7,7 @@ export interface ApiImage {
   currentBaseVersionId: string | null; createdAt: string; originalPreviewUrl: string; thumbnailPreviewUrl: string;
 }
 export interface ApiSuite {
-  id: string; name: string; status: "draft" | "in_progress";
+  id: string; name: string; status: "draft" | "in_progress"; origin?: "suite_studio" | "canvas";
   styleOverride?: string | null; styleOverrideUpdatedAt?: string | null;
   coverPreviewUrl?: string | null; inputImageCount?: number; taskCount?: number; isDemo?: boolean;
   createdAt: string; updatedAt: string; inputImages: ApiImage[];
@@ -26,14 +27,16 @@ export interface ApiPromptInputField {
 }
 export interface ApiPromptTemplate {
   templateId: string; templateVersionId: string; versionNo: number; code: string; name: string;
-  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt"; executionTarget: "llm" | "image_model";
+  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy"; executionTarget: "llm" | "image_model";
   inputSchema: ApiPromptInputField[]; applicability: Record<string, unknown>;
 }
 export interface ApiPromptTemplateCopy extends ApiPromptTemplate { body: string; userPromptTemplate: string; outputSchema?: Record<string, unknown>; status?: "draft" | "published" | "retired" }
 export interface ApiPlatformProfile {
   code: string; name: string; marketScope: "overseas" | "domestic";
+  mainImageBackground: "pure_white_required" | "white_preferred" | "flexible";
   mainImageStrategy: string; galleryStrategy: string; textStrategy: string; modelStrategy: string;
   sourceNote: string; sortOrder: number;
+  listingCopyRules?: ListingRules;
 }
 export interface ApiRagChunk { id: string; version: string; title: string; summary: string; sourceKind: string; sourceAssetPaths: string[]; contentSha256: string; fieldValues?: Record<string, unknown> }
 export interface ApiPlanItem { id: string; ordinal: number; imageType: "main" | "detail"; title: string; purpose: string; prompt: string }
@@ -52,7 +55,7 @@ export interface ApiStructurePlan {
 export interface ApiCategoryPromptItem { stableId: string; category: string; title: string; purpose: string; referenceImageIds: string[]; factRefs: string[]; prompt: string; allowsTextOverlay: "platform_default" | "yes" | "no"; textContent: Array<{ text: string; source: string }>; aspectRatio: string; suggestedParams: Record<string, unknown> }
 export interface ApiCategoryPromptRequest { id: string; suiteId: string; planSnapshotId: string; categoryCode: string; requestedCount: number; status: "running" | "succeeded" | "failed"; idempotencyKey: string; retryOfRequestId: string | null; templateVersionId: string; provider: { name: string; model: string; isFake: boolean; channel?: ModelChannelSnapshot }; requestSummary: Record<string, unknown>; responseSummary: Record<string, unknown> | null; items: ApiCategoryPromptItem[]; errorCode: string | null; errorMessage: string | null; createdAt: string; completedAt: string | null }
 export interface ApiCategoryPromptState { planSnapshotId: string | null; status: "not_ready" | "pending" | "running" | "partial" | "succeeded"; expectedRequestCount?: number; requests: ApiCategoryPromptRequest[] }
-export interface ApiPlanSnapshot { id: string; revisionNumber: number; revisionKind: "llm" | "human"; templateVersionId: string; dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>; chunks: Array<{ sourceChunkId: string; sourceVersion: string; title: string; fieldValues: Record<string, unknown>; sourceKind: string }>; inputImageIds?: string[]; provider: { name: string; model: string; isFake: boolean; channel?: ModelChannelSnapshot }; items: ApiPlanItem[]; phase?: "legacy_plan" | "structure_plan"; confirmationStatus?: "draft" | "confirmed"; confirmedAt?: string | null; structure?: ApiStructurePlan | null; categoryOutputs?: Record<string, { status: string; requestedCount: number; items: ApiCategoryPromptItem[]; errorCode?: string | null; errorMessage?: string | null }>; createdAt: string }
+export interface ApiPlanSnapshot { id: string; revisionNumber: number; revisionKind: "llm" | "human"; templateVersionId: string; dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>; chunks: Array<{ sourceChunkId: string; sourceVersion: string; title: string; fieldValues: Record<string, unknown>; sourceKind: string }>; inputImageIds?: string[]; provider: { name: string; model: string; isFake: boolean; channel?: ModelChannelSnapshot }; items: ApiPlanItem[]; phase?: "legacy_plan" | "structure_plan"; confirmationStatus?: "draft" | "confirmed"; confirmationMode?: "auto" | "human"; confirmedAt?: string | null; structure?: ApiStructurePlan | null; categoryOutputs?: Record<string, { status: string; requestedCount: number; items: ApiCategoryPromptItem[]; errorCode?: string | null; errorMessage?: string | null }>; createdAt: string }
 export interface ApiPlanAttempt { id: string; status: "running" | "succeeded" | "failed"; provider: { name: string; model: string; isFake: boolean; channel?: ModelChannelSnapshot }; errorCode: string | null; errorMessage: string | null; snapshot: ApiPlanSnapshot | null }
 export interface ApiPlanState { attempt: ApiPlanAttempt | null; snapshot: ApiPlanSnapshot | null }
 export type ApiTaskStatus = "incomplete" | "pending" | "generating" | "generated" | "refining" | "failed" | "archived";
@@ -95,6 +98,33 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload?.data as T;
 }
 
+export type { ListingConfig } from "../../shared/listing-config";
+export interface ApiListingSummary extends Omit<ListingConfig, "sellingPoints"> {
+  id: string;
+  sourceSuiteId: string | null;
+  input: { sellingPoints: string };
+  status: "draft" | "running" | "succeeded" | "failed";
+  errorCode: string | null;
+  updatedAt: string;
+}
+export type ApiListingContent = ListingContent;
+export interface ApiListingJob extends ApiListingSummary {
+  inputImages: { id: string; originalFilename: string }[];
+  versions: { id: string; versionNumber: number; createdAt: string; content: ApiListingContent }[];
+}
+
+const listingPath = "/api/listing-copies";
+const listingJobPath = (id: string) => `${listingPath}/${encodeURIComponent(id)}`;
+const listingWrite = (path: string, method: "POST" | "PUT", body: object) =>
+  request<ApiListingJob>(path, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+export const listingCopyApi = {
+  get: (id: string) => request<ApiListingJob>(listingJobPath(id)),
+  generateForSuite: (sourceSuiteId: string) => listingWrite(listingPath, "POST", { sourceSuiteId, generate: true }),
+  regenerate: (id: string) => listingWrite(`${listingJobPath(id)}/regenerate`, "POST", {}),
+  save: (id: string, content: Partial<ApiListingContent>) => listingWrite(listingJobPath(id), "PUT", { content }),
+};
+
 const settingsPath = "/api/model-settings";
 export const modelSettingsApi = {
   get: () => request<ModelSettingsView>(settingsPath),
@@ -111,8 +141,11 @@ export const modelSettingsApi = {
 };
 
 export const suiteApi = {
-  create(name: string) { return request<{ id: string; name: string }>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name }) }); },
+  create(name: string, origin?: ApiSuite["origin"]) { return request<ApiSuite>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name, origin }) }); },
+  rename(id: string, name: string) { return request<ApiSuite>(`/api/suites/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name }) }); },
+  delete(id: string) { return request<{ id: string }>(`/api/suites/${encodeURIComponent(id)}`, { method: "DELETE" }); },
   list() { return request<ApiSuite[]>("/api/suites"); },
+  listCanvases() { return request<ApiSuite[]>("/api/suites?view=canvas"); },
   get(id: string) { return request<ApiSuite>(`/api/suites/${encodeURIComponent(id)}`); },
   removeInputImage(suiteId: string, inputImageId: string) {
     return request<{ id: string }>(`/api/suites/${encodeURIComponent(suiteId)}/input-images/${encodeURIComponent(inputImageId)}`, { method: "DELETE" });
@@ -153,7 +186,7 @@ export const suiteApi = {
   getPlan(suiteId: string) { return request<ApiPlanState>(`/api/suites/${encodeURIComponent(suiteId)}/plan`); },
   getPlanAttempt(attemptId: string) { return request<ApiPlanAttempt>(`/api/plan-attempts/${encodeURIComponent(attemptId)}`); },
   getStructurePlan(suiteId: string) { return request<ApiPlanState>(`/api/suites/${encodeURIComponent(suiteId)}/structure-plan`); },
-  generateStructurePlan(suiteId: string, templateVersionId: string, dynamicInput: Record<string, unknown>, selectedChunks: ApiRagChunk[]) { return request<{ attemptId: string; status: string }>(`/api/suites/${encodeURIComponent(suiteId)}/structure-plan`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ templateVersionId, dynamicInput, humanInput: {}, selectedChunks: selectedChunks.map(({ id, version }) => ({ id, version })) }) }); },
+  generateStructurePlan(suiteId: string, templateVersionId: string, dynamicInput: Record<string, unknown>, selectedChunks: ApiRagChunk[] = []) { return request<{ attemptId: string; status: string }>(`/api/suites/${encodeURIComponent(suiteId)}/structure-plan`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ templateVersionId, dynamicInput, humanInput: {}, selectedChunks: selectedChunks.map(({ id, version }) => ({ id, version })) }) }); },
   confirmStructurePlan(suiteId: string, structure: ApiStructurePlan) { return request<ApiPlanSnapshot>(`/api/suites/${encodeURIComponent(suiteId)}/structure-plan/confirm`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ structure }) }); },
   getCategoryPrompts(suiteId: string) { return request<ApiCategoryPromptState>(`/api/suites/${encodeURIComponent(suiteId)}/category-prompts`); },
   generateCategoryPrompts(suiteId: string, planSnapshotId: string, templateVersionId?: string) { return request<{ planSnapshotId: string; status: string }>(`/api/suites/${encodeURIComponent(suiteId)}/category-prompts`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ planSnapshotId, templateVersionId }) }); },
@@ -163,7 +196,24 @@ export const suiteApi = {
   startCreationCheck(suiteId: string) { return request<{ ready: boolean; planSnapshotId: string; itemCount: number }>(`/api/suites/${encodeURIComponent(suiteId)}/start-creation-check`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() } }); },
   getWorkbench(suiteId: string) { return request<ApiWorkbench>(`/api/suites/${encodeURIComponent(suiteId)}/workbench`); },
   updateStyleOverride(suiteId: string, styleOverride: string | null) { return request<{ suite: ApiSuite; planStyleGuide: string; styleOverride: string | null; effectiveStyleGuide: string }>(`/api/suites/${encodeURIComponent(suiteId)}/style-override`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ styleOverride }) }); },
-  deliveryExportUrl(suiteId: string) { return `/api/suites/${encodeURIComponent(suiteId)}/delivery/export`; },
+  deliveryExportUrl(suiteId: string, options?: { preset?: string; format?: string; quality?: number; stitchDetail?: boolean }) {
+    const search = new URLSearchParams();
+    if (options?.preset && options.preset !== "original") search.set("preset", options.preset);
+    if (options?.format && options.format !== "original") search.set("format", options.format);
+    if (options?.quality !== undefined) search.set("quality", String(options.quality));
+    if (options?.stitchDetail) search.set("stitchDetail", "true");
+    const qs = search.toString();
+    return `/api/suites/${encodeURIComponent(suiteId)}/delivery/export${qs ? `?${qs}` : ""}`;
+  },
+  createCustomTask(suiteId: string, body: { imageType: "main" | "detail"; title: string; purpose?: string; promptDraft: string; sourceInputImageId?: string | null; generationParams?: Record<string, unknown> }) {
+    return request<ApiSuiteTask>(`/api/suites/${encodeURIComponent(suiteId)}/tasks/custom`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) });
+  },
+  batchUpdateTaskParams(suiteId: string, body: { imageType?: "main" | "detail" | "all"; taskIds?: string[]; generationParams: Record<string, unknown> }) {
+    return request<{ updatedCount: number; tasks: ApiSuiteTask[] }>(`/api/suites/${encodeURIComponent(suiteId)}/tasks/batch-params`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) });
+  },
+  translateImageTexts(body: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }) {
+    return request<{ targetLanguage: string; translations: Array<{ id: string; originalText: string; translatedText: string }>; model: string; channelName: string | null }>("/api/image-editor/translate-text", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  },
   createTasks(suiteId: string, planSnapshotId?: string) { return request<{ planSnapshotId: string; tasks: ApiSuiteTask[]; createdTaskIds: string[] }>(`/api/suites/${encodeURIComponent(suiteId)}/tasks`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(planSnapshotId ? { planSnapshotId } : {}) }); },
   updateTask(taskId: string, body: Partial<Pick<ApiSuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams">>) { return request<ApiSuiteTask>(`/api/suite-tasks/${encodeURIComponent(taskId)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   generateBatch(suiteId: string, taskIds?: string[]) { return request<{ batchId: string; status: string; requestedCount?: number }>(`/api/suites/${encodeURIComponent(suiteId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(taskIds ? { taskIds } : {}) }); },

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryCategoryPromptRepository } from "../server/repositories/memory-category-prompt-repository.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
@@ -48,7 +48,7 @@ test("confirmed category outputs materialize independent cards with frozen style
     await categoryPrompts.beginRequest(request);
     await categoryPrompts.completeRequest(request.id, [{ stableId: `${code}-1`, category: code, title, purpose: "独立职责", referenceImageIds: [input.id], factRefs: ["human_supplement"], prompt: `${code} prompt`, allowsTextOverlay: "no", textContent: [], aspectRatio: "1:1", suggestedParams: {} }], { itemCount: 1 });
   }
-  const api = createTicket02App({ repository, storage, planRepository: plans, categoryPromptRepository: categoryPrompts, taskRepository: tasks, provider: { edit: async ({ n }) => { assert.equal(n, 1); return { bytes, mimeType: "image/png" }; } } });
+  const api = createSuiteStudioApp({ repository, storage, planRepository: plans, categoryPromptRepository: categoryPrompts, taskRepository: tasks, provider: { edit: async ({ n }) => { assert.equal(n, 1); return { bytes, mimeType: "image/png" }; } } });
   const created = await api.request("POST", `/api/suites/${suite.id}/tasks`, { body: { planSnapshotId: snapshot.id } });
   assert.equal(created.status, 201);
   const cards = (created.body as any).data.tasks;
@@ -103,7 +103,7 @@ test("a recovered category appends a card without archiving the already material
   const main = categoryRequest(source, "main", "succeeded", "main prompt"); const pending = categoryRequest(source, "lifestyle_use", "running", "lifestyle prompt");
   await categoryPrompts.beginRequest(main); await categoryPrompts.completeRequest(main.id, main.items, {});
   await categoryPrompts.beginRequest(pending);
-  const api = createTicket02App({ repository, storage, planRepository: plans, categoryPromptRepository: categoryPrompts, taskRepository: tasks });
+  const api = createSuiteStudioApp({ repository, storage, planRepository: plans, categoryPromptRepository: categoryPrompts, taskRepository: tasks });
   const first = await api.request("POST", `/api/suites/${suite.id}/tasks`, { body: { planSnapshotId: source.id } });
   assert.equal(first.status, 201); assert.equal((first.body as any).data.tasks.length, 1);
   await categoryPrompts.completeRequest(pending.id, pending.items, {});

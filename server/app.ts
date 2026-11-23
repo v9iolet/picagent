@@ -1,14 +1,36 @@
-import type { ModelCapability } from "../shared/model-settings.js";
+import { planSnapshotView, isStructurePlanV2, taskView, taskAttemptView, taskSlotView, taskVersionView, taskBatchView } from "./suite-views.js";
+import { createSuitePipeline } from "./suite-pipeline.js";
+import { fail, errorMessages } from "./api-errors.js";
+import { ok, asRecord, dataOf, type AppResponse } from "./api-response.js";
+export type { AppResponse } from "./api-response.js";
+import { isProductImageResource } from "./library-reference-policy.js";
+import { createListingCopyApi } from "./listing-copy-api.js";
+import { MemoryListingRepository, type ListingRepository } from "./listing-copy.js";
+import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../shared/model-settings.js";
+import { PURE_WHITE_MAIN_IMAGE_REQUIREMENTS } from "../shared/platform-main-background.js";
+import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
+import { allocateSellingPointLayouts, resolveSellingPointLayouts } from "../shared/selling-point-layouts.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
 import type { ModelSettings } from "./model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
+import sharp from "sharp";
 import { processGeneratedImage, processImage } from "./image.js";
-import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptStage } from "./prompt-library.js";
+import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptStage, type PromptTemplateRuntime } from "./prompt-library.js";
 import { MemoryCategoryPromptRepository } from "./repositories/memory-category-prompt-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
-import { materializeCategoryPlanItems } from "./suite-task-prompt.js";
-import { applyStyleOverrideToPrompt, resolveDeliverySlots, sanitizeDeliveryName, type DeliveryEditChildLike } from "../shared/workbench-delivery.js";
+import { MemoryPipelineRepository } from "./repositories/memory-pipeline-repository.js";
+import { buildProviderImagePrompt, materializeCategoryPlanItems } from "./suite-task-prompt.js";
+import {
+  applyStyleOverrideToPrompt,
+  DELIVERY_EXPORT_PRESETS,
+  formatListingCopyMarkdown,
+  resolveDeliverySlots,
+  sanitizeDeliveryName,
+  type DeliveryEditChildLike,
+  type DeliveryExportFormat,
+  type DeliveryExportPresetId,
+} from "../shared/workbench-delivery.js";
 import { createZipBuffer } from "./zip.js";
 import type { ImageEditorApiResponse } from "./image-editor-api.js";
 import type {
@@ -17,7 +39,6 @@ import type {
   CategoryPromptLlmInput,
   CategoryPromptRequest,
   CategoryPromptRepository,
-  ErrorEnvelope,
   GenerationAttempt,
   ImageProvider,
   InputImage,
@@ -25,10 +46,10 @@ import type {
   PlanAttempt,
   PlanRepository,
   PlanSnapshot,
+  PlatformProfile,
   PlatformRepository,
   PromptRepository,
   RagClient,
-  ResponseEnvelope,
   StorageAdapter,
   StructureAllocation,
   StructurePlanV2,
@@ -40,14 +61,13 @@ import type {
   TaskGenerationAttempt,
   TaskGenerationBatch,
   TaskResultSlot,
-  TaskImageVersion,
   LibraryRepository,
   ReverseRepository, ReversePlan, ReverseReference, ReverseAttempt, ReversePromptVersion,
+  PipelineRepository,
 } from "./types.js";
 import { failObservation, finishObservation, startTool } from "./observability.js";
 
-export interface AppResponse { status: number; body: ResponseEnvelope<unknown> | ErrorEnvelope; headers?: Record<string, string>; raw?: Buffer }
-export interface Ticket02App {
+export interface SuiteStudioApp {
   request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<AppResponse>;
   upload(suiteId: string, file: UploadFile): Promise<AppResponse>;
   preview(suiteId: string, imageId: string, kind: "original" | "thumbnail"): Promise<AppResponse>;
@@ -55,6 +75,25 @@ export interface Ticket02App {
   previewTaskVersion(taskId: string, versionId: string): Promise<AppResponse>;
   previewLibraryResource(resourceId: string): Promise<AppResponse>;
   previewReverseReference(planId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+}
+
+function platformForPlanning(profile: PlatformProfile | null, background: unknown): PlatformProfile | undefined {
+  if (!profile) return undefined;
+  if (background === "pure_white_required")
+    return { ...profile, mainImageBackground: background, mainImageStrategy: PURE_WHITE_MAIN_IMAGE_REQUIREMENTS };
+  if (background === "flexible") return { ...profile, mainImageBackground: background };
+  return profile;
+}
+
+function savedSellingPointLayoutIds(snapshot: PlanSnapshot): unknown {
+  const input = snapshot.dynamicInput.selling_point_layouts;
+  if (typeof input !== "string") return snapshot.requestSummary.sellingPointLayoutIds;
+  try {
+    const layouts: unknown = JSON.parse(input);
+    return Array.isArray(layouts) ? layouts.map((layout) => asRecord(layout).id) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function observedPromptLoad(repository: PromptRepository, templateVersionId: string, stage?: PromptStage) {
@@ -69,94 +108,6 @@ async function observedPromptLoad(repository: PromptRepository, templateVersionI
   }
 }
 
-const errorMessages: Record<string, string> = {
-  INVALID_SUITE_ID: "方案不存在",
-  INVALID_STYLE_OVERRIDE: "画布风格覆盖必须为文本或空值",
-  DELIVERY_EMPTY: "当前方案尚无可交付的图片版本",
-  INVALID_INPUT_IMAGE: "原图不存在",
-  INVALID_BASE_VERSION: "底图版本不存在",
-  EMPTY_NAME: "方案名称不能为空",
-  INVALID_ORDINAL: "上传序号必须是 1 到 6",
-  TOO_MANY_IMAGES: "一个方案最多上传 6 张原图",
-  DUPLICATE_ORDINAL: "该上传序号已经存在",
-  DUPLICATE_IMAGE: "同一方案内不能重复上传相同图片",
-  UNSUPPORTED_IMAGE_MIME: "仅支持 JPG、PNG 或 WebP 图片",
-  INVALID_IMAGE: "文件不是有效图片",
-  MIME_MISMATCH: "图片真实类型与声明类型不一致",
-  IMAGE_TOO_LARGE: "图片文件超过 12MB 限制",
-  IMAGE_DIMENSIONS_TOO_LARGE: "图片尺寸超过限制",
-  MISSING_IDEMPOTENCY_KEY: "生成请求缺少幂等键",
-  INVALID_PROMPT_STAGE: "提示词阶段无效",
-  PROMPT_REPOSITORY_NOT_CONFIGURED: "提示词库未配置",
-  PROMPT_TEMPLATE_REQUIRED: "请选择提示词模板",
-  PROMPT_TEMPLATE_NOT_FOUND: "提示词模板未发布或阶段不匹配",
-  PLATFORM_NOT_FOUND: "目标平台不在维护表中",
-  PROMPT_INPUT_INVALID: "提示词动态字段无效",
-  IMAGE_PROVIDER_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认生图模型",
-  IMAGE_PROVIDER_FAILED: "图像生成服务调用失败",
-  INVALID_GENERATED_IMAGE: "图像生成服务返回了无效图片",
-  INPUT_OBJECT_NOT_FOUND: "原图对象不存在",
-  INPUT_OBJECT_READ_FAILED: "原图对象读取失败",
-  INPUT_IMAGE_HAS_HISTORY: "已有生成记录的原图不能取消",
-  STORAGE_WRITE_FAILED: "生成图片保存失败",
-  GENERATION_PERSIST_FAILED: "生成结果保存失败",
-  IMAGE_PROVIDER_TIMEOUT: "图像生成服务响应超时",
-  LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
-  PLAN_REPOSITORY_NOT_CONFIGURED: "计划仓储未配置",
-  PLAN_TEMPLATE_NOT_FOUND: "计划模板未发布或阶段不匹配",
-  RAG_NOT_CONFIGURED: "商品资料检索未配置",
-  RAG_CHUNK_NOT_FOUND: "所选商品资料不存在或未发布",
-  RAG_CHUNK_VERSION_DRIFT: "所选商品资料版本已变化，请重新选择",
-  LLM_OUTPUT_SCHEMA_INVALID: "LLM 输出不符合计划 Schema",
-  LLM_OUTPUT_COUNT_MISMATCH: "模型返回的主图或详情页数量与固定数量不一致，请重试",
-  STRUCTURE_PLAN_INVALID: "图片结构计划不符合数量或类别约束",
-  STRUCTURE_PLAN_NEEDS_INPUT: "必生类别缺少已确认商品事实",
-  STRUCTURE_PLAN_NOT_CONFIRMED: "图片结构计划尚未确认",
-  CATEGORY_PROMPT_REPOSITORY_NOT_CONFIGURED: "类别提示词仓储未配置",
-  CATEGORY_PROMPT_TEMPLATE_NOT_FOUND: "类别提示词模板未发布或阶段不匹配",
-  CATEGORY_PROMPT_NOT_CONFIRMED: "图片结构计划尚未确认，不能生成类别提示词",
-  INVALID_CATEGORY_PROMPT_REQUEST: "类别提示词请求不存在",
-  CATEGORY_PROMPT_INVALID: "类别提示词输出不符合类别或事实约束",
-  CATEGORY_PROMPT_COUNT_MISMATCH: "类别提示词数量与确认数量不一致，请重试",
-  CATEGORY_PROMPT_FAILED: "类别提示词生成失败",
-  CATEGORY_PROMPT_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
-  CATEGORY_PROMPTS_NOT_READY: "类别提示词尚未全部成功，请重试失败类别",
-  LLM_PROVIDER_FAILED: "LLM 计划生成失败",
-  LLM_TIMEOUT: "计划生成超时，请重试",
-  TASK_REPOSITORY_NOT_CONFIGURED: "套图任务仓储未配置",
-  INVALID_PLAN_SNAPSHOT: "没有可用的计划快照",
-  NO_TASKS_TO_GENERATE: "没有可生成的套图任务",
-  INVALID_SUITE_TASK: "套图任务不存在",
-  INVALID_TASK_BATCH: "生成批次不存在",
-  TASK_RETRY_INPUT_CHANGED: "任务输入已变更，请提交新的生成",
-  TASK_IMAGE_PROVIDER_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认生图模型",
-  TASK_IMAGE_PROVIDER_FAILED: "套图图片生成失败",
-  REVERSE_CANVAS_NO_RESULTS: "至少需要一条成功提示词才能进入共享画布",
-  REVERSE_WHITE_RESOURCE_REQUIRED: "请先从图片资源库选择产品白底图",
-  TASK_INVALID_SOURCE: "套图任务没有可用输入图",
-  TASK_INVALID_GENERATED_IMAGE: "套图图片生成结果无效",
-  TASK_STORAGE_WRITE_FAILED: "套图图片保存失败",
-  INVALID_TASK_VERSION: "图片版本不存在",
-  LAYOUT_VERSION_CONFLICT: "画布布局已被其他操作更新，请刷新后重试",
-  LIBRARY_RESOURCE_NOT_FOUND: "资源不存在或已归档",
-  LIBRARY_VERSION_INVALID: "资源版本无效",
-  LIBRARY_RESOURCE_FORBIDDEN: "资源不属于当前方案",
-  LIBRARY_STAGE_MISMATCH: "资源阶段与目标不匹配",
-  LIBRARY_TARGET_NOT_FOUND: "引用目标不存在",
-  LIBRARY_REPOSITORY_NOT_CONFIGURED: "资源库未配置",
-  REVERSE_REPOSITORY_NOT_CONFIGURED: "反推仓储未配置",
-  INVALID_REVERSE_PLAN: "反推方案不存在",
-  INVALID_REVERSE_MODE: "反推模式无效",
-  REVERSE_TEMPLATE_REQUIRED: "请选择反推模板",
-  REVERSE_TEMPLATE_NOT_FOUND: "反推模板未发布或模式不匹配",
-  REVERSE_REFERENCE_LIMIT: "一个方案最多上传 16 张参考图",
-  REVERSE_REFERENCE_NOT_FOUND: "反推参考图不存在",
-  REVERSE_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
-  REVERSE_OUTPUT_INVALID: "反推模型输出不符合契约",
-};
-
-function ok<T>(data: T, status = 200): AppResponse { return { status, body: { data, requestId: randomUUID() } }; }
-function fail(code: string, status = 400, message?: string): AppResponse { return { status, body: { error: { code, message: message ?? errorMessages[code] ?? "请求失败" }, requestId: randomUUID() } }; }
 function versionView(version: BaseImageVersion) {
   return {
     id: version.id,
@@ -261,12 +212,25 @@ function planAttemptView(attempt: PlanAttempt, snapshot: PlanSnapshot | null) {
   return { id: attempt.id, suiteId: attempt.suiteId, status: attempt.status, templateVersionId: attempt.templateVersionId, provider: attempt.provider, errorCode: attempt.errorCode, errorMessage: attempt.errorMessage, outputSummary: attempt.outputSummary, snapshot: snapshot ? planSnapshotView(snapshot) : null, createdAt: attempt.createdAt, completedAt: attempt.completedAt };
 }
 
-function planSnapshotView(snapshot: PlanSnapshot) {
-  return { id: snapshot.id, suiteId: snapshot.suiteId, revisionNumber: snapshot.revisionNumber, revisionKind: snapshot.revisionKind, parentSnapshotId: snapshot.parentSnapshotId, templateVersionId: snapshot.templateVersionId, dynamicInput: snapshot.dynamicInput, humanInput: snapshot.humanInput, chunks: snapshot.chunks.map(({ content: _content, ...chunk }) => chunk), inputImageIds: snapshot.inputImageIds, baseVersionIds: snapshot.baseVersionIds, provider: snapshot.provider, schemaVersion: snapshot.schemaVersion, items: snapshot.items, phase: snapshot.phase ?? "legacy_plan", confirmationStatus: snapshot.confirmationStatus ?? "confirmed", confirmedAt: snapshot.confirmedAt ?? null, structure: snapshot.structure ?? null, categoryOutputs: snapshot.categoryOutputs ?? {}, createdAt: snapshot.createdAt };
-}
-
-const DETAIL_CATEGORY_CODES = new Set(["appearance_angles", "lifestyle_use", "feature_benefit", "material_detail", "size_scale", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"]);
 type StructureOutput = StructurePlanV2 & { schemaVersion: "suite-structure-plan-v2" };
+
+function parseCategoryGroups(value: unknown): SuiteCategoryGroups | null {
+  const parsed = parseStructureJsonValue(value, null);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const groups = parsed as Record<string, unknown>;
+  if (Object.keys(groups).length !== Object.keys(SUITE_CATEGORY_GROUPS).length) return null;
+  for (const [code, definition] of Object.entries(SUITE_CATEGORY_GROUPS)) {
+    const raw = groups[code];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const group = raw as Record<string, unknown>;
+    if (group.mode !== definition.mode || !Number.isInteger(group.count) || Number(group.count) < 0) return null;
+    if (!Array.isArray(group.categories) || group.categories.length !== definition.categories.length || new Set(group.categories).size !== definition.categories.length || !definition.categories.every((category) => (group.categories as unknown[]).includes(category))) return null;
+  }
+  const result = groups as SuiteCategoryGroups;
+  const detailCount = result.selling_points.count + result.lifestyle.count + result.other.count;
+  if (result.main.count < SUITE_IMAGE_LIMITS.main.min || result.main.count > SUITE_IMAGE_LIMITS.main.max || detailCount > SUITE_IMAGE_LIMITS.detail.max || detailCount + result.main.count > SUITE_IMAGE_LIMITS.total.max) return null;
+  return result;
+}
 
 function normalizeStructureAllocation(value: unknown, main = false): StructureAllocation | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -307,13 +271,17 @@ function normalizeStructureOutput(value: unknown): StructureOutput | null {
 }
 
 function validateStructureOutput(output: StructureOutput, input: Record<string, unknown>, imageIds: string[], factIds: string[] = []): string | null {
+  const groups = input.category_groups ? parseCategoryGroups(input.category_groups) : null;
+  if (input.category_groups && !groups) return "category_groups";
+  const waitingForFacts = groups !== null && output.status === "NEEDS_HUMAN_INPUT";
   const min = Number(input.detail_image_count_min); const max = Number(input.detail_image_count_max);
-  if (!Number.isInteger(output.mainAllocation.count) || output.mainAllocation.count !== Number(input.main_image_count)) return "main_image_count";
+  if (!Number.isInteger(output.mainAllocation.count) || (!waitingForFacts && output.mainAllocation.count !== Number(input.main_image_count))) return "main_image_count";
   if (output.mainAllocation.sourceImageIds.some((id) => !imageIds.includes(id))) return "main:sourceImageIds";
   if (output.mainAllocation.factRefs.some((id) => !factIds.includes(id))) return "main:factRefs";
-  if (!Number.isInteger(output.detailImageCount) || output.detailImageCount < min || output.detailImageCount > max) return "detail_image_count_range";
-  const selectedValue = Array.isArray(input.selected_detail_categories) ? input.selected_detail_categories : JSON.parse(String(input.selected_detail_categories ?? "[]"));
-  const requirementsValue = input.category_requirements && typeof input.category_requirements === "object" ? input.category_requirements : JSON.parse(String(input.category_requirements ?? "{}"));
+  if (!Number.isInteger(output.detailImageCount) || output.detailImageCount < (waitingForFacts ? 0 : min) || output.detailImageCount > max) return "detail_image_count_range";
+  const groupCategories = groups ? Object.values(groups).flatMap((group) => group.categories.filter((code) => code !== "main")) : null;
+  const selectedValue = groupCategories ?? (Array.isArray(input.selected_detail_categories) ? input.selected_detail_categories : JSON.parse(String(input.selected_detail_categories ?? "[]")));
+  const requirementsValue = groupCategories ? Object.fromEntries(groupCategories.map((code) => [code, "optional"])) : input.category_requirements && typeof input.category_requirements === "object" ? input.category_requirements : JSON.parse(String(input.category_requirements ?? "{}"));
   const selected = new Set((Array.isArray(selectedValue) ? selectedValue : []).map(String));
   const requirements = new Map<string, "required" | "optional">(Object.entries(requirementsValue as Record<string, unknown>).map(([key, value]) => [key, value === "required" ? "required" : "optional"]));
   const seen = new Set<string>(); let total = 0;
@@ -325,12 +293,17 @@ function validateStructureOutput(output: StructureOutput, input: Record<string, 
     if (row.factRefs.some((id) => !factIds.includes(id))) return `${row.category}:factRefs`;
     total += row.count; seen.add(row.category);
   }
-  if (selected.size !== seen.size || total !== output.detailImageCount) return "category_total";
+  if (selected.size !== seen.size || (!waitingForFacts && total !== output.detailImageCount)) return "category_total";
+  if (groups) {
+    if (total > max || total > SUITE_IMAGE_LIMITS.detail.max || output.detailImageCount > SUITE_IMAGE_LIMITS.detail.max || output.mainAllocation.count + Math.max(total, output.detailImageCount) > SUITE_IMAGE_LIMITS.total.max) return "group:total";
+    for (const [code, group] of Object.entries(groups)) {
+      const allocations = code === "main" ? [output.mainAllocation] : output.categoryAllocations.filter((row) => group.categories.includes(row.category));
+      const count = allocations.reduce((sum, row) => sum + row.count, 0);
+      if (group.mode === "exact" && count !== group.count && (!waitingForFacts || count > group.count || !allocations.some((row) => row.missingFacts.some((fact) => fact.trim())))) return `group:${code}`;
+      if (group.mode === "max" && (count > group.count || allocations.some((row) => row.count > 1))) return `group:${code}`;
+    }
+  }
   return null;
-}
-
-function isStructurePlanV2(structure: PlanSnapshot["structure"]): structure is StructurePlanV2 {
-  return Boolean(structure && "mainAllocation" in structure && "status" in structure);
 }
 
 function parseStructureJsonValue(value: unknown, fallback: unknown): unknown {
@@ -338,20 +311,6 @@ function parseStructureJsonValue(value: unknown, fallback: unknown): unknown {
   if (typeof value !== "string") return fallback;
   try { return JSON.parse(value); } catch { return fallback; }
 }
-
-const DETAIL_CATEGORY_NAMES: Record<string, string> = {
-  main: "主图",
-  appearance_angles: "多角度外观图",
-  lifestyle_use: "生活场景图",
-  feature_benefit: "信息卖点图",
-  material_detail: "细节特写图",
-  size_scale: "尺寸规格图",
-  included_items: "配件全家福",
-  compatibility_application: "适配与应用图",
-  variant_bundle: "组合与变体图",
-  packaging_unboxing: "包装与开箱图",
-  care_instruction: "使用与维护图",
-};
 
 function normalizeCategoryPromptOutput(value: unknown): { schemaVersion: "suite-category-prompt-v1"; category: string; items: CategoryPromptItem[] } | null {
   const parsed = parseJsonLike(value);
@@ -433,17 +392,13 @@ export function planOutputMatchesRequestedCounts(output: { items: Array<{ imageT
   });
 }
 
-function taskView(task: SuiteTask) { return task; }
-function taskAttemptView(attempt: TaskGenerationAttempt) { return attempt; }
-function taskBatchView(batch: TaskGenerationBatch) { return batch; }
-function taskSlotView(slot: TaskResultSlot) { return slot; }
-function taskVersionView(version: TaskImageVersion) { return version; }
-
 function llmSource(client: LlmClient) {
   return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };
 }
 
-export function createTicket02App(deps: { repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> } }): Ticket02App {
+export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
+  const imageGenerationConcurrency = Math.max(1, Math.floor(Number.isFinite(deps.imageGenerationConcurrency) ? deps.imageGenerationConcurrency! : 3));
+  const imageRetryDelayMs = Math.max(0, Math.floor(Number.isFinite(deps.imageRetryDelayMs) ? deps.imageRetryDelayMs! : 1500));
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
   const resolveImage = async () => {
     const selected = await resolveModel("image");
@@ -451,6 +406,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       provider: selected ? new GptImageProvider(selected.baseUrl, selected.apiKey) : deps.provider,
       model: selected?.model ?? "gpt-image-2",
       channel: selected?.source,
+      imageOptions: selected?.imageOptions ?? defaultImageOptions(selected?.model ?? "gpt-image-2"),
     };
   };
   const resolveVision = async () => {
@@ -461,6 +417,9 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
   const uploadIdempotency = new Map<string, InputImage>();
   const styleOverrideIdempotency = new Map<string, { suite: import("./types.js").Suite; planStyleGuide: string; styleOverride: string | null; effectiveStyleGuide: string }>();
   const categoryPromptRepository = deps.categoryPromptRepository ?? new MemoryCategoryPromptRepository();
+  const pipelineRepository = deps.pipelineRepository ?? new MemoryPipelineRepository();
+  const listingRepository = deps.listingRepository ?? new MemoryListingRepository();
+  const listing = createListingCopyApi({ jobs: listingRepository, suites: deps.repository, storage: deps.storage, pipelines: pipelineRepository, plans: deps.planRepository, platforms: deps.platformRepository, prompts: deps.promptRepository, vision: resolveVision });
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
   const reversePlanWrites = new Map<string, Promise<void>>();
   const withReversePlanWrite = async <T>(planId: string, action: () => Promise<T>): Promise<T> => {
@@ -521,17 +480,44 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     }
   };
 
-  const categoryPlanInput = (snapshot: PlanSnapshot, categoryCode: string, requestedCount: number, allocation: Record<string, unknown> | null) => {
+  const categoryPlanInput = (
+    snapshot: PlanSnapshot,
+    categoryCode: string,
+    requestedCount: number,
+    allocation: Record<string, unknown> | null,
+    template: PromptTemplateRuntime,
+  ) => {
     const styleCard = snapshot.structure?.globalStyleCard ?? {};
     const factRefs = allocation && Array.isArray(allocation.factRefs) ? allocation.factRefs.map(String) : [];
     const sourceImageIds = allocation && Array.isArray(allocation.sourceImageIds) ? allocation.sourceImageIds.map(String) : snapshot.inputImageIds;
     const categoryName = DETAIL_CATEGORY_NAMES[categoryCode] ?? categoryCode;
     const universalInput: Record<string, unknown> = {};
-    for (const key of ["platform", "output_language", "product_name", "product_category", "brand", "target_market_country", "platform_text_rule", "text_strategy", "emphasis_requirements", "design_constraints"]) {
+    for (const key of ["platform", "output_language", "product_name", "product_category", "brand", "target_market_country", "aspect_ratio", "main_image_background", "platform_text_rule", "text_strategy", "emphasis_requirements", "design_constraints"]) {
       if (snapshot.dynamicInput[key] !== undefined) universalInput[key] = snapshot.dynamicInput[key];
+    }
+    const allowed = new Set(template.inputSchema.map(({ key }) => key));
+    const visualStyle = snapshot.dynamicInput.visual_style ?? snapshot.requestSummary.visualStyle;
+    if (allowed.has("visual_style") && typeof visualStyle === "string" && visualStyle.trim()) {
+      universalInput.visual_style = visualStyle;
+    }
+    if (allowed.has("selling_point_layouts") && isStructurePlanV2(snapshot.structure) &&
+        (categoryCode === "feature_benefit" || categoryCode === "material_detail")) {
+      const categories = snapshot.structure.categoryAllocations;
+      const featureCount = categories.find(({ category }) => category === "feature_benefit")?.count ?? 0;
+      const materialCount = categories.find(({ category }) => category === "material_detail")?.count ?? 0;
+      const layouts = resolveSellingPointLayouts(savedSellingPointLayoutIds(snapshot), featureCount + materialCount);
+      const slice = allocateSellingPointLayouts(layouts, { feature_benefit: featureCount, material_detail: materialCount })[categoryCode];
+      if (slice.length) universalInput.selling_point_layouts = JSON.stringify(slice);
     }
     const facts = designerFactsText(snapshot.dynamicInput);
     if (facts) universalInput.human_supplement = facts;
+    const isSellingPointCategory = categoryCode === "feature_benefit" || categoryCode === "material_detail";
+    const platformTextRule = isSellingPointCategory
+      ? "卖点图与细节图允许并应呈现清晰、克制、基于已确认事实的商业卖点标题、图标与标注（不得套用首图禁字规则）。"
+      : (snapshot.dynamicInput.platform_text_rule ?? snapshot.dynamicInput.text_strategy ?? "platform rules from confirmed planning input");
+    if (isSellingPointCategory && "text_strategy" in universalInput) {
+      universalInput.text_strategy = platformTextRule;
+    }
     return {
       ...universalInput,
       category_code: categoryCode,
@@ -541,7 +527,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       approved_fact_refs: factRefs,
       approved_facts: snapshot.chunks.filter((chunk) => factRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues })),
       reference_image_ids: sourceImageIds,
-      platform_text_rule: snapshot.dynamicInput.platform_text_rule ?? snapshot.dynamicInput.text_strategy ?? "platform rules from confirmed planning input",
+      platform_text_rule: platformTextRule,
     };
   };
 
@@ -569,7 +555,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       let sourceKind: "base" | "original" = "original";
       let sourceVersionId: string | null = null;
       let sourceObjectKey = image.originalObjectKey;
-      if (image.currentBaseVersionId) {
+      if (snapshot.requestSummary.useOriginalImages !== true && image.currentBaseVersionId) {
         const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId);
         if (base) { sourceKind = "base"; sourceVersionId = base.id; sourceObjectKey = base.objectKey; }
       }
@@ -592,7 +578,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     if (failedAttempt && (failedAttempt.contextSnapshot.sourceRevision ?? 0) !== (tasks[0].sourceRevision ?? 0)) {
       throw new Error("TASK_RETRY_INPUT_CHANGED");
     }
-    const { provider, model, channel } = await resolveImage();
+    const { provider, model, channel, imageOptions } = await resolveImage();
     if (deps.modelSettings && !provider) throw new Error("TASK_IMAGE_PROVIDER_NOT_CONFIGURED");
     const now = new Date().toISOString();
     const [suiteForStyle, latestPlanSnapshot] = await Promise.all([
@@ -604,6 +590,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const batch: TaskGenerationBatch = { id: randomUUID(), suiteId, kind, requestedCount: tasks.length, taskIds: tasks.map((task) => task.id), status: "running", idempotencyKey, createdAt: now, startedAt: now, finishedAt: null };
     const slots: TaskResultSlot[] = tasks.map((task, index) => ({ id: randomUUID(), batchId: batch.id, taskId: task.id, slotOrdinal: index + 1, retryOfSlotId: failedAttempt?.slotId ?? null, status: "generating", selectedVersionId: null, createdAt: now, completedAt: null }));
     const attempts: TaskGenerationAttempt[] = [];
+    const taskPlans = new Map<string, PlanSnapshot | null>();
+    if (latestPlanSnapshot) taskPlans.set(latestPlanSnapshot.id, latestPlanSnapshot);
     for (const [index, task] of tasks.entries()) {
       const providerName = channel ? "openai-compatible-image" : provider ? "image-provider" : "unconfigured";
       if (failedAttempt) {
@@ -614,25 +602,33 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         });
         continue;
       }
+      if (task.planSnapshotId && deps.planRepository && !taskPlans.has(task.planSnapshotId))
+        taskPlans.set(task.planSnapshotId, await deps.planRepository.getSnapshot(task.planSnapshotId));
+      const taskPlan = task.planSnapshotId ? taskPlans.get(task.planSnapshotId) : null;
+      const useOriginalImages = taskPlan?.requestSummary.useOriginalImages === true;
       let sourceKind: "base" | "original" | "library" = "original"; let sourceObjectKey = ""; let sourceBaseVersionId: string | null = null; let sourceInputImageId: string | null = null; let sourceLibraryReferenceId: string | null = null; let sourceResourceVersionId: string | null = null;
       const generationParams = task.generationParams ?? {};
       const materialRefs = Array.isArray(generationParams.productMaterialRefs) ? generationParams.productMaterialRefs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 3) : [];
       const inputImages: Array<{ bytes: Buffer; mimeType: string; filename: string; role: string; objectKey: string; resourceId?: string; resourceVersionId?: string; libraryReferenceId?: string }> = [];
-      if (materialRefs.length && deps.libraryRepository) {
+      const currentTaskVersionId = sourceVersionIds[task.id];
+      if (!currentTaskVersionId && materialRefs.length && deps.libraryRepository) {
         const references = await deps.libraryRepository.listReferences(suiteId, "task", task.id);
         for (const [materialIndex, material] of materialRefs.entries()) {
           const referenceId = typeof material.libraryReferenceId === "string" ? material.libraryReferenceId : "";
           const reference = references.find((item) => item.id === referenceId);
           const source = reference?.snapshot.source as Record<string, unknown> | undefined;
-          if (!reference || reference.resourceType !== "base_image" || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
+          if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
           const stored = await deps.storage.get(source.objectKey);
           if (!stored) throw new Error("TASK_INVALID_SOURCE");
           inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: `product-${materialIndex + 1}.png`, role: materialIndex === 0 ? "product_primary" : "product_detail", objectKey: source.objectKey, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, libraryReferenceId: reference.id });
         }
         const first = inputImages[0];
-        if (first) { sourceKind = "library"; sourceObjectKey = (references.find((item) => item.id === first.libraryReferenceId)?.snapshot.source as Record<string, unknown>)?.objectKey as string; sourceLibraryReferenceId = first.libraryReferenceId ?? null; sourceResourceVersionId = first.resourceVersionId ?? null; sourceBaseVersionId = first.resourceVersionId ?? null; }
+        if (first) {
+          const reference = references.find((item) => item.id === first.libraryReferenceId);
+          sourceKind = "library"; sourceObjectKey = first.objectKey; sourceLibraryReferenceId = first.libraryReferenceId ?? null; sourceResourceVersionId = first.resourceVersionId ?? null;
+          sourceBaseVersionId = typeof reference?.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
+        }
       }
-      const currentTaskVersionId = sourceVersionIds[task.id];
       if (currentTaskVersionId) {
         const history = await deps.taskRepository.listTaskVersions(task.id);
         const current = history.versions.find((version) => version.id === currentTaskVersionId && version.isCurrent);
@@ -644,37 +640,69 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       } else if (!inputImages.length && task.sourceLibraryReferenceId && deps.libraryRepository) {
         const reference = (await deps.libraryRepository.listReferences(suiteId, "task", task.id)).find((item) => item.id === task.sourceLibraryReferenceId);
         const source = reference?.snapshot.source as Record<string, unknown> | undefined;
-        if (!reference || reference.resourceType !== "base_image" || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
+        if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
         sourceKind = "library"; sourceObjectKey = source.objectKey; sourceLibraryReferenceId = reference.id; sourceResourceVersionId = reference.resourceVersionId;
         sourceBaseVersionId = typeof reference.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
       } else if (!inputImages.length) {
-        const image = await deps.repository.getInputImage(suiteId, task.sourceInputImageId ?? "");
+        if (!task.sourceInputImageId) throw new Error("TASK_INVALID_SOURCE");
+        const image = await deps.repository.getInputImage(suiteId, task.sourceInputImageId);
         if (!image) throw new Error("TASK_INVALID_SOURCE");
         sourceKind = "original"; sourceObjectKey = image.originalObjectKey; sourceInputImageId = image.id;
-        if (image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId); if (base) { sourceKind = "base"; sourceObjectKey = base.objectKey; sourceBaseVersionId = base.id; } }
+        if (!useOriginalImages && image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId); if (base) { sourceKind = "base"; sourceObjectKey = base.objectKey; sourceBaseVersionId = base.id; } }
+      }
+      if (!inputImages.length) {
+        const stored = await deps.storage.get(sourceObjectKey);
+        inputImages.push({ bytes: stored?.bytes ?? Buffer.alloc(0), mimeType: stored?.contentType ?? "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
       }
       if (task.originKind === "reverse_import" && generationParams.explosiveReferenceEnabled !== false && task.reversePlanId && task.reverseReferenceId) {
         const ref = await reverseRepository.getPlan(task.reversePlanId).then((plan) => plan?.references.find((item) => item.id === task.reverseReferenceId));
         const stored = ref ? await deps.storage.get(ref.objectKey) : null;
         if (stored) inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: "explosive-reference.png", role: "explosive_reference", objectKey: ref?.objectKey ?? "" });
       }
-      if (!inputImages.length) inputImages.push({ bytes: (await deps.storage.get(sourceObjectKey))?.bytes ?? Buffer.alloc(0), mimeType: "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
       const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import";
       const finalPrompt = shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft;
+      const pureWhiteMain =
+        task.categoryCode === "main" &&
+        (taskPlan?.dynamicInput.main_image_background === "pure_white_required" ||
+          finalPrompt.includes(PURE_WHITE_MAIN_IMAGE_REQUIREMENTS));
+      const providerPrompt = buildProviderImagePrompt(finalPrompt, {
+        categoryCode: task.categoryCode ?? null,
+        pureWhiteMain,
+      });
       const effectiveGlobalStyleCard = shouldApplyStyleOverride
         ? { ...(task.globalStyleCard ?? {}), promptPrefix: activeStyleOverride, overridden: true }
         : (task.globalStyleCard ?? {});
       const effectivePromptSha256 = shouldApplyStyleOverride
         ? createHash("sha256").update(finalPrompt).digest("hex")
         : (task.promptSha256 ?? createHash("sha256").update(finalPrompt).digest("hex"));
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: generationParams.size ?? "1K", quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
-      for (const attempt of attempts) void executeTaskAttempt(attempt, tasks.find((task) => task.id === attempt.contextSnapshot.suiteTaskId) ?? tasks[attempts.indexOf(attempt)], slots.find((slot) => slot.id === attempt.slotId)!, provider);
+      const jobs = attempts.map((attempt, index) => ({
+        attempt,
+        task: tasks.find((task) => task.id === attempt.contextSnapshot.suiteTaskId) ?? tasks[index],
+        slot: slots.find((slot) => slot.id === attempt.slotId)!,
+      }));
+      let cursor = 0;
+      const workerCount = Math.min(imageGenerationConcurrency, jobs.length);
+      for (let worker = 0; worker < workerCount; worker += 1) {
+        void (async () => {
+          while (cursor < jobs.length) {
+            const job = jobs[cursor++];
+            await executeTaskAttempt(job.attempt, job.task, job.slot, provider);
+          }
+        })();
+      }
     }
     return reservation;
+  };
+
+  const classifyTaskImageError = (error: unknown) => {
+    if (error instanceof Error && error.message === "IMAGE_SIZE_UNSUPPORTED") return "IMAGE_SIZE_UNSUPPORTED";
+    if (error instanceof Error && error.message.includes("TIMEOUT")) return "TASK_IMAGE_PROVIDER_TIMEOUT";
+    return "TASK_IMAGE_PROVIDER_FAILED";
   };
 
   const executeTaskAttempt = async (attempt: TaskGenerationAttempt, task: SuiteTask, slot: TaskResultSlot, provider: ImageProvider | undefined) => {
@@ -691,13 +719,46 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         return;
       }
       if (images.length > 1 && provider.supportsMultipleImages === false) { await deps.taskRepository.failAttempt(attempt.id, "TASK_PROVIDER_MULTI_IMAGE_UNSUPPORTED", "当前图片模型不支持多图输入", finish); return; }
-      const generated = await provider.edit({ requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.finalPrompt), size: (task.generationParams.size === "2K" || task.generationParams.size === "4K" ? "1K" : "1K"), quality: "medium", n: 1, responseFormat: "b64_json" });
+      const editRequest: Parameters<ImageProvider["edit"]>[0] = { requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.providerPrompt ?? attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality: "medium", n: 1, responseFormat: "b64_json" };
+      let generated: Awaited<ReturnType<ImageProvider["edit"]>>;
+      try {
+        generated = await provider.edit(editRequest);
+      } catch (firstError) {
+        const firstCode = classifyTaskImageError(firstError);
+        if (firstCode !== "TASK_IMAGE_PROVIDER_FAILED" && firstCode !== "TASK_IMAGE_PROVIDER_TIMEOUT") {
+          throw firstError;
+        }
+        if (imageRetryDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, imageRetryDelayMs));
+        }
+        generated = await provider.edit(editRequest);
+      }
       const processed = await processGeneratedImage(generated.bytes);
       const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
       await deps.storage.put({ key: objectKey, bytes: processed.bytes, contentType: processed.mimeType });
       await deps.taskRepository.completeAttempt({ attemptId: attempt.id, slotId: slot.id, taskId: task.id, objectKey, processObjectKeys: [], sha256: processed.sha256, width: processed.width, height: processed.height, mimeType: processed.mimeType, completedAt: new Date().toISOString() });
+      const latestRun = await pipelineRepository.getLatestRun(task.suiteId);
+      if (latestRun && (latestRun.status === "partial_failed" || latestRun.status === "failed")) {
+        const activeTasks = (await deps.taskRepository.listTasks(task.suiteId)).filter((item) => item.status !== "archived");
+        if (activeTasks.length > 0) {
+          const histories = await Promise.all(activeTasks.map((item) => deps.taskRepository!.listTaskVersions(item.id)));
+          if (histories.every((history) => history.versions.some((version) => version.isCurrent))) {
+            const convergedAt = new Date().toISOString();
+            await pipelineRepository.updateRun(latestRun.id, {
+              status: "completed",
+              currentPhase: "done",
+              errorCode: null,
+              errorMessage: null,
+              updatedAt: convergedAt,
+              completedAt: latestRun.completedAt ?? convergedAt,
+            });
+          }
+        }
+      }
     } catch (error) {
-      await deps.taskRepository.failAttempt(attempt.id, error instanceof Error && error.message.includes("TIMEOUT") ? "TASK_IMAGE_PROVIDER_TIMEOUT" : "TASK_IMAGE_PROVIDER_FAILED", errorMessages.TASK_IMAGE_PROVIDER_FAILED, new Date().toISOString()).catch(() => undefined);
+      const code = classifyTaskImageError(error);
+      const errorMessage = errorMessages[code] ?? (code === "TASK_IMAGE_PROVIDER_TIMEOUT" ? errorMessages.IMAGE_PROVIDER_TIMEOUT : errorMessages.TASK_IMAGE_PROVIDER_FAILED);
+      await deps.taskRepository.failAttempt(attempt.id, code, errorMessage, new Date().toISOString()).catch(() => undefined);
     }
   };
 
@@ -736,13 +797,76 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     return ok({ attemptId: attempt.id }, 202);
   };
 
-  const request = async (method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> => {
+  const loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
+    if (!deps.imageEditorApi) return [];
+    const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
+    const data = dataOf(response);
+    if (response.status !== 200 || !Array.isArray(data)) return [];
+    const all = data as DeliveryEditChildLike[];
+    const allowed = new Set(tasks.map((task) => task.id));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const child of all) {
+        const taskId = typeof child.task?.id === "string" ? child.task.id : "";
+        const sourceCardId = typeof child.task?.sourceCardId === "string" ? child.task.sourceCardId : "";
+        if (taskId && sourceCardId && allowed.has(sourceCardId) && !allowed.has(taskId)) { allowed.add(taskId); changed = true; }
+      }
+    }
+    return all.filter((child) => typeof child.task?.id === "string" && allowed.has(child.task.id));
+  };
+  const pipeline = createSuitePipeline({
+    repository: deps.repository, storage: deps.storage, platformRepository: deps.platformRepository,
+    promptRepository: deps.promptRepository, planRepository: deps.planRepository, taskRepository: deps.taskRepository,
+    hasPlanningModel: () => Boolean(deps.llmClient || deps.modelSettings), pipelineRepository, listingRepository,
+    startListingCopy: listing.startPipeline, appendConfirmedSnapshot, loadSuiteImageEditChildren, request,
+  });
+
+  async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
+    if (/^\/api\/listing-copies(?:[/?]|$)/.test(path)) return listing.request(method, path, options.body);
     if (path === "/api/model-settings" || path.startsWith("/api/model-settings/")) return deps.modelSettings ? deps.modelSettings.request(method, path, options.body) : fail("NOT_FOUND", 404);
+    if (method === "POST" && path === "/api/image-editor/translate-text") {
+      const body = asRecord(options.body, { allowArrays: true });
+      const targetLanguage = typeof body.targetLanguage === "string" && body.targetLanguage.trim() ? body.targetLanguage.trim() : "英文";
+      const rawItems = Array.isArray(body.items) ? body.items : [];
+      const items = rawItems
+        .map((item, index) => {
+          const row = asRecord(item, { allowArrays: true });
+          return { id: String(row.id ?? `block-${index + 1}`), text: String(row.text ?? "").trim() };
+        })
+        .filter((item) => item.text.length > 0);
+      if (!items.length) return fail("TRANSLATE_ITEMS_REQUIRED", 400);
+      const llmClient = await resolveVision();
+      if (!llmClient?.translateTexts) return fail("TRANSLATE_LLM_NOT_CONFIGURED", 503);
+      try {
+        const translations = await llmClient.translateTexts({
+          targetLanguage,
+          items,
+          preserveBrandTerms: body.preserveBrandTerms !== false,
+        });
+        return ok({
+          targetLanguage,
+          translations,
+          model: llmClient.model,
+          channelName: llmClient.channel?.channelName ?? null,
+        });
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "LLM_FAILED", 502);
+      }
+    }
     if (path.startsWith("/api/image-editor/")) return deps.imageEditorApi ? deps.imageEditorApi.request(method, path, options) : fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
+
+    if (method === "POST" && path === "/api/suites/one-click-generate") return pipeline.startRun(idempotencyKey, options.body);
+    const resumeMatch = path.match(/^\/api\/suites\/([^/]+)\/one-click-generate\/resume$/);
+    if (method === "POST" && resumeMatch) return pipeline.resumeRun(resumeMatch[1], idempotencyKey, options.body);
+    const studioStateMatch = path.match(/^\/api\/suites\/([^/]+)\/studio-state$/);
+    if (method === "GET" && studioStateMatch) return pipeline.getStudioState(studioStateMatch[1]);
+    const feedMatch = path.match(/^\/api\/suites\/feed(?:\?(.*))?$/);
+    if (method === "GET" && feedMatch) return pipeline.getFeed(feedMatch[1]);
     const reversePlanMatch = path.match(/^\/api\/reverse-plans\/([^/]+)$/);
     if (method === "POST" && path === "/api/reverse-plans") {
-      const result = await reverseRepository.createPlan(idempotencyKey); const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const result = await reverseRepository.createPlan(idempotencyKey); const body = asRecord(options.body, { allowArrays: true });
       if (body.mode === "detail") result.plan.mode = "detail";
       return ok(await reverseRepository.savePlan(result.plan), result.duplicate ? 200 : 201);
     }
@@ -750,7 +874,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     if (reversePlanMatch && method === "GET") { const plan = await reverseRepository.getPlan(reversePlanMatch[1]); return plan ? ok(plan) : fail("INVALID_REVERSE_PLAN", 404); }
     if (reversePlanMatch && method === "PATCH") {
       const plan = await reverseRepository.getPlan(reversePlanMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (body.mode !== undefined && body.mode !== "main" && body.mode !== "detail") return fail("INVALID_REVERSE_MODE");
       const next = { ...plan, mode: (body.mode ?? plan.mode) as "main" | "detail", baselineReferenceId: typeof body.baselineReferenceId === "string" ? body.baselineReferenceId : body.baselineReferenceId === null ? null : plan.baselineReferenceId, updatedAt: new Date().toISOString() };
       if (next.mode === "detail" && !next.baselineReferenceId && next.references[0]) next.baselineReferenceId = next.references[0].id;
@@ -761,7 +885,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       return withReversePlanWrite(reverseRefsMatch[1], async () => {
         const plan = await reverseRepository.getPlan(reverseRefsMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
         if (plan.references.length >= 16) return fail("REVERSE_REFERENCE_LIMIT", 400);
-        const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+        const body = asRecord(options.body, { allowArrays: true });
         if (typeof body.filename !== "string" || typeof body.mimeType !== "string" || typeof body.bytesBase64 !== "string") return fail("INVALID_INPUT_IMAGE");
         let processed; try { processed = await processImage(Buffer.from(body.bytesBase64, "base64"), body.mimeType); } catch (error) { const code = error instanceof Error ? error.message : "INVALID_IMAGE"; return fail(code); }
         if (plan.references.some((item) => item.sha256 === processed.sha256)) return fail("DUPLICATE_IMAGE", 409, "该参考图已存在");
@@ -773,7 +897,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     }
     const reverseRefMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)$/);
     if (reverseRefMatch && method === "PATCH") {
-      const plan = await reverseRepository.getPlan(reverseRefMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {}; const refs = [...plan.references]; const ref = refs.find((item) => item.id === reverseRefMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
+      const plan = await reverseRepository.getPlan(reverseRefMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const body = asRecord(options.body, { allowArrays: true }); const refs = [...plan.references]; const ref = refs.find((item) => item.id === reverseRefMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
       if (typeof body.templateVersionId === "string") { if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503); const template = await deps.promptRepository.getPublishedVersion(body.templateVersionId, "reverse_prompt"); if (!template || template.applicability.targetType !== plan.mode) return fail("REVERSE_TEMPLATE_NOT_FOUND", 400); ref.templateVersionId = template.templateVersionId; }
       if (typeof body.ordinal === "number") { const target = Math.max(1, Math.min(refs.length, Math.trunc(body.ordinal))); refs.splice(refs.indexOf(ref), 1); refs.splice(target - 1, 0, ref); refs.forEach((item, i) => item.ordinal = i + 1); }
       await reverseRepository.savePlan({ ...plan, references: refs, updatedAt: new Date().toISOString() }); return ok(ref);
@@ -804,7 +928,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         for (const reference of plan.references) {
           if (!reference.templateVersionId || reference.attempts.some((item) => item.status === "succeeded" || item.status === "running")) continue;
           const response = await runReverse(plan, reference, false, llmClient);
-          const data = "data" in response.body ? response.body.data as { attemptId: string } : null;
+          const data = dataOf(response) as { attemptId: string } | null;
           results.push(data ? { referenceId: reference.id, attemptId: data.attemptId } : { referenceId: reference.id, error: "error" in response.body ? response.body.error.code : "REVERSE_OUTPUT_INVALID" });
         }
         return ok({ planId: plan.id, attempts: results }, 202);
@@ -815,7 +939,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const reversePromptMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/prompt$/);
     if (reversePromptMatch && method === "PATCH") {
       const plan = await reverseRepository.getPlan(reversePromptMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const ref = plan.references.find((item) => item.id === reversePromptMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {}; if (typeof body.prompt !== "string" || !body.prompt.trim()) return fail("REVERSE_OUTPUT_INVALID");
+      const body = asRecord(options.body, { allowArrays: true }); if (typeof body.prompt !== "string" || !body.prompt.trim()) return fail("REVERSE_OUTPUT_INVALID");
       const source = ref.promptVersions.find((item) => item.id === ref.effectivePromptVersionId) ?? [...ref.promptVersions].reverse()[0]; if (!source) return fail("REVERSE_OUTPUT_INVALID");
       const version: ReversePromptVersion = { ...source, id: randomUUID(), kind: "user", prompt: body.prompt.trim(), rawOutput: null, createdAt: new Date().toISOString() }; ref.promptVersions.push(version); ref.effectivePromptVersionId = version.id; await reverseRepository.savePlan({ ...plan, updatedAt: new Date().toISOString() }); return ok(version, 201);
     }
@@ -831,20 +955,24 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const plan = await reverseRepository.getPlan(reverseCanvasMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
       const items = plan.references.map((reference) => ({ reference, prompt: reference.promptVersions.find((version) => version.id === reference.effectivePromptVersionId) })).filter((item): item is { reference: ReverseReference; prompt: ReversePromptVersion } => Boolean(item.prompt && item.reference.attempts.some((attempt) => attempt.status === "succeeded")));
       if (!items.length) return fail("REVERSE_CANVAS_NO_RESULTS", 409);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       let suite = typeof body.targetSuiteId === "string" ? await deps.repository.getSuite(body.targetSuiteId) : null;
       if (typeof body.targetSuiteId === "string" && !suite) return fail("INVALID_SUITE_ID", 404);
-      if (!suite) suite = await deps.repository.createSuite(typeof body.name === "string" && body.name.trim() ? body.name.trim() : `爆品图反推 ${new Date().toISOString().slice(0, 10)}`, `${idempotencyKey}:suite`);
+      if (!suite) suite = await deps.repository.createSuite(typeof body.name === "string" && body.name.trim() ? body.name.trim() : `爆品图反推 ${new Date().toISOString().slice(0, 10)}`, `${idempotencyKey}:suite`, "canvas");
       const taskGroupId = typeof body.taskGroupId === "string" ? body.taskGroupId : randomUUID();
       const result = await deps.taskRepository.createReverseTasks({ suiteId: suite.id, reversePlanId: plan.id, taskGroupId, mode: plan.mode, idempotencyKey, items: items.map(({ reference, prompt }) => ({ referenceId: reference.id, ordinal: reference.ordinal, filename: reference.filename, promptVersionId: prompt.id, prompt: prompt.prompt })) });
       return ok({ suiteId: suite.id, taskGroupId: result.created[0]?.reverseTaskGroupId ?? taskGroupId, taskIds: result.created.map((task) => task.id), duplicate: result.duplicate }, result.duplicate ? 200 : 201);
     }
     if (method === "POST" && path === "/api/suites") {
-      const name = typeof options.body === "object" && options.body !== null && "name" in options.body ? String((options.body as { name: unknown }).name).trim() : "";
+      const body = asRecord(options.body, { allowArrays: true });
+      const name = "name" in body ? String(body.name).trim() : "";
       if (!name) return fail("EMPTY_NAME");
-      return ok(await deps.repository.createSuite(name, idempotencyKey), 201);
+      const origin = body.origin === "canvas" ? "canvas" : "suite_studio";
+      return ok(await deps.repository.createSuite(name, idempotencyKey, origin), 201);
     }
-    if (method === "GET" && path === "/api/suites") {
+    const suiteListMatch = path.match(/^\/api\/suites(?:\?(.*))?$/);
+    if (method === "GET" && suiteListMatch) {
+      const canvasOnly = new URLSearchParams(suiteListMatch[1]).get("view") === "canvas";
       const suites = await deps.repository.listSuites();
       const enriched = await Promise.all(suites.map(async (suite) => {
         const [inputImages, tasks] = await Promise.all([
@@ -878,7 +1006,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           isDemo: suite.name.includes("演示") || suite.name.includes("Demo"),
         };
       }));
-      return ok(enriched);
+      return ok(canvasOnly ? enriched.filter((suite) => suite.origin === "canvas" || suite.taskCount > 0) : enriched);
     }
     const libraryResourceMatch = path.match(/^\/api\/library\/resources\/([^/]+)$/);
     if (method === "GET" && libraryResourceMatch) {
@@ -907,7 +1035,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const reverseAssetStatusMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/status$/);
     if (method === "POST" && reverseAssetStatusMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const status = body.status as import("./types.js").LibraryAssetStatus;
       if (!["draft", "published", "archived"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
       const resource = await deps.libraryRepository.setResourceStatus(reverseAssetStatusMatch[1], status);
@@ -915,7 +1043,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     }
     if (method === "POST" && path === "/api/library/reverse-reference-assets") {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (typeof body.title !== "string" || typeof body.objectKey !== "string" || typeof body.mimeType !== "string" || !body.promptSnapshot || typeof body.promptSnapshot !== "object") return fail("INVALID_REVERSE_REFERENCE_ASSET");
       const asset = await deps.libraryRepository.createReverseReferenceAsset({ suiteId: typeof body.suiteId === "string" ? body.suiteId : null, title: body.title, summary: typeof body.summary === "string" ? body.summary : "", objectKey: body.objectKey, mimeType: body.mimeType, promptSnapshot: body.promptSnapshot as Record<string, unknown>, visualStructure: body.visualStructure && typeof body.visualStructure === "object" ? body.visualStructure as Record<string, unknown> : {}, source: body.source && typeof body.source === "object" ? body.source as Record<string, unknown> : {} });
       return ok(asset, 201);
@@ -929,7 +1057,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     if (libraryReferencesMatch && method === "POST" && !libraryReferencesMatch[2]) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (typeof body.resourceId !== "string" || (body.targetType !== "plan" && body.targetType !== "task") || typeof body.targetId !== "string") return fail("LIBRARY_RESOURCE_NOT_FOUND");
       try { const result = await deps.libraryRepository.createReference({ suiteId: libraryReferencesMatch[1], resourceId: body.resourceId, targetType: body.targetType, targetId: body.targetId, idempotencyKey, createdBy: typeof body.createdBy === "string" ? body.createdBy : null }); return ok(result.reference, result.duplicate ? 200 : 201); }
       catch (error) { const code = error instanceof Error ? error.message : "LIBRARY_RESOURCE_NOT_FOUND"; return fail(code, code === "LIBRARY_RESOURCE_FORBIDDEN" || code === "LIBRARY_TARGET_NOT_FOUND" ? 403 : code === "LIBRARY_RESOURCE_NOT_FOUND" ? 404 : 409); }
@@ -948,7 +1076,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const promptLifecycleMatch = path.match(/^\/api\/prompt-templates\/([^/]+)$/);
     if (method === "PATCH" && promptLifecycleMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const updated = await deps.promptRepository.updateDraft(promptLifecycleMatch[1], {
         name: typeof body.name === "string" ? body.name : undefined,
         body: typeof body.body === "string" ? body.body : undefined,
@@ -999,7 +1127,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
 
     if (method === "POST" && path === "/api/rag/chunks/search") {
       if (!deps.ragClient) return fail("RAG_NOT_CONFIGURED", 503);
-      const query = options.body && typeof options.body === "object" && "query" in options.body ? String((options.body as { query: unknown }).query) : "";
+      const body = asRecord(options.body, { allowArrays: true });
+      const query = "query" in body ? String(body.query) : "";
       const observation = startTool("rag.query", { query }, { query_length: query.length });
       try {
         const result = await deps.ragClient.search(query);
@@ -1031,44 +1160,64 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      if (!deps.ragClient) return fail("RAG_NOT_CONFIGURED", 503);
       const llmClient = await resolveVision();
       if (!llmClient) return fail("LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(structureMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
       const template = await deps.promptRepository.getPublishedVersion(templateVersionId, "structure_plan");
       if (!template) return fail("PLAN_TEMPLATE_NOT_FOUND", 404);
-      const rawInput = body.dynamicInput && typeof body.dynamicInput === "object" && !Array.isArray(body.dynamicInput) ? body.dynamicInput as Record<string, unknown> : {};
-      const dynamicInput = { ...rawInput, selected_detail_categories: Array.isArray(rawInput.selected_detail_categories) ? JSON.stringify(rawInput.selected_detail_categories) : rawInput.selected_detail_categories, category_requirements: rawInput.category_requirements && typeof rawInput.category_requirements === "object" ? JSON.stringify(rawInput.category_requirements) : rawInput.category_requirements };
+      const dynamicInput = { ...asRecord(body.dynamicInput) };
+      if (Array.isArray(dynamicInput.selected_detail_categories))
+        dynamicInput.selected_detail_categories = JSON.stringify(dynamicInput.selected_detail_categories);
+      if (dynamicInput.category_requirements && typeof dynamicInput.category_requirements === "object")
+        dynamicInput.category_requirements = JSON.stringify(dynamicInput.category_requirements);
       const validated = validateDynamicInput(template.inputSchema, dynamicInput);
       if (!validated.ok) return fail("PROMPT_INPUT_INVALID", 400, validated.message);
+      if (validated.value.category_groups) {
+        const groups = parseCategoryGroups(validated.value.category_groups);
+        const min = Number(validated.value.detail_image_count_min);
+        const max = Number(validated.value.detail_image_count_max);
+        if (!groups || groups.main.count !== Number(validated.value.main_image_count) || !Number.isInteger(min) || !Number.isInteger(max) || min < SUITE_IMAGE_LIMITS.detail.min || min > max || max > SUITE_IMAGE_LIMITS.detail.max) return fail("PROMPT_INPUT_INVALID", 400, "分组数量配置无效");
+        const categories = Object.values(groups).flatMap((group) => group.categories.filter((code) => code !== "main"));
+        validated.value.selected_detail_categories = JSON.stringify(categories);
+        validated.value.category_requirements = JSON.stringify(Object.fromEntries(categories.map((code) => [code, "optional"])));
+      }
       const platformValue = typeof validated.value.platform === "string" ? validated.value.platform.trim() : "";
       const platformProfile = platformValue && deps.platformRepository ? await deps.platformRepository.find(platformValue) : null;
       if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
-      const humanInput = body.humanInput && typeof body.humanInput === "object" && !Array.isArray(body.humanInput) ? body.humanInput as Record<string, unknown> : {};
+      const humanInput = asRecord(body.humanInput);
       const refs = Array.isArray(body.selectedChunks) ? body.selectedChunks.flatMap((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).version === "string" ? [{ id: (item as { id: string }).id, version: (item as { version: string }).version }] : []) : [];
-      const chunks = await deps.ragClient.getByIds(refs);
+      const chunks = refs.length ? await deps.ragClient?.getByIds(refs) : [];
+      if (!chunks) return fail("RAG_NOT_CONFIGURED", 503);
       for (const ref of refs) { const chunk = chunks.find((item) => item.id === ref.id); if (!chunk || !chunk.published) return fail("RAG_CHUNK_NOT_FOUND", 409); if (chunk.version !== ref.version) return fail("RAG_CHUNK_VERSION_DRIFT", 409); }
       const images = await deps.repository.getInputImages(suite.id);
       if (images.length < 1 || images.length > 6) return fail("INVALID_INPUT_IMAGE");
+      const useOriginalImages = body.useOriginalImages === true;
       const visionImages = [];
-      for (const image of images) { let key = image.originalObjectKey; let source = await deps.storage.get(key); if (image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suite.id, image.id, image.currentBaseVersionId); if (base) { key = base.objectKey; source = await deps.storage.get(key); } } if (!source) return fail("PLAN_INPUT_IMAGE_NOT_FOUND", 409); visionImages.push({ id: image.id, sourceKind: image.currentBaseVersionId ? "base" as const : "original" as const, sourceVersionId: image.currentBaseVersionId, mimeType: source.contentType, bytes: source.bytes }); }
+      for (const image of images) {
+        const base = !useOriginalImages && image.currentBaseVersionId
+          ? await deps.repository.getBaseImageVersion(suite.id, image.id, image.currentBaseVersionId)
+          : null;
+        const source = await deps.storage.get(base?.objectKey ?? image.originalObjectKey);
+        if (!source) return fail("PLAN_INPUT_IMAGE_NOT_FOUND", 409);
+        visionImages.push({ id: image.id, sourceKind: base ? "base" as const : "original" as const, sourceVersionId: base?.id ?? null, mimeType: source.contentType, bytes: source.bytes });
+      }
       const createdAt = new Date().toISOString();
-      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: images.flatMap((item) => item.currentBaseVersionId ? [item.currentBaseVersionId] : []), provider: llmSource(llmClient), errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
+      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: visionImages.flatMap((item) => item.sourceVersionId ? [item.sourceVersionId] : []), provider: llmSource(llmClient), errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
       const reservation = await deps.planRepository.beginAttempt(attempt);
       if (reservation.duplicate) return ok({ attemptId: reservation.attempt.id, status: reservation.attempt.status }, reservation.attempt.status === "running" ? 202 : 200);
       void (async () => {
         try {
-          const raw = await llmClient.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined });
+          const raw = await llmClient.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformForPlanning(platformProfile, useOriginalImages ? validated.value.main_image_background : undefined) });
           const output = normalizeStructureOutput(raw);
           if (!output) { await deps.planRepository!.failAttempt(attempt.id, "LLM_OUTPUT_SCHEMA_INVALID", errorMessages.LLM_OUTPUT_SCHEMA_INVALID, summarizeOutput(raw)); return; }
           const supplementRef = designerFactsText(validated.value) ? ["human_supplement"] : [];
           let validationError: string | null = null; try { validationError = validateStructureOutput(output, { ...validated.value, selected_detail_categories: JSON.parse(String(validated.value.selected_detail_categories)), category_requirements: JSON.parse(String(validated.value.category_requirements)) }, attempt.inputImageIds, [...chunks.map((chunk) => chunk.id), ...supplementRef]); } catch { validationError = "input_json"; }
           if (validationError) { await deps.planRepository!.failAttempt(attempt.id, "STRUCTURE_PLAN_INVALID", errorMessages.STRUCTURE_PLAN_INVALID, summarizeOutput(raw, { validationError })); return; }
           const latest = await deps.planRepository!.getLatestSnapshot(suite.id);
-          const snapshot: PlanSnapshot = { id: randomUUID(), suiteId: suite.id, revisionNumber: (latest?.revisionNumber ?? 0) + 1, revisionKind: "llm", parentSnapshotId: latest?.id ?? null, templateVersionId, dynamicInput: validated.value, humanInput, chunks: chunks.map((chunk) => ({ sourceChunkId: chunk.id, sourceVersion: chunk.version, title: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256 })), inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, provider: attempt.provider, requestSummary: { phase: "structure_plan", templateVersionId }, rawOutputSummary: summarizeOutput(raw), schemaVersion: output.schemaVersion, items: [], phase: "structure_plan", confirmationStatus: "draft", confirmedAt: null, structure: { status: output.status, mainAllocation: output.mainAllocation, detailImageCount: output.detailImageCount, categoryAllocations: output.categoryAllocations, globalStyleCard: output.globalStyleCard }, createdAt: new Date().toISOString() };
+          const snapshot: PlanSnapshot = { id: randomUUID(), suiteId: suite.id, revisionNumber: (latest?.revisionNumber ?? 0) + 1, revisionKind: "llm", parentSnapshotId: latest?.id ?? null, templateVersionId, dynamicInput: validated.value, humanInput, chunks: chunks.map((chunk) => ({ sourceChunkId: chunk.id, sourceVersion: chunk.version, title: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256 })), inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, provider: attempt.provider, requestSummary: { phase: "structure_plan", templateVersionId, ...(useOriginalImages && { useOriginalImages }) }, rawOutputSummary: summarizeOutput(raw), schemaVersion: output.schemaVersion, items: [], phase: "structure_plan", confirmationStatus: "draft", confirmationMode: "human", confirmedAt: null, structure: { status: output.status, mainAllocation: output.mainAllocation, detailImageCount: output.detailImageCount, categoryAllocations: output.categoryAllocations, globalStyleCard: output.globalStyleCard }, createdAt: new Date().toISOString() };
           await deps.planRepository!.completeAttempt(attempt.id, snapshot);
         } catch (error) { await deps.planRepository!.failAttempt(attempt.id, error instanceof Error && error.message === "LLM_TIMEOUT" ? "LLM_TIMEOUT" : "LLM_PROVIDER_FAILED", error instanceof Error && error.message === "LLM_TIMEOUT" ? errorMessages.LLM_TIMEOUT : errorMessages.LLM_PROVIDER_FAILED).catch(() => undefined); }
       })();
@@ -1082,8 +1231,8 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       // Confirmation is terminal for a snapshot. Repeated clicks must reuse the
       // already-confirmed immutable snapshot instead of inserting its plan items again.
       if (latest.confirmationStatus === "confirmed") return ok(planSnapshotView(latest));
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
-      const requestedStructure = body.structure && typeof body.structure === "object" && !Array.isArray(body.structure) ? body.structure as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
+      const requestedStructure = asRecord(body.structure);
       const structure = {
         ...latest.structure,
         ...requestedStructure,
@@ -1100,7 +1249,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (validationError) return fail("STRUCTURE_PLAN_INVALID", 409);
       if (candidate.status !== "READY_FOR_REVIEW" || candidate.mainAllocation.missingFacts.length > 0 || candidate.categoryAllocations.some((row) => row.count > 0 && row.missingFacts.length > 0)) return fail("STRUCTURE_PLAN_NEEDS_INPUT", 409);
       const { schemaVersion: _schemaVersion, ...confirmedStructure } = candidate;
-      const next: PlanSnapshot = { ...latest, id: randomUUID(), revisionNumber: latest.revisionNumber + 1, revisionKind: "human", parentSnapshotId: latest.id, confirmationStatus: "confirmed", confirmedAt: new Date().toISOString(), structure: confirmedStructure, createdAt: new Date().toISOString() };
+      const next: PlanSnapshot = { ...latest, id: randomUUID(), revisionNumber: latest.revisionNumber + 1, revisionKind: "human", parentSnapshotId: latest.id, confirmationStatus: "confirmed", confirmationMode: "human", confirmedAt: new Date().toISOString(), structure: confirmedStructure, createdAt: new Date().toISOString() };
       return ok(planSnapshotView(await appendConfirmedSnapshot(next)));
     }
 
@@ -1132,7 +1281,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!llmClient) return fail("CATEGORY_PROMPT_LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(categoryPromptsMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const snapshotId = typeof body.planSnapshotId === "string" ? body.planSnapshotId : undefined;
       const requestedSnapshot = snapshotId ? await deps.planRepository.getSnapshot(snapshotId) : await deps.planRepository.getLatestSnapshot(suite.id);
       const snapshot = requestedSnapshot ? await resolveCategorySourceSnapshot(requestedSnapshot) : null;
@@ -1152,7 +1301,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
       const run = async () => {
         for (const entry of allocations) {
-          const dynamicInput = categoryPlanInput(snapshot, entry.categoryCode, entry.requestedCount, entry.allocation);
+          const dynamicInput = categoryPlanInput(snapshot, entry.categoryCode, entry.requestedCount, entry.allocation, template!);
           const approvedFactRefs = entry.allocation && Array.isArray(entry.allocation.factRefs) ? entry.allocation.factRefs.map(String) : [];
           const requestKey = `${idempotencyKey}:${snapshot.id}:${entry.categoryCode}`;
           const request: CategoryPromptRequest = {
@@ -1166,7 +1315,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           try {
             const chunks = snapshot.chunks.filter((chunk) => approvedFactRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, summary: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256, published: true }));
             const visionImages = await loadCategoryVisionImages(suite.id, snapshot, entry.allocation);
-            const llmInput: CategoryPromptLlmInput = { requestId: request.id, templateVersionId: template!.templateVersionId, templateBody: template!.body, userPromptTemplate: template!.userPromptTemplate, dynamicInput, humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined, categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, approvedFactRefs };
+            const llmInput: CategoryPromptLlmInput = { requestId: request.id, templateVersionId: template!.templateVersionId, templateBody: template!.body, userPromptTemplate: template!.userPromptTemplate, dynamicInput, humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformForPlanning(platformProfile, snapshot.requestSummary.useOriginalImages === true ? snapshot.dynamicInput.main_image_background : undefined), categoryCode: entry.categoryCode, requestedCount: entry.requestedCount, approvedFactRefs };
             if (!llmClient.generateCategoryPrompt) throw new Error("CATEGORY_PROMPT_LLM_NOT_CONFIGURED");
             const raw = await llmClient.generateCategoryPrompt(llmInput);
             const output = normalizeCategoryPromptOutput(raw);
@@ -1200,7 +1349,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const categoryRequests = await categoryPromptRepository.listRequests(snapshot.id);
       const previous = categoryRequests.find((request) => request.id === categoryRetryMatch[2]) ?? categoryRequests.filter((request) => request.categoryCode === categoryRetryMatch[2]).at(-1);
       if (!previous || previous.status !== "failed") return fail("INVALID_CATEGORY_PROMPT_REQUEST", 404);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : previous.templateVersionId;
       const template = await observedPromptLoad(deps.promptRepository, templateVersionId, "category_prompt");
       if (!template) return fail("CATEGORY_PROMPT_TEMPLATE_NOT_FOUND", 404);
@@ -1210,7 +1359,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const allocation = previous.categoryCode === "main" && isStructurePlanV2(snapshot.structure)
         ? snapshot.structure.mainAllocation as unknown as Record<string, unknown>
         : snapshot.structure.categoryAllocations.map((item) => item as Record<string, unknown>).find((item) => String(item.category) === previous.categoryCode) ?? null;
-      const dynamicInput = categoryPlanInput(snapshot, previous.categoryCode, previous.requestedCount, allocation);
+      const dynamicInput = categoryPlanInput(snapshot, previous.categoryCode, previous.requestedCount, allocation, template);
       const retryRequest: CategoryPromptRequest = { ...previous, id: randomUUID(), status: "running", idempotencyKey: `${idempotencyKey}:${snapshot.id}:${previous.categoryCode}:retry`, retryOfRequestId: previous.id, provider: llmSource(llmClient), templateVersionId: template.templateVersionId, dynamicInput, requestSummary: { ...previous.requestSummary, retryOfRequestId: previous.id }, responseSummary: null, items: [], errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), completedAt: null };
       const reservation = await categoryPromptRepository.beginRequest(retryRequest);
       if (reservation.duplicate) return ok(categoryRequestView(reservation.request), reservation.request.status === "running" ? 202 : 200);
@@ -1220,7 +1369,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           const chunks = snapshot.chunks.filter((chunk) => approvedFactRefs.includes(chunk.sourceChunkId)).map((chunk) => ({ id: chunk.sourceChunkId, version: chunk.sourceVersion, title: chunk.title, summary: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256, published: true }));
           const visionImages = await loadCategoryVisionImages(suite.id, snapshot, allocation);
           if (!llmClient.generateCategoryPrompt) throw new Error("CATEGORY_PROMPT_LLM_NOT_CONFIGURED");
-          const raw = await llmClient.generateCategoryPrompt({ requestId: retryRequest.id, templateVersionId: template.templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput, humanInput: retryRequest.humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined, categoryCode: retryRequest.categoryCode, requestedCount: retryRequest.requestedCount, approvedFactRefs });
+          const raw = await llmClient.generateCategoryPrompt({ requestId: retryRequest.id, templateVersionId: template.templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput, humanInput: retryRequest.humanInput, chunks, inputImageIds: visionImages.map((image) => image.id), baseVersionIds: snapshot.baseVersionIds, visionImages, platformProfile: platformForPlanning(platformProfile, snapshot.requestSummary.useOriginalImages === true ? snapshot.dynamicInput.main_image_background : undefined), categoryCode: retryRequest.categoryCode, requestedCount: retryRequest.requestedCount, approvedFactRefs });
           const output = normalizeCategoryPromptOutput(raw);
           const summary = summarizeOutput(raw);
           if (!output || output.category !== retryRequest.categoryCode) { await categoryPromptRepository.failRequest(retryRequest.id, "CATEGORY_PROMPT_INVALID", errorMessages.CATEGORY_PROMPT_INVALID, summary); return; }
@@ -1249,7 +1398,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!llmClient) return fail("LLM_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(planMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
       const template = await observedPromptLoad(deps.promptRepository, templateVersionId, "plan");
       if (!template) return fail("PLAN_TEMPLATE_NOT_FOUND", 404);
@@ -1258,7 +1407,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const platformValue = typeof validated.value.platform === "string" ? validated.value.platform.trim() : "";
       const platformProfile = platformValue && deps.platformRepository ? await deps.platformRepository.find(platformValue) : null;
       if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
-      const humanInput = body.humanInput && typeof body.humanInput === "object" && !Array.isArray(body.humanInput) ? body.humanInput as Record<string, unknown> : {};
+      const humanInput = asRecord(body.humanInput);
       const refs = Array.isArray(body.selectedChunks) ? body.selectedChunks.flatMap((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).version === "string" ? [{ id: (item as { id: string }).id, version: (item as { version: string }).version }] : []) : [];
       const chunks = await deps.ragClient.getByIds(refs);
       for (const ref of refs) {
@@ -1308,7 +1457,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       const latest = await deps.planRepository.getLatestSnapshot(planMatch[1]);
       if (!latest) return fail("INVALID_PLAN_SNAPSHOT", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (!Array.isArray(body.items) || !validPlanOutput({ schemaVersion: "suite-plan-v1", items: body.items }, { items: { properties: { imageType: {} } } })) return fail("LLM_OUTPUT_SCHEMA_INVALID");
       const items = body.items as Array<{ imageType?: "main" | "detail"; title: string; purpose: string; prompt: string }>;
       const snapshot: PlanSnapshot = { ...latest, id: randomUUID(), revisionNumber: latest.revisionNumber + 1, revisionKind: "human", parentSnapshotId: latest.id, items: items.map((item, index) => ({ id: randomUUID(), ordinal: index + 1, imageType: item.imageType ?? "main", title: item.title, purpose: item.purpose, prompt: item.prompt })), createdAt: new Date().toISOString() };
@@ -1319,7 +1468,6 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       const [images, snapshot] = await Promise.all([deps.repository.getInputImages(startCheckMatch[1]), deps.planRepository.getLatestSnapshot(startCheckMatch[1])]);
       if (!images.length) return fail("INVALID_INPUT_IMAGE");
-      if (images.some((image) => !image.currentBaseVersionId)) return fail("BASE_IMAGE_REQUIRED");
       if (!snapshot) return fail("INVALID_PLAN_SNAPSHOT");
       if (snapshot.phase === "structure_plan" && snapshot.confirmationStatus === "confirmed") {
         const items = materializeCategoryPlanItems(snapshot, await listCategoryRequestsForSnapshot(snapshot));
@@ -1331,6 +1479,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     }
 
     const resolvePlanStyleGuide = (snapshot: PlanSnapshot | null): string => {
+      if (!snapshot) return "未设置";
       const card = snapshot?.structure?.globalStyleCard;
       if (card && typeof card === "object" && typeof (card as Record<string, unknown>).promptPrefix === "string" && String((card as Record<string, unknown>).promptPrefix).trim()) {
         return String((card as Record<string, unknown>).promptPrefix).trim();
@@ -1342,27 +1491,6 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       return "沿用计划模板默认风格，保持商品真实外观、光影和品牌一致性。";
     };
 
-    const loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
-      if (!deps.imageEditorApi) return [];
-      const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
-      if (response.status !== 200 || !("data" in response.body) || !Array.isArray(response.body.data)) return [];
-      const all = response.body.data as DeliveryEditChildLike[];
-      const allowed = new Set(tasks.map((task) => task.id));
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const child of all) {
-          const taskId = typeof child.task?.id === "string" ? child.task.id : "";
-          const sourceCardId = typeof child.task?.sourceCardId === "string" ? child.task.sourceCardId : "";
-          if (taskId && sourceCardId && allowed.has(sourceCardId) && !allowed.has(taskId)) {
-            allowed.add(taskId);
-            changed = true;
-          }
-        }
-      }
-      return all.filter((child) => typeof child.task?.id === "string" && allowed.has(child.task.id));
-    };
-
     const styleOverrideMatch = path.match(/^\/api\/suites\/([^/]+)\/style-override$/);
     if (method === "PATCH" && styleOverrideMatch) {
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
@@ -1371,7 +1499,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (cached) return ok(cached);
       const suite = await deps.repository.getSuite(styleOverrideMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const rawValue = body.styleOverride;
       if (rawValue !== null && rawValue !== undefined && typeof rawValue !== "string") return fail("INVALID_STYLE_OVERRIDE");
       const nextValue = typeof rawValue === "string" && rawValue.trim() ? rawValue.trim() : null;
@@ -1389,11 +1517,24 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       return ok(payload);
     }
 
-    const deliveryExportMatch = path.match(/^\/api\/suites\/([^/]+)\/delivery\/export$/);
+    const deliveryExportMatch = path.match(/^\/api\/suites\/([^/]+)\/delivery\/export(?:\?(.*))?$/);
     if (method === "GET" && deliveryExportMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(deliveryExportMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
+
+      const query = new URLSearchParams(deliveryExportMatch[2] ?? "");
+      const presetRaw = (query.get("preset") ?? "original").trim() as DeliveryExportPresetId;
+      if (!Object.prototype.hasOwnProperty.call(DELIVERY_EXPORT_PRESETS, presetRaw)) return fail("INVALID_EXPORT_OPTIONS", 400);
+      const preset = DELIVERY_EXPORT_PRESETS[presetRaw];
+      const formatRaw = (query.get("format") ?? preset.defaultFormat).trim() as DeliveryExportFormat;
+      if (!["original", "png", "jpeg", "webp"].includes(formatRaw)) return fail("INVALID_EXPORT_OPTIONS", 400);
+      const qualityRaw = query.get("quality") ? Number(query.get("quality")) : preset.defaultQuality;
+      if (!Number.isFinite(qualityRaw) || qualityRaw < 60 || qualityRaw > 100) return fail("INVALID_EXPORT_OPTIONS", 400);
+      const quality = Math.round(qualityRaw);
+      const stitchDetail = query.get("stitchDetail") === "true" || query.get("stitchDetail") === "1";
+      const selectedTaskIds = new Set((query.get("taskIds") ?? "").split(",").map((id) => id.trim()).filter(Boolean));
+
       const [snapshot, tasks] = await Promise.all([
         deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null),
         deps.taskRepository.listTasks(suite.id),
@@ -1404,11 +1545,28 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       }));
       const imageEditChildren = await loadSuiteImageEditChildren(tasks);
       const slots = resolveDeliverySlots(taskAggregates, imageEditChildren, { defaultTemplateVersionId: snapshot?.templateVersionId ?? null });
-      const deliverable = slots.filter((slot) => slot.sourceRole !== "pending" && slot.exportPath);
+      const deliverable = slots.filter((slot) => slot.sourceRole !== "pending" && slot.exportPath && (!selectedTaskIds.size || selectedTaskIds.has(slot.parentTaskId)));
       if (!deliverable.length) return fail("DELIVERY_EMPTY", 400);
 
+      const extForFormat = (fmt: DeliveryExportFormat, fallbackPath: string) => {
+        if (fmt === "jpeg") return "jpg";
+        if (fmt === "webp") return "webp";
+        if (fmt === "png") return "png";
+        return fallbackPath.split(".").pop() || "png";
+      };
+      const mimeForFormat = (fmt: DeliveryExportFormat, fallbackMime: string) => {
+        if (fmt === "jpeg") return "image/jpeg";
+        if (fmt === "webp") return "image/webp";
+        if (fmt === "png") return "image/png";
+        return fallbackMime;
+      };
+      const replaceExt = (filePath: string, ext: string) => filePath.replace(/\.[^./]+$/, `.${ext}`);
+
+      const needsTransform = preset.id !== "original" || formatRaw !== "original";
       const entries: Array<{ name: string; data: Buffer }> = [];
       const manifestItems: Array<Record<string, unknown>> = [];
+      const detailForStitch: Buffer[] = [];
+
       for (const slot of deliverable) {
         let bytes: Buffer | null = null;
         if (slot.objectKey) {
@@ -1416,9 +1574,47 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           if (stored) bytes = stored.bytes;
         }
         if (!bytes) return fail("OBJECT_NOT_FOUND", 404);
-        entries.push({ name: slot.exportPath!, data: bytes });
+
+        let outBytes = bytes;
+        let outWidth = slot.width;
+        let outHeight = slot.height;
+        let outMime = slot.mimeType;
+        let outPath = slot.exportPath!;
+
+        if (needsTransform) {
+          let pipeline = sharp(bytes);
+          if (slot.imageType === "main" && preset.mainBox) {
+            pipeline = pipeline.resize({
+              width: preset.mainBox.width,
+              height: preset.mainBox.height,
+              fit: preset.mainBox.fit,
+              background: { r: 255, g: 255, b: 255, alpha: 1 },
+            });
+          } else if (slot.imageType === "detail" && preset.detailWidth) {
+            pipeline = pipeline.resize({ width: preset.detailWidth, withoutEnlargement: false });
+          }
+          if (formatRaw === "jpeg") {
+            pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } }).jpeg({ quality, mozjpeg: true });
+          } else if (formatRaw === "webp") {
+            pipeline = pipeline.webp({ quality });
+          } else if (formatRaw === "png") {
+            pipeline = pipeline.png({ compressionLevel: 8 });
+          }
+          const rendered = await pipeline.toBuffer({ resolveWithObject: true });
+          outBytes = rendered.data;
+          outWidth = rendered.info.width;
+          outHeight = rendered.info.height;
+          outMime = mimeForFormat(formatRaw, slot.mimeType);
+          outPath = replaceExt(slot.exportPath!, extForFormat(formatRaw, slot.exportPath!));
+        }
+
+        if (stitchDetail && slot.imageType === "detail") {
+          detailForStitch.push(outBytes);
+        }
+
+        entries.push({ name: outPath, data: outBytes });
         manifestItems.push({
-          exportPath: slot.exportPath,
+          exportPath: outPath,
           imageType: slot.imageType,
           ordinal: slot.typeOrdinal,
           title: slot.title,
@@ -1430,9 +1626,10 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           sourceVersionId: slot.sourceVersionId,
           versionId: slot.versionId,
           versionNumber: slot.versionNumber,
-          width: slot.width,
-          height: slot.height,
-          mimeType: slot.mimeType,
+          width: outWidth,
+          height: outHeight,
+          byteLength: outBytes.length,
+          mimeType: outMime,
           model: slot.model,
           channelName: slot.channelName,
           templateVersionId: slot.templateVersionId,
@@ -1441,10 +1638,95 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
         });
       }
 
+      let stitchedDetailPath: string | null = null;
+      if (stitchDetail && detailForStitch.length > 0) {
+        const targetWidth = preset.detailWidth ?? 1200;
+        const resizedSlices = await Promise.all(
+          detailForStitch.map((sliceBytes) =>
+            sharp(sliceBytes)
+              .resize({ width: targetWidth, withoutEnlargement: false })
+              .png()
+              .toBuffer({ resolveWithObject: true }),
+          ),
+        );
+        const totalHeight = resizedSlices.reduce((sum, slice) => sum + slice.info.height, 0);
+        let top = 0;
+        const composites = resizedSlices.map((slice) => {
+          const entry = { input: slice.data, top, left: 0 };
+          top += slice.info.height;
+          return entry;
+        });
+        let stitched = sharp({
+          create: {
+            width: targetWidth,
+            height: Math.max(1, totalHeight),
+            channels: 4,
+            background: { r: 255, g: 255, b: 255, alpha: 1 },
+          },
+        }).composite(composites);
+        const stitchFmt: DeliveryExportFormat = formatRaw === "original" ? "png" : formatRaw;
+        if (stitchFmt === "jpeg") stitched = stitched.flatten({ background: { r: 255, g: 255, b: 255 } }).jpeg({ quality, mozjpeg: true });
+        else if (stitchFmt === "webp") stitched = stitched.webp({ quality });
+        else stitched = stitched.png({ compressionLevel: 8 });
+        const stitchedBytes = await stitched.toBuffer();
+        const ext = extForFormat(stitchFmt, "detail.png");
+        stitchedDetailPath = `detail/00_detail_long_stitched.${ext}`;
+        entries.push({ name: stitchedDetailPath, data: stitchedBytes });
+      }
+
+      const latestPipeline = await pipelineRepository.getLatestRun(suite.id);
+      const listingSummary =
+        (latestPipeline && (await listingRepository.summary(latestPipeline.id))) ??
+        (await listingRepository.findLatestBySuiteId(suite.id));
+      const listingJob = listingSummary ? await listingRepository.get(listingSummary.id) : null;
+      const latestListingVersion =
+        listingJob && listingJob.versions.length > 0
+          ? listingJob.versions[listingJob.versions.length - 1]
+          : null;
+      const exportedAt = new Date().toISOString();
+      let listingCopyPath: string | null = null;
+      let listingCopyManifest: Record<string, unknown> | null = null;
+
+      if (listingJob && latestListingVersion) {
+        const platformProfile = deps.platformRepository
+          ? await deps.platformRepository.find(listingJob.platform)
+          : null;
+        const markdown = formatListingCopyMarkdown({
+          suiteName: suite.name,
+          platformName: platformProfile?.name,
+          marketScope: platformProfile?.marketScope,
+          job: listingJob,
+          version: latestListingVersion,
+          rules: platformProfile?.listingCopyRules,
+          exportedAt,
+        });
+        listingCopyPath = "listing-copy.md";
+        entries.push({ name: listingCopyPath, data: Buffer.from(markdown, "utf8") });
+        listingCopyManifest = {
+          jobId: listingJob.id,
+          status: listingJob.status,
+          platform: listingJob.platform,
+          targetMarket: listingJob.targetMarket,
+          outputLanguage: listingJob.outputLanguage,
+          versionId: latestListingVersion.id,
+          versionNumber: latestListingVersion.versionNumber,
+          createdAt: latestListingVersion.createdAt,
+          content: latestListingVersion.content,
+        };
+      }
+
       const planStyleGuide = resolvePlanStyleGuide(snapshot);
       const manifest = {
         schemaVersion: "picagent-delivery-manifest-v1",
-        exportedAt: new Date().toISOString(),
+        exportedAt,
+        exportOptions: {
+          preset: preset.id,
+          presetLabel: preset.label,
+          format: formatRaw,
+          quality,
+          stitchDetail,
+          stitchedDetailPath,
+        },
         suite: {
           id: suite.id,
           name: suite.name,
@@ -1459,20 +1741,25 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           exportedCount: manifestItems.length,
           mainCount: manifestItems.filter((item) => item.imageType === "main").length,
           detailCount: manifestItems.filter((item) => item.imageType === "detail").length,
+          stitchedDetailIncluded: Boolean(stitchedDetailPath),
+          listingCopyIncluded: Boolean(listingCopyPath),
+          listingCopyPath,
         },
+        listingCopy: listingCopyManifest,
         items: manifestItems,
       };
       entries.push({ name: "manifest.json", data: Buffer.from(JSON.stringify(manifest, null, 2), "utf8") });
       const zipBuffer = createZipBuffer(entries);
       const safeSuiteName = sanitizeDeliveryName(suite.name, `suite_${suite.id.slice(0, 8)}`);
       const asciiFallback = safeSuiteName.replace(/[^\x20-\x7e]/g, "") || `suite_${suite.id.slice(0, 8)}`;
-      const encodedName = encodeURIComponent(`${safeSuiteName}_delivery.zip`);
+      const suffix = preset.id === "original" ? "delivery" : `delivery_${preset.id}`;
+      const encodedName = encodeURIComponent(`${safeSuiteName}_${suffix}.zip`);
       return {
         status: 200,
-        body: { data: { exportedCount: manifestItems.length }, requestId: randomUUID() },
+        body: { data: { exportedCount: manifestItems.length, preset: preset.id, stitchedDetailPath }, requestId: randomUUID() },
         headers: {
           "content-type": "application/zip",
-          "content-disposition": `attachment; filename="${asciiFallback}_delivery.zip"; filename*=UTF-8''${encodedName}`,
+          "content-disposition": `attachment; filename="${asciiFallback}_${suffix}.zip"; filename*=UTF-8''${encodedName}`,
           "cache-control": "no-store",
         },
         raw: zipBuffer,
@@ -1512,12 +1799,72 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       });
     }
 
+    const customTaskMatch = path.match(/^\/api\/suites\/([^/]+)\/tasks\/custom$/);
+    if (method === "POST" && customTaskMatch) {
+      if (!deps.taskRepository?.createCustomTask) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
+      const suite = await deps.repository.getSuite(customTaskMatch[1]);
+      if (!suite) return fail("INVALID_SUITE_ID", 404);
+      const body = asRecord(options.body, { allowArrays: true });
+      const title = typeof body.title === "string" ? body.title.trim() : "";
+      const promptDraft = typeof body.promptDraft === "string" ? body.promptDraft.trim() : "";
+      const imageType = body.imageType === "main" ? "main" : "detail";
+      const purpose = typeof body.purpose === "string" && body.purpose.trim() ? body.purpose.trim() : (imageType === "main" ? "自由补充主图" : "自由补充详情图");
+      if (!title || !promptDraft) return fail("CUSTOM_TASK_FIELDS_REQUIRED", 400);
+      const [snapshot, inputImages] = await Promise.all([
+        deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null),
+        deps.repository.getInputImages(suite.id),
+      ]);
+      const sourceInputImageId = body.sourceInputImageId === null ? null : typeof body.sourceInputImageId === "string" && inputImages.some((img) => img.id === body.sourceInputImageId)
+        ? body.sourceInputImageId
+        : (inputImages[0]?.id ?? null);
+      const generationParams = body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)
+        ? body.generationParams as Record<string, unknown>
+        : { ratio: imageType === "main" ? "1:1" : "3:4", size: "1K", quality: "medium" };
+      const result = await deps.taskRepository.createCustomTask({
+        suiteId: suite.id,
+        planSnapshotId: snapshot?.id ?? null,
+        imageType,
+        title,
+        purpose,
+        promptDraft,
+        sourceInputImageId,
+        generationParams,
+        idempotencyKey,
+      });
+      return ok(result.task, result.duplicate ? 200 : 201);
+    }
+
+    const batchParamsMatch = path.match(/^\/api\/suites\/([^/]+)\/tasks\/batch-params$/);
+    if (method === "POST" && batchParamsMatch) {
+      if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
+      const suite = await deps.repository.getSuite(batchParamsMatch[1]);
+      if (!suite) return fail("INVALID_SUITE_ID", 404);
+      const body = asRecord(options.body, { allowArrays: true });
+      const patch = body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)
+        ? body.generationParams as Record<string, unknown>
+        : null;
+      if (!patch || !Object.keys(patch).length) return fail("INVALID_EXPORT_OPTIONS", 400);
+      const scope = body.imageType === "main" || body.imageType === "detail" ? body.imageType : "all";
+      const explicitIds = Array.isArray(body.taskIds) ? new Set(body.taskIds.filter((id): id is string => typeof id === "string")) : null;
+      const tasks = (await deps.taskRepository.listTasks(suite.id)).filter((task) => {
+        if (task.status === "archived") return false;
+        if (explicitIds) return explicitIds.has(task.id);
+        return scope === "all" ? true : task.imageType === scope;
+      });
+      const updated: SuiteTask[] = [];
+      for (const task of tasks) {
+        const next = await deps.taskRepository.updateTask(task.id, { generationParams: { ...task.generationParams, ...patch } });
+        if (next) updated.push(next);
+      }
+      return ok({ updatedCount: updated.length, tasks: updated });
+    }
+
     const createTasksMatch = path.match(/^\/api\/suites\/([^/]+)\/tasks$/);
     if (method === "POST" && createTasksMatch) {
       if (!deps.taskRepository || !deps.planRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const suite = await deps.repository.getSuite(createTasksMatch[1]);
       if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const snapshotId = typeof body.planSnapshotId === "string" ? body.planSnapshotId : undefined;
       let snapshot = snapshotId ? await deps.planRepository.getSnapshot(snapshotId) : await deps.planRepository.getLatestSnapshot(suite.id);
       if (!snapshot || snapshot.suiteId !== suite.id) return fail("INVALID_PLAN_SNAPSHOT", 409);
@@ -1539,11 +1886,28 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const updateTaskMatch = path.match(/^\/api\/suite-tasks\/([^/]+)$/);
     if (method === "PATCH" && updateTaskMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
-      const patch: Record<string, unknown> = {};
-      for (const key of ["title", "purpose", "promptDraft", "sourceInputImageId", "status"] as const) if (typeof body[key] === "string") patch[key] = body[key];
-      if (body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)) patch.generationParams = body.generationParams;
-      const task = await deps.taskRepository.updateTask(updateTaskMatch[1], patch as never);
+      const body = asRecord(options.body, { allowArrays: true });
+      const patch: Parameters<TaskRepository["updateTask"]>[1] = {};
+      for (const key of ["title", "purpose", "promptDraft"] as const) if (typeof body[key] === "string") patch[key] = body[key];
+      if (typeof body.status === "string") patch.status = body.status as SuiteTask["status"];
+      if (body.generationParams && typeof body.generationParams === "object" && !Array.isArray(body.generationParams)) patch.generationParams = body.generationParams as Record<string, unknown>;
+      if (typeof body.sourceInputImageId === "string") {
+        const current = await deps.taskRepository.getTask(updateTaskMatch[1]);
+        if (!current) return fail("INVALID_SUITE_TASK", 404);
+        const images = await deps.repository.getInputImages(current.suiteId);
+        if (!images.some((image) => image.id === body.sourceInputImageId) || current.status === "generating" || current.status === "archived") return fail("TASK_INVALID_SOURCE", 409);
+        patch.sourceInputImageId = body.sourceInputImageId;
+        if (current.sourceInputImageId !== patch.sourceInputImageId || current.sourceLibraryReferenceId) {
+          patch.sourceRevision = (current.sourceRevision ?? 0) + 1;
+          patch.sourceLibraryReferenceId = null;
+          patch.sourceResourceVersionId = null;
+          const params = { ...current.generationParams, ...patch.generationParams };
+          delete params.productMaterialRefs;
+          patch.generationParams = params;
+        }
+        if (current.status === "incomplete" || current.status === "failed") patch.status = "pending";
+      }
+      const task = await deps.taskRepository.updateTask(updateTaskMatch[1], patch);
       return task ? ok(task) : fail("INVALID_SUITE_TASK", 404);
     }
 
@@ -1552,13 +1916,14 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       if (!deps.taskRepository || !deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       const task = await deps.taskRepository.getTask(whiteResourceMatch[1]); if (!task) return fail("INVALID_SUITE_TASK", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      if (task.status === "generating" || task.status === "archived") return fail("TASK_INVALID_SOURCE", 409);
+      const body = asRecord(options.body, { allowArrays: true });
       const resourceIds = Array.isArray(body.resourceIds) ? body.resourceIds.filter((item): item is string => typeof item === "string") : typeof body.resourceId === "string" ? [body.resourceId] : [];
       if (!resourceIds.length) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       if (resourceIds.length > 3) return fail("REVERSE_WHITE_RESOURCE_LIMIT", 409);
       const resources = await Promise.all(resourceIds.map((id) => deps.libraryRepository!.getResource(id)));
       if (resources.some((resource) => !resource)) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
-      if (resources.some((resource) => resource!.resourceType !== "base_image" || resource!.status !== "published")) return fail("LIBRARY_RESOURCE_FORBIDDEN", 403);
+      if (resources.some((resource) => !isProductImageResource(resource!) || resource!.status !== "published")) return fail("LIBRARY_RESOURCE_FORBIDDEN", 403);
       try {
         const existing = await deps.libraryRepository.listReferences(task.suiteId, "task", task.id);
         const references = [];
@@ -1569,10 +1934,10 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
           if (typeof source?.objectKey !== "string") throw new Error("LIBRARY_RESOURCE_NOT_FOUND");
           (result.reference as typeof result.reference & { order?: number }).order = index + 1;
         }
-        for (const stale of existing.filter((reference) => reference.resourceType === "base_image" && !resourceIds.includes(reference.resourceId))) await deps.libraryRepository.archiveReference(task.suiteId, stale.id);
-        const productMaterialRefs = references.map((reference, index) => ({ libraryReferenceId: reference.id, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, order: index + 1, title: String((reference.snapshot as Record<string, unknown>).title ?? "产品白底图"), previewUrl: typeof (reference.snapshot as Record<string, unknown>).previewUrl === "string" ? (reference.snapshot as Record<string, unknown>).previewUrl : `/api/library/resources/${encodeURIComponent(reference.resourceId)}/preview` }));
+        for (const stale of existing.filter((reference) => isProductImageResource(reference) && !resourceIds.includes(reference.resourceId))) await deps.libraryRepository.archiveReference(task.suiteId, stale.id);
+        const productMaterialRefs = references.map((reference, index) => ({ libraryReferenceId: reference.id, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, order: index + 1, title: String(reference.snapshot.title ?? "商品参考图"), previewUrl: typeof reference.snapshot.previewUrl === "string" ? reference.snapshot.previewUrl : `/api/library/resources/${encodeURIComponent(reference.resourceId)}/preview` }));
         const first = references[0];
-        const updated = await deps.taskRepository.updateTask(task.id, { sourceLibraryReferenceId: first.id, sourceResourceVersionId: first.resourceVersionId, sourceRevision: (task.sourceRevision ?? 0) + 1, generationParams: { ...task.generationParams, productMaterialRefs } as Record<string, unknown>, status: "pending" });
+        const updated = await deps.taskRepository.updateTask(task.id, { sourceInputImageId: null, sourceLibraryReferenceId: first.id, sourceResourceVersionId: first.resourceVersionId, sourceRevision: (task.sourceRevision ?? 0) + 1, generationParams: { ...task.generationParams, productMaterialRefs }, status: "pending" });
         const duplicate = references.every((reference) => existing.some((item) => item.id === reference.id));
         return ok({ task: updated, references, reference: first, duplicate }, duplicate ? 200 : 201);
       } catch (error) { const code = error instanceof Error ? error.message : "LIBRARY_RESOURCE_FORBIDDEN"; return fail(code, code === "LIBRARY_RESOURCE_NOT_FOUND" ? 404 : 403); }
@@ -1585,7 +1950,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     }
     if (method === "PATCH" && layoutMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const expectedVersion = Number(body.layoutVersion ?? 0);
       const viewport = body.viewport && typeof body.viewport === "object" ? body.viewport as { x: number; y: number; zoom: number } : { x: 0, y: 0, zoom: 1 };
       const nodes = Array.isArray(body.nodes) ? body.nodes : [];
@@ -1599,7 +1964,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const allTasks = await deps.taskRepository.listTasks(suiteGenerationMatch[1]);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       const requested = Array.isArray(body.taskIds) ? body.taskIds.filter((id): id is string => typeof id === "string") : allTasks.filter((task) => task.status !== "archived").map((task) => task.id);
       const tasks = allTasks.filter((task) => requested.includes(task.id) && task.status !== "archived");
       if (!tasks.length) return fail("NO_TASKS_TO_GENERATE", 409);
@@ -1613,13 +1978,15 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const task = await deps.taskRepository.getTask(taskGenerationMatch[1]);
       if (!task || task.status === "archived") return fail("INVALID_SUITE_TASK", 404);
-      const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body, { allowArrays: true });
       if (typeof body.promptDraft === "string") await deps.taskRepository.updateTask(task.id, { promptDraft: body.promptDraft });
       const current = await deps.taskRepository.getTask(task.id);
       try {
         const history = await deps.taskRepository.listTaskVersions(task.id);
         const currentVersion = history.versions.find((version) => version.isCurrent);
-        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, currentVersion ? { [task.id]: currentVersion.id } : {});
+        const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);
+        const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (current?.sourceRevision ?? 0);
+        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, currentVersion && sourceUnchanged ? { [task.id]: currentVersion.id } : {});
         return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
       }
       catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
@@ -1656,7 +2023,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
     const selectTaskVersionMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/select$/);
     if (method === "POST" && selectTaskVersionMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
-      const selection = options.body && typeof options.body === "object" && (options.body as Record<string, unknown>).selection === "final" ? "final" : "current";
+      const selection = asRecord(options.body, { allowArrays: true }).selection === "final" ? "final" : "current";
       const version = await deps.taskRepository.selectVersion(selectTaskVersionMatch[1], selectTaskVersionMatch[2], selection); return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
     }
     const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
@@ -1685,7 +2052,7 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const [suiteId, inputImageId] = generationMatch.slice(1);
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      const body = options.body && typeof options.body === "object" && !Array.isArray(options.body) ? options.body as Record<string, unknown> : {};
+      const body = asRecord(options.body);
       const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
       if (!templateVersionId) return fail("PROMPT_TEMPLATE_REQUIRED");
       const template = await observedPromptLoad(deps.promptRepository, templateVersionId, "base_refine");
@@ -1833,8 +2200,21 @@ export function createTicket02App(deps: { repository: SuiteRepository; storage: 
       const inputImages = await deps.repository.getInputImages(suite.id);
       return ok({ ...suite, inputImages } satisfies SuiteAggregate);
     }
+    if (method === "PATCH" && suiteMatch) {
+      const body = asRecord(options.body, { allowArrays: true });
+      const name = "name" in body ? String(body.name).trim() : "";
+      if (!name) return fail("EMPTY_NAME");
+      if (!deps.repository.renameSuite) return fail("NOT_FOUND", 404);
+      const updated = await deps.repository.renameSuite(suiteMatch[1], name);
+      return updated ? ok(updated) : fail("INVALID_SUITE_ID", 404);
+    }
+    if (method === "DELETE" && suiteMatch) {
+      if (!deps.repository.deleteSuite) return fail("NOT_FOUND", 404);
+      const deleted = await deps.repository.deleteSuite(suiteMatch[1]);
+      return deleted ? ok(deleted) : fail("INVALID_SUITE_ID", 404);
+    }
     return fail("NOT_FOUND", 404);
-  };
+  }
 
   const upload = async (suiteId: string, file: UploadFile): Promise<AppResponse> => {
     const suite = await deps.repository.getSuite(suiteId);

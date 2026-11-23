@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { suiteApi, type ApiBaseHistory, type ApiCategoryPromptState, type ApiImage, type ApiPlanSnapshot, type ApiPlatformProfile, type ApiPromptInputField, type ApiPromptTemplate, type ApiRagChunk, type ApiSuite, type ApiStructurePlan } from "../api/client";
+import { DETAIL_CATEGORIES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_IMAGE_LIMITS } from "../../shared/suite-categories.js";
+import { SUPPORTED_OUTPUT_LANGUAGES } from "../../shared/workbench-delivery";
+import { suiteApi, type ApiBaseHistory, type ApiCategoryPromptState, type ApiImage, type ApiPlanSnapshot, type ApiPlatformProfile, type ApiPromptInputField, type ApiPromptTemplate, type ApiSuite, type ApiStructurePlan } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { inputForTemplate, structurePlanDynamicInput, updatePromptInputValue } from "../features/plan/plan-input";
 import { Icon, ImageWithState, ModelSettingsMessage } from "./shared";
@@ -20,12 +22,6 @@ const OPTION_LABELS: Record<string, string> = {
   detail_only: "仅详情页",
 };
 
-const DETAIL_CATEGORIES = [
-  ["appearance_angles", "多角度外观图"], ["lifestyle_use", "生活场景图"], ["feature_benefit", "信息卖点图"], ["material_detail", "细节特写图"],
-  ["size_scale", "尺寸规格图"], ["included_items", "配件全家福"], ["compatibility_application", "适配与应用图"], ["variant_bundle", "组合与变体图"],
-  ["packaging_unboxing", "包装与开箱图"], ["care_instruction", "使用与维护图"],
-] as const;
-const DETAIL_CATEGORY_NAMES: Record<string, string> = { main: "主图组", ...Object.fromEntries(DETAIL_CATEGORIES) };
 const RECENT_PAGE_SIZE = 6;
 
 type BriefInput = {
@@ -54,53 +50,6 @@ function stylePrompt(card: Record<string, unknown>): string {
 function optionLabel(field: ApiPromptInputField, option: string): string {
   if (field.key === "design_style_mode" && option === "auto") return "自动判断";
   return OPTION_LABELS[option] ?? option;
-}
-
-function RagReferences({ chunks, query, selectedChunkIds, setQuery, setSelectedChunkIds, supplement, setSupplement, disabled }: {
-  chunks: ApiRagChunk[];
-  query: string;
-  selectedChunkIds: string[];
-  setQuery: React.Dispatch<React.SetStateAction<string>>;
-  setSelectedChunkIds: React.Dispatch<React.SetStateAction<string[]>>;
-  supplement: string;
-  setSupplement: (value: string) => void;
-  disabled: boolean;
-}) {
-  return (
-    <section className="start-rag" aria-labelledby="rag-title">
-      <div className="start-rag-head">
-        <div>
-          <h3 id="rag-title">商品资料</h3>
-          <span>只冻结明确勾选的资料；未选择资料也可以继续规划。</span>
-        </div>
-        <span className="start-selection-count">已选 {selectedChunkIds.length} 条</span>
-      </div>
-      <div className="start-rag-browser">
-        <label className="start-search">
-          <Icon name="zoom-in" />
-          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索商品类别或素材组" disabled={disabled} />
-        </label>
-        <div className="start-chunk-list">
-          {chunks.length ? chunks.map((chunk) => (
-            <label className={`start-chunk ${selectedChunkIds.includes(chunk.id) ? "selected" : ""}`} key={`${chunk.id}:${chunk.version}`}>
-              <input type="checkbox" disabled={disabled} checked={selectedChunkIds.includes(chunk.id)} onChange={() => setSelectedChunkIds(selectedChunkIds.includes(chunk.id) ? selectedChunkIds.filter((id) => id !== chunk.id) : [...selectedChunkIds, chunk.id])} />
-              <span>
-                <strong>{chunk.title}</strong>
-                <small>{chunk.id} · v{chunk.version} · {chunk.sourceKind === "validation_seed" ? "验证资料" : chunk.sourceKind}</small>
-                <p>{chunk.summary}</p>
-              </span>
-              <em>已发布</em>
-            </label>
-          )) : <p className="start-rag-empty">暂未检索到商品资料，可使用图片与人工补充事实继续规划。</p>}
-        </div>
-      </div>
-      <label className="start-supplement">
-        <span>补充商品事实（选填）</span>
-        <textarea disabled={disabled} value={supplement} onChange={(event) => setSupplement(event.target.value)} placeholder="填写资料中没有但本次允许使用的真实参数、配件、兼容关系或卖点。" />
-        <small>整段内容会作为当前方案的人工确认事实冻结。</small>
-      </label>
-    </section>
-  );
 }
 
 function DynamicField({ field, value, onChange, platforms, className = "" }: {
@@ -135,7 +84,13 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
   const [suite, setSuite] = useState<ApiSuite | null>(null);
   const [recentSuites, setRecentSuites] = useState<ApiSuite[]>([]);
   const [recentPage, setRecentPage] = useState(1);
-  const [name, setName] = useState("");
+  const [recentSearch, setRecentSearch] = useState("");
+  const [recentStatusFilter, setRecentStatusFilter] = useState<"all" | "in_progress" | "draft">("all");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [deletingSuite, setDeletingSuite] = useState<ApiSuite | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [name, setName] = useState(() => new URLSearchParams(window.location.search).get("prefillName") ?? "");
   const [images, setImages] = useState<ApiImage[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [structureTemplates, setStructureTemplates] = useState<ApiPromptTemplate[]>([]);
@@ -144,9 +99,6 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
   const [baseTemplateId, setBaseTemplateId] = useState("");
   const [briefInput, setBriefInput] = useState<BriefInput>(EMPTY_BRIEF);
   const [baseInput, setBaseInput] = useState<Record<string, unknown>>({});
-  const [query, setQuery] = useState("");
-  const [chunks, setChunks] = useState<ApiRagChunk[]>([]);
-  const [selectedChunkIds, setSelectedChunkIds] = useState<string[]>([]);
   const [planSnapshot, setPlanSnapshot] = useState<ApiPlanSnapshot | null>(null);
   const [structureSnapshot, setStructureSnapshot] = useState<ApiPlanSnapshot | null>(null);
   const [categoryPromptState, setCategoryPromptState] = useState<ApiCategoryPromptState | null>(null);
@@ -166,7 +118,6 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgressItem[]>([]);
-  const [ragOpen, setRagOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [baseHistory, setBaseHistory] = useState<Record<string, ApiBaseHistory>>({});
   const [previewVersionIds, setPreviewVersionIds] = useState<Record<string, string>>({});
@@ -182,11 +133,11 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
   const uploadCleanupTimer = useRef<number | null>(null);
   const step1Ref = useRef<HTMLElement | null>(null);
   const step2Ref = useRef<HTMLElement | null>(null);
+  const supplementRef = useRef<HTMLTextAreaElement | null>(null);
   const structureReviewRef = useRef<HTMLElement | null>(null);
   const scrollToReviewAfterResult = useRef(false);
 
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2400); };
-  const selectedChunks = useMemo(() => chunks.filter((chunk) => selectedChunkIds.includes(chunk.id)), [chunks, selectedChunkIds]);
   const current = images.find((image) => image.id === currentId) ?? images[0] ?? null;
   const currentHistory = current ? baseHistory[current.id] : undefined;
   const previewVersionId = current ? previewVersionIds[current.id] ?? currentHistory?.currentVersionId ?? currentHistory?.versions[0]?.id : undefined;
@@ -209,15 +160,23 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
   })();
   const categoryPromptsComplete = categoryPromptState?.status === "succeeded" && categoryPromptState.requests.length >= categoryExpectedRequestCount;
   const v11Ready = structureSnapshot?.confirmationStatus === "confirmed" && categoryPromptsComplete;
-  const planningFingerprint = JSON.stringify({ imageIds: images.map((image) => image.id), chunkIds: selectedChunkIds, briefInput, structureInput });
+  const planningFingerprint = JSON.stringify({ imageIds: images.map((image) => image.id), briefInput, structureInput });
   const structureStale = Boolean(structureSnapshot && structureRequestFingerprint && planningFingerprint !== structureRequestFingerprint && structureSnapshot.confirmationStatus !== "confirmed");
   const activeCategoryRequests = [...new Map((categoryPromptState?.requests ?? []).map((request) => [request.categoryCode, request])).values()];
   const categoryProgressKey = activeCategoryRequests.map((request) => `${request.id}:${request.status}:${request.items.length}`).join("|");
   const categoryOverallProgress = categoryExpectedRequestCount
     ? Math.round(activeCategoryRequests.reduce((sum, request) => sum + (request.status === "succeeded" ? 100 : categoryProgressById[request.id] ?? 0), 0) / categoryExpectedRequestCount)
     : 0;
-  const recentPageCount = Math.max(1, Math.ceil(recentSuites.length / RECENT_PAGE_SIZE));
-  const pagedRecentSuites = recentSuites.slice((recentPage - 1) * RECENT_PAGE_SIZE, recentPage * RECENT_PAGE_SIZE);
+  const filteredRecentSuites = useMemo(() => {
+    const q = recentSearch.trim().toLowerCase();
+    return recentSuites.filter((item) => {
+      if (recentStatusFilter !== "all" && item.status !== recentStatusFilter) return false;
+      if (q && !item.name.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [recentSuites, recentSearch, recentStatusFilter]);
+  const recentPageCount = Math.max(1, Math.ceil(filteredRecentSuites.length / RECENT_PAGE_SIZE));
+  const pagedRecentSuites = filteredRecentSuites.slice((recentPage - 1) * RECENT_PAGE_SIZE, recentPage * RECENT_PAGE_SIZE);
   const demoSuite = useMemo(() => recentSuites.find((item) => item.isDemo) ?? null, [recentSuites]);
 
   useEffect(() => {
@@ -261,14 +220,6 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
   useEffect(() => {
     setRecentPage((page) => Math.min(page, recentPageCount));
   }, [recentPageCount]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      suiteApi.searchChunks(query).then((items) => { if (!cancelled) setChunks(items); }).catch((cause: Error) => { if (!cancelled) setError(cause.message); });
-    }, 250);
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [query]);
 
   useEffect(() => {
     if (!suiteId || suiteId === "new") {
@@ -319,7 +270,6 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
           emphasis_requirements: String(input.emphasis_requirements ?? value.emphasis_requirements),
           design_constraints: String(input.design_constraints ?? input.design_style ?? value.design_constraints),
         }));
-        setSelectedChunkIds(snapshot.chunks.map((chunk) => chunk.sourceChunkId));
       }
     }).catch(() => undefined);
     suiteApi.getCategoryPrompts(suiteId).then(setCategoryPromptState).catch(() => undefined);
@@ -386,6 +336,41 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
       setError(cause instanceof Error ? cause.message : "创建失败");
     } finally {
       setCreating(false);
+    }
+  };
+
+  const commitRename = async (suiteToRename: ApiSuite) => {
+    const nextName = renameDraft.trim();
+    if (!nextName || nextName === suiteToRename.name) {
+      setRenamingId(null);
+      return;
+    }
+    try {
+      const updated = await suiteApi.rename(suiteToRename.id, nextName);
+      setRecentSuites((current) => current.map((item) => item.id === updated.id ? { ...item, name: updated.name, updatedAt: updated.updatedAt } : item));
+      notify("方案名称已更新");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "重命名失败");
+    } finally {
+      setRenamingId(null);
+    }
+  };
+
+  const confirmDeleteSuite = async () => {
+    if (!deletingSuite || deleting) return;
+    setDeleting(true);
+    setError("");
+    try {
+      await suiteApi.delete(deletingSuite.id);
+      setRecentSuites((current) => current.filter((item) => item.id !== deletingSuite.id));
+      if (renamingId === deletingSuite.id) setRenamingId(null);
+      setDeletingSuite(null);
+      notify("方案已删除");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "删除方案失败");
+      setDeletingSuite(null);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -558,7 +543,7 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
     setError("");
     scrollToReviewAfterResult.current = true;
     try {
-      const started = await suiteApi.generateStructurePlan(suite.id, template.templateVersionId, structurePlanDynamicInput(briefInput, structureInput), selectedChunks);
+      const started = await suiteApi.generateStructurePlan(suite.id, template.templateVersionId, structurePlanDynamicInput(briefInput, structureInput));
       setStructureAttemptId(started.attemptId);
     } catch (cause) {
       setStructureGenerating(false);
@@ -623,7 +608,7 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
 
   const jumpToFacts = () => {
     setCollapsedSteps((value) => ({ ...value, step2: false }));
-    setRagOpen(true);
+    window.requestAnimationFrame(() => supplementRef.current?.focus());
   };
 
   const structureStatus = structureGenerating ? `规划中 ${structureProgress}%` : structureSnapshot?.confirmationStatus === "confirmed" ? "已确认" : structureSnapshot ? "待审核" : structureError ? "生成失败" : "待填写";
@@ -665,7 +650,7 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
               <div className="pa-lobby-copy">
                 <p className="start-eyebrow">CROSS-BORDER E-COMMERCE AI STUDIO</p>
                 <h1>从商品实拍到可交付套图方案</h1>
-                <p>先精修产品外观真值，再通过 RAG 事实约束与两阶段人工审核编排整套跨境电商主图与详情页。</p>
+                <p>准备商品图和产品简报，审核图片结构计划后，为整套主图与详情图生成提示词。</p>
               </div>
               <form className="pa-create-form" onSubmit={(event) => { event.preventDefault(); void createSuite(); }}>
                 <label>
@@ -715,7 +700,33 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                   <p className="start-eyebrow">RECENT PROJECTS</p>
                   <h2 id="recent-title">最近项目</h2>
                 </div>
-                <span className="pa-recents-count">共 {recentSuites.length} 个方案</span>
+                <div className="pa-recents-tools">
+                  <input
+                    type="search"
+                    className="pa-recents-search"
+                    aria-label="搜索最近项目"
+                    placeholder="搜索方案名称…"
+                    value={recentSearch}
+                    onChange={(event) => { setRecentSearch(event.target.value); setRecentPage(1); }}
+                  />
+                  <div className="pa-recents-filter" role="group" aria-label="按状态筛选项目">
+                    {([
+                      ["all", "全部"],
+                      ["in_progress", "进行中"],
+                      ["draft", "草稿"],
+                    ] as const).map(([statusKey, label]) => (
+                      <button
+                        key={statusKey}
+                        type="button"
+                        className={recentStatusFilter === statusKey ? "is-active" : ""}
+                        onClick={() => { setRecentStatusFilter(statusKey); setRecentPage(1); }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="pa-recents-count">显示 {filteredRecentSuites.length}/{recentSuites.length}</span>
+                </div>
               </header>
               {pagedRecentSuites.length ? (
                 <div className="pa-project-grid">
@@ -735,7 +746,43 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                         </span>
                       </div>
                       <div className="pa-project-body">
-                        <h3 title={item.name}>{item.name}</h3>
+                        {renamingId === item.id ? (
+                          <form className="pa-project-rename" onSubmit={(event) => { event.preventDefault(); void commitRename(item); }}>
+                            <input
+                              autoFocus
+                              aria-label="新方案名称"
+                              value={renameDraft}
+                              onChange={(event) => setRenameDraft(event.target.value)}
+                              onKeyDown={(event) => { if (event.key === "Escape") setRenamingId(null); }}
+                            />
+                            <button type="submit">保存</button>
+                            <button type="button" onClick={() => setRenamingId(null)}>取消</button>
+                          </form>
+                        ) : (
+                          <div className="pa-project-title-row">
+                            <h3 title={item.name}>{item.name}</h3>
+                            <div className="pa-project-card-tools">
+                              <button
+                                type="button"
+                                className="pa-project-rename-btn"
+                                title="重命名方案"
+                                aria-label={`重命名 ${item.name}`}
+                                onClick={() => { setRenamingId(item.id); setRenameDraft(item.name); }}
+                              >
+                                <Icon name="edit" />
+                              </button>
+                              <button
+                                type="button"
+                                className="pa-project-delete-btn"
+                                title="删除方案"
+                                aria-label={`删除 ${item.name}`}
+                                onClick={() => setDeletingSuite(item)}
+                              >
+                                <Icon name="trash" />
+                              </button>
+                            </div>
+                          </div>
+                        )}
                         <p className="pa-project-meta">
                           <span>{item.inputImageCount ?? 0} 张原图</span>
                           <span>·</span>
@@ -787,7 +834,7 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                 onClick={() => { setCollapsedSteps((v) => ({ ...v, step2: false })); step2Ref.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
               >
                 <span>{step2Done ? "✓" : "02"}</span>
-                <div><strong>简报与事实资料</strong><small>{selectedPlatform?.name ?? "未选平台"} · {selectedChunkIds.length} 条资料</small></div>
+                <div><strong>产品简报</strong><small>{selectedPlatform?.name ?? "未选平台"} · {briefInput.output_language}</small></div>
               </button>
               <button
                 type="button"
@@ -922,15 +969,14 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
               )}
             </section>
 
-            {/* Step 2: 简报与商品资料事实（可折叠） */}
+            {/* Step 2: 产品简报（可折叠） */}
             <section ref={step2Ref} className={`pa-wizard-card ${collapsedSteps.step2 ? "is-collapsed" : ""}`} aria-labelledby="brief-title">
               <header className="pa-wizard-card-head">
                 <div>
-                  <span className="pa-step-kicker">STEP 02 · BRIEF & RAG EVIDENCE</span>
-                  <h2 id="brief-title">产品简报与 RAG 事实资料</h2>
+                  <span className="pa-step-kicker">STEP 02 · PRODUCT BRIEF</span>
+                  <h2 id="brief-title">产品简报</h2>
                 </div>
                 <div className="pa-wizard-card-meta">
-                  <span className="pa-badge">{selectedChunkIds.length} 条 RAG 资料{briefInput.human_supplement.trim() ? " + 人工补充" : ""}</span>
                   <span className={`start-step-badge ${structureSnapshot?.confirmationStatus === "confirmed" ? "confirmed" : ""}`}>{structureStatus}</span>
                   {step2Done && (
                     <button type="button" className="pa-collapse-btn" onClick={() => setCollapsedSteps((v) => ({ ...v, step2: !v.step2 }))}>
@@ -942,30 +988,11 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
 
               {collapsedSteps.step2 ? (
                 <div className="pa-collapsed-summary">
-                  <span>平台：{selectedPlatform?.name ?? briefInput.platform} · 语言：{briefInput.output_language} · 已冻结 {selectedChunkIds.length} 条商品资料。</span>
+                  <span>{selectedPlatform?.name ?? briefInput.platform} · {briefInput.output_language}</span>
                   <button type="button" onClick={() => setCollapsedSteps((v) => ({ ...v, step2: false }))}>展开修改简报</button>
                 </div>
               ) : (
                 <div className="pa-step-body">
-                  {/* 显性化 RAG 商品资料与人工补充事实条 */}
-                  <div className="pa-rag-banner">
-                    <div className="pa-rag-banner-copy">
-                      <strong>商品事实边界（防幻觉约束）</strong>
-                      <p>仅明确勾选的 RAG 商品资料和人工补充事实会被冻结进规划上下文，模型不得编造未核验的参数或功效。</p>
-                      <div className="pa-rag-chips">
-                        {selectedChunks.length > 0 ? selectedChunks.map((chunk) => (
-                          <span className="pa-rag-chip" key={chunk.id}>{chunk.title} · v{chunk.version}</span>
-                        )) : <span className="pa-rag-chip is-muted">尚未勾选 RAG 资料（可仅凭图片与人工补充规划）</span>}
-                        {briefInput.human_supplement.trim() && <span className="pa-rag-chip is-human">已填写人工补充商品事实</span>}
-                      </div>
-                    </div>
-                    <button type="button" className="pa-rag-open-btn" onClick={() => setRagOpen(true)}>
-                      <Icon name="library" />
-                      <span>选择商品资料 / 补充事实</span>
-                      <b>{selectedChunkIds.length}</b>
-                    </button>
-                  </div>
-
                   <section className="start-brief-block" aria-label="最小人工简报">
                     <div className="start-brief-grid">
                       <label className="start-field">
@@ -979,23 +1006,27 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                       <label className="start-field">
                         <span>输出语言 *</span>
                         <select disabled={structureSnapshot?.confirmationStatus === "confirmed"} value={briefInput.output_language} onChange={(event) => setBriefInput((value) => ({ ...value, output_language: event.target.value }))}>
-                          <option value="英文">英文</option>
-                          <option value="中文">中文</option>
+                          {SUPPORTED_OUTPUT_LANGUAGES.map((lang) => (
+                            <option key={lang.code} value={lang.value}>{lang.label}</option>
+                          ))}
                         </select>
                       </label>
                       <label className="start-field full">
                         <span>产品名称</span>
-                        <input disabled={structureSnapshot?.confirmationStatus === "confirmed"} value={briefInput.product_name} onChange={(event) => setBriefInput((value) => ({ ...value, product_name: event.target.value }))} placeholder="可从资料带入，也可以手动修改" />
+                        <input disabled={structureSnapshot?.confirmationStatus === "confirmed"} value={briefInput.product_name} onChange={(event) => setBriefInput((value) => ({ ...value, product_name: event.target.value }))} placeholder="输入本次套图使用的产品名称" />
+                      </label>
+                      <label className="start-field full">
+                        <span>补充商品事实（选填）</span>
+                        <textarea ref={supplementRef} disabled={structureSnapshot?.confirmationStatus === "confirmed"} value={briefInput.human_supplement} onChange={(event) => setBriefInput((value) => ({ ...value, human_supplement: event.target.value }))} placeholder="填写已确认的尺寸、材质、配件或兼容型号" />
+                        <small>填写图片无法确认、且本次套图会用到的商品事实。</small>
                       </label>
                       <label className="start-field full">
                         <span>本次必须强调的内容（选填）</span>
-                        <textarea disabled={structureSnapshot?.confirmationStatus === "confirmed"} value={briefInput.emphasis_requirements} onChange={(event) => setBriefInput((value) => ({ ...value, emphasis_requirements: event.target.value }))} placeholder={"产品参数：\n- 尺寸：125 × 65 × 40 mm\n- 重量：约 95 g\n- 材质：ABS + 半透明外壳\n- 连接方式：2.4G 无线、蓝牙\n- 按键数量：6 个\n\n必须强调：\n- 橙色半透明外壳\n- 左右对称人体工学结构\n- 轻量化设计\n- 必须展示侧键和滚轮\n\n不得虚构：\n- DPI 数值\n- 续航时间\n- 防水等级\n- 未确认的性能参数"} />
-                        <small>填写已确认的产品参数、事实和必须展示的卖点，模型不得自行补充或修改这些事实。</small>
+                        <textarea disabled={structureSnapshot?.confirmationStatus === "confirmed"} value={briefInput.emphasis_requirements} onChange={(event) => setBriefInput((value) => ({ ...value, emphasis_requirements: event.target.value }))} placeholder="例如突出橙色半透明外壳，并展示侧键和滚轮" />
                       </label>
                       <label className="start-field full">
                         <span>设计方向与禁止内容（选填）</span>
                         <textarea disabled={structureSnapshot?.confirmationStatus === "confirmed"} value={briefInput.design_constraints} onChange={(event) => setBriefInput((value) => ({ ...value, design_constraints: event.target.value }))} placeholder={"设计方向：\n- 整体风格：科技、轻量、年轻化\n- 色彩：橙色半透明外壳，搭配黑色细节\n- 光线：柔和顶光和侧逆光，表现透明材质和轮廓\n- 背景：纯白或浅灰，保持干净\n- 构图：主体居中，完整展示产品轮廓\n- 场景图：可使用电竞桌面或年轻化办公环境\n\n禁止内容：\n- 不改变产品外壳颜色\n- 不增加额外按键、线材或配件\n- 不生成错误品牌 Logo\n- 不添加夸张促销文字或标签\n- 不使用未经确认的 RGB 灯光效果"} />
-                        <small>填写视觉风格和构图要求，以及明确禁止出现的内容；产品参数请填写在上一个输入框。</small>
                       </label>
                     </div>
                     {selectedPlatform && (
@@ -1014,12 +1045,12 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                           <h3 id="structure-plan-title">套图结构要求</h3>
                           <p>主图数量由你确定；详情图由多模态模型在范围内分配。</p>
                         </div>
-                        <span>{selectedChunkIds.length} 条资料 · {images.length} 张图片</span>
+                        <span>{images.length} 张商品图</span>
                       </header>
                       <div className="start-structure-controls">
-                        <label className="start-field"><span>主图总数</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min="1" value={structureInput.main_image_count} onChange={(event) => setStructureInput((value) => ({ ...value, main_image_count: Number(event.target.value) }))} /></label>
-                        <label className="start-field"><span>详情图最少数量</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min="0" value={structureInput.detail_image_count_min} onChange={(event) => setStructureInput((value) => ({ ...value, detail_image_count_min: Number(event.target.value) }))} /></label>
-                        <label className="start-field"><span>详情图最多数量</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min="0" value={structureInput.detail_image_count_max} onChange={(event) => setStructureInput((value) => ({ ...value, detail_image_count_max: Number(event.target.value) }))} /></label>
+                        <label className="start-field"><span>主图总数</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min={SUITE_IMAGE_LIMITS.main.min} max={SUITE_IMAGE_LIMITS.main.max} value={structureInput.main_image_count} onChange={(event) => setStructureInput((value) => ({ ...value, main_image_count: Number(event.target.value) }))} /></label>
+                        <label className="start-field"><span>详情图最少数量</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min={SUITE_IMAGE_LIMITS.detail.min} max={SUITE_IMAGE_LIMITS.detail.max} value={structureInput.detail_image_count_min} onChange={(event) => setStructureInput((value) => ({ ...value, detail_image_count_min: Number(event.target.value) }))} /></label>
+                        <label className="start-field"><span>详情图最多数量</span><input disabled={structureSnapshot?.confirmationStatus === "confirmed"} type="number" min={SUITE_IMAGE_LIMITS.detail.min} max={SUITE_IMAGE_LIMITS.detail.max} value={structureInput.detail_image_count_max} onChange={(event) => setStructureInput((value) => ({ ...value, detail_image_count_max: Number(event.target.value) }))} /></label>
                       </div>
                       <div className="start-category-grid">
                         {DETAIL_CATEGORIES.map(([code, label]) => (
@@ -1041,7 +1072,7 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                           {structureGenerating ? "多模态模型正在规划…" : structureSnapshot ? "重新生成结构建议" : "生成结构建议"}
                           <Icon name="sparkles" />
                         </button>
-                        <span>{structureGenerating ? "正在分析图片、资料和类别要求" : "返回后将在下方步骤 03 展开人工审核"}</span>
+                        <span>{structureGenerating ? "正在分析商品图、简报和类别要求" : "返回后将在下方步骤 03 展开人工审核"}</span>
                       </div>
                     </section>
                   )}
@@ -1087,7 +1118,7 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                     <div><span>主图</span><strong>{mainAllocation.count}</strong></div>
                     <div><span>详情图</span><strong>{structure.detailImageCount}</strong></div>
                     <div><span>已采用类别</span><strong>{structure.categoryAllocations.filter((row) => row.count > 0).length}</strong></div>
-                    <div><span>事实来源</span><strong>{selectedChunkIds.length + (briefInput.human_supplement.trim() ? 1 : 0)}</strong></div>
+                    <div><span>引用的事实来源</span><strong>{new Set([...mainAllocation.factRefs, ...structure.categoryAllocations.flatMap((row) => row.factRefs)]).size}</strong></div>
                   </div>
                   <div className="start-review-toolbar">
                     <div><strong>图片分配</strong><span>主图数量固定，详情图数量可在确认前调整。</span></div>
@@ -1166,7 +1197,7 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                     <div className="start-structure-total">
                       <span>详情图最终总数</span>
                       {structureSnapshot?.confirmationStatus !== "confirmed" ? (
-                        <input aria-label="详情图最终总数" type="number" min="0" value={structure.detailImageCount} onChange={(event) => updateStructure((currentValue) => ({ ...currentValue, detailImageCount: Number(event.target.value) }))} />
+                        <input aria-label="详情图最终总数" type="number" min={SUITE_IMAGE_LIMITS.detail.min} max={SUITE_IMAGE_LIMITS.detail.max} value={structure.detailImageCount} onChange={(event) => updateStructure((currentValue) => ({ ...currentValue, detailImageCount: Number(event.target.value) }))} />
                       ) : (
                         <strong>{structure.detailImageCount}</strong>
                       )}
@@ -1252,27 +1283,21 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
         )}
       </main>
 
-      {ragOpen && (
-        <div className="start-rag-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setRagOpen(false); }}>
-          <section className="start-rag-modal" role="dialog" aria-modal="true" aria-labelledby="rag-modal-title">
-            <header>
-              <div><p className="start-eyebrow">PRODUCT EVIDENCE</p><h2 id="rag-modal-title">商品资料</h2></div>
-              <button type="button" aria-label="关闭商品资料" onClick={() => setRagOpen(false)}>×</button>
-            </header>
-            <RagReferences
-              chunks={chunks}
-              query={query}
-              selectedChunkIds={selectedChunkIds}
-              setQuery={setQuery}
-              setSelectedChunkIds={setSelectedChunkIds}
-              supplement={briefInput.human_supplement}
-              setSupplement={(human_supplement) => setBriefInput((value) => ({ ...value, human_supplement }))}
-              disabled={structureSnapshot?.confirmationStatus === "confirmed"}
-            />
+      {toast && <div className="start-toast show" role="status" aria-live="polite">{toast}</div>}
+      {deletingSuite && (
+        <div className="start-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeletingSuite(null); }}>
+          <section className="start-modal error" role="dialog" aria-modal="true" aria-labelledby="delete-suite-modal-title">
+            <button className="start-modal-close" type="button" aria-label="取消删除" disabled={deleting} onClick={() => setDeletingSuite(null)}>×</button>
+            <p className="start-modal-kicker">DELETE PROJECT</p>
+            <h2 id="delete-suite-modal-title">确认删除方案？</h2>
+            <p className="start-modal-message">确定要删除「{deletingSuite.name}」吗？删除后将从最近项目列表中移除，已归档到资源库的历史图片引用不受影响。</p>
+            <div className="start-modal-actions">
+              <button className="start-modal-cancel" type="button" disabled={deleting} onClick={() => setDeletingSuite(null)}>取消</button>
+              <button className="start-modal-danger" type="button" disabled={deleting} onClick={() => void confirmDeleteSuite()}>{deleting ? "删除中…" : "确认删除"}</button>
+            </div>
           </section>
         </div>
       )}
-      {toast && <div className="start-toast show" role="status" aria-live="polite">{toast}</div>}
       {modal && (
         <div className="start-modal-backdrop" role="presentation">
           <section className={`start-modal ${modal.kind}`} role="dialog" aria-modal="true" aria-labelledby="start-modal-title">

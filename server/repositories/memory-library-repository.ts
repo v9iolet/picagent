@@ -1,3 +1,4 @@
+import { assertReferenceAllowed } from "../library-reference-policy.js";
 import { randomUUID } from "node:crypto";
 import type { LibraryAssetStatus, LibraryReference, LibraryRepository, LibraryResource, LibraryResourceQuery } from "../types.js";
 
@@ -33,13 +34,11 @@ export class MemoryLibraryRepository implements LibraryRepository {
   }
 
   async createReference(input: { suiteId: string; resourceId: string; targetType: "plan" | "task"; targetId: string; idempotencyKey: string; createdBy?: string | null }) {
-    const existingId = this.idempotency.get(`${input.suiteId}:${input.idempotencyKey}`);
-    if (existingId) return { reference: this.references.get(existingId)!, duplicate: true };
     const resource = this.resources.get(input.resourceId);
     if (!resource) throw new Error("LIBRARY_RESOURCE_NOT_FOUND");
-    if (resource.status && resource.status !== "published") throw new Error("LIBRARY_RESOURCE_NOT_PUBLISHED");
-    if (resource.resourceType === "process_image") throw new Error("LIBRARY_PROCESS_IMAGE_NOT_SELECTABLE");
-    if (resource.resourceType === "prompt_template" && ((input.targetType === "plan" && resource.stage !== "plan") || (input.targetType === "task" && resource.stage !== "task_image"))) throw new Error("LIBRARY_STAGE_MISMATCH");
+    assertReferenceAllowed(resource, input.suiteId, input.targetType);
+    const existingId = this.idempotency.get(`${input.suiteId}:${input.idempotencyKey}`);
+    if (existingId) return { reference: this.references.get(existingId)!, duplicate: true };
     const duplicate = [...this.references.values()].find((reference) => reference.suiteId === input.suiteId && reference.resourceId === input.resourceId && reference.targetType === input.targetType && reference.targetId === input.targetId && !reference.archivedAt);
     if (duplicate) { this.idempotency.set(`${input.suiteId}:${input.idempotencyKey}`, duplicate.id); return { reference: duplicate, duplicate: true }; }
     const now = new Date().toISOString();

@@ -1,15 +1,17 @@
+import { PostgresListingRepository } from "./repositories/postgres-listing-copy-repository.js";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { Client as MinioClient } from "minio";
 import { Pool } from "pg";
-import { createTicket02App } from "./app.js";
+import { createSuiteStudioApp } from "./app.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
-import { decodeMultipartFilename, parseMultipartFile } from "./multipart.js";
+import { dispatchInputImageUpload, parseMultipartFile } from "./multipart.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
+import { resolveImageSize } from "../shared/model-settings.js";
 import { PostgresPlanRepository } from "./repositories/postgres-plan-repository.js";
 import { PostgresCategoryPromptRepository } from "./repositories/postgres-category-prompt-repository.js";
 import { PostgresPlatformRepository } from "./repositories/postgres-platform-repository.js";
@@ -19,6 +21,7 @@ import { PostgresTaskRepository } from "./repositories/postgres-task-repository.
 import { PostgresPromptRepository } from "./repositories/postgres-prompt-repository.js";
 import { PostgresLibraryRepository } from "./repositories/postgres-library-repository.js";
 import { PostgresReverseRepository } from "./repositories/postgres-reverse-repository.js";
+import { PostgresPipelineRepository } from "./repositories/postgres-pipeline-repository.js";
 import { MinioStorage } from "./storage/minio-storage.js";
 import { ImageEditorService, type ImageEditProvider, type ImageSource } from "./image-editor.js";
 import { createImageEditorApi } from "./image-editor-api.js";
@@ -29,7 +32,7 @@ import { initializeObservability, shutdownObservability } from "./observability.
 
 const config = loadServerConfig();
 initializeObservability();
-const pool = new Pool({ ...config.postgres, max: 6, connectionTimeoutMillis: 30_000, idleTimeoutMillis: 60_000 });
+const pool = new Pool({ ...config.postgres, max: Math.max(6, Number(process.env.PG_POOL_MAX) || 16), connectionTimeoutMillis: 30_000, idleTimeoutMillis: 60_000 });
 const minio = new MinioClient(config.minio);
 await pool.query("SELECT 1");
 await runMigrations(pool, { recoverStaleAttempts: true });
@@ -63,14 +66,6 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
       currentVersionInput: process.env.IMAGE_EDITOR_CURRENT_VERSION !== "false",
     }),
     edit: async (command, source) => {
-      const structuredInstructions = command.operations.map((operation) => {
-        if (operation.type === "add_text") return `新增文字“${String(operation.payload.text ?? "")}”，区域与样式参数：${JSON.stringify(operation.payload)}`;
-        if (operation.type === "change_text") return `将区域 ${JSON.stringify(operation.payload.region)} 内的原文字“${String(operation.payload.originalText ?? "")}”替换为“${String(operation.payload.newText ?? "")}”，保留原有排版。`;
-        if (operation.type === "outpaint") return `按方向 ${String(operation.payload.direction ?? "all")} 扩展到目标比例 ${String(operation.payload.targetRatio ?? "original")}，保持主体位置与风格。`;
-        if (operation.type === "redraw") return `仅重绘蒙版白色区域，蒙版外保持不变。操作参数：${JSON.stringify(operation.payload)}`;
-        if (operation.type === "erase") return `仅消除蒙版白色区域并修复背景，蒙版外保持不变。操作参数：${JSON.stringify(operation.payload)}`;
-        return String(operation.payload.instruction ?? operation.summary);
-      }).join("\n");
       const maskedOperations = command.operations.filter((operation) => operation.type === "redraw" || operation.type === "erase");
       if (maskedOperations.length > 1) throw new Error("MULTIPLE_MASK_OPERATIONS_UNSUPPORTED");
       const masked = maskedOperations[0];
@@ -82,7 +77,27 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
         if (!stored || stored.contentType !== "image/png") throw new Error("MASK_OBJECT_NOT_FOUND");
         mask = stored.bytes;
       }
-      const result = await imageProvider.edit({ requestId: randomUUID(), flow: "image-editor", endpoint: "/v1/images/edits", image: source.bytes, imageMimeType: source.mimeType, imageFilename: "source.png", model: selected.model, prompt: `${command.prompt}\n\n结构化编辑指令：\n${structuredInstructions}`, size: "1K", quality: "medium", n: 1, responseFormat: "b64_json", mask, maskMimeType: mask ? "image/png" : undefined, maskFilename: mask ? "mask.png" : undefined });
+      // 编辑子卡可继续派生；沿血缘找到源任务版本，优先复用该次出图冻结的最终尺寸。
+      const sourceSize = await pool.query<{ size: string | null; generationParams: Record<string, unknown>; imageType: string }>(
+        `WITH RECURSIVE lineage(version_id) AS (
+          SELECT $1::text
+          UNION
+          SELECT c.source_version_id FROM lineage l
+          JOIN suite_workbench.image_edit_versions ev ON ev.id::text=l.version_id
+          JOIN suite_workbench.image_edit_child_tasks c ON c.id=ev.child_task_id
+        )
+        SELECT a.request_summary_json->>'size' AS size, t.generation_params_json AS "generationParams", t.image_type AS "imageType"
+        FROM lineage l JOIN suite_workbench.task_image_versions v ON v.id::text=l.version_id
+        JOIN suite_workbench.suite_tasks t ON t.id=v.task_id
+        JOIN suite_workbench.task_generation_attempts a ON a.id=v.attempt_id LIMIT 1`,
+        [command.sourceVersionId],
+      );
+      const original = sourceSize.rows[0];
+      const params = original?.generationParams ?? {};
+      const size = original?.size || (original && selected.imageOptions
+        ? resolveImageSize(typeof params.size === "string" ? params.size : "1K", typeof params.ratio === "string" ? params.ratio : original.imageType === "main" ? "1:1" : "3:4", selected.imageOptions.sizeMode)
+        : "1K");
+      const result = await imageProvider.edit({ requestId: randomUUID(), flow: "image-editor", endpoint: "/v1/images/edits", image: source.bytes, imageMimeType: source.mimeType, imageFilename: "source.png", model: selected.model, prompt: command.prompt, size, quality: "medium", n: 1, responseFormat: "b64_json", mask, maskMimeType: mask ? "image/png" : undefined, maskFilename: mask ? "mask.png" : undefined });
       const metadata = await sharp(result.bytes).metadata();
       return { bytes: result.bytes, mimeType: result.mimeType, width: metadata.width ?? source.width, height: metadata.height ?? source.height };
     },
@@ -116,7 +131,7 @@ const validateImageEditSource = async (sourceCardId: string, sourceVersionId: st
   return Boolean(result.rows[0]?.valid);
 };
 const imageEditorApi = createImageEditorApi(new ImageEditorService(new PostgresImageEditorRepository(pool), resolveImageEditorProvider, storage, resolveImageSource, resolveOcrProvider, validateImageEditSource));
-const app = createTicket02App({
+const app = createSuiteStudioApp({
   repository: new PostgresSuiteRepository(pool),
   storage,
   modelSettings,
@@ -125,6 +140,8 @@ const app = createTicket02App({
   planRepository: new PostgresPlanRepository(pool),
   categoryPromptRepository: new PostgresCategoryPromptRepository(pool),
   taskRepository,
+  listingRepository: new PostgresListingRepository(pool),
+  pipelineRepository: new PostgresPipelineRepository(pool),
   imageEditorApi,
   libraryRepository: new PostgresLibraryRepository(pool),
   reverseRepository: new PostgresReverseRepository(pool),
@@ -157,27 +174,17 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   const path = requestUrl.pathname + requestUrl.search;
   const headers = req.headers as Record<string, string | undefined>;
   let response;
-  if (req.method === "POST" && path.endsWith("/input-images")) {
-    const suiteId = path.split("/")[3];
-    const contentType = headers["content-type"] ?? "";
-    const boundary = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/)?.[1] ?? contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/)?.[2];
-    if (!boundary) response = { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "上传请求格式无效" }, requestId: "" } };
-    else {
-      const raw = body.toString("latin1"); const part = raw.split(`--${boundary}`).find((value) => value.includes("filename="));
-      const match = part?.match(/(?:filename\*=[^']*''([^;\r\n]+)|filename="([^"]+)")[\s\S]*?Content-Type:\s*([^\r\n]+)[\r\n]+\r\n([\s\S]*?)\r\n$/i);
-      if (!match) response = { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "未找到图片文件" }, requestId: "" } };
-      else {
-        const encodedFilename = match[1];
-        const filename = decodeMultipartFilename(encodedFilename, match[2]);
-        response = await app.upload(suiteId, { filename, mimeType: match[3], bytes: Buffer.from(match[4], "latin1"), idempotencyKey: headers["idempotency-key"] });
-      }
-    }
+  const upload = req.method === "POST" ? await dispatchInputImageUpload(app, requestUrl.pathname, body, headers) : null;
+  if (upload) {
+    response = upload;
   } else if (req.method === "POST" && /^\/api\/reverse-plans\/[^/]+\/references$/.test(path)) {
     const parsed = parseMultipartFile(body, headers["content-type"] ?? "");
     if (!parsed) response = { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "未找到图片文件" }, requestId: "" } };
     else {
       response = await app.request("POST", path, { headers: headers as Record<string, string>, body: { filename: parsed.filename, mimeType: parsed.mimeType, bytesBase64: parsed.bytes.toString("base64") } });
     }
+  } else if (req.method === "GET" && /^\/api\/listing-copies\/[^/]+\/input-images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname)) {
+    response = await app.request("GET", requestUrl.pathname);
   } else if (req.method === "GET" && path.includes("/preview")) {
     const inputMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/preview\/(original|thumbnail)$/);
     const baseMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/base-versions\/([^/]+)\/preview$/);

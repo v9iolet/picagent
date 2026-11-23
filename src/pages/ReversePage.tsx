@@ -213,7 +213,7 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
         headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
         body: JSON.stringify({}),
       });
-      navigate(`/suites/${result.suiteId}/board`);
+      navigate(`/create/canvas/${result.suiteId}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "导入共享画布失败");
     }

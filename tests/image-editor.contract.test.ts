@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import test from "node:test";
 import sharp from "sharp";
-import { ImageEditorService, MemoryImageEditorRepository, type EditOperation, type ImageEditProvider, type ImageSource } from "../server/image-editor.js";
+import { buildImageEditPrompt, ImageEditorService, MemoryImageEditorRepository, type EditOperation, type ImageEditProvider, type ImageSource } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
+import { DashScopeOcrProvider } from "../server/providers/dashscope-ocr-provider.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 
 const source: ImageSource = { bytes: Buffer.from("source"), mimeType: "image/png", width: 100, height: 100 };
@@ -51,14 +53,20 @@ test("current and final selections are independent", async () => {
   await service.selectVersion(submitted.childTask.id, first.id, "final"); const task = await repository.getChildTask(submitted.childTask.id); assert.equal(task?.currentVersionId, first.id); assert.equal(task?.finalVersionId, first.id);
 });
 
-test("change_text requires OCR and freezes the OCR snapshot", async () => {
+test("change_text allows manual submit without OCR, freezes OCR snapshot when present, and validates required fields", async () => {
   const repository = new MemoryImageEditorRepository();
   const service = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source, { name: "fake-ocr", version: "1", recognize: async () => ({ blocks: [{ id: "text-1", text: "旧文案", confidence: 0.99, bounds: { x: 0.1, y: 0.1, width: 0.3, height: 0.1 }, rotation: 0 }] }) });
   const change: EditOperation = { ...operation("change_text"), payload: { prompt: "替换文字", originalText: "旧文案", newText: "新文案", region: { x: 0.1, y: 0.1, width: 0.3, height: 0.1 } } };
-  await service.upsertOperation({ sessionId: "session", operation: change });
-  await assert.rejects(service.submit({ sessionId: "session", idempotencyKey: "without-ocr", sourceCardId: "parent", sourceVersionId: "version-1" }), /OCR_REQUIRED/);
-  await service.recognize("session", "version-1");
-  const submitted = await service.submit({ sessionId: "session", idempotencyKey: "with-ocr", sourceCardId: "parent", sourceVersionId: "version-1" });
+  await service.upsertOperation({ sessionId: "manual-session", operation: change });
+  const manualSubmitted = await service.submit({ sessionId: "manual-session", idempotencyKey: "without-ocr", sourceCardId: "parent", sourceVersionId: "version-1" });
+  assert.equal(manualSubmitted.snapshot.operations[0].payload.ocrSnapshot, undefined);
+
+  await service.upsertOperation({ sessionId: "invalid-session", operation: { ...operation("change_text"), payload: { prompt: "替换文字", originalText: "", newText: "新文案", region: { x: 0.1, y: 0.1, width: 0.3, height: 0.1 } } } });
+  await assert.rejects(service.submit({ sessionId: "invalid-session", idempotencyKey: "missing-fields", sourceCardId: "parent", sourceVersionId: "version-1" }), /CHANGE_TEXT_FIELDS_REQUIRED/);
+
+  await service.upsertOperation({ sessionId: "ocr-session", operation: change });
+  await service.recognize("ocr-session", "version-1");
+  const submitted = await service.submit({ sessionId: "ocr-session", idempotencyKey: "with-ocr", sourceCardId: "parent", sourceVersionId: "version-1" });
   const frozen = submitted.snapshot.operations[0].payload.ocrSnapshot as { sourceVersionId: string; status: string };
   assert.equal(frozen.sourceVersionId, "version-1"); assert.equal(frozen.status, "succeeded");
 });
@@ -97,17 +105,87 @@ test("regenerate endpoint appends an attempt and version to the same child task"
   await settle(); const task = await repository.getChildTask(firstData.childTask.id); assert.equal(task?.id, firstData.childTask.id); assert.equal((await repository.listAttempts(firstData.childTask.id)).length, 2); assert.equal((await repository.listVersions(firstData.childTask.id)).length, 2);
 });
 
-test("submission freezes the exact source-version prompt and composes operation prompts", async () => {
+test("submission freezes sourcePrompt while compiling pure product-fidelity prompts for local edits and preserving full prompt for re_edit", async () => {
   const repository = new MemoryImageEditorRepository();
   const commands: Array<{ prompt: string }> = [];
-  const service = new ImageEditorService(repository, provider({ edit: async (command) => { commands.push(command); return { bytes: Buffer.from("result"), mimeType: "image/png", width: 100, height: 100 }; } }), new MemoryStorage(), async () => ({ ...source, generationPrompt: "SOURCE VERSION PROMPT" }));
-  await service.upsertOperation({ sessionId: "session", operation: { ...operation("add_text"), payload: { text: "新品主视觉", region: { x: 0.2, y: 0.3, width: 0.4, height: 0.1 }, prompt: "使用醒目的无衬线标题，与画面光线融合" } } });
-  const submitted = await service.submit({ sessionId: "session", idempotencyKey: "prompt-compose", sourceCardId: "parent", sourceVersionId: "version-1", summary: "添加文字" });
+  const service = new ImageEditorService(
+    repository,
+    provider({ edit: async (command) => { commands.push(command); return { bytes: Buffer.from("result"), mimeType: "image/png", width: 100, height: 100 }; } }),
+    new MemoryStorage(),
+    async () => ({ ...source, generationPrompt: "SOURCE VERSION PROMPT" }),
+    { name: "fake-ocr", version: "1", recognize: async () => ({ blocks: [{ id: "b1", text: "旧标语", confidence: 0.99, bounds: { x: 0.1, y: 0.1, width: 0.5, height: 0.2 }, rotation: 0 }] }) },
+  );
+  await service.recognize("session", "version-1");
+  await service.upsertOperation({ sessionId: "session", operation: { ...operation("add_text"), operationId: "op-add", payload: { text: "新品主视觉", region: { x: 0.2, y: 0.3, width: 0.4, height: 0.1 }, prompt: "使用醒目的无衬线标题，与画面光线融合" } } });
+  await service.upsertOperation({ sessionId: "session", operation: { ...operation("change_text"), operationId: "op-change", payload: { originalText: "旧标语", newText: "新标语", region: { x: 0.1, y: 0.1, width: 0.5, height: 0.2 }, prompt: "保持字体一致" } } });
+  await service.upsertOperation({ sessionId: "session", operation: { ...operation("redraw"), operationId: "op-redraw", payload: { prompt: "替换为柔和木纹桌面", strokes: [{ points: [{ x: 0.1, y: 0.2 }, { x: 0.3, y: 0.4 }], width: 0.1 }] } } });
+  const submitted = await service.submit({ sessionId: "session", idempotencyKey: "prompt-compose", sourceCardId: "parent", sourceVersionId: "version-1", summary: "组合局部修改" });
   assert.equal(submitted.snapshot.sourcePrompt, "SOURCE VERSION PROMPT");
   await settle();
-  assert.match(commands[0].prompt, /SOURCE VERSION PROMPT/);
-  assert.match(commands[0].prompt, /新品主视觉/);
-  assert.match(commands[0].prompt, /使用醒目的无衬线标题/);
+  const localPrompt = commands[0].prompt;
+  assert.match(localPrompt, /严格保持输入图片中的商品主体外观/);
+  assert.match(localPrompt, /横向约 20%–60%/);
+  assert.match(localPrompt, /新品主视觉/);
+  assert.match(localPrompt, /使用醒目的无衬线标题/);
+  assert.match(localPrompt, /顶部居中区域（横向约 10%–60%，纵向约 10%–30%）/);
+  assert.match(localPrompt, /旧标语.*新标语/);
+  assert.match(localPrompt, /仅重绘蒙版白色选区：替换为柔和木纹桌面/);
+  assert.doesNotMatch(localPrompt, /SOURCE VERSION PROMPT/);
+  assert.doesNotMatch(localPrompt, /strokes/);
+  assert.doesNotMatch(localPrompt, /ocrSnapshot/);
+
+  const reEditPrompt = buildImageEditPrompt([{ ...operation("re_edit"), payload: { prompt: "完整重编辑提示词" } }], "SOURCE VERSION PROMPT");
+  assert.equal(reEditPrompt, "完整重编辑提示词");
+});
+
+test("DashScopeOcrProvider downscales large images to <=1280px JPEG and maps network/timeout errors to readable Chinese", async (t) => {
+  const bigPng = await sharp({ create: { width: 2400, height: 2000, channels: 3, background: { r: 245, g: 245, b: 245 } } }).png().toBuffer();
+  let capturedBody: Record<string, unknown> | null = null;
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    capturedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ blocks: [] }) } }] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address() as { port: number };
+  const ocrProvider = new DashScopeOcrProvider(`http://127.0.0.1:${address.port}/v1`, "test-key", "qwen-vl-ocr");
+  await ocrProvider.recognize({ bytes: bigPng, mimeType: "image/png", width: 2400, height: 2000 });
+
+  const messages = (capturedBody as { messages: Array<{ content: unknown }> }).messages;
+  const userContent = messages[1].content as Array<{ image_url?: { url?: string } }>;
+  const imageUrl = userContent[1].image_url?.url ?? "";
+  assert.match(imageUrl, /^data:image\/jpeg;base64,/);
+  const decoded = Buffer.from(imageUrl.slice("data:image/jpeg;base64,".length), "base64");
+  const meta = await sharp(decoded).metadata();
+  assert.equal(meta.format, "jpeg");
+  assert.ok((meta.width ?? 0) <= 1280 && (meta.height ?? 0) <= 1280);
+
+  const repository = new MemoryImageEditorRepository();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError("fetch failed"); };
+  try {
+    const failingService = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source, ocrProvider);
+    const snap = await failingService.recognize("net-fail", "version-1");
+    assert.equal(snap.status, "failed");
+    assert.match(snap.error ?? "", /文字识别服务连接失败/);
+    assert.doesNotMatch(snap.error ?? "", /fetch failed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const hangServer = http.createServer(() => { /* keep open to trigger abort timeout */ });
+  await new Promise<void>((resolve) => hangServer.listen(0, "127.0.0.1", resolve));
+  t.after(() => hangServer.close());
+  const hangPort = (hangServer.address() as { port: number }).port;
+  const timeoutOcr = new DashScopeOcrProvider(`http://127.0.0.1:${hangPort}/v1`, "test-key", "qwen-vl-ocr", 40);
+  const timeoutService = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source, timeoutOcr);
+  const timeoutSnap = await timeoutService.recognize("timeout", "version-1");
+  assert.equal(timeoutSnap.status, "failed");
+  assert.match(timeoutSnap.error ?? "", /文字识别请求超时/);
+  assert.doesNotMatch(timeoutSnap.error ?? "", /OCR_TIMEOUT/);
 });
 
 test("mask eraser strokes subtract from previously painted mask pixels", async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
@@ -16,7 +16,7 @@ test("reverse task binds up to three white resources and freezes ordered multi-i
   let receivedImages = 0;
   const provider: ImageProvider = { supportsMultipleImages: true, edit: async (request) => { receivedImages = request.images?.length ?? 0; return { bytes: png, mimeType: "image/png" }; } };
   const llm: LlmClient = { provider: "qwen", model: "qwen-vl-max", isFake: true, generatePlan: async () => ({}), generateReversePrompt: async ({ referenceImageId }) => ({ schemaVersion: "reverse-prompt-v1", referenceImageId, prompt: "使用产品白底图作为唯一外观来源。" }) };
-  const api = createTicket02App({ repository: suites, storage, taskRepository: tasks, libraryRepository: library, promptRepository: prompts, llmClient: llm, provider });
+  const api = createSuiteStudioApp({ repository: suites, storage, taskRepository: tasks, libraryRepository: library, promptRepository: prompts, llmClient: llm, provider });
   const plan = await api.request("POST", "/api/reverse-plans", { body: { mode: "main" } }); const planId = (plan.body as any).data.id;
   const uploaded = await api.request("POST", `/api/reverse-plans/${planId}/references`, { body: { filename: "爆品.png", mimeType: "image/png", bytesBase64: png.toString("base64") } }); const refId = (uploaded.body as any).data.id;
   await api.request("PATCH", `/api/reverse-plans/${planId}/references/${refId}`, { body: { templateVersionId: template.templateVersionId } }); await api.request("POST", `/api/reverse-plans/${planId}/references/${refId}/run`); await new Promise((resolve) => setTimeout(resolve, 10));

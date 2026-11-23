@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
@@ -15,7 +15,7 @@ const llm: LlmClient = { provider: "qwen", model: "qwen-vl-max", isFake: true, g
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 test("reverse plan persists validated image, template, model output and user prompt version", async () => {
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts, llmClient: llm });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts, llmClient: llm });
   const created = await api.request("POST", "/api/reverse-plans", { headers: { "idempotency-key": "plan-1" }, body: { mode: "main" } });
   assert.equal(created.status, 201); const planId = (created.body as any).data.id;
   const uploaded = await api.request("POST", `/api/reverse-plans/${planId}/references`, { headers: { "idempotency-key": "ref-1" }, body: { filename: "a.png", mimeType: "image/png", bytesBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" } });
@@ -34,7 +34,7 @@ test("a completed reverse attempt does not remove a reference uploaded while it 
       finishReverse = () => resolve({ schemaVersion: "reverse-prompt-v1", referenceImageId, prompt: "保留最新方案中的全部参考图。" });
     }),
   };
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts, llmClient: delayedLlm });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts, llmClient: delayedLlm });
   const created = await api.request("POST", "/api/reverse-plans", { body: { mode: "main" } });
   const planId = (created.body as any).data.id;
   const first = await api.request("POST", `/api/reverse-plans/${planId}/references`, { body: { filename: "first.png", mimeType: "image/png", bytesBase64: pngBase64 } });
@@ -54,7 +54,7 @@ test("a completed reverse attempt does not remove a reference uploaded while it 
 });
 
 test("concurrent reverse reference uploads preserve every image", async () => {
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts, llmClient: llm });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts, llmClient: llm });
   const created = await api.request("POST", "/api/reverse-plans", { body: { mode: "main" } });
   const planId = (created.body as any).data.id;
   const firstBytes = Buffer.concat([Buffer.from(pngBase64, "base64"), Buffer.from([1])]).toString("base64");
@@ -72,13 +72,13 @@ test("concurrent reverse reference uploads preserve every image", async () => {
 
 test("successful reverse results import as an idempotent task group and preserve source snapshots", async () => {
   const storage = new MemoryStorage(); const reverse = new MemorySuiteRepository(); const tasks = new MemoryTaskRepository(); const library = new MemoryLibraryRepository();
-  const api = createTicket02App({ repository: reverse, storage, taskRepository: tasks, libraryRepository: library, promptRepository: prompts, llmClient: llm });
+  const api = createSuiteStudioApp({ repository: reverse, storage, taskRepository: tasks, libraryRepository: library, promptRepository: prompts, llmClient: llm });
   const created = await api.request("POST", "/api/reverse-plans", { headers: { "idempotency-key": "canvas-plan" }, body: { mode: "detail" } }); const planId = (created.body as any).data.id;
   const uploaded = await api.request("POST", `/api/reverse-plans/${planId}/references`, { headers: { "idempotency-key": "canvas-ref" }, body: { filename: "detail.png", mimeType: "image/png", bytesBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" } }); const refId = (uploaded.body as any).data.id;
   await api.request("PATCH", `/api/reverse-plans/${planId}/references/${refId}`, { body: { templateVersionId: detailTemplate.templateVersionId } }); await api.request("POST", `/api/reverse-plans/${planId}/references/${refId}/run`); await new Promise((resolve) => setTimeout(resolve, 10));
   const imported = await api.request("POST", `/api/reverse-plans/${planId}/canvas-imports`, { headers: { "idempotency-key": "canvas-import" }, body: { name: "反推套图" } }); assert.equal(imported.status, 201); const suiteId = (imported.body as any).data.suiteId; assert.equal((imported.body as any).data.taskIds.length, 1);
   const duplicate = await api.request("POST", `/api/reverse-plans/${planId}/canvas-imports`, { headers: { "idempotency-key": "canvas-import" }, body: { name: "反推套图" } }); assert.equal(duplicate.status, 200); assert.equal((duplicate.body as any).data.duplicate, true);
-  const workbench = await api.request("GET", `/api/suites/${suiteId}/workbench`); const task = (workbench.body as any).data.tasks.find((item: any) => item.originKind === "reverse_import"); assert.ok(task); assert.equal(task.planSnapshotId, null); assert.equal(task.reversePlanId, planId); assert.equal(task.reverseReferenceId, refId);
+  const workbench = await api.request("GET", `/api/suites/${suiteId}/workbench`); const task = (workbench.body as any).data.tasks.find((item: any) => item.originKind === "reverse_import"); assert.equal((workbench.body as any).data.suite.origin, "canvas"); assert.ok(task); assert.equal(task.planSnapshotId, null); assert.equal(task.reversePlanId, planId); assert.equal(task.reverseReferenceId, refId);
 });
 
 test("ReversePage copies FileList into an array before resetting file input value", async () => {

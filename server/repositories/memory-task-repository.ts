@@ -4,7 +4,41 @@ import type { CanvasLayout, InputImage, PlanSnapshot, SuiteTask, TaskGenerationA
 export class MemoryTaskRepository implements TaskRepository {
   private tasks = new Map<string, SuiteTask>(); private batches = new Map<string, TaskGenerationBatch>();
   private slots = new Map<string, TaskResultSlot>(); private attempts = new Map<string, TaskGenerationAttempt>();
-  private versions = new Map<string, TaskImageVersion>(); private batchKeys = new Map<string, string>(); private layouts = new Map<string, CanvasLayout>(); private reverseKeys = new Map<string, string[]>();
+  private versions = new Map<string, TaskImageVersion>(); private batchKeys = new Map<string, string>(); private layouts = new Map<string, CanvasLayout>(); private reverseKeys = new Map<string, string[]>(); private customTaskKeys = new Map<string, string>();
+  async createCustomTask(input: { suiteId: string; planSnapshotId: string | null; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }) {
+    if (input.idempotencyKey) {
+      const existingId = this.customTaskKeys.get(`${input.suiteId}:${input.idempotencyKey}`);
+      if (existingId && this.tasks.has(existingId)) return { task: this.tasks.get(existingId)!, duplicate: true };
+    }
+    const now = new Date().toISOString();
+    const existing = await this.listTasks(input.suiteId);
+    const ordinal = existing.reduce((max, item) => Math.max(max, item.ordinal), 0) + 1;
+    const task: SuiteTask = {
+      id: randomUUID(),
+      suiteId: input.suiteId,
+      planSnapshotId: input.planSnapshotId,
+      planItemId: null,
+      ordinal,
+      imageType: input.imageType,
+      title: input.title,
+      purpose: input.purpose,
+      promptDraft: input.promptDraft,
+      promptRevision: 1,
+      sourceInputImageId: input.sourceInputImageId,
+      generationParams: { size: "1K", quality: "medium", ...input.generationParams },
+      status: input.sourceInputImageId ? "pending" : "incomplete",
+      archivedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      originKind: "suite_plan",
+      referenceImageIds: input.sourceInputImageId ? [input.sourceInputImageId] : [],
+      factRefs: [],
+      promptSha256: taskPromptHash(input.promptDraft),
+    };
+    this.tasks.set(task.id, task);
+    if (input.idempotencyKey) this.customTaskKeys.set(`${input.suiteId}:${input.idempotencyKey}`, task.id);
+    return { task, duplicate: false };
+  }
   async createTasksFromSnapshot(suiteId: string, snapshot: PlanSnapshot, inputImages: InputImage[]) {
     const now = new Date().toISOString();
     const activePlanItemIds = new Set(snapshot.items.map((item) => item.id));

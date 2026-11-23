@@ -1,3 +1,5 @@
+import { listingFieldEnabled, type ListingContent, type ListingRules } from "./listing-config.js";
+
 export type DeliverySourceRole = "edit_final" | "parent_final" | "edit_current" | "parent_current" | "pending";
 
 export interface DeliveryVersionLike {
@@ -96,6 +98,23 @@ export function applyStyleOverrideToPrompt(prompt: string, styleOverride?: strin
   }
   const trimmed = prompt.trim();
   return trimmed ? `${line}\n${trimmed}` : line;
+}
+
+export function extractCardPromptPreview(prompt: string, fallbackPurpose?: string): string {
+  const categoryPrefix = "当前类别提示词：";
+  const categoryStart = prompt.indexOf(categoryPrefix);
+  if (categoryStart >= 0) {
+    const description = prompt.slice(categoryStart + categoryPrefix.length)
+      .replace(/(?:^|\r?\n)[^\S\r\n]*单卡人工补充：\s*无\s*$/, "")
+      .trim();
+    return description.replace(/\r\n/g, "\n") || fallbackPurpose?.trim() || prompt;
+  }
+
+  const constraint = /^\s*(?:系统安全约束|平台约束|商品事实约束|全局风格卡)：/;
+  const lines = prompt.split(/\r?\n/);
+  const description = lines.filter((line) => !constraint.test(line));
+  if (description.length === lines.length && prompt.trim()) return prompt;
+  return description.join("\n").trim() || fallbackPurpose?.trim() || prompt;
 }
 
 export function sanitizeDeliveryName(value: string, fallback: string): string {
@@ -381,69 +400,82 @@ export interface DirectedEdgeLike {
   target: string;
 }
 
-const LANE_CARD_SIZES: Record<LaneNodeKind, { width: number; height: number }> = {
-  style: { width: 256, height: 210 },
-  base: { width: 224, height: 240 },
-  "reverse-ref": { width: 224, height: 240 },
-  task: { width: 296, height: 390 },
-  "edit-child": { width: 296, height: 390 },
+export type LaneCardSize = { width: number; height: number };
+
+export interface LaneLayoutOptions {
+  ignoreSavedPositions?: boolean;
+  measuredSizes?: ReadonlyMap<string, LaneCardSize>;
+}
+
+const LANE_CARD_SIZES: Record<LaneNodeKind, LaneCardSize> = {
+  style: { width: 256, height: 260 },
+  base: { width: 224, height: 280 },
+  "reverse-ref": { width: 224, height: 280 },
+  task: { width: 320, height: 540 },
+  "edit-child": { width: 320, height: 520 },
 };
 
 export function computeWorkbenchLanes(
   items: LaneLayoutItem[],
   savedPositions: ReadonlyMap<string, LanePosition> = new Map(),
-  options: { ignoreSavedPositions?: boolean } = {},
+  { ignoreSavedPositions, measuredSizes }: LaneLayoutOptions = {},
 ): Map<string, LanePosition> {
-  const ignoreSaved = Boolean(options.ignoreSavedPositions);
+  const columnGap = 44;
+  const rowGap = 40;
+  const top = 28;
+  const left = 32;
   const positions = new Map<string, LanePosition>();
-  const occupied: Array<{ x: number; y: number; width: number; height: number }> = [];
+  const savedBoxes: Array<LanePosition & LaneCardSize> = [];
+  const sizeOf = (item: LaneLayoutItem) => measuredSizes?.get(item.id) ?? LANE_CARD_SIZES[item.kind];
 
-  const collides = (pos: LanePosition, size: { width: number; height: number }) =>
-    occupied.some((box) =>
-      pos.x < box.x + box.width + 20 &&
-      pos.x + size.width + 20 > box.x &&
-      pos.y < box.y + box.height + 20 &&
-      pos.y + size.height + 20 > box.y);
-
-  const commit = (id: string, kind: LaneNodeKind, preferred: LanePosition): LanePosition => {
-    const size = LANE_CARD_SIZES[kind];
-    let pos = { ...preferred };
-    for (let attempt = 0; attempt < 80 && collides(pos, size); attempt += 1) {
-      pos = { x: pos.x, y: pos.y + size.height + 24 };
+  // Keep manual positions on reload. Place new cards around those existing cards.
+  if (!ignoreSavedPositions) {
+    for (const item of items) {
+      const saved = savedPositions.get(item.id);
+      if (!saved) continue;
+      positions.set(item.id, { ...saved });
+      savedBoxes.push({ ...saved, ...sizeOf(item) });
     }
-    occupied.push({ ...pos, ...size });
-    positions.set(id, pos);
-    return pos;
+    savedBoxes.sort((a, b) => a.y - b.y);
+  }
+
+  const place = (item: LaneLayoutItem, x: number, startY: number) => {
+    if (positions.has(item.id)) return startY;
+    const { width, height } = sizeOf(item);
+    let y = startY;
+    for (const box of savedBoxes) {
+      if (x < box.x + box.width + columnGap && x + width + columnGap > box.x &&
+        y < box.y + box.height + rowGap && y + height + rowGap > box.y) {
+        y = box.y + box.height + rowGap;
+      }
+    }
+    positions.set(item.id, { x, y });
+    return y + height + rowGap;
   };
 
   const leftItems = items.filter((item) => item.kind === "style" || item.kind === "base" || item.kind === "reverse-ref");
   const taskItems = items.filter((item) => item.kind === "task");
   const childItems = items.filter((item) => item.kind === "edit-child");
 
-  let leftY = 28;
+  let leftY = top;
   for (const item of leftItems) {
-    const saved = ignoreSaved ? undefined : savedPositions.get(item.id);
-    const pos = commit(item.id, item.kind, saved ?? { x: 32, y: leftY });
-    if (!saved) leftY = pos.y + LANE_CARD_SIZES[item.kind].height + 24;
+    leftY = place(item, left, leftY);
   }
 
   const taskColumns = taskItems.length > 3 ? 2 : 1;
+  const taskX = left + Math.max(LANE_CARD_SIZES.style.width, ...leftItems.map((item) => sizeOf(item).width)) + columnGap;
+  const taskWidth = Math.max(LANE_CARD_SIZES.task.width, ...taskItems.map((item) => sizeOf(item).width));
+  const colY = Array<number>(taskColumns).fill(top);
   taskItems.forEach((item, index) => {
-    const saved = ignoreSaved ? undefined : savedPositions.get(item.id);
     const col = index % taskColumns;
-    const row = Math.floor(index / taskColumns);
-    const preferred = saved ?? { x: 348 + col * 336, y: 28 + row * 424 };
-    commit(item.id, item.kind, preferred);
+    colY[col] = place(item, taskX + col * (taskWidth + columnGap), colY[col]);
   });
 
-  const rightLaneX = 348 + taskColumns * 336 + 44;
-  let rightFallbackY = 28;
+  const rightLaneX = taskX + taskColumns * (taskWidth + columnGap);
+  let rightY = top;
   for (const item of childItems) {
-    const saved = ignoreSaved ? undefined : savedPositions.get(item.id);
-    const parentPos = item.parentId ? positions.get(item.parentId) : undefined;
-    const preferred = saved ?? { x: rightLaneX, y: parentPos ? parentPos.y : rightFallbackY };
-    const placed = commit(item.id, item.kind, preferred);
-    if (!saved) rightFallbackY = Math.max(rightFallbackY, placed.y + LANE_CARD_SIZES["edit-child"].height + 24);
+    const parentY = item.parentId ? positions.get(item.parentId)?.y ?? top : top;
+    rightY = place(item, rightLaneX, Math.max(rightY, parentY));
   }
 
   return positions;
@@ -499,4 +531,333 @@ export function computeLineageHighlight(
   }
 
   return { highlightedNodeIds, highlightedEdgeIds };
+}
+
+export const SUPPORTED_OUTPUT_LANGUAGES = [
+  { value: "英文", label: "英文 (English · US/UK/AU)", code: "en" },
+  { value: "中文", label: "中文 (简体中文 · 国内电商)", code: "zh-CN" },
+  { value: "日语", label: "日语 (日本語 · Amazon JP)", code: "ja" },
+  { value: "德语", label: "德语 (Deutsch · Amazon DE)", code: "de" },
+  { value: "法语", label: "法语 (Français · Amazon FR)", code: "fr" },
+  { value: "西班牙语", label: "西班牙语 (Español · ES/MX)", code: "es" },
+  { value: "韩语", label: "韩语 (한국어 · Coupang)", code: "ko" },
+  { value: "泰语", label: "泰语 (ไทย · Shopee/Lazada TH)", code: "th" },
+  { value: "越南语", label: "越南语 (Tiếng Việt · VN)", code: "vi" },
+  { value: "俄语", label: "俄语 (Русский · Ozon/WB)", code: "ru" },
+  { value: "葡萄牙语", label: "葡萄牙语 (Português · BR)", code: "pt" },
+  { value: "阿拉伯语", label: "阿拉伯语 (العربية · Noon/AE)", code: "ar" },
+] as const;
+
+export type DeliveryExportPresetId = "original" | "amazon" | "taobao" | "tiktok" | "shopify";
+export type DeliveryExportFormat = "original" | "png" | "jpeg" | "webp";
+
+export interface DeliveryExportPreset {
+  id: DeliveryExportPresetId;
+  label: string;
+  description: string;
+  defaultFormat: DeliveryExportFormat;
+  defaultQuality: number;
+  mainBox?: { width: number; height: number; fit: "contain" | "cover" };
+  detailWidth?: number;
+  minMainSide?: number;
+}
+
+export const DELIVERY_EXPORT_PRESETS: Record<DeliveryExportPresetId, DeliveryExportPreset> = {
+  original: {
+    id: "original",
+    label: "原图无损",
+    description: "保留模型生成的原始分辨率与格式，适合二次精修与归档。",
+    defaultFormat: "original",
+    defaultQuality: 92,
+    minMainSide: 800,
+  },
+  amazon: {
+    id: "amazon",
+    label: "Amazon 跨境规范",
+    description: "主图 2000×2000 白底补边 JPG（满足缩放要求），详情图 1600px 宽 JPG。",
+    defaultFormat: "jpeg",
+    defaultQuality: 90,
+    mainBox: { width: 2000, height: 2000, fit: "contain" },
+    detailWidth: 1600,
+    minMainSide: 1000,
+  },
+  taobao: {
+    id: "taobao",
+    label: "淘宝 / 天猫规范",
+    description: "主图 800×800 JPG，详情页 790px 宽 JPG（支持一键无缝长图拼接）。",
+    defaultFormat: "jpeg",
+    defaultQuality: 88,
+    mainBox: { width: 800, height: 800, fit: "contain" },
+    detailWidth: 790,
+    minMainSide: 800,
+  },
+  tiktok: {
+    id: "tiktok",
+    label: "TikTok Shop 规范",
+    description: "主图 1080×1080 JPG，详情图 1080px 宽适配移动端竖屏浏览。",
+    defaultFormat: "jpeg",
+    defaultQuality: 90,
+    mainBox: { width: 1080, height: 1080, fit: "contain" },
+    detailWidth: 1080,
+    minMainSide: 800,
+  },
+  shopify: {
+    id: "shopify",
+    label: "Shopify 独立站 WebP",
+    description: "主图 2048×2048 WebP，详情 1600px 宽 WebP，兼顾高清与秒开加载。",
+    defaultFormat: "webp",
+    defaultQuality: 88,
+    mainBox: { width: 2048, height: 2048, fit: "contain" },
+    detailWidth: 1600,
+    minMainSide: 1000,
+  },
+};
+
+export interface DeliveryComplianceCheck {
+  id: string;
+  label: string;
+  status: "pass" | "warn" | "fail";
+  detail: string;
+}
+
+export interface DeliveryComplianceReport {
+  presetId: DeliveryExportPresetId;
+  score: number;
+  totalSlots: number;
+  deliverableCount: number;
+  finalizedCount: number;
+  checks: DeliveryComplianceCheck[];
+}
+
+export function evaluateDeliveryCompliance(
+  slots: ResolvedDeliverySlot[],
+  presetId: DeliveryExportPresetId = "original",
+): DeliveryComplianceReport {
+  const preset = DELIVERY_EXPORT_PRESETS[presetId] ?? DELIVERY_EXPORT_PRESETS.original;
+  const totalSlots = slots.length;
+  const deliverable = slots.filter((slot) => slot.sourceRole !== "pending");
+  const mainDeliverable = deliverable.filter((slot) => slot.imageType === "main");
+  const finalized = deliverable.filter((slot) => slot.sourceRole === "edit_final" || slot.sourceRole === "parent_final");
+  const minMainSide = preset.minMainSide ?? 800;
+
+  const checks: DeliveryComplianceCheck[] = [];
+
+  if (totalSlots === 0) {
+    checks.push({ id: "slots", label: "套图坑位完整性", status: "fail", detail: "尚无任务坑位，请先在规划页或创作板创建任务。" });
+  } else if (deliverable.length === totalSlots) {
+    checks.push({ id: "slots", label: "套图坑位完整性", status: "pass", detail: `全部 ${totalSlots} 个坑位均已出图，可直接打包交付。` });
+  } else {
+    checks.push({
+      id: "slots",
+      label: "套图坑位完整性",
+      status: deliverable.length > 0 ? "warn" : "fail",
+      detail: `已出图 ${deliverable.length}/${totalSlots}，仍有 ${totalSlots - deliverable.length} 个坑位待生成。`,
+    });
+  }
+
+  if (!deliverable.length) {
+    checks.push({ id: "final", label: "终版人工确认率", status: "fail", detail: "尚无可确认的成品版本。" });
+  } else if (finalized.length === deliverable.length) {
+    checks.push({ id: "final", label: "终版人工确认率", status: "pass", detail: `全部 ${finalized.length} 张交付图已由设计师显式设为终版。` });
+  } else {
+    checks.push({
+      id: "final",
+      label: "终版人工确认率",
+      status: "warn",
+      detail: `${finalized.length}/${deliverable.length} 已设终版，其余将按规则自动回退当前版导出。`,
+    });
+  }
+
+  const lowResMains = mainDeliverable.filter((slot) => {
+    const longest = Math.max(slot.width ?? 0, slot.height ?? 0);
+    return longest > 0 && longest < minMainSide;
+  });
+  if (!mainDeliverable.length) {
+    checks.push({ id: "resolution", label: `主图分辨率达标（≥${minMainSide}px）`, status: "warn", detail: "暂无已生成的主图可供校验。" });
+  } else if (!lowResMains.length) {
+    checks.push({
+      id: "resolution",
+      label: `主图分辨率达标（≥${minMainSide}px）`,
+      status: "pass",
+      detail: `${mainDeliverable.length} 张主图均满足 ${preset.label} 清晰度要求。`,
+    });
+  } else {
+    checks.push({
+      id: "resolution",
+      label: `主图分辨率达标（≥${minMainSide}px）`,
+      status: "warn",
+      detail: `${lowResMains.length} 张主图原图最长边不足 ${minMainSide}px（导出平台预设时将自动缩放补齐，建议源图升级 2K）。`,
+    });
+  }
+
+  const missingTrace = deliverable.filter((slot) => !slot.promptText.trim());
+  checks.push({
+    id: "trace",
+    label: "提示词快照可追溯性",
+    status: deliverable.length > 0 && !missingTrace.length ? "pass" : deliverable.length ? "warn" : "fail",
+    detail: deliverable.length === 0
+      ? "等待出图后生成不可变溯源快照。"
+      : !missingTrace.length
+        ? "全部交付图均携带完整冻结提示词与模型血缘，自动写入 manifest.json。"
+        : `有 ${missingTrace.length} 张图片缺少完整提示词快照。`,
+  });
+
+  const weight = checks.reduce((sum, item) => sum + (item.status === "pass" ? 1 : item.status === "warn" ? 0.55 : 0), 0);
+  const score = checks.length ? Math.round((weight / checks.length) * 100) : 0;
+
+  return {
+    presetId: preset.id,
+    score,
+    totalSlots,
+    deliverableCount: deliverable.length,
+    finalizedCount: finalized.length,
+    checks,
+  };
+}
+
+export interface OutpaintPreviewBox {
+  targetWidth: number;
+  targetHeight: number;
+  anchor: "center" | "left" | "right";
+  /** Normalized 0..1 position of the original image inside the expanded target frame */
+  innerX: number;
+  innerY: number;
+  innerWidth: number;
+  innerHeight: number;
+}
+
+export function computeOutpaintPreviewBox(
+  sourceWidth: number,
+  sourceHeight: number,
+  direction: "all" | "horizontal" | "vertical" | "left" | "right",
+  targetRatio: "original" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9",
+): OutpaintPreviewBox {
+  const safeW = Math.max(1, sourceWidth);
+  const safeH = Math.max(1, sourceHeight);
+  const sourceRatio = safeW / safeH;
+  const ratioMap: Record<typeof targetRatio, number | null> = {
+    original: null,
+    "1:1": 1,
+    "3:4": 3 / 4,
+    "4:3": 4 / 3,
+    "9:16": 9 / 16,
+    "16:9": 16 / 9,
+  };
+  const desiredRatio = ratioMap[targetRatio] ?? sourceRatio;
+  let targetWidth = safeW;
+  let targetHeight = safeH;
+  if (targetRatio === "original") {
+    if (direction === "all") {
+      targetWidth = Math.ceil(safeW * 1.25);
+      targetHeight = Math.ceil(safeH * 1.25);
+    } else if (direction === "horizontal" || direction === "left" || direction === "right") {
+      targetWidth = Math.ceil(safeW * 1.3);
+    } else if (direction === "vertical") {
+      targetHeight = Math.ceil(safeH * 1.3);
+    }
+  } else if (sourceRatio < desiredRatio) {
+    targetWidth = Math.max(safeW, Math.ceil(safeH * desiredRatio));
+  } else {
+    targetHeight = Math.max(safeH, Math.ceil(safeW / desiredRatio));
+  }
+
+  const innerWidth = Math.min(1, safeW / targetWidth);
+  const innerHeight = Math.min(1, safeH / targetHeight);
+  const anchor: "center" | "left" | "right" = direction === "left" ? "right" : direction === "right" ? "left" : "center";
+  const innerX = anchor === "left" ? 0 : anchor === "right" ? 1 - innerWidth : (1 - innerWidth) / 2;
+  const innerY = (1 - innerHeight) / 2;
+
+  return { targetWidth, targetHeight, anchor, innerX, innerY, innerWidth, innerHeight };
+}
+
+export interface ListingCopyMarkdownInput {
+  suiteName: string;
+  platformName?: string;
+  marketScope?: string;
+  job: {
+    platform: string;
+    targetMarket: string;
+    outputLanguage: string;
+  };
+  version: {
+    versionNumber: number;
+    createdAt: string;
+    content: ListingContent;
+  };
+  rules?: ListingRules;
+  exportedAt: string;
+}
+
+/** Formats a listing-copy version into a UTF-8 Markdown document for delivery ZIP export. */
+export function formatListingCopyMarkdown(input: ListingCopyMarkdownInput): string {
+  const { suiteName, platformName, marketScope, job, version, rules, exportedAt } = input;
+  const content = version.content;
+  const domestic = marketScope === "domestic";
+  const lines: string[] = [
+    `# ${suiteName} — 商品上架文案`,
+    "",
+    `- 目标平台：${platformName ? `${platformName} (${job.platform})` : job.platform}`,
+    `- 目标市场：${job.targetMarket}`,
+    `- 输出语言：${job.outputLanguage}`,
+    `- 版本号：v${version.versionNumber}`,
+    `- 导出时间：${exportedAt}`,
+    "",
+  ];
+
+  const pushTextSection = (heading: string, value?: string) => {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+    lines.push(`## ${heading}`, "", trimmed, "");
+  };
+
+  lines.push("## 标题", "", content.title?.trim() || "（空）", "");
+
+  if (listingFieldEnabled("itemHighlights", rules) || content.itemHighlights?.trim()) {
+    pushTextSection("商品亮点 (Item Highlights)", content.itemHighlights);
+  }
+
+  if (listingFieldEnabled("subtitle", rules) || content.subtitle?.trim()) {
+    pushTextSection("促销副标题", content.subtitle);
+  }
+
+  const bullets = (content.bulletPoints ?? []).map((item) => item.trim()).filter(Boolean);
+  lines.push(`## ${domestic ? "卖点短句" : "五点描述"}`, "");
+  if (bullets.length) {
+    bullets.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
+  } else {
+    lines.push("（空）");
+  }
+  lines.push("");
+
+  lines.push("## 商品描述", "", content.description?.trim() || "（空）", "");
+
+  const searchTerms = (content.searchTerms ?? []).map((item) => item.trim()).filter(Boolean);
+  if ((listingFieldEnabled("searchTerms", rules) || searchTerms.length > 0) && searchTerms.length > 0) {
+    lines.push("## 后台搜索词", "", searchTerms.join(" "), "");
+    for (const term of searchTerms) lines.push(`- ${term}`);
+    lines.push("");
+  }
+
+  const tags = (content.tags ?? []).map((item) => item.trim()).filter(Boolean);
+  if ((listingFieldEnabled("tags", rules) || tags.length > 0) && tags.length > 0) {
+    lines.push("## 商品标签 (Tags)", "", tags.join(", "), "");
+    for (const tag of tags) lines.push(`- ${tag}`);
+    lines.push("");
+  }
+
+  if (listingFieldEnabled("seoTitle", rules) || content.seoTitle?.trim()) {
+    pushTextSection("SEO Meta Title", content.seoTitle);
+  }
+
+  if (listingFieldEnabled("seoDescription", rules) || content.seoDescription?.trim()) {
+    pushTextSection("SEO Meta Description", content.seoDescription);
+  }
+
+  const hashtags = (content.hashtags ?? []).map((item) => item.trim()).filter(Boolean);
+  if ((listingFieldEnabled("hashtags", rules) || hashtags.length > 0) && hashtags.length > 0) {
+    const formatted = hashtags.map((tag) => (tag.startsWith("#") ? tag : `#${tag}`));
+    lines.push("## 话题标签 (#Tag)", "", formatted.join(" "), "");
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
 }

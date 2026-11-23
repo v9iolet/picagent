@@ -4,10 +4,11 @@ import { MemoryPromptRepository } from "../server/repositories/memory-prompt-rep
 import { parsePromptMarkdown } from "../server/prompt-library.js";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { ModelSettings, type ModelSettingsState } from "../server/model-settings.js";
+import { resolveImageSize } from "../shared/model-settings.js";
 
 const path = "/api/model-settings";
 const channel = {
@@ -24,7 +25,7 @@ function setup() {
     read: async () => structuredClone(state),
     update: async (change) => { state = change(structuredClone(state)); return structuredClone(state); },
   });
-  const createApp = () => createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), modelSettings: settings });
+  const createApp = () => createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), modelSettings: settings });
   return { api: createApp(), settings, createApp };
 }
 
@@ -102,7 +103,7 @@ test("base refinement uses the selected channel, retains its source, and switche
   const prompts = new MemoryPromptRepository();
   const [version] = await prompts.importRecords(parsePromptMarkdown("### 产品图转干净产品底图返修提示词\n\n```plain\n白底精修\n```", "prompt.md"));
   await prompts.publishVersion(version.templateVersionId);
-  const api = createTicket02App({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), modelSettings: settings, promptRepository: prompts });
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), modelSettings: settings, promptRepository: prompts });
   const suite = await api.request("POST", "/api/suites", { body: { name: "白底精修" } });
   const uploaded = await api.upload(suite.body.data.id, { bytes: png, filename: "product.png", mimeType: "image/png" });
   const imagePath = `/api/suites/${suite.body.data.id}/input-images/${uploaded.body.data.id}`;
@@ -159,4 +160,60 @@ test("updates the two default preferences independently and protects their chann
 
   assert.deepEqual((await preferences({ image: null })).body.data.preferences, { image: null, vision });
   assert.equal((await api.request("DELETE", imageChannelPath)).status, 200);
+});
+
+test("image options round-trip through channels and resolve with legacy model defaults", async () => {
+  const { api, settings } = setup();
+  const imageOptions = { sizes: ["1K", "2K"], aspectRatios: ["1:1", "2:3"], sizeMode: "pixels" };
+  const created = await api.request("POST", path + "/channels", { body: {
+    ...channel, models: [{ id: "gpt-image-2.5-flare-special", capabilities: ["image"], imageOptions }],
+  } });
+  const saved = created.body.data.channels[0];
+  assert.deepEqual(saved.models[0].imageOptions, imageOptions);
+  await api.request("PATCH", path + "/preferences", { body: { image: { channelId: saved.id, modelId: saved.models[0].id } } });
+  assert.deepEqual((await settings.resolve("image"))?.imageOptions, imageOptions);
+  assert.deepEqual((await api.request("GET", path)).body.data.channels[0].models[0].imageOptions, imageOptions);
+  await api.request("PUT", path + "/channels/" + saved.id, { body: {
+    ...channel, models: [{ id: saved.models[0].id, capabilities: ["image"] }],
+  } });
+  assert.deepEqual((await settings.resolve("image"))?.imageOptions, {
+    sizes: ["1K", "2K", "4K"], aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "16:9", "9:16"], sizeMode: "pixels",
+  });
+  await api.request("PATCH", path + "/preferences", { body: { image: null } });
+  await api.request("PUT", path + "/channels/" + saved.id, { body: channel });
+  await api.request("PATCH", path + "/preferences", { body: { image: { channelId: saved.id, modelId: "shared-model" } } });
+  assert.deepEqual((await settings.resolve("image"))?.imageOptions, {
+    sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "tier",
+  });
+});
+
+test("invalid image options are rejected without losing the saved capability configuration", async () => {
+  const { api } = setup();
+  for (const imageOptions of [
+    { sizes: [], aspectRatios: ["1:1"], sizeMode: "pixels" },
+    { sizes: ["8K"], aspectRatios: ["1:1"], sizeMode: "pixels" },
+    { sizes: ["1K"], aspectRatios: ["0:3"], sizeMode: "pixels" },
+    { sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "unknown" },
+  ]) {
+    assert.equal((await api.request("POST", path + "/channels", { body: { ...channel, models: [{ ...channel.models[0], imageOptions }] } })).status, 400);
+  }
+  assert.deepEqual((await api.request("GET", path)).body.data.channels, []);
+});
+
+test("pixel conversion maps seven aspect ratios at 1K, 2K and 4K", () => {
+  const cases = [
+    ["1:1", "1024x1024", "2048x2048", "2880x2880"],
+    ["2:3", "1024x1536", "2048x3072", "2880x4320"],
+    ["3:2", "1536x1024", "3072x2048", "4320x2880"],
+    ["3:4", "1024x1360", "2048x2736", "2880x3840"],
+    ["4:3", "1360x1024", "2736x2048", "3840x2880"],
+    ["16:9", "1824x1024", "3648x2048", "5120x2880"],
+    ["9:16", "1024x1824", "2048x3648", "2880x5120"],
+  ];
+  for (const [ratio, ...pixels] of cases) {
+    assert.deepEqual(["1K", "2K", "4K"].map((size) => resolveImageSize(size, ratio, "pixels")), pixels, ratio);
+  }
+  assert.equal(resolveImageSize("2K", "3:4", "tier"), "2K");
+  assert.throws(() => resolveImageSize("8K", "1:1", "pixels"), /IMAGE_SIZE_UNSUPPORTED/);
+  assert.throws(() => resolveImageSize("1K", "0:1", "pixels"), /IMAGE_SIZE_UNSUPPORTED/);
 });

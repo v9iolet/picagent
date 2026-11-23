@@ -1,51 +1,41 @@
 # PicAgent Studio · 电商智能生图工作台
 
-PicAgent 桌面端套图工作台独立项目。
-
-当前已建立 Ticket 01 的正式前端应用骨架，后续能力按 `docs/PRD-套图工作台-V1.md` 逐步接入。
+面向跨境与国内电商的桌面端商品视觉与上架内容工作台。支持上传商品实拍原图一键生成合规主图、卖点图、生活场景图及 16 平台差异化商品上架文案，并提供共享 XYFlow 生图画布、AI 局部图片编辑器、爆品图反推与图片/模板资产库。
 
 ## 本地运行
 
-```powershell
+按 `.env.example` 在 `.env` 中配置 PostgreSQL 与 MinIO 连接信息：
+
+```bash
 npm install
 npm run api
-# 在另一个终端启动前端
+# 在另一个终端启动前端开发服务
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-按 `.env.example` 在 `.env` 中配置 PostgreSQL、MinIO 等基础设施。启动后，在左侧「配置 → 渠道」填写 OpenAI 兼容渠道、API Key 和模型 ID，再到「偏好设置」选择默认生图和多模态模型。接口地址填写兼容 API 的基础地址，例如 `https://api.example.com/v1`。仅填域名时使用 `/v1`；如果网关有自定义路径，请填写完整 API 前缀。
+启动后，在左侧导航「配置 → 渠道」添加 OpenAI 兼容协议渠道、API Key 与模型 ID（勾选生图 / 多模态能力并按账号分组调整支持的分辨率与比例），随后在「偏好设置」选择默认生图模型与默认多模态视觉模型。
 
-既有实例升级后也请在配置页手动补录渠道和默认模型。补录后即可提交新的生成任务。历史图片和提示词快照继续可读。
+## 核心入口与路由
 
-可访问路由：
+- `/create/suite`（及 `/create/suite/:suiteId`）：AI 商品套图一键生成、多阶段进度追踪、原地图片精修与批次历史
+- `/create/canvas`（及 `/create/canvas/:suiteId`）：三泳道生图画布、全局风格覆盖、AI 局部图片编辑与多平台成品交付视图（`?view=gallery`，支持打包导出图片、`listing-copy.md` 与 `manifest.json`）
+- `/reverse`（及 `/reverse/:planId`）：爆品参考图逐张视觉结构与提示词反推，一键导入共享生图画布
+- `/assets`、`/templates`：图片资产库与提示词模板库（支持草稿编辑、版本发布与在线回溯）
+- `/settings`、`/settings/preferences`：模型渠道与全局默认模型偏好设置
 
-- `/suites/new`
-- `/suites/:suiteId`
-- `/suites/:suiteId/board`
-- `/settings`
-- `/settings/preferences`
+## 校验与构建
 
-类型检查与生产构建：
-
-```powershell
+```bash
 npm run typecheck
 npm run build
+npx tsx --test tests/*.test.ts
+npm run test:pg
 ```
 
-## 当前范围
+## 文档索引
 
-- 桌面端，不做移动端；
-- 1–6 张原图上传、白底精修、套图计划、卡片生成和历史版本；
-- 生图和多模态模型在配置页维护，由实例内成员共用；
-- PostgreSQL 和 MinIO 使用服务器实例；
-- 登录界面与权限暂不作为首版工作台开发阻塞项。
-
-## 文档
-
-- [套图工作台 V1 PRD](docs/PRD-套图工作台-V1.md)
-- [生图网关接口示例](docs/gpt-image-2.md)
-- [原型基准说明](docs/原型基准说明.md)
-
-## 原型
-
-原型入口位于 `prototype/index.html`。后续套图工作台开发以 `prototype/` 中的套图创建首页和套图创作工作台为交互与页面结构基准。
+- [领域词汇与当前共识](CONTEXT.md)
+- [架构决策记录 (ADR 0001–0008)](docs/adr/)
+- [Agent 协作规范](AGENTS.md)
+- [生图网关接口与规格实测记录](docs/gpt-image-2.md)
+- [平台规范维护参考](docs/平台维护表-海外优先.md)

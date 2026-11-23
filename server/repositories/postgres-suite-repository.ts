@@ -6,7 +6,7 @@ import type {
   GenerationAttempt,
   InputImage,
   Suite,
-  SuiteRepository,
+  SuiteRepository, SuiteOrigin,
 } from "../types.js";
 
 const inputImageColumns = `id, suite_id AS "suiteId", ordinal, original_object_key AS "originalObjectKey",
@@ -21,9 +21,45 @@ const versionColumns = `id, suite_id AS "suiteId", input_image_id AS "inputImage
   version_number AS "versionNumber", object_key AS "objectKey", sha256, width, height, mime_type AS "mimeType",
   created_at AS "createdAt"`;
 
+function toIsoString(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function toNullableIsoString(value: Date | string | null | undefined): string | null {
+  if (value == null) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function normalizeSuite(suite: Suite): Suite {
+  return {
+    ...suite,
+    ...("styleOverrideUpdatedAt" in suite
+      ? { styleOverrideUpdatedAt: toNullableIsoString(suite.styleOverrideUpdatedAt) }
+      : {}),
+    createdAt: toIsoString(suite.createdAt),
+    updatedAt: toIsoString(suite.updatedAt),
+  };
+}
+
+function normalizeAttempt(attempt: GenerationAttempt): GenerationAttempt {
+  return {
+    ...attempt,
+    createdAt: toIsoString(attempt.createdAt),
+    completedAt: toNullableIsoString(attempt.completedAt),
+  };
+}
+
+function normalizeBaseVersion(version: BaseImageVersion): BaseImageVersion {
+  return {
+    ...version,
+    createdAt: toIsoString(version.createdAt),
+  };
+}
+
 function withPreviewUrls(image: Omit<InputImage, "originalPreviewUrl" | "thumbnailPreviewUrl">): InputImage {
   return {
     ...image,
+    createdAt: toIsoString(image.createdAt),
     originalPreviewUrl: `/api/suites/${image.suiteId}/input-images/${image.id}/preview/original`,
     thumbnailPreviewUrl: `/api/suites/${image.suiteId}/input-images/${image.id}/preview/thumbnail`,
   };
@@ -32,7 +68,7 @@ function withPreviewUrls(image: Omit<InputImage, "originalPreviewUrl" | "thumbna
 export class PostgresSuiteRepository implements SuiteRepository {
   constructor(private readonly pool: Pool) {}
 
-  async createSuite(name: string, idempotencyKey?: string) {
+  async createSuite(name: string, idempotencyKey?: string, origin: SuiteOrigin = "suite_studio") {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -44,8 +80,8 @@ export class PostgresSuiteRepository implements SuiteRepository {
           return suite!;
         }
       }
-      const result = await client.query<Suite>("INSERT INTO suite_workbench.suites (id, name, status, created_at, updated_at) VALUES (gen_random_uuid(), $1, 'draft', now(), now()) RETURNING id, name, status, created_at AS \"createdAt\", updated_at AS \"updatedAt\"", [name]);
-      const suite = result.rows[0];
+      const result = await client.query<Suite>("INSERT INTO suite_workbench.suites (id, name, status, origin, created_at, updated_at) VALUES (gen_random_uuid(), $1, 'draft', $2, now(), now()) RETURNING id, name, status, origin, created_at AS \"createdAt\", updated_at AS \"updatedAt\"", [name, origin]);
+      const suite = normalizeSuite(result.rows[0]);
       if (idempotencyKey) await client.query("INSERT INTO suite_workbench.idempotency_keys (scope, key, resource_id) VALUES ($1, $2, $3)", ["suite.create", idempotencyKey, suite.id]);
       await client.query("COMMIT");
       return suite;
@@ -58,22 +94,38 @@ export class PostgresSuiteRepository implements SuiteRepository {
   }
 
   async listSuites() {
-    const result = await this.pool.query<Suite>("SELECT id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites ORDER BY updated_at DESC LIMIT 30");
-    return result.rows;
+    const result = await this.pool.query<Suite>("SELECT id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE deleted_at IS NULL ORDER BY created_at DESC");
+    return result.rows.map(normalizeSuite);
   }
 
   async getSuite(id: string, client: Pool | PoolClient = this.pool) {
-    const result = await client.query<Suite>("SELECT id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE id = $1", [id]);
+    const result = await client.query<Suite>("SELECT id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE id = $1 AND deleted_at IS NULL", [id]);
+    return result.rows[0] ? normalizeSuite(result.rows[0]) : null;
+  }
+
+  async renameSuite(suiteId: string, name: string) {
+    const result = await this.pool.query<Suite>(
+      "UPDATE suite_workbench.suites SET name = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
+      [suiteId, name.trim()],
+    );
+    return result.rows[0] ? normalizeSuite(result.rows[0]) : null;
+  }
+
+  async deleteSuite(suiteId: string) {
+    const result = await this.pool.query<{ id: string }>(
+      "UPDATE suite_workbench.suites SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id",
+      [suiteId],
+    );
     return result.rows[0] ?? null;
   }
 
   async updateSuiteStyleOverride(suiteId: string, styleOverride: string | null) {
     const cleaned = styleOverride?.trim() ? styleOverride.trim() : null;
     const result = await this.pool.query<Suite>(
-      "UPDATE suite_workbench.suites SET style_override = $2, style_override_updated_at = CASE WHEN $2 IS NULL THEN NULL ELSE now() END, updated_at = now() WHERE id = $1 RETURNING id, name, status, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
+      "UPDATE suite_workbench.suites SET style_override = $2, style_override_updated_at = CASE WHEN $2 IS NULL THEN NULL ELSE now() END, updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\"",
       [suiteId, cleaned],
     );
-    return result.rows[0] ?? null;
+    return result.rows[0] ? normalizeSuite(result.rows[0]) : null;
   }
 
   async getInputImages(suiteId: string) {
@@ -153,7 +205,7 @@ export class PostgresSuiteRepository implements SuiteRepository {
       if (existing.rowCount) {
         const version = await client.query<BaseImageVersion>(`SELECT ${versionColumns} FROM suite_workbench.base_image_versions WHERE id = $1`, [existing.rows[0].baseVersionId]);
         await client.query("COMMIT");
-        return { attempt: existing.rows[0], existingVersion: version.rows[0] ?? null, duplicate: true };
+        return { attempt: normalizeAttempt(existing.rows[0]), existingVersion: version.rows[0] ? normalizeBaseVersion(version.rows[0]) : null, duplicate: true };
       }
       const next = await client.query<{ version_number: number }>("SELECT COALESCE(MAX(version_number), 0) + 1 AS version_number FROM suite_workbench.generation_attempts WHERE input_image_id = $1 AND status IN ('running', 'succeeded')", [input.inputImageId]);
       const result = await client.query<GenerationAttempt>(`INSERT INTO suite_workbench.generation_attempts
@@ -164,7 +216,7 @@ export class PostgresSuiteRepository implements SuiteRepository {
         input.model, input.endpoint, input.prompt, input.promptTemplateVersionId, JSON.stringify(input.dynamicInput), input.size,
         input.quality, input.n, input.responseFormat, input.createdAt, input.channel ? JSON.stringify(input.channel) : null]);
       await client.query("COMMIT");
-      return { attempt: result.rows[0], existingVersion: null, duplicate: false };
+      return { attempt: normalizeAttempt(result.rows[0]), existingVersion: null, duplicate: false };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -188,7 +240,7 @@ export class PostgresSuiteRepository implements SuiteRepository {
       await client.query("UPDATE suite_workbench.input_images SET current_base_version_id = $2 WHERE id = $1", [attempt.inputImageId, attempt.baseVersionId]);
       await client.query("UPDATE suite_workbench.suites SET updated_at = $2 WHERE id = $1", [attempt.suiteId, input.completedAt]);
       await client.query("COMMIT");
-      return { attempt: completed.rows[0], version: versionResult.rows[0] };
+      return { attempt: normalizeAttempt(completed.rows[0]), version: normalizeBaseVersion(versionResult.rows[0]) };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -200,22 +252,22 @@ export class PostgresSuiteRepository implements SuiteRepository {
   async failBaseGeneration(attemptId: string, errorCode: string, errorMessage: string, completedAt: string) {
     const result = await this.pool.query<GenerationAttempt>(`UPDATE suite_workbench.generation_attempts SET status = 'failed', error_code = $2, error_message = $3, completed_at = $4 WHERE id = $1 AND status = 'running' RETURNING ${attemptColumns}`, [attemptId, errorCode, errorMessage, completedAt]);
     if (!result.rows[0]) throw new Error("INVALID_GENERATION_ATTEMPT");
-    return result.rows[0];
+    return normalizeAttempt(result.rows[0]);
   }
 
   async listBaseImageVersions(suiteId: string, inputImageId: string) {
     const result = await this.pool.query<BaseImageVersion>(`SELECT ${versionColumns} FROM suite_workbench.base_image_versions WHERE suite_id = $1 AND input_image_id = $2 ORDER BY version_number DESC`, [suiteId, inputImageId]);
-    return result.rows;
+    return result.rows.map(normalizeBaseVersion);
   }
 
   async listGenerationAttempts(suiteId: string, inputImageId: string) {
     const result = await this.pool.query<GenerationAttempt>(`SELECT ${attemptColumns} FROM suite_workbench.generation_attempts WHERE suite_id = $1 AND input_image_id = $2 ORDER BY created_at DESC`, [suiteId, inputImageId]);
-    return result.rows;
+    return result.rows.map(normalizeAttempt);
   }
 
   async getBaseImageVersion(suiteId: string, inputImageId: string, versionId: string) {
     const result = await this.pool.query<BaseImageVersion>(`SELECT ${versionColumns} FROM suite_workbench.base_image_versions WHERE suite_id = $1 AND input_image_id = $2 AND id = $3`, [suiteId, inputImageId, versionId]);
-    return result.rows[0] ?? null;
+    return result.rows[0] ? normalizeBaseVersion(result.rows[0]) : null;
   }
 
   async selectBaseImageVersion(suiteId: string, inputImageId: string, versionId: string) {
@@ -230,7 +282,7 @@ export class PostgresSuiteRepository implements SuiteRepository {
       await client.query("UPDATE suite_workbench.input_images SET current_base_version_id = $3 WHERE suite_id = $1 AND id = $2", [suiteId, inputImageId, versionId]);
       await client.query("UPDATE suite_workbench.suites SET updated_at = now() WHERE id = $1", [suiteId]);
       await client.query("COMMIT");
-      return version.rows[0];
+      return normalizeBaseVersion(version.rows[0]);
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

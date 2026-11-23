@@ -1,8 +1,35 @@
 export type ModelCapability = "image" | "vision";
 
+export interface ImageOptions {
+  sizes: string[];
+  aspectRatios: string[];
+  sizeMode: "tier" | "pixels";
+}
+
+export function defaultImageOptions(modelId: string): ImageOptions {
+  // omyai 的 flare-special 验证记录见 docs/gpt-image-2.md；系列默认值可由渠道显式覆盖。
+  return /^gpt-image-2(?:[.-]|$)/i.test(modelId)
+    ? { sizes: ["1K", "2K", "4K"], aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "16:9", "9:16"], sizeMode: "pixels" }
+    : { sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "tier" };
+}
+
+export function resolveImageSize(size: string, ratio: string, sizeMode: ImageOptions["sizeMode"]): string {
+  if (sizeMode === "tier") return size;
+  // 短边沿用实测方图档位；长边取最近的 16 像素，3:4 两种请求（1365/1360）实出均为 1360。
+  // 这是请求尺寸而非成品保证：1K 9:16 请求 1024x1824，实出 1027x1824。高档位组合未逐一验证。
+  const shortEdge = ({ "1K": 1024, "2K": 2048, "4K": 2880 } as Record<string, number>)[size];
+  const match = /^(\d+):(\d+)$/.exec(ratio);
+  const width = Number(match?.[1]);
+  const height = Number(match?.[2]);
+  if (!shortEdge || !width || !height || !Number.isFinite(width / height)) throw new Error("IMAGE_SIZE_UNSUPPORTED");
+  const longEdge = 16 * Math.round(shortEdge * Math.max(width, height) / Math.min(width, height) / 16);
+  return width >= height ? `${longEdge}x${shortEdge}` : `${shortEdge}x${longEdge}`;
+}
+
 export interface ChannelModel {
   id: string;
   capabilities: ModelCapability[];
+  imageOptions?: ImageOptions;
 }
 
 export interface ModelReference {

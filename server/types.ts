@@ -1,12 +1,15 @@
+import type { ListingConfigInput } from "../shared/listing-config.js";
 import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import type { PromptStage } from "./prompt-library.js";
 
 export type SuiteStatus = "draft" | "in_progress";
+export type SuiteOrigin = "suite_studio" | "canvas";
 
 export interface Suite {
   id: string;
   name: string;
   status: SuiteStatus;
+  origin?: SuiteOrigin;
   styleOverride?: string | null;
   styleOverrideUpdatedAt?: string | null;
   createdAt: string;
@@ -38,9 +41,11 @@ export interface ResponseEnvelope<T> { data: T; requestId: string }
 export interface ErrorEnvelope { error: { code: string; message: string }; requestId: string }
 
 export interface SuiteRepository {
-  createSuite(name: string, idempotencyKey?: string): Promise<Suite>;
+  createSuite(name: string, idempotencyKey?: string, origin?: SuiteOrigin): Promise<Suite>;
   listSuites(): Promise<Suite[]>;
   getSuite(id: string): Promise<Suite | null>;
+  renameSuite?(suiteId: string, name: string): Promise<Suite | null>;
+  deleteSuite?(suiteId: string): Promise<{ id: string } | null>;
   updateSuiteStyleOverride(suiteId: string, styleOverride: string | null): Promise<Suite | null>;
   getInputImages(suiteId: string): Promise<InputImage[]>;
   hasInputImageHash(suiteId: string, sha256: string): Promise<boolean>;
@@ -69,9 +74,11 @@ export interface PromptRepository {
 }
 
 export interface PlatformProfile {
+  listingCopyRules?: import("../shared/listing-config.js").ListingRules;
   code: string;
   name: string;
   marketScope: "overseas" | "domestic";
+  mainImageBackground: "pure_white_required" | "white_preferred" | "flexible";
   mainImageStrategy: string;
   galleryStrategy: string;
   textStrategy: string;
@@ -154,7 +161,7 @@ export interface ImageEditRequest {
   imageFilename: string;
   model: string;
   prompt: string;
-  size: "1K";
+  size: string;
   quality: "medium";
   n: 1;
   responseFormat: "b64_json";
@@ -176,7 +183,7 @@ export interface RagClient {
 }
 export interface PlanLlmInput {
   requestId?: string; templateVersionId: string; templateBody: string; userPromptTemplate?: string; dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>;
-  chunks: RagChunk[]; inputImageIds: string[]; baseVersionIds: string[]; visionImages?: PlanVisionImage[]; platformProfile?: PlatformProfile; flow?: "plan" | "category-prompt";
+  chunks: RagChunk[]; inputImageIds: string[]; baseVersionIds: string[]; visionImages?: PlanVisionImage[]; platformProfile?: PlatformProfile; flow?: "plan" | "category-prompt" | "listing-copy";
 }
 export interface CategoryPromptLlmInput extends PlanLlmInput {
   categoryCode: string;
@@ -191,6 +198,7 @@ export interface LlmClient {
   generatePlan(input: PlanLlmInput): Promise<unknown>;
   generateCategoryPrompt?(input: CategoryPromptLlmInput): Promise<unknown>;
   generateReversePrompt?(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; referenceMimeType?: string; baselineImage?: Buffer; baselineMimeType?: string; mode: "main" | "detail" }): Promise<unknown>;
+  translateTexts?(input: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }): Promise<Array<{ id: string; originalText: string; translatedText: string }>>;
 }
 export type PlanAttemptStatus = "running" | "succeeded" | "failed";
 export interface PlanItem {
@@ -245,9 +253,39 @@ export interface PlanSnapshot {
   requestSummary: Record<string, unknown>; rawOutputSummary: Record<string, unknown>; schemaVersion: string; items: PlanItem[]; createdAt: string;
   phase?: "legacy_plan" | "structure_plan";
   confirmationStatus?: "draft" | "confirmed";
+  confirmationMode?: "auto" | "human";
   confirmedAt?: string | null;
   structure?: PlanStructure;
   categoryOutputs?: Record<string, { status: "succeeded" | "failed" | "running"; requestedCount: number; items: Array<Record<string, unknown>>; errorCode?: string | null; errorMessage?: string | null }>;
+}
+
+export type SuitePipelineStatus = "running" | "waiting_base_refine_decision" | "waiting_human_input" | "completed" | "partial_failed" | "failed";
+export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "done";
+export interface SuitePipelineRun {
+  id: string;
+  suiteId: string;
+  idempotencyKey: string;
+  status: SuitePipelineStatus;
+  currentPhase: SuitePipelinePhase;
+  resumeCount?: number;
+  lastResumeKey?: string | null;
+  resumeKeys?: string[];
+  structureSnapshotId?: string | null;
+  taskIds?: string[];
+  config: ListingConfigInput & Record<string, unknown>;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+export interface PipelineRepository {
+  createRun(run: SuitePipelineRun): Promise<{ run: SuitePipelineRun; duplicate: boolean }>;
+  getRun(id: string): Promise<SuitePipelineRun | null>;
+  getLatestRun(suiteId: string): Promise<SuitePipelineRun | null>;
+  listRuns(suiteId: string): Promise<SuitePipelineRun[]>;
+  resumeRun(previous: SuitePipelineRun, key: string, phase: SuitePipelinePhase, config: SuitePipelineRun["config"]): Promise<SuitePipelineRun | null>;
+  updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>): Promise<SuitePipelineRun | null>;
 }
 export interface PlanAttempt {
   id: string; suiteId: string; idempotencyKey: string; status: PlanAttemptStatus; templateVersionId: string;
@@ -371,6 +409,7 @@ export interface CanvasLayoutGroup { groupKey: string; x: number; y: number; wid
 export interface CanvasLayout { id: string; suiteId: string; layoutVersion: number; viewport: { x: number; y: number; zoom: number }; nodes: CanvasLayoutNode[]; groups: CanvasLayoutGroup[]; updatedAt: string }
 export interface TaskRepository {
   createTasksFromSnapshot(suiteId: string, snapshot: PlanSnapshot, inputImages: InputImage[]): Promise<{ tasks: SuiteTask[]; created: SuiteTask[] }>;
+  createCustomTask?(input: { suiteId: string; planSnapshotId: string | null; imageType: TaskImageType; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }): Promise<{ task: SuiteTask; duplicate: boolean }>;
   createReverseTasks(input: { suiteId: string; reversePlanId: string; taskGroupId: string; mode: ReverseMode; idempotencyKey: string; items: Array<{ referenceId: string; ordinal: number; filename: string; promptVersionId: string; prompt: string }> }): Promise<{ tasks: SuiteTask[]; created: SuiteTask[]; duplicate: boolean }>;
   getTask(taskId: string): Promise<SuiteTask | null>;
   listTasks(suiteId: string): Promise<SuiteTask[]>;

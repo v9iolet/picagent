@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
-import { createTicket02App } from "../server/app.js";
+import { createSuiteStudioApp } from "../server/app.js";
 import { MemoryCategoryPromptRepository } from "../server/repositories/memory-category-prompt-repository.js";
 import { MemoryPlanRepository } from "../server/repositories/memory-plan-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
@@ -12,12 +12,13 @@ import type { PlanSnapshot } from "../server/types.js";
 
 const image = Buffer.from("fake-image");
 
-async function fixture(outputFor: (category: string, count: number) => unknown, options: { confirmed?: boolean; emphasisRequirements?: string } = {}) {
+async function fixture(outputFor: (category: string, count: number) => unknown, options: { confirmed?: boolean; emphasisRequirements?: string; comparison?: boolean; dynamicInput?: Record<string, unknown>; templatePath?: string } = {}) {
   const repository = new MemorySuiteRepository();
   const storage = new MemoryStorage();
   const prompts = new MemoryPromptRepository();
-  const markdown = await (await import("node:fs/promises")).readFile("prompt/normalized/general-category-prompt.md", "utf8");
-  const template = parseNormalizedPromptMarkdown(markdown, "general-category-prompt.md");
+  const templatePath = options.templatePath ?? "prompt/normalized/general-category-prompt.md";
+  const markdown = await (await import("node:fs/promises")).readFile(templatePath, "utf8");
+  const template = parseNormalizedPromptMarkdown(markdown, templatePath);
   const [published] = await prompts.importRecords([template]);
   await prompts.publishVersion(published.templateVersionId);
   const suite = await repository.createSuite("类别提示词");
@@ -28,11 +29,16 @@ async function fixture(outputFor: (category: string, count: number) => unknown, 
     id: randomUUID(), suiteId: suite.id, revisionNumber: 1, revisionKind: "human", parentSnapshotId: null,
     templateVersionId: published.templateVersionId, dynamicInput: { platform: "Amazon", output_language: "中文", human_supplement: "人工确认：包装内含一条充电线。", ...(options.emphasisRequirements ? { emphasis_requirements: options.emphasisRequirements } : {}) }, humanInput: {}, chunks: [], inputImageIds: ["img-1"], baseVersionIds: [], provider: { name: "fake", model: "fake", isFake: true }, requestSummary: {}, rawOutputSummary: {}, schemaVersion: "suite-structure-plan-v2", items: [], phase: "structure_plan", confirmationStatus: options.confirmed === false ? "draft" : "confirmed", confirmedAt: new Date().toISOString(), structure: { status: "READY_FOR_REVIEW", mainAllocation: { category: "main", count: 1, reason: "主图组", sourceImageIds: ["img-1"], factRefs: ["human_supplement"], missingFacts: [] }, detailImageCount: 2, categoryAllocations: [{ category: "lifestyle_use", requirement: "required", count: 1, reason: "使用场景", sourceImageIds: ["img-1"], factRefs: ["human_supplement"], missingFacts: [] }, { category: "material_detail", requirement: "optional", count: 1, reason: "材质", sourceImageIds: ["img-1"], factRefs: [], missingFacts: [] }], globalStyleCard: { promptPrefix: "干净中性的统一电商摄影风格" } }, createdAt: new Date().toISOString(),
   };
+  Object.assign(snapshot.dynamicInput, options.dynamicInput);
+  if (options.comparison && snapshot.structure && "mainAllocation" in snapshot.structure) {
+    snapshot.structure.categoryAllocations.push({ category: "comparison", requirement: "optional", count: 1, reason: "同款规格对比", sourceImageIds: ["img-1"], factRefs: ["human_supplement"], missingFacts: [] });
+    snapshot.structure.detailImageCount += 1;
+  }
   await plans.appendRevision(snapshot);
   const categoryRequests = new MemoryCategoryPromptRepository();
   let calls = 0;
   const inputs: Array<Parameters<NonNullable<import("../server/types.js").LlmClient["generateCategoryPrompt"]>>[0]> = [];
-  const app = createTicket02App({ repository, storage, promptRepository: prompts, planRepository: plans, categoryPromptRepository: categoryRequests, llmClient: { provider: "fake", model: "qwen-test", isFake: true, async generatePlan() { return {}; }, async generateCategoryPrompt(input) { calls += 1; inputs.push(input); return outputFor(input.categoryCode, input.requestedCount); } } });
+  const app = createSuiteStudioApp({ repository, storage, promptRepository: prompts, planRepository: plans, categoryPromptRepository: categoryRequests, llmClient: { provider: "fake", model: "qwen-test", isFake: true, async generatePlan() { return {}; }, async generateCategoryPrompt(input) { calls += 1; inputs.push(input); return outputFor(input.categoryCode, input.requestedCount); } } });
   return { app, suite, snapshot, template: published, categoryRequests, inputs, get calls() { return calls; } };
 }
 
@@ -135,4 +141,26 @@ test("normalizes the observed QWEN array and snake_case category output without 
   assert.equal(main.items[0].stableId, "main-observed-1");
   assert.match(main.items[0].prompt, /构图：居中完整展示/);
   assert.match(main.items[0].prompt, /负面约束：不得增加配件/);
+});
+
+test("comparison prompts receive self-comparison guardrails, aspect ratio and platform background from the frozen plan", async () => {
+  const fixtureData = await fixture((category, count) => output(category, count), {
+    comparison: true,
+    templatePath: "prompt/normalized/general-category-prompt-groups.md",
+    dynamicInput: { aspect_ratio: "3:4", main_image_background: "pure_white_required", target_market_country: "美国" },
+  });
+  const started = await fixtureData.app.request("POST", `/api/suites/${fixtureData.suite.id}/category-prompts`, { headers: { "idempotency-key": "comparison" }, body: { planSnapshotId: fixtureData.snapshot.id, templateVersionId: fixtureData.template.templateVersionId } });
+  assert.equal(started.status, 202);
+  const terminal = await waitForStatus(fixtureData.app, fixtureData.suite.id, "succeeded");
+  assert.equal(terminal.requests.find((request: any) => request.categoryCode === "comparison").status, "succeeded");
+  const comparison = fixtureData.inputs.find((input) => input.categoryCode === "comparison")!;
+  assert.equal(comparison.dynamicInput.category_name, "对比图");
+  assert.match(comparison.templateBody, /只做有事实依据的自身对比/);
+  assert.match(comparison.templateBody, /每一条最终 prompt.*不出现竞品品牌、竞品商品/);
+  assert.match(comparison.templateBody, /不用最好、第一等无依据比较/);
+  for (const input of fixtureData.inputs) {
+    assert.equal(input.dynamicInput.aspect_ratio, "3:4");
+    assert.equal(input.dynamicInput.main_image_background, "pure_white_required");
+    assert.equal(input.dynamicInput.target_market_country, "美国");
+  }
 });

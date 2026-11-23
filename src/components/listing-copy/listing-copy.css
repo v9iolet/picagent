@@ -1,0 +1,128 @@
+.lc-fields {
+  display: grid;
+  gap: 12px;
+}
+.lc-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  font-weight: 600;
+}
+.lc-field input, .lc-field textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  font: inherit;
+  font-weight: 400;
+  color: var(--pa-ink);
+  background: var(--pa-surface);
+  border: 1px solid var(--pa-border);
+  border-radius: 7px;
+}
+.lc-field textarea {
+  resize: vertical;
+}
+.lc-result button svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  vertical-align: middle;
+}
+.lc-row, .lc-field-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.lc-field-head, .lc-result-head {
+  justify-content: space-between;
+}
+.lc-result-head {
+  margin-bottom: 14px;
+}
+.ss-dialog.lc-drawer {
+  inset: 0 0 0 auto;
+  margin: 0;
+  width: min(100%, 570px);
+  min-width: 0;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  border-radius: 0;
+  background: var(--pa-surface);
+  font: 14px/1.5 system-ui, sans-serif;
+}
+.lc-batch-name {
+  color: var(--pa-muted);
+}
+.lc-status {
+  color: var(--pa-muted);
+  font-weight: 600;
+}
+.lc-status[data-status="running"] {
+  color: var(--pa-accent);
+}
+.lc-drawer .lc-error {
+  padding: 8px 10px;
+  margin: 8px 0;
+  color: #99232c;
+  background: #fff0f1;
+  border-radius: 6px;
+}
+.lc-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex-basis: 100%;
+}
+.lc-count {
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--pa-muted);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.lc-count[data-over-limit="true"] {
+  background: #ffeca9;
+  color: #634400;
+  font-weight: 600;
+}
+.lc-versions {
+  margin-top: 20px;
+  border-top: 1px solid var(--pa-border);
+  padding-top: 14px;
+  min-width: 0;
+}
+.lc-versions h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+.lc-list {
+  display: grid;
+  gap: 5px;
+  padding: 0;
+  list-style: none;
+}
+.lc-list li button {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.lc-list button[aria-pressed="true"] {
+  border-color: var(--pa-accent);
+  background: var(--pa-accent-soft);
+}
+.lc-list time {
+  font-size: 12px;
+  color: var(--pa-muted);
+}
+.lc-generate .ss-primary, .lc-fields .lc-row .ss-primary {
+  width: auto;
+}

@@ -7,6 +7,12 @@ import { failObservation, finishObservation, logObservation, recordModelFailure,
 
 type VisionContent = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 
+const mainImageBackgroundRequirements = {
+  pure_white_required: "主图必须使用纯白背景（RGB 255,255,255），不添加文字、Logo、水印或装饰。",
+  white_preferred: "主图优先白底或干净浅色背景。",
+  flexible: "主图按平台策略选择背景，可用场景背景。",
+};
+
 export function buildPlanUserContent(input: PlanLlmInput): VisionContent[] {
   const user = {
     dynamicInput: input.dynamicInput,
@@ -26,6 +32,7 @@ export function buildPlanUserContent(input: PlanLlmInput): VisionContent[] {
   const platformRules = input.platformProfile ? [
     "平台适配规则（来自平台维护表，优先于泛化平台假设）：",
     `- 平台：${input.platformProfile.name}`,
+    `- 主图背景要求：${input.platformProfile.mainImageBackground}（${mainImageBackgroundRequirements[input.platformProfile.mainImageBackground]}）`,
     `- 主图策略：${input.platformProfile.mainImageStrategy}`,
     `- 主图组策略：${input.platformProfile.galleryStrategy}`,
     `- 文字策略：${input.platformProfile.textStrategy}`,
@@ -57,8 +64,8 @@ export class DashScopeLlmClient implements LlmClient {
     const userContent = buildPlanUserContent(input);
     const userPrompt = userContent[0].type === "text" ? userContent[0].text : "";
     const archive = await startModelArchive({
-      type: input.flow === "category-prompt" ? "multimodal-category-prompt" : "multimodal-plan",
-      flow: input.flow === "category-prompt" ? "category-prompt" : "plan",
+      type: flow === "listing-copy" ? "multimodal-listing-copy" : input.flow === "category-prompt" ? "multimodal-category-prompt" : "multimodal-plan",
+      flow,
       requestId,
       provider: this.provider,
       model: this.model,
@@ -166,6 +173,61 @@ export class DashScopeLlmClient implements LlmClient {
       recordModelSuccess("reverse-prompt", this.provider, this.model, Date.now() - startedAt, { input: usage?.prompt_tokens, output: usage?.completion_tokens });
       return parsed;
     } catch (error) { const normalized = error instanceof DOMException && error.name === "AbortError" ? new Error("LLM_TIMEOUT") : error; failObservation(observation, normalized); recordModelFailure("reverse-prompt", this.provider, this.model, Date.now() - startedAt, normalized instanceof Error ? normalized.message : "LLM_FAILED"); throw normalized; } finally { clearTimeout(timer); }
+  }
+
+  async translateTexts(input: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }): Promise<Array<{ id: string; originalText: string; translatedText: string }>> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(this.timeoutMs, 120_000));
+    const startedAt = Date.now();
+    const systemPrompt = [
+      "你是专业跨境电商视觉本地化翻译专家。",
+      `请将输入 JSON 数组中的商品图片文案逐条翻译为地道、简洁、符合电商主图/详情页排版习惯的【${input.targetLanguage}】。`,
+      "规则：",
+      "1. 严格保留数字、尺寸单位（mm/cm/g/W/mAh/V 等）、型号编码与认证缩写。",
+      input.preserveBrandTerms !== false ? "2. 专有品牌名与英文商标保持原样不强行意译。" : "2. 可按目标市场习惯本地化表达。",
+      "3. 保持精炼短句风格，避免破坏原图排版长度。",
+      '4. 仅返回严格 JSON 对象：{"translations":[{"id":"原id","translatedText":"译文"}]}，禁止任何额外说明。',
+    ].join("\n");
+    const observation = startGeneration("llm.image-translate", { system: systemPrompt, items: input.items, targetLanguage: input.targetLanguage }, { flow: "image-translate", provider: this.provider, model: this.model });
+    try {
+      const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), {
+        method: "POST",
+        redirect: "error",
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: this.model,
+          temperature: 0.1,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: JSON.stringify({ targetLanguage: input.targetLanguage, items: input.items }) },
+          ],
+        }),
+      });
+      const rawBody = await response.text();
+      if (!response.ok) throw new Error(`LLM_HTTP_${response.status}`);
+      const payload = parseProviderJson(rawBody, this.apiKey, "LLM_INVALID_HTTP_RESPONSE") as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      const content = payload.choices?.[0]?.message?.content;
+      if (!content) throw new Error("LLM_EMPTY_RESPONSE");
+      const parsed = parseProviderJson(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""), this.apiKey, "LLM_INVALID_JSON_RESPONSE") as { translations?: Array<{ id?: unknown; translatedText?: unknown }> };
+      const byId = new Map((parsed.translations ?? []).map((row) => [String(row.id ?? ""), String(row.translatedText ?? "").trim()]));
+      const result = input.items.map((item) => ({
+        id: item.id,
+        originalText: item.text,
+        translatedText: byId.get(item.id) || item.text,
+      }));
+      finishObservation(observation, { status: "succeeded", count: result.length }, { http_status: response.status });
+      recordModelSuccess("image-translate", this.provider, this.model, Date.now() - startedAt, { input: payload.usage?.prompt_tokens, output: payload.usage?.completion_tokens });
+      return result;
+    } catch (error) {
+      const normalized = error instanceof DOMException && error.name === "AbortError" ? new Error("LLM_TIMEOUT") : error;
+      failObservation(observation, normalized);
+      recordModelFailure("image-translate", this.provider, this.model, Date.now() - startedAt, normalized instanceof Error ? normalized.message : "LLM_FAILED");
+      throw normalized;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 

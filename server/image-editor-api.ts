@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { ImageEditorService } from "./image-editor.js";
+import { ok } from "./api-response.js";
+import { formatOcrErrorMessage, type ImageEditorService } from "./image-editor.js";
 import type { ErrorEnvelope, ResponseEnvelope } from "./types.js";
 
 export interface ImageEditorApiResponse { status: number; body: ResponseEnvelope<unknown> | ErrorEnvelope }
-const ok = (data: unknown, status = 200): ImageEditorApiResponse => ({ status, body: { data, requestId: randomUUID() } });
 const fail = (code: string, status = 400): ImageEditorApiResponse => {
   if (code === "IMAGE_PROVIDER_NOT_CONFIGURED" || code === "OCR_PROVIDER_UNAVAILABLE") {
     const purpose = code === "OCR_PROVIDER_UNAVAILABLE" ? "多模态" : "生图";
@@ -32,7 +32,20 @@ export function createImageEditorApi(service: ImageEditorService) {
       }
       const ocrMatch = path.match(/^\/api\/image-editor\/sessions\/([^/]+)\/ocr$/);
       if (method === "GET" && ocrMatch) { const sourceVersionId = typeof body.sourceVersionId === "string" ? body.sourceVersionId : ""; return sourceVersionId ? ok(await service.getOcrSnapshot(ocrMatch[1], sourceVersionId)) : fail("SOURCE_VERSION_REQUIRED"); }
-      if (method === "POST" && ocrMatch) { const sourceVersionId = typeof body.sourceVersionId === "string" ? body.sourceVersionId : ""; if (!sourceVersionId) return fail("SOURCE_VERSION_REQUIRED"); try { return ok(await service.recognize(ocrMatch[1], sourceVersionId), 202); } catch (error) { return fail(error instanceof Error ? error.message : "OCR_FAILED", 409); } }
+      if (method === "POST" && ocrMatch) {
+        const sourceVersionId = typeof body.sourceVersionId === "string" ? body.sourceVersionId : "";
+        if (!sourceVersionId) return fail("SOURCE_VERSION_REQUIRED");
+        try {
+          return ok(await service.recognize(ocrMatch[1], sourceVersionId), 202);
+        } catch (error) {
+          const rawCode = error instanceof Error ? error.message : "OCR_FAILED";
+          if (rawCode === "OCR_PROVIDER_UNAVAILABLE") return fail(rawCode, 503);
+          return {
+            status: 409,
+            body: { error: { code: rawCode, message: formatOcrErrorMessage(error) }, requestId: randomUUID() },
+          };
+        }
+      }
       const removeMatch = path.match(/^\/api\/image-editor\/sessions\/([^/]+)\/operations\/([^/]+)$/);
       if (method === "DELETE" && removeMatch) { const draft = await service.removeOperation(removeMatch[1], removeMatch[2]); return draft ? ok(draft) : fail("EDIT_OPERATION_NOT_FOUND", 404); }
       const submitMatch = path.match(/^\/api\/image-editor\/sessions\/([^/]+)\/submit$/);

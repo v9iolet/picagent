@@ -1,23 +1,33 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { applyNodeChanges, Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider, type Edge, type Node, type NodeProps, type Viewport, useNodesState, useReactFlow } from "@xyflow/react";
+import { ResolutionCostNote } from "../components/ResolutionCostNote";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { applyNodeChanges, Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, type Edge, type Node, type NodeProps, type Viewport, useNodesState, useReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { defaultImageOptions } from "../../shared/model-settings";
 import {
   applyStyleOverrideToPrompt,
   computeLineageHighlight,
+  computeOutpaintPreviewBox,
   computeWorkbenchLanes,
+  extractCardPromptPreview,
+  SUPPORTED_OUTPUT_LANGUAGES,
+  type LaneCardSize,
   type LaneLayoutItem,
+  type LaneLayoutOptions,
   type ResolvedDeliverySlot,
 } from "../../shared/workbench-delivery";
 import { modelSettingsApi, suiteApi, type ApiCanvasLayout, type ApiLibraryResource, type ApiPromptTemplateCopy, type ApiProductMaterialRef, type ApiSuiteTask, type ApiTaskVersion, type ApiWorkbench } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { BeforeAfterLightbox, type LightboxPreview } from "../components/BeforeAfterLightbox";
+import { CustomTaskModal } from "../components/CustomTaskModal";
 import { DeliveryGalleryView } from "../components/DeliveryGalleryView";
+import { VersionCompareModal } from "../components/VersionCompareModal";
 import { Icon, ImageWithState, ModelSettingsMessage } from "./shared";
 import { Circle as KonvaCircle, Layer, Line, Rect as KonvaRect, Stage, Text as KonvaText, Transformer } from "react-konva";
 import type Konva from "konva";
 import "./WorkbenchBoardPage.css";
 
 type BoardMode = "compose" | "gallery";
+type CanvasFilter = "all" | "main" | "detail" | "edit" | "failed";
 type CardKind = "style" | "base" | "reverse-ref" | "task";
 type BoardData = {
   kind: CardKind;
@@ -30,8 +40,9 @@ type BoardData = {
   beforeLabel?: string;
   styleGuide?: string;
   styleOverridden?: boolean;
+  freeStyle?: boolean;
+  originalImage?: boolean;
   referenceCount?: number;
-  displayPrompt?: string;
   lineage?: string;
   isEditChild?: boolean;
   isHighlighted?: boolean;
@@ -42,6 +53,7 @@ type BoardData = {
   onCopy?: (task: ApiSuiteTask) => void;
   onRegenerate?: (task: ApiSuiteTask) => void;
   onEdit?: (task: ApiSuiteTask, version?: ApiTaskVersion) => void;
+  onCompareVersions?: (task: ApiSuiteTask) => void;
   onEditStyle?: () => void;
   onSelectVersion?: (task: ApiSuiteTask, versionId: string, selection: "current" | "final") => void;
 };
@@ -60,7 +72,13 @@ const readParam = (task: ApiSuiteTask, key: string, fallback: string) => {
 const ratioFor = (task: ApiSuiteTask) => readParam(task, "ratio", task.imageType === "detail" ? "3:4" : "1:1");
 const sizeFor = (task: ApiSuiteTask) => readParam(task, "size", "1K");
 const qualityFor = (task: ApiSuiteTask) => readParam(task, "quality", "medium");
-const versionGenerationPrompt = (version: ApiTaskVersion, fallback = "") => {
+const missingReferenceHint = "请先绑定商品参考图";
+const hasTaskReference = (task: ApiSuiteTask) => Boolean(task.sourceInputImageId || task.sourceLibraryReferenceId);
+const parameterOptions = (options: string[], value: string) => <>
+  {!options.includes(value) && <option value={value} disabled>{value}（当前值）</option>}
+  {options.map((option) => <option key={option}>{option}</option>)}
+</>;
+const versionGenerationPrompt = (version: Pick<ApiTaskVersion, "promptSnapshot">, fallback = "") => {
   const snapshot = version.promptSnapshot ?? {};
   const value = snapshot.finalPrompt ?? snapshot.prompt;
   return typeof value === "string" && value.trim() ? value : fallback;
@@ -73,6 +91,7 @@ function modelFor(task: ApiSuiteTask, version?: ApiTaskVersion) {
 }
 
 const fallbackPlanStyle = (workbench: ApiWorkbench) => {
+  if (!workbench.planSnapshot) return "未设置";
   if (workbench.planStyleGuide?.trim()) return workbench.planStyleGuide.trim();
   const card = workbench.planSnapshot?.structure?.globalStyleCard;
   if (card && typeof card.promptPrefix === "string" && card.promptPrefix.trim()) return card.promptPrefix.trim();
@@ -89,12 +108,14 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
   const onGenerate = data.onGenerate ?? (() => undefined);
   const onRegenerate = data.onRegenerate ?? (() => undefined);
   const onEdit = data.onEdit ?? (() => undefined);
+  const onCompareVersions = data.onCompareVersions ?? (() => undefined);
   const onEditStyle = data.onEditStyle ?? (() => undefined);
   const onSelectVersion = data.onSelectVersion ?? (() => undefined);
   const [simulatedProgress, setSimulatedProgress] = useState(0);
   const availableVersions = data.task?.versions ?? [];
   const versionIds = availableVersions.map((version) => version.id).join("|");
   const [selectedVersionId, setSelectedVersionId] = useState(data.version?.id ?? "");
+  const previousCurrentVersionId = useRef(data.version?.id ?? "");
 
   useEffect(() => {
     if (data.task?.status !== "generating") { setSimulatedProgress(0); return; }
@@ -104,7 +125,15 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
   }, [data.task?.status]);
 
   useEffect(() => {
-    if (!availableVersions.some((version) => version.id === selectedVersionId)) setSelectedVersionId(data.version?.id ?? availableVersions[0]?.id ?? "");
+    const currentId = data.version?.id ?? "";
+    if (currentId && currentId !== previousCurrentVersionId.current) {
+      previousCurrentVersionId.current = currentId;
+      setSelectedVersionId(currentId);
+      return;
+    }
+    if (!availableVersions.some((version) => version.id === selectedVersionId)) {
+      setSelectedVersionId(currentId || availableVersions[0]?.id || "");
+    }
   }, [data.version?.id, selectedVersionId, versionIds]);
 
   const highlightClass = data.isHighlighted ? "is-lineage-active" : data.isDimmed ? "is-lineage-dim" : "";
@@ -116,14 +145,14 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
         <div className="wb-card-topline">
           <span className="wb-card-kicker">STYLE GUIDE</span>
           <span className={`wb-card-state ${data.styleOverridden ? "is-override" : "is-active"}`}>
-            {data.styleOverridden ? "已覆盖原计划" : "原计划风格"}
+            {data.freeStyle ? "自由风格" : data.styleOverridden ? "已覆盖原计划" : "原计划风格"}
           </span>
         </div>
         <h3>全局风格卡</h3>
         <p>{data.styleGuide}</p>
         <div className="wb-card-note">
           <Icon name="check" />
-          {data.styleOverridden ? "仅作用于后续新提交生图，不篡改历史快照" : "已按计划冻结；点击编辑可前向微调"}
+          {data.styleOverridden ? "仅作用于后续新提交生图，不篡改历史快照" : data.freeStyle ? "风格可编辑" : "已按计划冻结；点击编辑可前向微调"}
         </div>
         <button type="button" className="wb-link-button nodrag nopan" onClick={(event) => { event.stopPropagation(); onEditStyle(); }}>编辑</button>
       </article>
@@ -134,7 +163,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
     return (
       <article className={`wb-card wb-base-card ${highlightClass}`}>
         <Handle type="source" position={Position.Right} />
-        <span className="wb-card-kicker">{data.kind === "reverse-ref" ? "REFERENCE IMAGE" : "BASE IMAGE"}</span>
+        <span className="wb-card-kicker">{data.kind === "reverse-ref" ? "REFERENCE IMAGE" : data.originalImage ? "ORIGINAL IMAGE" : "BASE IMAGE"}</span>
         <button className="wb-image-button nodrag nopan" type="button" onClick={(event) => { event.stopPropagation(); if (data.imageUrl) onPreview({ url: data.imageUrl, title: data.title, subtitle: data.subtitle }); }}>
           <ImageWithState src={data.imageUrl} alt={data.title} loading="lazy" retryable={false} />
         </button>
@@ -148,6 +177,8 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
   if (!task) return null;
   const version = availableVersions.find((item) => item.id === selectedVersionId) ?? data.version;
   const model = modelFor(task, version);
+  const promptPreview = extractCardPromptPreview(task.promptDraft, task.purpose);
+  const missingReference = !data.isEditChild && !hasTaskReference(task);
 
   return (
     <article className={`wb-card wb-task-card ${data.isEditChild ? "wb-edit-child-card" : ""} ${highlightClass}`} onClick={() => onSelect(task, id)}>
@@ -187,10 +218,10 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
       <div className="wb-task-stats">
         <span><b>图片</b><strong>{version ? 1 : 0} 张</strong></span>
         <span><b>参考图</b><strong>{data.referenceCount ?? 0} 张</strong></span>
-        <span><b>提示词</b><strong>{(data.displayPrompt ?? task.promptDraft).length} 字</strong></span>
+        <span><b>提示词摘要</b><strong>{promptPreview.length} 字</strong></span>
         <span><b>状态</b><strong>{statusText(task.status)}</strong></span>
       </div>
-      <p className="wb-task-prompt">{data.displayPrompt ?? task.promptDraft}</p>
+      <p className="wb-task-prompt">{promptPreview}</p>
       <div className="wb-card-footer">
         {model && <span title={model}>{model}</span>}
         <span>{ratioFor(task)}</span>
@@ -198,7 +229,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
         <span>{qualityFor(task)}</span>
       </div>
       <div className="wb-task-actions nodrag nopan">
-        <button type="button" className="wb-card-generate" disabled={task.status === "generating"} onClick={(event) => { event.stopPropagation(); onGenerate(task); }}>
+        <button type="button" className="wb-card-generate" disabled={missingReference || task.status === "generating"} title={missingReference ? missingReferenceHint : undefined} onClick={(event) => { event.stopPropagation(); onGenerate(task); }}>
           <Icon name="sparkles" />生成
         </button>
         <button type="button" disabled={task.status === "generating" || (!version && task.status !== "failed")} onClick={(event) => { event.stopPropagation(); onRegenerate(task); }}>
@@ -208,6 +239,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
           <Icon name="edit" />编辑图片
         </button>
       </div>
+      {missingReference && <small>{missingReferenceHint}</small>}
       {version && (
         <div className="wb-card-version-actions nodrag nopan">
           <select aria-label={`选择${task.title}版本`} value={version.id} onClick={(event) => event.stopPropagation()} onChange={(event) => setSelectedVersionId(event.target.value)}>
@@ -217,6 +249,11 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
           </select>
           {version.isCurrent ? <span className="wb-version-status"><Icon name="check" />当前版本</span> : <button type="button" onClick={(event) => { event.stopPropagation(); onSelectVersion(task, version.id, "current"); }}>设为当前</button>}
           {version.isFinal ? <span className="wb-version-status is-final"><Icon name="check" />已是终版</span> : <button type="button" className="wb-version-final" onClick={(event) => { event.stopPropagation(); onSelectVersion(task, version.id, "final"); }}>设为终版</button>}
+          {availableVersions.length >= 2 && (
+            <button type="button" className="wb-version-compare-btn" onClick={(event) => { event.stopPropagation(); onCompareVersions(task); }}>
+              对比 {availableVersions.length} 版
+            </button>
+          )}
         </div>
       )}
       <Handle type="source" position={Position.Right} />
@@ -320,28 +357,31 @@ function projectComposeGraph(
   effectiveStyleGuide: string,
   styleOverride: string | null,
   selectedNodeId: string | null,
-  ignoreSavedPositions: boolean,
-  handlers: Pick<BoardData, "onPreview" | "onSelect" | "onGenerate" | "onCopy" | "onRegenerate" | "onEdit" | "onEditStyle" | "onSelectVersion">,
+  canvasFilter: CanvasFilter,
+  layoutOptions: LaneLayoutOptions,
+  handlers: Pick<BoardData, "onPreview" | "onSelect" | "onGenerate" | "onCopy" | "onRegenerate" | "onEdit" | "onCompareVersions" | "onEditStyle" | "onSelectVersion">,
 ) {
   const saved = new Map((layout?.nodes ?? []).map((node) => [node.nodeId, { x: node.x, y: node.y }]));
   const active = workbench.tasks
     .filter((task) => task.status !== "archived" && (task.originKind === "reverse_import" || !workbench.planSnapshot || task.planSnapshotId === workbench.planSnapshot.id))
     .slice()
     .sort((left, right) => (left.imageType !== right.imageType ? (left.imageType === "main" ? -1 : 1) : left.ordinal - right.ordinal));
-  const currentBases = workbench.inputImages.filter((image) => image.currentBaseVersionId);
+  const materialsByInputId = new Map(workbench.inputImages.map((image) => [image.id, {
+    image,
+    id: image.currentBaseVersionId ? `base:${image.currentBaseVersionId}` : `input:${image.id}`,
+  }]));
   const reverseMaterials = new Map<string, { resourceId: string; resourceVersionId: string; title: string; previewUrl: string }>();
   active.forEach((task) => {
     const refs = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
-    refs.forEach((ref) => reverseMaterials.set(ref.resourceVersionId, { resourceId: ref.resourceId, resourceVersionId: ref.resourceVersionId, title: ref.title ?? "产品白底图", previewUrl: ref.previewUrl ?? `/api/library/resources/${encodeURIComponent(ref.resourceId)}/preview` }));
+    refs.forEach((ref) => reverseMaterials.set(ref.resourceVersionId, { resourceId: ref.resourceId, resourceVersionId: ref.resourceVersionId, title: ref.title ?? "商品参考图", previewUrl: ref.previewUrl ?? `/api/library/resources/${encodeURIComponent(ref.resourceId)}/preview` }));
   });
 
   const versionLookup = buildVersionLookup(workbench);
   const styleId = "style:global";
-  const baseIds = currentBases.map((image) => `base:${image.currentBaseVersionId}`);
 
   // 1. Collect lane items
   const laneItems: LaneLayoutItem[] = [{ id: styleId, kind: "style" }];
-  currentBases.forEach((image) => laneItems.push({ id: `base:${image.currentBaseVersionId}`, kind: "base" }));
+  materialsByInputId.forEach(({ id }) => laneItems.push({ id, kind: "base" }));
   [...reverseMaterials.values()].forEach((material) => laneItems.push({ id: `library-base:${material.resourceVersionId}`, kind: "base" }));
   const reverseRefSeen = new Set<string>();
   active.forEach((task) => {
@@ -365,7 +405,7 @@ function projectComposeGraph(
   });
   syntheticChildren.forEach(({ nodeId, parentNodeId }) => laneItems.push({ id: nodeId, kind: "edit-child", parentId: parentNodeId }));
 
-  const positions = computeWorkbenchLanes(laneItems, saved, { ignoreSavedPositions });
+  const positions = computeWorkbenchLanes(laneItems, saved, layoutOptions);
 
   // 2. Build edges (suppress noisy style-to-all dashed lines unless style card is explicitly selected)
   const rawEdges: Edge[] = [];
@@ -374,11 +414,12 @@ function projectComposeGraph(
     if (task.originKind === "reverse_import" && task.reversePlanId && task.reverseReferenceId) {
       rawEdges.push({ id: `reverse-ref:${task.reverseReferenceId}->${id}`, source: `reverse-ref:${task.reverseReferenceId}`, target: id, type: "default" });
     }
-    baseIds.forEach((sourceId) => rawEdges.push({ id: `${sourceId}->${id}`, source: sourceId, target: id, type: "default", animated: task.status === "generating" }));
+    const sourceId = task.sourceInputImageId ? materialsByInputId.get(task.sourceInputImageId)?.id : undefined;
+    if (sourceId && !task.sourceLibraryReferenceId) rawEdges.push({ id: `${sourceId}->${id}`, source: sourceId, target: id, type: "default", animated: task.status === "generating" });
     const materialRefs = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
     materialRefs.forEach((ref) => rawEdges.push({ id: `library-base:${ref.resourceVersionId}->${id}`, source: `library-base:${ref.resourceVersionId}`, target: id, type: "default", animated: task.status === "generating" }));
     if (selectedNodeId === styleId) {
-      rawEdges.push({ id: `${styleId}->${id}`, source: styleId, target: id, type: "smoothstep", style: { strokeDasharray: "5 5", stroke: "#d4a414" } });
+      rawEdges.push({ id: `${styleId}->${id}`, source: styleId, target: id, type: "smoothstep", style: { strokeDasharray: "5 5" } });
     }
   });
   const knownNodeIds = new Set(laneItems.map((item) => item.id));
@@ -393,34 +434,41 @@ function projectComposeGraph(
   const { highlightedNodeIds, highlightedEdgeIds } = computeLineageHighlight(hasSelection ? selectedNodeId : null, rawEdges);
 
   const styledEdges: Edge[] = rawEdges.map((edge) => {
-    if (hasSelection) {
-      const isLit = highlightedEdgeIds.has(edge.id);
-      return {
-        ...edge,
-        zIndex: isLit ? 5 : 0,
-        style: {
-          ...(edge.style ?? {}),
-          stroke: isLit ? "#2563eb" : "#cbd5e1",
-          strokeWidth: isLit ? 2.2 : 1,
-          opacity: isLit ? 1 : 0.16,
-        },
-      };
-    }
+    const isLit = highlightedEdgeIds.has(edge.id);
     return {
       ...edge,
+      zIndex: isLit ? 5 : 0,
       style: {
         ...(edge.style ?? {}),
-        stroke: "#cbd5e1",
-        strokeWidth: 1.25,
-        opacity: 0.48,
+        stroke: isLit ? "#2563eb" : "#64748b",
+        strokeWidth: isLit ? 2.6 : 1.8,
+        opacity: hasSelection ? (isLit ? 1 : 0.28) : 0.85,
       },
     };
   });
 
-  const nodeHighlightProps = (id: string) => ({
-    isHighlighted: hasSelection && highlightedNodeIds.has(id),
-    isDimmed: hasSelection && !highlightedNodeIds.has(id),
-  });
+  const filterMatches = (kind: CardKind, task?: ApiSuiteTask, isEditChild?: boolean) => {
+    if (canvasFilter === "all") return true;
+    if (canvasFilter === "main") return kind === "task" && !isEditChild && task?.imageType === "main";
+    if (canvasFilter === "detail") return kind === "task" && !isEditChild && task?.imageType === "detail";
+    if (canvasFilter === "edit") return Boolean(isEditChild);
+    if (canvasFilter === "failed") return kind === "task" && (task?.status === "failed" || task?.status === "pending" || task?.status === "incomplete");
+    return true;
+  };
+
+  const nodeHighlightProps = (id: string, kind: CardKind, task?: ApiSuiteTask, isEditChild?: boolean) => {
+    if (hasSelection) {
+      return {
+        isHighlighted: highlightedNodeIds.has(id),
+        isDimmed: !highlightedNodeIds.has(id),
+      };
+    }
+    if (canvasFilter !== "all") {
+      const matched = filterMatches(kind, task, isEditChild);
+      return { isHighlighted: matched, isDimmed: !matched };
+    }
+    return { isHighlighted: false, isDimmed: false };
+  };
 
   // 4. Build nodes
   const nodes: BoardNode[] = [];
@@ -433,24 +481,25 @@ function projectComposeGraph(
       title: "全局风格卡",
       styleGuide: effectiveStyleGuide,
       styleOverridden: Boolean(styleOverride),
-      ...nodeHighlightProps(styleId),
+      freeStyle: !workbench.planSnapshot,
+      ...nodeHighlightProps(styleId, "style"),
       ...handlers,
     },
     draggable: true,
   });
 
-  currentBases.forEach((image) => {
-    const id = `base:${image.currentBaseVersionId}`;
+  materialsByInputId.forEach(({ id, image }) => {
     nodes.push({
       id,
       type: "boardCard",
       position: positions.get(id) ?? { x: 32, y: 260 },
       data: {
         kind: "base",
-        title: `白底图 ${image.ordinal}`,
-        subtitle: `${image.width} × ${image.height}`,
-        imageUrl: `/api/suites/${workbench.suite.id}/input-images/${image.id}/base-versions/${image.currentBaseVersionId}/preview`,
-        ...nodeHighlightProps(id),
+        title: `${image.currentBaseVersionId ? "白底图" : "原图"} ${image.ordinal}`,
+        subtitle: image.currentBaseVersionId ? `${image.width} × ${image.height}` : image.originalFilename,
+        imageUrl: image.currentBaseVersionId ? `/api/suites/${workbench.suite.id}/input-images/${image.id}/base-versions/${image.currentBaseVersionId}/preview` : image.originalPreviewUrl,
+        originalImage: !image.currentBaseVersionId,
+        ...nodeHighlightProps(id, "base"),
         ...handlers,
       },
       draggable: true,
@@ -466,9 +515,10 @@ function projectComposeGraph(
       data: {
         kind: "base",
         title: material.title,
-        subtitle: `资源库白底图 · ${material.resourceVersionId.slice(0, 8)}`,
+        subtitle: `图片库 · ${material.resourceVersionId.slice(0, 8)}`,
+        originalImage: material.resourceId.startsWith("input:"),
         imageUrl: material.previewUrl,
-        ...nodeHighlightProps(id),
+        ...nodeHighlightProps(id, "base"),
         ...handlers,
       },
       draggable: true,
@@ -479,9 +529,6 @@ function projectComposeGraph(
   active.forEach((task) => {
     const id = `task:${task.id}`;
     const currentVersion = task.versions.find((version) => version.isCurrent) ?? task.versions[0];
-    const displayPrompt = styleOverride && task.originKind !== "reverse_import"
-      ? applyStyleOverrideToPrompt(task.promptDraft, styleOverride)
-      : task.promptDraft;
     nodes.push({
       id,
       type: "boardCard",
@@ -492,9 +539,9 @@ function projectComposeGraph(
         task,
         version: currentVersion,
         imageUrl: currentVersion?.previewUrl,
-        referenceCount: currentBases.length || workbench.inputImages.length,
-        displayPrompt,
-        ...nodeHighlightProps(id),
+        referenceCount: Array.isArray(task.generationParams?.productMaterialRefs) && task.generationParams.productMaterialRefs.length > 0
+          ? task.generationParams.productMaterialRefs.length : hasTaskReference(task) ? 1 : 0,
+        ...nodeHighlightProps(id, "task", task, false),
         ...handlers,
       },
       draggable: true,
@@ -512,7 +559,7 @@ function projectComposeGraph(
             title: task.title,
             subtitle: "爆品参考图，仅用于视觉结构",
             imageUrl: `/api/reverse-plans/${task.reversePlanId}/references/${task.reverseReferenceId}/preview`,
-            ...nodeHighlightProps(refId),
+            ...nodeHighlightProps(refId, "reverse-ref"),
             ...handlers,
           },
           draggable: true,
@@ -542,10 +589,9 @@ function projectComposeGraph(
         imageUrl: childVersion?.previewUrl,
         beforeImageUrl: beforeSource?.url ?? null,
         beforeLabel: beforeSource?.label,
-        displayPrompt: synthetic.promptDraft,
         lineage,
         isEditChild: true,
-        ...nodeHighlightProps(nodeId),
+        ...nodeHighlightProps(nodeId, "task", synthetic, true),
         ...handlers,
       },
       draggable: true,
@@ -619,22 +665,28 @@ function PromptLibraryButton({ onNotify }: { onNotify: (message: string) => void
 }
 
 function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; onBound: () => Promise<void>; onNotify: (message: string) => void }) {
-  const [items, setItems] = useState<ApiLibraryResource[]>([]);
+  const [items, setItems] = useState<ApiLibraryResource[] | null>(null);
   const [selected, setSelected] = useState<ApiProductMaterialRef[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const bound = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
 
   useEffect(() => {
-    if (task.originKind !== "reverse_import") return;
-    suiteApi.listLibraryResources({ resourceType: "base_image", status: "published", pageSize: 100 }).then((result) => setItems(result.items)).catch(() => onNotify("白底图资源加载失败"));
-  }, [task.id, task.originKind, onNotify]);
+    if (!open) return;
+    let active = true;
+    Promise.all((["base_image", "input_image"] as const).map((resourceType) => suiteApi.listLibraryResources({ resourceType, status: "published", pageSize: 100 })))
+      .then((results) => { if (active) setItems(results.flatMap((result) => result.items)); })
+      .catch(() => { if (active) setLoadError(true); });
+    return () => { active = false; };
+  }, [open]);
 
-  useEffect(() => {
-    const refs = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
-    setSelected(refs.slice().sort((a, b) => a.order - b.order));
-  }, [task.id, task.generationParams]);
-
-  if (task.originKind !== "reverse_import") return null;
+  const show = () => {
+    setSelected(bound.slice().sort((a, b) => a.order - b.order));
+    setItems(null);
+    setLoadError(false);
+    setOpen(true);
+  };
   const toggle = (item: ApiLibraryResource) => setSelected((current) => current.some((ref) => ref.resourceId === item.id) ? current.filter((ref) => ref.resourceId !== item.id) : current.length >= 3 ? current : [...current, { libraryReferenceId: "", resourceId: item.id, resourceVersionId: item.resourceVersionId, order: current.length + 1, title: item.title, previewUrl: item.previewUrl ?? `/api/library/resources/${encodeURIComponent(item.id)}/preview` }]);
   const move = (index: number, delta: number) => setSelected((current) => {
     const next = current.slice();
@@ -650,9 +702,9 @@ function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; 
       await suiteApi.bindWhiteResources(task.id, selected.map((item) => item.resourceId));
       await onBound();
       setOpen(false);
-      onNotify(task.sourceRevision ? "已更换白底图并创建新的任务源版本" : "白底图已绑定");
+      onNotify("已绑定图片库参考图");
     } catch {
-      onNotify("白底图绑定失败");
+      onNotify("参考图绑定失败");
     } finally {
       setLoading(false);
     }
@@ -660,27 +712,27 @@ function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; 
   return (
     <>
       <div className="wb-inspector-field">
-        <span>产品白底图</span>
-        <div className="wb-material-summary">{selected.length ? selected.map((item, index) => <span key={item.resourceId}>{index + 1}. {item.title ?? item.resourceId.slice(0, 8)}</span>) : <small>尚未绑定，最多选择 3 张</small>}</div>
-        <button type="button" className="wb-primary-action" onClick={() => setOpen(true)}>添加产品白底图</button>
-        <small>{selected.length ? `已冻结 ${selected.length} 个资源版本 · 源版本 ${task.sourceRevision ?? 1}` : "从图片资源库选择已发布白底图"}</small>
+        <span>图片库参考图</span>
+        {bound.length > 0 && <div className="wb-material-summary">{bound.map((item, index) => <span key={item.resourceId}>{index + 1}. {item.title ?? item.resourceId.slice(0, 8)}</span>)}</div>}
+        <button type="button" className="wb-link-button" disabled={task.status === "generating"} onClick={show}>从图片库选择</button>
       </div>
       {open && (
         <div className="wb-prompt-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
-          <section className="wb-prompt-modal wb-white-picker" role="dialog" aria-modal="true" aria-label="选择产品白底图">
+          <section className="wb-prompt-modal wb-white-picker" role="dialog" aria-modal="true" aria-label="选择图片库参考图">
             <div className="wb-prompt-popover-head">
-              <div><span className="wb-modal-eyebrow">PRODUCT MATERIALS</span><strong>选择产品白底图</strong><small>最多 3 张，按顺序作为主图和补充角度</small></div>
-              <button type="button" aria-label="关闭白底图选择器" onClick={() => setOpen(false)}><Icon name="x" /></button>
+              <div><span className="wb-modal-eyebrow">PRODUCT MATERIALS</span><strong>选择图片库参考图</strong><small>最多 3 张，按顺序作为主图和补充角度</small></div>
+              <button type="button" aria-label="关闭图片库选择器" onClick={() => setOpen(false)}><Icon name="x" /></button>
             </div>
+            {loadError ? <p role="alert">图片库加载失败</p> : !items ? <p role="status">正在加载图片库…</p> : !items.length && <p>暂无已发布的原图或白底图</p>}
             <div className="wb-white-picker-grid">
-              {items.map((item) => {
+              {items?.map((item) => {
                 const active = selected.some((ref) => ref.resourceId === item.id);
                 return (
-                  <button type="button" key={item.id} className={`wb-white-picker-item ${active ? "is-selected" : ""}`} onClick={() => toggle(item)}>
+                  <button type="button" key={item.id} aria-pressed={active} disabled={loading || (!active && selected.length >= 3)} className={`wb-white-picker-item ${active ? "is-selected" : ""}`} onClick={() => toggle(item)}>
                     <span className="wb-picker-check">{active ? "✓" : ""}</span>
                     {item.previewUrl && <img src={item.previewUrl} alt={item.title} />}
                     <strong>{item.title}</strong>
-                    <small>版本 {item.resourceVersionId.slice(0, 8)}</small>
+                    <small>{item.resourceType === "base_image" ? "白底图" : "原图"} · {item.resourceVersionId.slice(0, 8)}</small>
                   </button>
                 );
               })}
@@ -708,7 +760,30 @@ function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; 
   );
 }
 
-function ImageEditorModal({
+function formatClientOcrError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "文字识别失败，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  if (/timeout|timed out|abort|OCR_TIMEOUT/i.test(trimmed)) {
+    return "文字识别请求超时，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  if (/fetch failed|ECONNREFUSED|ENOTFOUND|network|socket/i.test(trimmed)) {
+    return "文字识别服务连接失败，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  if (/^OCR_HTTP_\d+$/.test(trimmed) || trimmed.startsWith("OCR_")) {
+    return "文字识别服务返回异常，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  if (/[\u4e00-\u9fa5]/.test(trimmed)) return trimmed;
+  return "文字识别失败，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+}
+
+export type ImageEditorTaskInput = Pick<ApiSuiteTask, "id" | "title" | "promptDraft">;
+export type ImageEditorVersionInput = Pick<
+  ApiTaskVersion,
+  "id" | "versionNumber" | "previewUrl" | "width" | "height" | "promptSnapshot"
+>;
+
+export function ImageEditorModal({
   task,
   version,
   onClose,
@@ -716,8 +791,8 @@ function ImageEditorModal({
   onOperationAdded,
   onRegenerate = async () => undefined,
 }: {
-  task: ApiSuiteTask;
-  version: ApiTaskVersion;
+  task: ImageEditorTaskInput;
+  version: ImageEditorVersionInput;
   onClose: () => void;
   onSubmit: (spec: Record<string, unknown>, instruction: string) => Promise<void>;
   onOperationAdded?: (operation: DraftOperation, instruction: string) => Promise<void>;
@@ -749,6 +824,13 @@ function ImageEditorModal({
   const [editorError, setEditorError] = useState("");
   const [ocrBlocks, setOcrBlocks] = useState<Array<{ id: string; text: string; confidence: number; bounds: { x: number; y: number; width: number; height: number }; rotation: number }>>([]);
   const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrError, setOcrError] = useState("");
+  const ocrAutoTriggeredRef = useRef(false);
+  const [translateLang, setTranslateLang] = useState("英文");
+  const [translating, setTranslating] = useState(false);
+  const [translatedMap, setTranslatedMap] = useState<Record<string, string>>({});
+  const [zoom, setZoom] = useState(1);
+  const [holdCompareOriginal, setHoldCompareOriginal] = useState(false);
   const [textRegion, setTextRegion] = useState({ x: 0.36, y: 0.42, width: 0.28, height: 0.1, rotation: 0 });
   const [capabilities, setCapabilities] = useState<ImageEditCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState("");
@@ -764,20 +846,96 @@ function ImageEditorModal({
 
   const runOcr = useCallback(async () => {
     setOcrLoading(true);
+    setOcrError("");
     try {
       const result = await suiteApi.recognizeImageEditText(task.id, version.id);
-      setOcrBlocks(result.blocks ?? []);
-      if (result.blocks?.[0]) {
-        setOriginalText(result.blocks[0].text);
-        setTextRegion({ ...result.blocks[0].bounds, rotation: result.blocks[0].rotation });
+      if (result.status === "failed") {
+        setOcrBlocks([]);
+        setOcrError(formatClientOcrError(result.error));
+        return;
+      }
+      const blocks = result.blocks ?? [];
+      setOcrBlocks(blocks);
+      setTranslatedMap({});
+      if (blocks[0]) {
+        setOriginalText(blocks[0].text);
+        setTextRegion({ ...blocks[0].bounds, rotation: blocks[0].rotation });
       }
     } catch (error) {
       setOcrBlocks([]);
-      setEditorError(error instanceof Error ? error.message : "文字识别失败，可重新识别");
+      setOcrError(formatClientOcrError(error));
     } finally {
       setOcrLoading(false);
     }
   }, [task.id, version.id]);
+
+  const runBatchTranslate = async () => {
+    if (!ocrBlocks.length || translating) return;
+    setTranslating(true);
+    setEditorError("");
+    try {
+      const result = await suiteApi.translateImageTexts({
+        targetLanguage: translateLang,
+        items: ocrBlocks.map((block) => ({ id: block.id, text: block.text })),
+        preserveBrandTerms: true,
+      });
+      const nextMap: Record<string, string> = {};
+      for (const row of result.translations) nextMap[row.id] = row.translatedText;
+      setTranslatedMap(nextMap);
+      if (ocrBlocks[0] && nextMap[ocrBlocks[0].id]) {
+        setOriginalText(ocrBlocks[0].text);
+        setNewText(nextMap[ocrBlocks[0].id]);
+        setTextRegion({ ...ocrBlocks[0].bounds, rotation: ocrBlocks[0].rotation });
+      }
+    } catch (error) {
+      setEditorError(error instanceof Error ? error.message : "图片文字翻译失败");
+    } finally {
+      setTranslating(false);
+    }
+  };
+
+  const applyAllTranslationsToDraft = async () => {
+    const pairs = ocrBlocks
+      .map((block) => ({ block, translated: (translatedMap[block.id] ?? "").trim() }))
+      .filter((entry) => entry.translated.length > 0 && entry.translated !== entry.block.text.trim());
+    if (!pairs.length) {
+      setEditorError("请先点击一键翻译或填写需要替换的译文");
+      return;
+    }
+    setSaving(true);
+    setEditorError("");
+    try {
+      const created: DraftOperation[] = [];
+      for (const { block, translated } of pairs) {
+        const opId = `change_text-tr-${block.id}`;
+        const op: DraftOperation = {
+          operationId: opId,
+          type: "change_text",
+          summary: `翻译替换(${translateLang})：${block.text} → ${translated}`,
+          sourceVersionId: version.id,
+          payload: {
+            originalText: block.text,
+            newText: translated,
+            region: { ...block.bounds, rotation: block.rotation },
+            prompt: `${changeTextPrompt}；目标语言：${translateLang}`,
+          },
+        };
+        await onOperationAdded?.(op, op.summary);
+        committedOperationIds.current.add(op.operationId);
+        created.push(op);
+      }
+      setOperations((current) => {
+        const createdIds = new Set(created.map((item) => item.operationId));
+        return [...current.filter((item) => !createdIds.has(item.operationId)), ...created];
+      });
+      setOriginalText("");
+      setNewText("");
+    } catch (errorValue) {
+      setEditorError(errorValue instanceof Error ? errorValue.message : "批量写入翻译操作失败");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   useEffect(() => { suiteApi.imageEditorCapabilities().then((result) => setCapabilities(result.capabilities)).catch(() => setCapabilityError("能力状态暂时不可用")); }, []);
   useEffect(() => {
@@ -812,9 +970,19 @@ function ImageEditorModal({
     if (imageRef.current) observer.observe(imageRef.current);
     updateFrame();
     return () => observer.disconnect();
-  }, [updateFrame]);
+  }, [updateFrame, zoom]);
 
-  useEffect(() => { if (tool === "change_text" && !ocrBlocks.length) void runOcr(); }, [runOcr, tool, ocrBlocks.length]);
+  useEffect(() => {
+    ocrAutoTriggeredRef.current = false;
+  }, [version.id]);
+
+  useEffect(() => {
+    if (tool !== "change_text") return;
+    if (!capabilities || capabilities.ocr === false) return;
+    if (ocrBlocks.length > 0 || ocrAutoTriggeredRef.current) return;
+    ocrAutoTriggeredRef.current = true;
+    void runOcr();
+  }, [capabilities, tool, ocrBlocks.length, runOcr]);
   useEffect(() => {
     const transformer = transformerRef.current;
     if (!transformer) return;
@@ -864,10 +1032,20 @@ function ImageEditorModal({
       } else if (event.key === "]") {
         event.preventDefault();
         setBrush((value) => Math.min(120, value + 6));
+      } else if (event.code === "Space") {
+        event.preventDefault();
+        setHoldCompareOriginal(true);
       }
     };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code === "Space") setHoldCompareOriginal(false);
+    };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
   }, [tool, undo, redo, onClose]);
 
   const pointFromEvent = (event: { target: { getStage(): Konva.Stage | null } }) => {
@@ -946,10 +1124,47 @@ function ImageEditorModal({
   }, [tool, text, originalText, newText, textRegion, strokes, feather, expand, ratio, instruction, addTextPrompt, changeTextPrompt, redrawPrompt, erasePrompt, textOperationId, operations]);
 
   const submit = async () => {
+    let finalOperations = operations;
+    const currentError = tool === "regenerate" ? "" : validationError();
+    if (!currentError && tool !== "regenerate") {
+      const next = operationFor();
+      const existing = operations.find((item) => item.operationId === next.operationId);
+      const needsSync =
+        !existing ||
+        !committedOperationIds.current.has(next.operationId) ||
+        existing.summary !== next.summary ||
+        JSON.stringify(existing.payload) !== JSON.stringify(next.payload);
+      if (needsSync) {
+        setSaving(true);
+        setEditorError("");
+        try {
+          await onOperationAdded?.(next, next.summary);
+          committedOperationIds.current.add(next.operationId);
+          finalOperations = [...operations.filter((item) => item.operationId !== next.operationId), next];
+          setOperations(finalOperations);
+        } catch (errorValue) {
+          setEditorError(errorValue instanceof Error ? errorValue.message : "操作保存失败");
+          setSaving(false);
+          return;
+        }
+      }
+    } else if (currentError && operations.length === 0) {
+      setEditorError(currentError);
+      return;
+    }
+
+    if (finalOperations.length === 0) {
+      setEditorError("请先添加或填写至少一项编辑操作");
+      return;
+    }
+
     setSaving(true);
     setEditorError("");
     try {
-      await onSubmit({ schemaVersion: "image-edit-v1", sourceVersionId: version.id, operations }, operations.map((item) => item.summary).join("；"));
+      await onSubmit(
+        { schemaVersion: "image-edit-v1", sourceVersionId: version.id, operations: finalOperations },
+        finalOperations.map((item) => item.summary).join("；"),
+      );
     } catch (errorValue) {
       setEditorError(errorValue instanceof Error ? errorValue.message : "生成提交失败");
     } finally {
@@ -995,14 +1210,26 @@ function ImageEditorModal({
     ["expand", "扩图", "outpaint"],
   ];
   const activeCapability = toolList.find(([value]) => value === tool)?.[2];
-  const capabilityAvailable = (value: EditTool, capability: string) => capabilities?.[capability] !== false && (value !== "change_text" || capabilities?.ocr !== false);
+  const capabilityAvailable = (_value: EditTool, capability: string) => capabilities?.[capability] !== false;
   const capabilityReady = tool === "regenerate" ? capabilities?.currentVersionInput !== false : !capabilities || capabilityAvailable(tool, activeCapability ?? "");
-  const targetSize = (() => {
-    const ratioValue = ratio === "original" ? version.width / Math.max(1, version.height) : Number(ratio.split(":")[0]) / Number(ratio.split(":")[1]);
-    if (!Number.isFinite(ratioValue) || ratioValue <= 0) return { width: version.width, height: version.height };
-    if (ratioValue >= version.width / Math.max(1, version.height)) return { width: Math.max(version.width, Math.ceil(version.height * ratioValue)), height: version.height };
-    return { width: version.width, height: Math.max(version.height, Math.ceil(version.width / ratioValue)) };
-  })();
+  const outpaintBox = useMemo(
+    () => computeOutpaintPreviewBox(version.width || 1024, version.height || 1024, expand as "all" | "horizontal" | "vertical" | "left" | "right", ratio as "original" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9"),
+    [version.width, version.height, expand, ratio],
+  );
+  const targetSize = { width: outpaintBox.targetWidth, height: outpaintBox.targetHeight };
+  const quickDirectives: Record<string, string[]> = {
+    inpaint: ["保持商品本体轮廓与颜色严格不变", "替换为极简柔和影棚光影", "增强材质高光与真实质感", "补充柔和自然桌面接触阴影"],
+    erase: ["无痕移除杂物与水印，自然延续周围纹理", "清除多余瑕疵与反光斑点，保持原光影"],
+    add_text: ["现代无衬线商业排版，清晰高对比，与画面光影融合", "极简高端品牌副标题排版，居中对齐"],
+    re_edit: ["严格保持商品外观与比例不变，仅优化整体商业光影质感", "提升画面明暗层次与电商点击吸引力"],
+  };
+  const appendQuickDirective = (phrase: string) => {
+    const append = (prev: string) => (prev.trim() ? `${prev.trim()}；${phrase}` : phrase);
+    if (tool === "inpaint") setRedrawPrompt(append);
+    else if (tool === "erase") setErasePrompt(append);
+    else if (tool === "add_text") setAddTextPrompt(append);
+    else if (tool === "re_edit") setInstruction(append);
+  };
   const textVisible = tool === "add_text" || tool === "change_text";
   const textOperations = operations.filter((item) => item.type === "add_text");
   const hasActiveTextOperation = textOperations.some((item) => item.operationId === textOperationId);
@@ -1024,14 +1251,20 @@ function ImageEditorModal({
           {tool === "change_text" && (
             <div className="wb-ocr-blocks" role="status">
               <strong>识别文字</strong>
-              {ocrLoading ? <span>识别中…</span> : (
+              {capabilities?.ocr === false ? (
+                <span>当前未配置多模态识字模型，请在图片上拖拽框选原文字区域并手动填写原文字与新文字</span>
+              ) : ocrLoading ? <span>识别中…</span> : (
                 <>
                   <button type="button" onClick={() => void runOcr()}>重新识别</button>
                   {ocrBlocks.length ? ocrBlocks.map((block) => (
                     <button type="button" key={block.id} onClick={() => { setOriginalText(block.text); setTextRegion({ ...block.bounds, rotation: block.rotation }); }}>
                       {block.text} · {Math.round(block.confidence * 100)}%
                     </button>
-                  )) : <span>未识别到文字，请在图片上拖拽框选原文字区域</span>}
+                  )) : ocrError ? (
+                    <span>{ocrError}</span>
+                  ) : (
+                    <span>未识别到文字，请在图片上拖拽框选原文字区域</span>
+                  )}
                 </>
               )}
             </div>
@@ -1048,70 +1281,110 @@ function ImageEditorModal({
             {capabilityError && <p className="wb-editor-error">{capabilityError}</p>}
           </aside>
           <div className="wb-editor-stage">
-            <div className="wb-editor-canvas" ref={canvasRef}>
-              <img ref={imageRef} onLoad={updateFrame} src={version.previewUrl} alt={task.title} />
-              <Stage width={frame.width} height={frame.height} style={{ position: "absolute", left: frame.left, top: frame.top }} onMouseDown={startStroke} onMousemove={movePointer} onMouseup={finishStroke} onMouseleave={() => { setPointer(null); finishStroke(); }}>
-                <Layer>
-                  {ocrBlocks.map((block) => <KonvaRect key={`ocr-${block.id}`} x={block.bounds.x * frame.width} y={block.bounds.y * frame.height} width={block.bounds.width * frame.width} height={block.bounds.height * frame.height} stroke="#c39416" dash={[7, 5]} strokeWidth={1.5} listening={false} />)}
-                  {strokes.map((stroke, index) => <Line key={index} points={stroke.points.flatMap((point) => [point.x * frame.width, point.y * frame.height])} stroke={stroke.mode === "erase" ? "#64748b" : "#e45757"} opacity={stroke.mode === "erase" ? 0.46 : 0.62} strokeWidth={stroke.size * Math.min(frame.width, frame.height)} lineCap="round" lineJoin="round" globalCompositeOperation={stroke.mode === "erase" ? "destination-out" : "source-over"} />)}
-                  {activeStroke && <Line points={activeStroke.points.flatMap((point) => [point.x * frame.width, point.y * frame.height])} stroke="#e45757" opacity={0.62} strokeWidth={activeStroke.size * Math.min(frame.width, frame.height)} lineCap="round" lineJoin="round" />}
-                  {activeRegion && <KonvaRect x={activeRegion.x * frame.width} y={activeRegion.y * frame.height} width={activeRegion.width * frame.width} height={activeRegion.height * frame.height} stroke="#3d8bfd" dash={[6, 4]} strokeWidth={1.5} />}
-                  {textOperations.map((item) => {
-                    const payload = item.payload;
-                    const selected = tool === "add_text" && item.operationId === textOperationId;
-                    const region = selected || !payload.region || typeof payload.region !== "object" ? textRegion : payload.region as typeof textRegion;
-                    return (
+            <div className="wb-editor-canvas-scroll">
+              <div className="wb-editor-canvas" ref={canvasRef} style={{ width: `${Math.round(zoom * 100)}%`, height: `${Math.round(zoom * 100)}%` }}>
+                <img ref={imageRef} onLoad={updateFrame} src={version.previewUrl} alt={task.title} />
+                <Stage width={frame.width} height={frame.height} style={{ position: "absolute", left: frame.left, top: frame.top }} onMouseDown={startStroke} onMousemove={movePointer} onMouseup={finishStroke} onMouseleave={() => { setPointer(null); finishStroke(); }}>
+                  <Layer visible={!holdCompareOriginal}>
+                    {ocrBlocks.map((block) => <KonvaRect key={`ocr-${block.id}`} x={block.bounds.x * frame.width} y={block.bounds.y * frame.height} width={block.bounds.width * frame.width} height={block.bounds.height * frame.height} stroke="#c39416" dash={[7, 5]} strokeWidth={1.5} listening={false} />)}
+                    {strokes.map((stroke, index) => <Line key={index} points={stroke.points.flatMap((point) => [point.x * frame.width, point.y * frame.height])} stroke={stroke.mode === "erase" ? "#64748b" : "#e45757"} opacity={stroke.mode === "erase" ? 0.46 : 0.62} strokeWidth={stroke.size * Math.min(frame.width, frame.height)} lineCap="round" lineJoin="round" globalCompositeOperation={stroke.mode === "erase" ? "destination-out" : "source-over"} />)}
+                    {activeStroke && <Line points={activeStroke.points.flatMap((point) => [point.x * frame.width, point.y * frame.height])} stroke="#e45757" opacity={0.62} strokeWidth={activeStroke.size * Math.min(frame.width, frame.height)} lineCap="round" lineJoin="round" />}
+                    {activeRegion && <KonvaRect x={activeRegion.x * frame.width} y={activeRegion.y * frame.height} width={activeRegion.width * frame.width} height={activeRegion.height * frame.height} stroke="#3d8bfd" dash={[6, 4]} strokeWidth={1.5} />}
+                    {textOperations.map((item) => {
+                      const payload = item.payload;
+                      const selected = tool === "add_text" && item.operationId === textOperationId;
+                      const region = selected || !payload.region || typeof payload.region !== "object" ? textRegion : payload.region as typeof textRegion;
+                      return (
+                        <KonvaText
+                          key={item.operationId}
+                          ref={selected ? textNodeRef : undefined}
+                          text={selected ? text : String(payload.text ?? "")}
+                          x={(region.x + region.width / 2) * frame.width}
+                          y={(region.y + region.height / 2) * frame.height}
+                          offsetX={region.width * frame.width / 2}
+                          offsetY={region.height * frame.height / 2}
+                          width={region.width * frame.width}
+                          height={region.height * frame.height}
+                          fill={previewFill}
+                          fontSize={Math.max(14, region.height * frame.height * 0.55)}
+                          rotation={region.rotation}
+                          draggable={selected}
+                          shadowColor={previewShadow}
+                          shadowBlur={6}
+                          onClick={() => selectOperation(item)}
+                          onTap={() => selectOperation(item)}
+                          onDragEnd={selected ? (event) => updateTextRegion(event.target as Konva.Text) : undefined}
+                          onTransformEnd={selected ? (event) => updateTextRegion(event.target as Konva.Text, true) : undefined}
+                        />
+                      );
+                    })}
+                    {textVisible && ((tool === "change_text") || (tool === "add_text" && !hasActiveTextOperation)) && (
                       <KonvaText
-                        key={item.operationId}
-                        ref={selected ? textNodeRef : undefined}
-                        text={selected ? text : String(payload.text ?? "")}
-                        x={(region.x + region.width / 2) * frame.width}
-                        y={(region.y + region.height / 2) * frame.height}
-                        offsetX={region.width * frame.width / 2}
-                        offsetY={region.height * frame.height / 2}
-                        width={region.width * frame.width}
-                        height={region.height * frame.height}
+                        ref={textNodeRef}
+                        text={tool === "change_text" ? newText || originalText : text}
+                        x={(textRegion.x + textRegion.width / 2) * frame.width}
+                        y={(textRegion.y + textRegion.height / 2) * frame.height}
+                        offsetX={textRegion.width * frame.width / 2}
+                        offsetY={textRegion.height * frame.height / 2}
+                        width={textRegion.width * frame.width}
+                        height={textRegion.height * frame.height}
                         fill={previewFill}
-                        fontSize={Math.max(14, region.height * frame.height * 0.55)}
-                        rotation={region.rotation}
-                        draggable={selected}
+                        fontSize={Math.max(14, textRegion.height * frame.height * 0.55)}
+                        rotation={textRegion.rotation}
+                        draggable
                         shadowColor={previewShadow}
                         shadowBlur={6}
-                        onClick={() => selectOperation(item)}
-                        onTap={() => selectOperation(item)}
-                        onDragEnd={selected ? (event) => updateTextRegion(event.target as Konva.Text) : undefined}
-                        onTransformEnd={selected ? (event) => updateTextRegion(event.target as Konva.Text, true) : undefined}
+                        onDragEnd={(event) => updateTextRegion(event.target as Konva.Text)}
+                        onTransformEnd={(event) => updateTextRegion(event.target as Konva.Text, true)}
                       />
-                    );
-                  })}
-                  {textVisible && ((tool === "change_text") || (tool === "add_text" && !hasActiveTextOperation)) && (
-                    <KonvaText
-                      ref={textNodeRef}
-                      text={tool === "change_text" ? newText || originalText : text}
-                      x={(textRegion.x + textRegion.width / 2) * frame.width}
-                      y={(textRegion.y + textRegion.height / 2) * frame.height}
-                      offsetX={textRegion.width * frame.width / 2}
-                      offsetY={textRegion.height * frame.height / 2}
-                      width={textRegion.width * frame.width}
-                      height={textRegion.height * frame.height}
-                      fill={previewFill}
-                      fontSize={Math.max(14, textRegion.height * frame.height * 0.55)}
-                      rotation={textRegion.rotation}
-                      draggable
-                      shadowColor={previewShadow}
-                      shadowBlur={6}
-                      onDragEnd={(event) => updateTextRegion(event.target as Konva.Text)}
-                      onTransformEnd={(event) => updateTextRegion(event.target as Konva.Text, true)}
-                    />
-                  )}
-                  {textVisible && <Transformer ref={transformerRef} borderDash={[6, 4]} borderStroke="#3d8bfd" anchorStroke="#3d8bfd" anchorFill="#ffffff" rotateAnchorOffset={22} enabledAnchors={["top-left", "top-right", "bottom-left", "bottom-right"]} boundBoxFunc={(oldBox, newBox) => newBox.width < 24 || newBox.height < 18 ? oldBox : newBox} />}
-                  {["inpaint", "erase"].includes(tool) && pointer && <KonvaCircle x={pointer.x} y={pointer.y} radius={brush / 2} stroke={maskMode === "erase" ? "#475569" : "#dc3f3f"} dash={maskMode === "erase" ? [4, 3] : undefined} strokeWidth={1.5} listening={false} />}
-                </Layer>
-              </Stage>
-              {tool === "expand" && <div className="wb-outpaint-overlay"><span>待扩展区域</span><strong>{targetSize.width} × {targetSize.height}</strong><small>锚点：{expand === "left" ? "右侧" : expand === "right" ? "左侧" : "中心"}</small></div>}
+                    )}
+                    {textVisible && <Transformer ref={transformerRef} borderDash={[6, 4]} borderStroke="#3d8bfd" anchorStroke="#3d8bfd" anchorFill="#ffffff" rotateAnchorOffset={22} enabledAnchors={["top-left", "top-right", "bottom-left", "bottom-right"]} boundBoxFunc={(oldBox, newBox) => newBox.width < 24 || newBox.height < 18 ? oldBox : newBox} />}
+                    {["inpaint", "erase"].includes(tool) && pointer && <KonvaCircle x={pointer.x} y={pointer.y} radius={brush / 2} stroke={maskMode === "erase" ? "#475569" : "#dc3f3f"} dash={maskMode === "erase" ? [4, 3] : undefined} strokeWidth={1.5} listening={false} />}
+                  </Layer>
+                </Stage>
+                {tool === "expand" && (
+                  <div className="wb-outpaint-overlay">
+                    <div className="wb-outpaint-frame" style={{ aspectRatio: `${outpaintBox.targetWidth} / ${outpaintBox.targetHeight}` }}>
+                      <div
+                        className="wb-outpaint-origin"
+                        style={{
+                          left: `${outpaintBox.innerX * 100}%`,
+                          top: `${outpaintBox.innerY * 100}%`,
+                          width: `${outpaintBox.innerWidth * 100}%`,
+                          height: `${outpaintBox.innerHeight * 100}%`,
+                        }}
+                      >
+                        <img src={version.previewUrl} alt="原图锚点" />
+                      </div>
+                    </div>
+                    <div className="wb-outpaint-caption">
+                      <span>待扩展画幅预览</span>
+                      <strong>{targetSize.width} × {targetSize.height}</strong>
+                      <small>原图锚点：{outpaintBox.anchor === "left" ? "左侧" : outpaintBox.anchor === "right" ? "右侧" : "居中"}</small>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
             <div className="wb-editor-bottom">
               <span>{strokes.length ? `已记录 ${strokes.length} 条蒙版笔画` : textVisible ? "拖动或缩放虚线框定位文字区域" : "未绘制选区"}</span>
+              <div className="wb-zoom-controls" role="group" aria-label="画布缩放控制">
+                <button type="button" onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.25).toFixed(2))))} aria-label="缩小画布">−</button>
+                <button type="button" onClick={() => setZoom(1)} title="重置为 100%">{Math.round(zoom * 100)}%</button>
+                <button type="button" onClick={() => setZoom((z) => Math.min(2.5, Number((z + 0.25).toFixed(2))))} aria-label="放大画布">+</button>
+              </div>
+              {["inpaint", "erase"].includes(tool) && (
+                <button
+                  type="button"
+                  className={holdCompareOriginal ? "is-active" : ""}
+                  onPointerDown={() => setHoldCompareOriginal(true)}
+                  onPointerUp={() => setHoldCompareOriginal(false)}
+                  onPointerLeave={() => setHoldCompareOriginal(false)}
+                  title="按住按钮或空格键临时隐藏蒙版查看原图"
+                >
+                  按住看原图
+                </button>
+              )}
               {textVisible && (
                 <div className="wb-mask-mode" role="group" aria-label="画布文字预览对比度">
                   <button type="button" className={previewTone === "dark" ? "is-active" : ""} onClick={() => setPreviewTone("dark")}>深色预览</button>
@@ -1145,6 +1418,45 @@ function ImageEditorModal({
             )}
             {tool === "change_text" && (
               <>
+                <div className="wb-translate-box" aria-label="跨境图片一键翻译">
+                  <div className="wb-translate-head">
+                    <strong>跨境图片一键翻译</strong>
+                    <span>图文分离 · 保留原排版</span>
+                  </div>
+                  <div className="wb-translate-controls">
+                    <select aria-label="翻译目标语言" value={translateLang} onChange={(event) => setTranslateLang(event.target.value)}>
+                      {SUPPORTED_OUTPUT_LANGUAGES.map((lang) => (
+                        <option key={lang.code} value={lang.value}>{lang.value}</option>
+                      ))}
+                    </select>
+                    <button type="button" disabled={translating || !ocrBlocks.length} onClick={() => void runBatchTranslate()}>
+                      {translating ? "翻译中…" : `一键翻译全部 (${ocrBlocks.length})`}
+                    </button>
+                  </div>
+                  {ocrBlocks.length > 0 && (
+                    <div className="wb-translate-rows">
+                      {ocrBlocks.map((block) => (
+                        <div className="wb-translate-row" key={block.id}>
+                          <small title={block.text}>{block.text}</small>
+                          <input
+                            aria-label={`译文 ${block.text}`}
+                            placeholder={`输入${translateLang}译文…`}
+                            value={translatedMap[block.id] ?? ""}
+                            onFocus={() => { setOriginalText(block.text); setNewText(translatedMap[block.id] ?? ""); setTextRegion({ ...block.bounds, rotation: block.rotation }); }}
+                            onChange={(event) => {
+                              const nextVal = event.target.value;
+                              setTranslatedMap((current) => ({ ...current, [block.id]: nextVal }));
+                              if (originalText === block.text) setNewText(nextVal);
+                            }}
+                          />
+                        </div>
+                      ))}
+                      <button type="button" className="wb-translate-apply" disabled={saving || !Object.values(translatedMap).some((v) => v.trim())} onClick={() => void applyAllTranslationsToDraft()}>
+                        将全部译文批量加入对话
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <label>原文字<input value={originalText} onChange={(event) => setOriginalText(event.target.value)} placeholder="OCR 失败时手工确认" /></label>
                 <label>新文字<input value={newText} onChange={(event) => setNewText(event.target.value)} /></label>
                 <label>替换要求<textarea value={changeTextPrompt} onChange={(event) => setChangeTextPrompt(event.target.value)} /></label>
@@ -1157,6 +1469,16 @@ function ImageEditorModal({
                 <label>边缘羽化<input type="range" min="0" max="40" value={Math.round(feather * 100)} onChange={(event) => setFeather(Number(event.target.value) / 100)} /><output>{Math.round(feather * 100)}%</output></label>
                 {tool === "inpaint" ? <label>重绘要求<textarea value={redrawPrompt} onChange={(event) => setRedrawPrompt(event.target.value)} placeholder="描述选区中要重绘成什么，以及需要保留的画面关系" /></label> : <label>清除要求<textarea value={erasePrompt} onChange={(event) => setErasePrompt(event.target.value)} /></label>}
               </>
+            )}
+            {quickDirectives[tool] && (
+              <div className="wb-quick-chips-block">
+                <span>电商高频精修指令</span>
+                <div className="wb-quick-chips">
+                  {quickDirectives[tool].map((phrase) => (
+                    <button type="button" key={phrase} onClick={() => appendQuickDirective(phrase)}>+ {phrase}</button>
+                  ))}
+                </div>
+              </div>
             )}
             {tool === "expand" && (
               <>
@@ -1183,7 +1505,7 @@ function ImageEditorModal({
             {tool === "regenerate" ? (
               <button type="button" className="wb-primary-action" disabled={saving || !capabilityReady} onClick={() => { setSaving(true); onRegenerate().then(onClose).catch((errorValue) => setEditorError(errorValue instanceof Error ? errorValue.message : "再次生成失败")).finally(() => setSaving(false)); }}>{saving ? "提交中…" : "再次生成当前版本"}</button>
             ) : (
-              <button type="button" className="wb-primary-action" disabled={saving || !operations.length || !capabilityReady} onClick={() => void submit()}>{saving ? "提交中…" : "冻结并生成子卡片"}</button>
+              <button type="button" className="wb-primary-action" disabled={saving || !capabilityReady} onClick={() => void submit()}>{saving ? "提交中…" : "开始生成（新建编辑子卡）"}</button>
             )}
           </footer>
         </div>
@@ -1192,13 +1514,16 @@ function ImageEditorModal({
   );
 }
 
-export function WorkbenchBoardPage({ suiteId, navigate }: { suiteId: string; navigate: (to: string) => void }) {
-  return <ReactFlowProvider><WorkbenchBoardInner suiteId={suiteId} navigate={navigate} /></ReactFlowProvider>;
+export type WorkbenchBoardPageProps = { suiteId: string; search?: string; navigate: (to: string) => void };
+
+export function WorkbenchBoardPage(props: WorkbenchBoardPageProps) {
+  return <ReactFlowProvider><WorkbenchBoardInner {...props} /></ReactFlowProvider>;
 }
 
-function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate: (to: string) => void }) {
+function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPageProps) {
   const [workbench, setWorkbench] = useState<ApiWorkbench | null>(null);
-  const [mode, setMode] = useState<BoardMode>("compose");
+  const [mode, setMode] = useState<BoardMode>(() => new URLSearchParams(search).get("view") === "gallery" ? "gallery" : "compose");
+  const [canvasFilter, setCanvasFilter] = useState<CanvasFilter>("all");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<BoardNode>([]);
@@ -1206,17 +1531,23 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
   const [edges, setEdges] = useState<Edge[]>([]);
   const [preview, setPreview] = useState<LightboxPreview | null>(null);
   const [editor, setEditor] = useState<{ task: ApiSuiteTask; version: ApiTaskVersion } | null>(null);
+  const [compareTaskId, setCompareTaskId] = useState<string | null>(null);
+  const [customTaskOpen, setCustomTaskOpen] = useState(false);
+  const uploadInput = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [savingTaskInput, setSavingTaskInput] = useState(false);
   const [styleDrawerOpen, setStyleDrawerOpen] = useState(false);
   const [styleDraft, setStyleDraft] = useState("");
   const [savingStyle, setSavingStyle] = useState(false);
   const [toast, setToast] = useState("");
   const [defaultImageModel, setDefaultImageModel] = useState<string | null | undefined>(undefined);
+  const [imageOptions, setImageOptions] = useState(() => defaultImageOptions("gpt-image-2"));
   const [promptDraft, setPromptDraft] = useState("");
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
   const latestWorkbench = useRef<ApiWorkbench | null>(null);
   const layoutVersionRef = useRef(0);
   const layoutSaveQueue = useRef<Promise<void>>(Promise.resolve());
-  const { fitView } = useReactFlow();
+  const { fitView, getInternalNode } = useReactFlow<BoardNode>();
 
   const planStyleGuide = useMemo(() => workbench ? fallbackPlanStyle(workbench) : "", [workbench]);
   const styleOverride = workbench?.styleOverride ?? workbench?.suite.styleOverride ?? null;
@@ -1241,6 +1572,8 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
       modelSettingsApi.get().then(({ channels, preferences }) => {
         const channel = channels.find((item) => item.id === preferences.image?.channelId);
         setDefaultImageModel(channel && preferences.image ? `${channel.name} · ${preferences.image.modelId}` : null);
+        const model = channel?.models.find((item) => item.id === preferences.image?.modelId && item.capabilities.includes("image"));
+        setImageOptions(model?.imageOptions ?? defaultImageOptions(model?.id ?? "gpt-image-2"));
       }).catch(() => setDefaultImageModel(undefined));
     };
     loadDefault();
@@ -1281,30 +1614,37 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
   const openStyleDrawer = useCallback(() => {
     const currentWb = latestWorkbench.current;
     const override = currentWb?.styleOverride ?? currentWb?.suite.styleOverride ?? "";
-    const plan = currentWb ? fallbackPlanStyle(currentWb) : "";
+    const plan = currentWb?.planSnapshot ? fallbackPlanStyle(currentWb) : "";
     setStyleDraft(override || plan);
     setStyleDrawerOpen(true);
   }, []);
 
-  const rebuildGraph = useCallback((nextWb: ApiWorkbench, focusNodeId: string | null, ignoreSavedPositions = false) => {
+  const rebuildGraph = useCallback((nextWb: ApiWorkbench, focusNodeId: string | null, activeFilter: CanvasFilter = "all", ignoreSavedPositions = false) => {
     const nextPlanStyle = fallbackPlanStyle(nextWb);
     const nextOverride = nextWb.styleOverride ?? nextWb.suite.styleOverride ?? null;
     const nextEffective = nextWb.effectiveStyleGuide?.trim() || nextOverride?.trim() || nextPlanStyle;
-    const projected = projectComposeGraph(nextWb, nextWb.layout, nextEffective, nextOverride, focusNodeId, ignoreSavedPositions, {
+    const measuredSizes = new Map<string, LaneCardSize>();
+    for (const node of nodesRef.current) {
+      const { width, height } = getInternalNode(node.id)?.measured ?? {};
+      if (width && height) measuredSizes.set(node.id, { width, height });
+    }
+    const projected = projectComposeGraph(nextWb, nextWb.layout, nextEffective, nextOverride, focusNodeId, activeFilter, { ignoreSavedPositions, measuredSizes }, {
       onPreview: setPreview,
       onSelect: (task, nodeId) => { setSelectedTaskId(task.id); setSelectedNodeId(nodeId); },
       onGenerate: (task) => generateOne(task).catch((error) => notify(error instanceof Error ? error.message : "生成提交失败")),
       onCopy: (task) => copyPrompt(task).catch(() => notify("复制失败")),
       onRegenerate: (task) => regenerateTask(task).catch((error) => notify(error instanceof Error ? error.message : "重新生成提交失败")),
       onEdit: (task, version) => { if (version) setEditor({ task, version }); },
+      onCompareVersions: (task) => setCompareTaskId(task.id),
       onEditStyle: openStyleDrawer,
       onSelectVersion: (task, versionId, selection) => selectVersion(task, versionId, selection).catch(() => notify("版本选择失败")),
     });
-    nodesRef.current = projected.nodes;
-    setNodes(projected.nodes);
+    const nextNodes = projected.nodes.map((node) => ({ ...node, measured: measuredSizes.get(node.id) }));
+    nodesRef.current = nextNodes;
+    setNodes(nextNodes);
     setEdges(projected.edges);
-    return projected;
-  }, [setNodes, openStyleDrawer, notify]);
+    return nextNodes;
+  }, [setNodes, openStyleDrawer, notify, getInternalNode]);
 
   const reload = useCallback(async () => {
     const next = await suiteApi.getWorkbench(suiteId);
@@ -1312,20 +1652,70 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
     setWorkbench(next);
     layoutVersionRef.current = next.layout?.layoutVersion ?? 0;
     setViewport(next.layout?.viewport ?? { x: 0, y: 0, zoom: 1 });
-    const projected = rebuildGraph(next, selectedNodeId, false);
+    const nextNodes = rebuildGraph(next, selectedNodeId, canvasFilter);
     const savedIds = new Set((next.layout?.nodes ?? []).map((node) => node.nodeId));
-    const needsFit = !next.layout || projected.nodes.some((node) => !savedIds.has(node.id));
+    const needsFit = !next.layout || nextNodes.some((node) => !savedIds.has(node.id));
     if (needsFit) window.setTimeout(() => fitView({ padding: 0.14, duration: 0 }), 0);
     setSelectedTaskId((current) => current && (next.tasks.some((task) => task.id === current) || next.imageEditChildren?.some((child) => String(child.task.id) === current)) ? current : next.tasks.find((task) => task.status !== "archived")?.id ?? null);
-  }, [fitView, rebuildGraph, selectedNodeId, suiteId]);
+  }, [fitView, rebuildGraph, selectedNodeId, canvasFilter, suiteId]);
 
   useEffect(() => { reload().catch(() => notify("工作台加载失败，请重试")); }, [suiteId]);
 
-  // Re-highlight lineage immediately when selectedNodeId changes without refetching
+  useEffect(() => {
+    setMode(new URLSearchParams(search).get("view") === "gallery" ? "gallery" : "compose");
+  }, [search]);
+
+  const consumedEditQueryRef = useRef("");
+  useEffect(() => {
+    if (!workbench || workbench.suite.id !== suiteId) return;
+    const params = new URLSearchParams(search ?? "");
+    const editTaskId = params.get("editTask")?.trim() || "";
+    if (!editTaskId) return;
+    const editVersionId = params.get("editVersion")?.trim() || "";
+    const signature = `${suiteId}:${editTaskId}:${editVersionId}`;
+    if (consumedEditQueryRef.current === signature) return;
+    consumedEditQueryRef.current = signature;
+
+    let targetTask = workbench.tasks.find((task) => task.id === editTaskId) ?? null;
+    let targetNodeId = targetTask ? `task:${targetTask.id}` : "";
+    if (!targetTask) {
+      const childIndex = (workbench.imageEditChildren ?? []).findIndex((child) => String(child.task.id) === editTaskId);
+      if (childIndex >= 0) {
+        targetTask = imageEditChildTask(workbench, workbench.imageEditChildren![childIndex], childIndex);
+        targetNodeId = `edit-child:${targetTask.id}`;
+      }
+    }
+    if (!targetTask && editVersionId) {
+      const fallbackParent = workbench.tasks.find((task) => task.versions.some((v) => v.id === editVersionId)) ?? null;
+      if (fallbackParent) {
+        targetTask = fallbackParent;
+        targetNodeId = `task:${fallbackParent.id}`;
+      }
+    }
+    if (targetTask) {
+      setSelectedTaskId(targetTask.id);
+      if (targetNodeId) setSelectedNodeId(targetNodeId);
+      const targetVersion =
+        (editVersionId ? targetTask.versions.find((v) => v.id === editVersionId) : undefined) ??
+        targetTask.versions.find((v) => v.isCurrent) ??
+        targetTask.versions[0];
+      if (targetVersion) {
+        setEditor({ task: targetTask, version: targetVersion });
+      }
+    }
+
+    params.delete("editTask");
+    params.delete("editVersion");
+    const remaining = params.toString();
+    const nextUrl = `${window.location.pathname}${remaining ? `?${remaining}` : ""}${window.location.hash}`;
+    window.history.replaceState({}, "", nextUrl);
+  }, [workbench, suiteId, search]);
+
+  // Re-highlight lineage immediately when selectedNodeId or filter changes without refetching
   useEffect(() => {
     if (!latestWorkbench.current || mode !== "compose") return;
-    rebuildGraph(latestWorkbench.current, selectedNodeId, false);
-  }, [selectedNodeId, mode, rebuildGraph]);
+    rebuildGraph(latestWorkbench.current, selectedNodeId, canvasFilter, false);
+  }, [selectedNodeId, canvasFilter, mode, rebuildGraph]);
 
   useEffect(() => {
     const ordinaryTaskRunning = workbench?.tasks.some((task) => task.status === "generating");
@@ -1344,8 +1734,8 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
 
   const tidyLayout = async () => {
     if (!latestWorkbench.current) return;
-    const projected = rebuildGraph(latestWorkbench.current, selectedNodeId, true);
-    await persistLayout(projected.nodes);
+    const nextNodes = rebuildGraph(latestWorkbench.current, selectedNodeId, canvasFilter, true);
+    await persistLayout(nextNodes);
     window.setTimeout(() => fitView({ padding: 0.14, duration: 260 }), 20);
     notify("已按三泳道自动整理画布布局");
   };
@@ -1356,7 +1746,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
       await suiteApi.updateStyleOverride(suiteId, nextValue);
       setStyleDrawerOpen(false);
       await reload();
-      notify(nextValue ? "已保存画布风格覆盖，仅作用于后续新提交生成" : "已恢复为原计划冻结风格");
+      notify(nextValue ? "已保存画布风格覆盖，仅作用于后续新提交生成" : workbench?.planSnapshot ? "已恢复为原计划冻结风格" : "已清除画布风格");
     } catch (error) {
       notify(error instanceof Error ? error.message : "风格覆盖保存失败");
     } finally {
@@ -1364,11 +1754,39 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
     }
   };
 
-  const updateTaskParams = async (patch: Record<string, unknown>) => {
+  const saveTaskInput = async (patch: Parameters<typeof suiteApi.updateTask>[1], success: string) => {
     if (!selectedTask || selectedIsImageEditChild) return;
-    await suiteApi.updateTask(selectedTask.id, { generationParams: { ...selectedTask.generationParams, ...patch } });
-    await reload();
-    notify("已保存当前卡片参数");
+    setSavingTaskInput(true);
+    try {
+      await suiteApi.updateTask(selectedTask.id, patch);
+      await reload();
+      notify(success);
+    } finally {
+      setSavingTaskInput(false);
+    }
+  };
+
+  const updateTaskParams = (patch: Record<string, unknown>) => saveTaskInput({ generationParams: { ...selectedTask?.generationParams, ...patch } }, "已保存当前卡片参数");
+
+  const uploadProductImages = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!files.length) return;
+    setUploading(true);
+    let uploaded = 0;
+    try {
+      const firstOrdinal = Math.max(0, ...(latestWorkbench.current?.inputImages ?? []).map((image) => image.ordinal)) + 1;
+      for (const file of files) {
+        await suiteApi.upload(suiteId, file, firstOrdinal + uploaded);
+        uploaded += 1;
+      }
+      notify(`已上传 ${uploaded} 张商品图`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "商品图上传失败");
+    } finally {
+      if (uploaded) await reload().catch(() => notify("商品图已上传，画布刷新失败"));
+      setUploading(false);
+    }
   };
 
   const savePrompt = async () => {
@@ -1421,14 +1839,55 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
     notify(selection === "final" ? "已设为终版" : "已切换当前版本");
   };
 
-  const generateAll = async () => {
+  const generateAll = async (onlyUnfinished = false) => {
     if (!workbench) return;
-    const tasks = workbench.tasks.filter((task) => task.status !== "archived" && (task.originKind !== "reverse_import" || task.sourceLibraryReferenceId));
-    if (tasks.length) {
-      await suiteApi.generateBatch(suiteId, tasks.map((task) => task.id));
-      await reload();
-      notify(`已提交 ${tasks.length} 个任务`);
+    const tasks = workbench.tasks.filter((task) => {
+      if (task.status === "archived") return false;
+      if (!hasTaskReference(task)) return false;
+      if (onlyUnfinished) return task.status === "pending" || task.status === "failed";
+      return true;
+    });
+    if (!tasks.length) {
+      notify(onlyUnfinished ? "所有任务均已生成完成" : "当前没有可提交的任务");
+      return;
     }
+    await suiteApi.generateBatch(suiteId, tasks.map((task) => task.id));
+    await reload();
+    notify(`已提交 ${tasks.length} 个任务`);
+  };
+
+  const retryFailedTasks = async () => {
+    if (!workbench) return;
+    const failedTasks = workbench.tasks.filter((task) => task.status === "failed");
+    if (!failedTasks.length) return;
+    let submitted = 0;
+    for (const task of failedTasks) {
+      const failedAttempt = [...task.attempts].reverse().find((attempt) => attempt.status === "failed");
+      if (failedAttempt) {
+        await suiteApi.retryTaskAttempt(failedAttempt.id);
+        submitted += 1;
+      }
+    }
+    await reload();
+    notify(`已重新提交 ${submitted} 个失败任务`);
+  };
+
+  const batchSyncParams = async (imageType: "main" | "detail" | "all") => {
+    if (!selectedTask || selectedIsImageEditChild) return;
+    const patch = { ratio: ratioFor(selectedTask), size: sizeFor(selectedTask), quality: qualityFor(selectedTask) };
+    const result = await suiteApi.batchUpdateTaskParams(suiteId, { imageType, generationParams: patch });
+    await reload();
+    const label = imageType === "main" ? "全部主图" : imageType === "detail" ? "全部详情图" : "全部任务卡";
+    notify(`已将比例/尺寸/清晰度同步至${label}（共 ${result.updatedCount} 张）`);
+  };
+
+  const createCustomTask = async (input: { imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown> }) => {
+    const created = await suiteApi.createCustomTask(suiteId, input);
+    setCustomTaskOpen(false);
+    await reload();
+    setSelectedTaskId(created.id);
+    setSelectedNodeId(`task:${created.id}`);
+    notify(`已新增画布任务卡「${created.title}」`);
   };
 
   const copyPrompt = async (task: ApiSuiteTask) => {
@@ -1452,17 +1911,31 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
   };
 
   const activeTasks = workbench?.tasks.filter((task) => task.status !== "archived") ?? [];
+  const mainTaskCount = activeTasks.filter((task) => task.imageType === "main").length;
+  const detailTaskCount = activeTasks.filter((task) => task.imageType === "detail").length;
+  const unfinishedTasks = activeTasks.filter((task) => (task.status === "pending" || task.status === "failed") && hasTaskReference(task));
+  const failedTaskCount = activeTasks.filter((task) => task.status === "failed").length;
+  const editChildCount = workbench?.imageEditChildren?.length ?? 0;
   const isGenerating = activeTasks.some((task) => task.status === "generating") || Boolean(workbench?.imageEditChildren?.some((child) => String(child.task.status) === "generating"));
+  const compareTask = workbench && compareTaskId
+    ? (workbench.tasks.find((task) => task.id === compareTaskId) ?? (() => {
+      const idx = (workbench.imageEditChildren ?? []).findIndex((child) => String(child.task.id) === compareTaskId);
+      return idx >= 0 ? imageEditChildTask(workbench, workbench.imageEditChildren![idx], idx) : null;
+    })())
+    : null;
 
   if (!workbench) {
     return (
-      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "创建", to: "/suites/new" }, { label: "套图工作台" }]} statusText="正在恢复套图工作台…" statusTone="running">
-        <div className="flow-loading">正在恢复套图工作台…</div>
+      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "生图画布", to: "/create/canvas" }]} statusText={toast || "正在加载画布…"} statusTone={toast ? "error" : "running"}>
+        <div className="flow-loading">{toast || "正在加载画布…"}</div>
       </AppShell>
     );
   }
 
   const currentVersion = selectedTask?.versions.find((version) => version.isCurrent) ?? selectedTask?.versions[0];
+  const isFreeCanvas = workbench.suite.origin === "canvas";
+  const returnPath = isFreeCanvas ? "/create/canvas" : `/create/suite/${suiteId}`;
+  const missingReference = Boolean(selectedTask && !selectedIsImageEditChild && !hasTaskReference(selectedTask));
   const appliesStyleOverride = Boolean(styleOverride && selectedTask && !selectedIsImageEditChild && selectedTask.originKind !== "reverse_import");
   const effectiveInspectorPrompt = selectedTask
     ? (selectedIsImageEditChild
@@ -1476,7 +1949,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
       activeNav="create"
       navigate={navigate}
       fullHeight
-      crumbs={[{ label: "创建", to: "/suites/new" }, { label: workbench.suite.name, to: `/suites/${suiteId}` }, { label: mode === "compose" ? "创作板" : "成品展示板" }]}
+      crumbs={[{ label: isFreeCanvas ? "生图画布" : "商品套图", to: returnPath }, { label: workbench.suite.name }, { label: mode === "compose" ? "创作板" : "成品展示板" }]}
       statusText={isGenerating ? "模型生成中…" : "已保存"}
       statusTone={isGenerating ? "running" : "pass"}
       centerSlot={
@@ -1486,15 +1959,15 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
         </div>
       }
       rightSlot={
-        <button type="button" className="pa-topbar-btn" onClick={() => navigate(`/suites/${suiteId}`)}>
-          返回规划
+        <button type="button" className="pa-topbar-btn" onClick={() => navigate(returnPath)}>
+          {isFreeCanvas ? "返回画布列表" : "返回套图"}
         </button>
       }
     >
       {mode === "gallery" ? (
         <DeliveryGalleryView
           workbench={workbench}
-          effectiveStyleGuide={effectiveStyleGuide}
+          effectiveStyleGuide={workbench.planSnapshot || styleOverride?.trim() ? effectiveStyleGuide : ""}
           onPreview={openDeliveryPreview}
           onNotify={notify}
         />
@@ -1510,13 +1983,50 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                   </span>
                 </div>
                 <div className="wb-canvas-actions">
-                  <button type="button" className="wb-primary-action" disabled={isGenerating} onClick={() => generateAll().catch((error) => notify(error instanceof Error ? error.message : "批量生成提交失败"))}>
-                    {isGenerating ? "生成中…" : "生成全部"}
-                  </button>
+                  <input ref={uploadInput} type="file" aria-label="上传商品图" accept="image/png,image/jpeg,image/webp" multiple hidden onChange={(event) => void uploadProductImages(event)} />
+                  <button type="button" className="wb-upload-product" disabled={uploading} onClick={() => uploadInput.current?.click()}><Icon name="image" />{uploading ? "上传中…" : "上传商品图"}</button>
+                  <button type="button" onClick={() => setCustomTaskOpen(true)}>+ 新建任务卡</button>
+                  {unfinishedTasks.length > 0 ? (
+                    <button type="button" className="wb-primary-action" disabled={isGenerating} onClick={() => generateAll(true).catch((error) => notify(error instanceof Error ? error.message : "批量生成提交失败"))}>
+                      {isGenerating ? "生成中…" : `生成待完成 (${unfinishedTasks.length})`}
+                    </button>
+                  ) : (
+                    <button type="button" className="wb-primary-action" disabled={isGenerating || !activeTasks.some(hasTaskReference)} onClick={() => generateAll(false).catch((error) => notify(error instanceof Error ? error.message : "批量生成提交失败"))}>
+                      {isGenerating ? "生成中…" : "重新生成全部"}
+                    </button>
+                  )}
+                  {failedTaskCount > 0 && (
+                    <button type="button" className="wb-retry-failed-btn" disabled={isGenerating} onClick={() => retryFailedTasks().catch((error) => notify(error instanceof Error ? error.message : "批量重试失败"))}>
+                      重试失败 ({failedTaskCount})
+                    </button>
+                  )}
                   <button type="button" onClick={() => void tidyLayout()} title="按三泳道一键整理画布节点">一键整理布局</button>
                   <button type="button" onClick={() => fitView({ padding: 0.14, duration: 250 })} title="适应视图"><Icon name="fit" /></button>
                   <button type="button" onClick={openStyleDrawer}>{styleOverride ? "风格覆盖（已生效）" : "全局风格"}</button>
                 </div>
+              </div>
+              <div className="wb-filter-strip" role="group" aria-label="画布卡片筛选">
+                {([
+                  ["all", `全部 (${activeTasks.length + editChildCount})`],
+                  ["main", `主图 (${mainTaskCount})`],
+                  ["detail", `详情页 (${detailTaskCount})`],
+                  ["edit", `编辑子卡 (${editChildCount})`],
+                  ["failed", `待处理 (${unfinishedTasks.length})`],
+                ] as Array<[CanvasFilter, string]>).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className={canvasFilter === key ? "is-active" : ""}
+                    onClick={() => { setSelectedNodeId(null); setCanvasFilter(key); }}
+                  >
+                    {label}
+                  </button>
+                ))}
+                {unfinishedTasks.length > 0 && unfinishedTasks.length < activeTasks.length && (
+                  <button type="button" className="wb-filter-extra" disabled={isGenerating} onClick={() => generateAll(false).catch((error) => notify(error instanceof Error ? error.message : "批量生成提交失败"))}>
+                    全部重生成 ({activeTasks.length})
+                  </button>
+                )}
               </div>
               <div className="wb-canvas wb-canvas-compose">
                 <ReactFlow
@@ -1533,10 +2043,24 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                   }}
                   nodesDraggable
                   nodesConnectable={false}
+                  minZoom={0.1}
                   fitView={false}
                 >
                   <Background gap={20} size={1} color="#e4e7eb" />
                   <Controls showInteractive={false} />
+                  <MiniMap
+                    pannable
+                    zoomable
+                    nodeColor={(node) => {
+                      const d = node.data as BoardData | undefined;
+                      if (d?.kind === "style") return "#f59e0b";
+                      if (d?.kind === "base" || d?.kind === "reverse-ref") return "#94a3b8";
+                      if (d?.isEditChild) return "#6366f1";
+                      if (d?.task?.status === "failed") return "#ef4444";
+                      if (d?.task?.status === "generated") return "#10b981";
+                      return "#3b82f6";
+                    }}
+                  />
                 </ReactFlow>
               </div>
             </div>
@@ -1557,7 +2081,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
               </div>
               <div className="wb-mode-explainer">
                 <span>当前模式</span>
-                <strong>{selectedTask?.originKind === "reverse_import" ? "爆品图反推任务组" : "套图模式"}</strong>
+                <strong>{isFreeCanvas ? "自由画布" : "套图模式"}</strong>
                 <p>同一画布中统一管理参考图、白底图、任务提示词、编辑血缘子卡和版本快照。</p>
               </div>
               <div className="wb-reference-strip">
@@ -1587,7 +2111,18 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                       <textarea value={promptDraft} onChange={(event) => setPromptDraft(event.target.value)} />
                     </label>
                   )}
-                  <WhiteResourcePicker task={selectedTask} onBound={reload} onNotify={notify} />
+                  {!selectedIsImageEditChild && (
+                    <>
+                      <label className="wb-inspector-field">
+                        <span>商品参考图</span>
+                        <select value={selectedTask.sourceInputImageId ?? ""} disabled={!workbench.inputImages.length || savingTaskInput || selectedTask.status === "generating"} onChange={(event) => saveTaskInput({ sourceInputImageId: event.target.value }, "已绑定商品参考图").catch(() => notify("商品图绑定失败"))}>
+                          <option value="" disabled>{selectedTask.sourceLibraryReferenceId ? "已绑定图片库参考图" : "未绑定商品图"}</option>
+                          {workbench.inputImages.map((image) => <option key={image.id} value={image.id}>{image.currentBaseVersionId ? "白底图" : "原图"} {image.ordinal} · {image.originalFilename}</option>)}
+                        </select>
+                      </label>
+                      <WhiteResourcePicker key={selectedTask.id} task={selectedTask} onBound={reload} onNotify={notify} />
+                    </>
+                  )}
                   {selectedTask.originKind === "reverse_import" && (
                     <label className="wb-inspector-field wb-checkbox-field">
                       <span>爆品图参考</span>
@@ -1597,18 +2132,30 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
                   )}
                   {!selectedIsImageEditChild && (
                     <>
-                      <label className="wb-inspector-field"><span>比例</span><select value={ratioFor(selectedTask)} onChange={(event) => updateTaskParams({ ratio: event.target.value }).catch(() => notify("比例保存失败"))}><option>1:1</option><option>3:4</option><option>4:3</option><option>9:16</option><option>16:9</option></select></label>
-                      <label className="wb-inspector-field"><span>尺寸</span><select value={sizeFor(selectedTask)} onChange={(event) => updateTaskParams({ size: event.target.value }).catch(() => notify("尺寸保存失败"))}><option>1K</option><option>2K</option><option>4K</option></select></label>
+                      <label className="wb-inspector-field"><span>比例</span><select value={ratioFor(selectedTask)} disabled={savingTaskInput} onChange={(event) => updateTaskParams({ ratio: event.target.value }).catch(() => notify("比例保存失败"))}>{parameterOptions(imageOptions.aspectRatios, ratioFor(selectedTask))}</select></label>
+                      <label className="wb-inspector-field"><span>分辨率</span><select value={sizeFor(selectedTask)} disabled={savingTaskInput} onChange={(event) => updateTaskParams({ size: event.target.value }).catch(() => notify("分辨率保存失败"))}>{parameterOptions(imageOptions.sizes, sizeFor(selectedTask))}</select></label>
+                      <ResolutionCostNote size={sizeFor(selectedTask)} className="wb-resolution-note" />
                       <label className="wb-inspector-field"><span>清晰度</span><select value={qualityFor(selectedTask)} onChange={(event) => updateTaskParams({ quality: event.target.value }).catch(() => notify("清晰度保存失败"))}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+                      <div className="wb-batch-sync-row">
+                        <button type="button" onClick={() => batchSyncParams(selectedTask.imageType).catch(() => notify("批量同步失败"))}>
+                          同步参数到全部{selectedTask.imageType === "main" ? "主图" : "详情图"}
+                        </button>
+                      </div>
                     </>
                   )}
+                  {missingReference && <p className="wb-inspector-field">{missingReferenceHint}</p>}
                   <div className="wb-inspector-actions">
                     {!selectedIsImageEditChild && <button type="button" className="wb-primary-action" onClick={() => savePrompt().catch(() => notify("提示词保存失败"))}>保存提示词</button>}
-                    <button type="button" className="wb-primary-action" disabled={selectedTask.originKind === "reverse_import" && !selectedTask.sourceLibraryReferenceId} onClick={() => generateOne(selectedTask, promptDraft).catch((error) => notify(error instanceof Error ? error.message : "生成提交失败"))}>
+                    <button type="button" className="wb-primary-action" disabled={missingReference || savingTaskInput || selectedTask.status === "generating"} title={missingReference ? missingReferenceHint : undefined} onClick={() => generateOne(selectedTask, promptDraft).catch((error) => notify(error instanceof Error ? error.message : "生成提交失败"))}>
                       {selectedIsImageEditChild ? "再次生成" : "创作"}
                     </button>
                     <button type="button" onClick={() => copyPrompt({ ...selectedTask, promptDraft }).catch(() => notify("复制失败"))}><Icon name="copy" />复制提示词</button>
                     {currentVersion && <button type="button" onClick={() => setEditor({ task: selectedTask, version: currentVersion })}><Icon name="edit" />编辑图片</button>}
+                    {selectedTask.versions.length > 0 && (
+                      <button type="button" onClick={() => setCompareTaskId(selectedTask.id)}>
+                        <Icon name="columns" />版本对比 ({selectedTask.versions.length})
+                      </button>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -1633,7 +2180,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
             </header>
             <div className="wb-style-drawer-body">
               <div className="wb-style-origin">
-                <strong>原计划冻结全局风格（只读）</strong>
+                <strong>{workbench.planSnapshot ? "原计划冻结全局风格（只读）" : "自由风格"}</strong>
                 <p>{planStyleGuide}</p>
               </div>
               <label className="wb-style-field">
@@ -1651,7 +2198,7 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
             <footer>
               {styleOverride && (
                 <button type="button" className="wb-style-reset" disabled={savingStyle} onClick={() => void saveStyleOverride(null)}>
-                  恢复原计划风格
+                  {workbench.planSnapshot ? "恢复原计划风格" : "清除画布风格"}
                 </button>
               )}
               <button type="button" disabled={savingStyle} onClick={() => setStyleDrawerOpen(false)}>取消</button>
@@ -1671,6 +2218,24 @@ function WorkbenchBoardInner({ suiteId, navigate }: { suiteId: string; navigate:
           onOperationAdded={(operation, instruction) => persistEditOperation(editor.task, operation, instruction)}
           onRegenerate={() => regenerateTask(editor.task)}
           onSubmit={(spec, instruction) => submitEdit(editor.task, spec, instruction)}
+        />
+      )}
+
+      {customTaskOpen && (
+        <CustomTaskModal
+          inputImages={workbench.inputImages}
+          imageOptions={imageOptions}
+          onClose={() => setCustomTaskOpen(false)}
+          onCreate={createCustomTask}
+        />
+      )}
+
+      {compareTask && (
+        <VersionCompareModal
+          task={compareTask}
+          onClose={() => setCompareTaskId(null)}
+          onSelectVersion={selectVersion}
+          onComparePreview={(nextPreview) => setPreview(nextPreview)}
         />
       )}
 
