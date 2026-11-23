@@ -35,8 +35,29 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .reverse-status b { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--green); }
 .reverse-avatar { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 50%; background: #fff; color: var(--ink); }
 
+.reverse-readonly-page { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; }
+.reverse-upgrade-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 24px; border-bottom: 1px solid #d4e1f7; background: #f2f6ff; color: var(--ink); flex-shrink: 0; }
+.reverse-upgrade-copy { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; min-width: 0; font-size: 12px; }
+.reverse-upgrade-copy strong { color: #1f489e; font-weight: 700; }
+.reverse-upgrade-copy span:last-child { color: #546278; }
+.reverse-readonly-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; border: 1px solid #b7c9ef; background: #fff; color: #2454b8; font-size: 11px; font-weight: 700; }
+.reverse-upgrade-link { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 700; text-decoration: none; white-space: nowrap; transition: .16s ease; }
+.reverse-upgrade-link:hover { background: #3c66bf; }
+.reverse-readonly-kv { display: grid; gap: 8px; margin: 0; }
+.reverse-readonly-kv > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--soft); }
+.reverse-readonly-kv dt { margin: 0; color: var(--muted); font-size: 12px; }
+.reverse-readonly-kv dd { margin: 0; color: var(--ink); font-size: 12px; font-weight: 650; }
+.reverse-readonly-empty { display: grid; place-items: center; gap: 10px; min-height: 220px; padding: 32px 24px; border: 1px dashed var(--line); border-radius: 8px; background: #fff; text-align: center; }
+.reverse-readonly-empty strong { font-size: 15px; color: var(--ink); }
+.reverse-readonly-empty p { margin: 0; color: var(--muted); line-height: 1.6; }
+.reverse-readonly-template { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--soft); font-size: 11px; }
+.reverse-readonly-template span { color: var(--muted); }
+.reverse-readonly-template strong { color: var(--ink); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reverse-btn { text-decoration: none; }
+.reverse-field textarea[readonly] { background: #f8fafc; color: var(--ink); cursor: text; }
+
 .reverse-layout { position: fixed; inset: 64px 0 0; display: grid; grid-template-columns: 272px minmax(0, 1fr) 390px; min-height: 0; }
-.pa-shell .reverse-layout { position: static; flex: 1; height: 100%; }
+.pa-shell .reverse-layout { position: static; flex: 1; min-height: 0; }
 .reverse-step.done { color: var(--green); }
 .reverse-step.done span { border-color: var(--green); background: color-mix(in oklch, var(--green) 14%, #fff); color: var(--green); font-weight: 700; }
 .reverse-summary-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }

@@ -8,7 +8,7 @@ import { Pool } from "pg";
 import { createSuiteStudioApp } from "./app.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
-import { dispatchInputImageUpload, parseMultipartFile } from "./multipart.js";
+import { dispatchInputImageUpload } from "./multipart.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
 import { resolveImageSize } from "../shared/model-settings.js";
@@ -177,12 +177,6 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   const upload = req.method === "POST" ? await dispatchInputImageUpload(app, requestUrl.pathname, body, headers) : null;
   if (upload) {
     response = upload;
-  } else if (req.method === "POST" && /^\/api\/reverse-plans\/[^/]+\/references$/.test(path)) {
-    const parsed = parseMultipartFile(body, headers["content-type"] ?? "");
-    if (!parsed) response = { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "未找到图片文件" }, requestId: "" } };
-    else {
-      response = await app.request("POST", path, { headers: headers as Record<string, string>, body: { filename: parsed.filename, mimeType: parsed.mimeType, bytesBase64: parsed.bytes.toString("base64") } });
-    }
   } else if (req.method === "GET" && /^\/api\/listing-copies\/[^/]+\/input-images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname)) {
     response = await app.request("GET", requestUrl.pathname);
   } else if (req.method === "GET" && path.includes("/preview")) {

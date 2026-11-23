@@ -93,6 +93,7 @@ export const errorMessages: Record<string, string> = {
   REVERSE_REFERENCE_NOT_FOUND: "反推参考图不存在",
   REVERSE_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
   REVERSE_OUTPUT_INVALID: "反推模型输出不符合契约",
+  REVERSE_PLAN_READ_ONLY: "爆品图反推已升级为爆品图复刻，旧反推方案仅支持只读查看",
   REPLICA_OUTPUT_INVALID: "复刻视觉分析输出不符合契约",
 };
 

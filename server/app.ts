@@ -62,7 +62,7 @@ import type {
   TaskGenerationBatch,
   TaskResultSlot,
   LibraryRepository,
-  ReverseRepository, ReversePlan, ReverseReference, ReverseAttempt, ReversePromptVersion,
+  ReverseRepository, ReverseReference, ReversePromptVersion,
   PipelineRepository,
 } from "./types.js";
 import { failObservation, finishObservation, startTool } from "./observability.js";
@@ -421,17 +421,6 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const listingRepository = deps.listingRepository ?? new MemoryListingRepository();
   const listing = createListingCopyApi({ jobs: listingRepository, suites: deps.repository, storage: deps.storage, pipelines: pipelineRepository, plans: deps.planRepository, platforms: deps.platformRepository, prompts: deps.promptRepository, vision: resolveVision });
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
-  const reversePlanWrites = new Map<string, Promise<void>>();
-  const withReversePlanWrite = async <T>(planId: string, action: () => Promise<T>): Promise<T> => {
-    const previous = reversePlanWrites.get(planId) ?? Promise.resolve();
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const current = previous.catch(() => undefined).then(() => gate);
-    reversePlanWrites.set(planId, current);
-    await previous.catch(() => undefined);
-    try { return await action(); }
-    finally { release(); if (reversePlanWrites.get(planId) === current) reversePlanWrites.delete(planId); }
-  };
 
   const resolveCategorySourceSnapshot = async (snapshot: PlanSnapshot): Promise<PlanSnapshot> => {
     if (!deps.planRepository) return snapshot;
@@ -762,41 +751,6 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
   };
 
-  const runReverse = async (plan: ReversePlan, ref: ReverseReference, retry: boolean, llmClient: LlmClient | undefined) => {
-    if (!ref.templateVersionId) return fail("REVERSE_TEMPLATE_REQUIRED");
-    if (!llmClient?.generateReversePrompt || !deps.promptRepository) return fail("REVERSE_LLM_NOT_CONFIGURED", 503);
-    const generateReversePrompt = llmClient.generateReversePrompt.bind(llmClient);
-    const template = await observedPromptLoad(deps.promptRepository, ref.templateVersionId, "reverse_prompt"); if (!template || template.applicability.targetType !== plan.mode) return fail("REVERSE_TEMPLATE_NOT_FOUND", 400);
-    const source = await deps.storage.get(ref.objectKey);
-    if (!source) return fail("INPUT_OBJECT_NOT_FOUND", 404);
-    const baselineRef = plan.mode === "detail" ? plan.references.find((item) => item.id === plan.baselineReferenceId && item.id !== ref.id) : undefined;
-    const baseline = baselineRef ? await deps.storage.get(baselineRef.objectKey) : null;
-    const attempt: ReverseAttempt = { id: randomUUID(), referenceId: ref.id, status: "running", retryOfAttemptId: retry ? [...ref.attempts].reverse().find((item) => item.status === "failed")?.id ?? null : null, templateVersionId: template.templateVersionId, mode: plan.mode, baselineReferenceId: plan.baselineReferenceId, requestSummary: { provider: llmClient.provider, model: llmClient.model, channel: llmClient.channel, inputRoles: baseline ? ["reference", "series_color_baseline"] : ["reference"] }, rawOutput: null, errorCode: null, errorMessage: null, promptVersionId: null, createdAt: new Date().toISOString(), completedAt: null }; ref.attempts.push(attempt); await reverseRepository.savePlan({ ...plan, updatedAt: new Date().toISOString() });
-    void (async () => {
-      try {
-        const output = await generateReversePrompt({ template: { body: template.body, userPromptTemplate: template.userPromptTemplate, templateVersionId: template.templateVersionId }, referenceImageId: ref.id, referenceImage: source.bytes, referenceMimeType: ref.mimeType, baselineImage: baseline?.bytes, baselineMimeType: baselineRef?.mimeType, mode: plan.mode });
-        const parsed = typeof output === "string" ? JSON.parse(output) : output; const row = parsed as Record<string, unknown>;
-        if (!row || row.schemaVersion !== "reverse-prompt-v1" || row.referenceImageId !== ref.id || typeof row.prompt !== "string" || !row.prompt.trim()) throw new Error("REVERSE_OUTPUT_INVALID");
-        const generatedPrompt = row.prompt.trim();
-        await withReversePlanWrite(plan.id, async () => {
-          const latest = await reverseRepository.getPlan(plan.id); const latestRef = latest?.references.find((item) => item.id === ref.id); const latestAttempt = latestRef?.attempts.find((item) => item.id === attempt.id);
-          if (!latest || !latestRef || !latestAttempt) return;
-          const version: ReversePromptVersion = { id: randomUUID(), referenceId: ref.id, kind: "model", prompt: generatedPrompt, rawOutput: output, templateVersionId: template.templateVersionId, mode: plan.mode, provider: llmSource(llmClient), createdAt: new Date().toISOString() };
-          latestRef.promptVersions.push(version); latestRef.effectivePromptVersionId = version.id; latestAttempt.status = "succeeded"; latestAttempt.rawOutput = output; latestAttempt.promptVersionId = version.id; latestAttempt.completedAt = new Date().toISOString();
-          await reverseRepository.savePlan({ ...latest, updatedAt: new Date().toISOString() });
-        });
-      } catch (error) {
-        await withReversePlanWrite(plan.id, async () => {
-          const latest = await reverseRepository.getPlan(plan.id); const latestAttempt = latest?.references.find((item) => item.id === ref.id)?.attempts.find((item) => item.id === attempt.id);
-          if (!latest || !latestAttempt) return;
-          latestAttempt.status = "failed"; latestAttempt.errorCode = error instanceof Error ? error.message : "REVERSE_OUTPUT_INVALID"; latestAttempt.errorMessage = latestAttempt.errorCode; latestAttempt.completedAt = new Date().toISOString();
-          await reverseRepository.savePlan({ ...latest, updatedAt: new Date().toISOString() });
-        });
-      }
-    })();
-    return ok({ attemptId: attempt.id }, 202);
-  };
-
   const loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
     if (!deps.imageEditorApi) return [];
     const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
@@ -865,84 +819,22 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const feedMatch = path.match(/^\/api\/suites\/feed(?:\?(.*))?$/);
     if (method === "GET" && feedMatch) return pipeline.getFeed(feedMatch[1]);
     const reversePlanMatch = path.match(/^\/api\/reverse-plans\/([^/]+)$/);
-    if (method === "POST" && path === "/api/reverse-plans") {
-      const result = await reverseRepository.createPlan(idempotencyKey); const body = asRecord(options.body, { allowArrays: true });
-      if (body.mode === "detail") result.plan.mode = "detail";
-      return ok(await reverseRepository.savePlan(result.plan), result.duplicate ? 200 : 201);
-    }
+    if (method === "POST" && path === "/api/reverse-plans") return fail("REVERSE_PLAN_READ_ONLY", 410);
     if (method === "GET" && path === "/api/reverse-plans") return ok(await reverseRepository.listPlans());
     if (reversePlanMatch && method === "GET") { const plan = await reverseRepository.getPlan(reversePlanMatch[1]); return plan ? ok(plan) : fail("INVALID_REVERSE_PLAN", 404); }
-    if (reversePlanMatch && method === "PATCH") {
-      const plan = await reverseRepository.getPlan(reversePlanMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-      const body = asRecord(options.body, { allowArrays: true });
-      if (body.mode !== undefined && body.mode !== "main" && body.mode !== "detail") return fail("INVALID_REVERSE_MODE");
-      const next = { ...plan, mode: (body.mode ?? plan.mode) as "main" | "detail", baselineReferenceId: typeof body.baselineReferenceId === "string" ? body.baselineReferenceId : body.baselineReferenceId === null ? null : plan.baselineReferenceId, updatedAt: new Date().toISOString() };
-      if (next.mode === "detail" && !next.baselineReferenceId && next.references[0]) next.baselineReferenceId = next.references[0].id;
-      return ok(await reverseRepository.savePlan(next));
-    }
+    if (reversePlanMatch && method === "PATCH") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseRefsMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references$/);
-    if (reverseRefsMatch && method === "POST") {
-      return withReversePlanWrite(reverseRefsMatch[1], async () => {
-        const plan = await reverseRepository.getPlan(reverseRefsMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-        if (plan.references.length >= 16) return fail("REVERSE_REFERENCE_LIMIT", 400);
-        const body = asRecord(options.body, { allowArrays: true });
-        if (typeof body.filename !== "string" || typeof body.mimeType !== "string" || typeof body.bytesBase64 !== "string") return fail("INVALID_INPUT_IMAGE");
-        let processed; try { processed = await processImage(Buffer.from(body.bytesBase64, "base64"), body.mimeType); } catch (error) { const code = error instanceof Error ? error.message : "INVALID_IMAGE"; return fail(code); }
-        if (plan.references.some((item) => item.sha256 === processed.sha256)) return fail("DUPLICATE_IMAGE", 409, "该参考图已存在");
-        const referenceId = randomUUID(); const objectKey = `reverse-plans/${plan.id}/references/${referenceId}/original`; const thumbKey = `reverse-plans/${plan.id}/references/${referenceId}/thumbnail`;
-        await deps.storage.put({ key: objectKey, bytes: Buffer.from(body.bytesBase64, "base64"), contentType: processed.mimeType }); await deps.storage.put({ key: thumbKey, bytes: processed.thumbnail, contentType: "image/jpeg" });
-        const reference: ReverseReference = { id: referenceId, planId: plan.id, ordinal: plan.references.length + 1, filename: body.filename, mimeType: processed.mimeType, sha256: processed.sha256, width: processed.width, height: processed.height, objectKey, thumbnailObjectKey: thumbKey, templateVersionId: null, attempts: [], promptVersions: [], effectivePromptVersionId: null, createdAt: new Date().toISOString() };
-        const next = { ...plan, references: [...plan.references, reference], baselineReferenceId: plan.mode === "detail" && !plan.baselineReferenceId ? reference.id : plan.baselineReferenceId, updatedAt: new Date().toISOString() }; await reverseRepository.savePlan(next); return ok(reference, 201);
-      });
-    }
+    if (reverseRefsMatch && method === "POST") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseRefMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)$/);
-    if (reverseRefMatch && method === "PATCH") {
-      const plan = await reverseRepository.getPlan(reverseRefMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const body = asRecord(options.body, { allowArrays: true }); const refs = [...plan.references]; const ref = refs.find((item) => item.id === reverseRefMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      if (typeof body.templateVersionId === "string") { if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503); const template = await deps.promptRepository.getPublishedVersion(body.templateVersionId, "reverse_prompt"); if (!template || template.applicability.targetType !== plan.mode) return fail("REVERSE_TEMPLATE_NOT_FOUND", 400); ref.templateVersionId = template.templateVersionId; }
-      if (typeof body.ordinal === "number") { const target = Math.max(1, Math.min(refs.length, Math.trunc(body.ordinal))); refs.splice(refs.indexOf(ref), 1); refs.splice(target - 1, 0, ref); refs.forEach((item, i) => item.ordinal = i + 1); }
-      await reverseRepository.savePlan({ ...plan, references: refs, updatedAt: new Date().toISOString() }); return ok(ref);
-    }
-    if (reverseRefMatch && method === "DELETE") {
-      const plan = await reverseRepository.getPlan(reverseRefMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const removed = plan.references.find((item) => item.id === reverseRefMatch[2]); if (!removed) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      const refs = plan.references.filter((item) => item.id !== removed.id); refs.forEach((item, index) => item.ordinal = index + 1); const baselineReferenceId = plan.baselineReferenceId === removed.id ? refs[0]?.id ?? null : plan.baselineReferenceId;
-      await reverseRepository.savePlan({ ...plan, references: refs, baselineReferenceId, updatedAt: new Date().toISOString() }); return ok({ id: removed.id, removed: true, baselineReferenceId });
-    }
+    if (reverseRefMatch && (method === "PATCH" || method === "DELETE")) return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseRunMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/(run|retry)$/);
-    if (reverseRunMatch && method === "POST") {
-      const llmClient = await resolveVision();
-      return withReversePlanWrite(reverseRunMatch[1], async () => {
-        const plan = await reverseRepository.getPlan(reverseRunMatch[1]);
-        if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-        const reference = plan.references.find((item) => item.id === reverseRunMatch[2]);
-        return reference ? runReverse(plan, reference, reverseRunMatch[3] === "retry", llmClient) : fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      });
-    }
+    if (reverseRunMatch && method === "POST") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseBatchMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/attempts$/);
-    if (reverseBatchMatch && method === "POST") {
-      const llmClient = await resolveVision();
-      if (!llmClient?.generateReversePrompt) return fail("REVERSE_LLM_NOT_CONFIGURED", 503);
-      return withReversePlanWrite(reverseBatchMatch[1], async () => {
-        const plan = await reverseRepository.getPlan(reverseBatchMatch[1]);
-        if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-        const results: Array<{ referenceId: string; attemptId?: string; error?: string }> = [];
-        for (const reference of plan.references) {
-          if (!reference.templateVersionId || reference.attempts.some((item) => item.status === "succeeded" || item.status === "running")) continue;
-          const response = await runReverse(plan, reference, false, llmClient);
-          const data = dataOf(response) as { attemptId: string } | null;
-          results.push(data ? { referenceId: reference.id, attemptId: data.attemptId } : { referenceId: reference.id, error: "error" in response.body ? response.body.error.code : "REVERSE_OUTPUT_INVALID" });
-        }
-        return ok({ planId: plan.id, attempts: results }, 202);
-      });
-    }
+    if (reverseBatchMatch && method === "POST") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseAttemptMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/attempts\/([^/]+)$/);
     if (reverseAttemptMatch && method === "GET") { const plan = await reverseRepository.getPlan(reverseAttemptMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const found = plan.references.flatMap((item) => item.attempts).find((item) => item.id === reverseAttemptMatch[2]); return found ? ok(found) : fail("REVERSE_REFERENCE_NOT_FOUND", 404); }
     const reversePromptMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/prompt$/);
-    if (reversePromptMatch && method === "PATCH") {
-      const plan = await reverseRepository.getPlan(reversePromptMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const ref = plan.references.find((item) => item.id === reversePromptMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      const body = asRecord(options.body, { allowArrays: true }); if (typeof body.prompt !== "string" || !body.prompt.trim()) return fail("REVERSE_OUTPUT_INVALID");
-      const source = ref.promptVersions.find((item) => item.id === ref.effectivePromptVersionId) ?? [...ref.promptVersions].reverse()[0]; if (!source) return fail("REVERSE_OUTPUT_INVALID");
-      const version: ReversePromptVersion = { ...source, id: randomUUID(), kind: "user", prompt: body.prompt.trim(), rawOutput: null, createdAt: new Date().toISOString() }; ref.promptVersions.push(version); ref.effectivePromptVersionId = version.id; await reverseRepository.savePlan({ ...plan, updatedAt: new Date().toISOString() }); return ok(version, 201);
-    }
+    if (reversePromptMatch && method === "PATCH") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseAssetMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/asset$/);
     if (reverseAssetMatch && method === "POST") {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503); const plan = await reverseRepository.getPlan(reverseAssetMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const ref = plan.references.find((item) => item.id === reverseAssetMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404); const prompt = ref.promptVersions.find((item) => item.id === ref.effectivePromptVersionId); if (!prompt) return fail("REVERSE_OUTPUT_INVALID");
@@ -958,6 +850,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const body = asRecord(options.body, { allowArrays: true });
       let suite = typeof body.targetSuiteId === "string" ? await deps.repository.getSuite(body.targetSuiteId) : null;
       if (typeof body.targetSuiteId === "string" && !suite) return fail("INVALID_SUITE_ID", 404);
+      if (suite?.origin === "replica") return fail("INVALID_SUITE_ORIGIN", 400, "复刻批次不支持导入画布任务");
       if (!suite) suite = await deps.repository.createSuite(typeof body.name === "string" && body.name.trim() ? body.name.trim() : `爆品图反推 ${new Date().toISOString().slice(0, 10)}`, `${idempotencyKey}:suite`, "canvas");
       const taskGroupId = typeof body.taskGroupId === "string" ? body.taskGroupId : randomUUID();
       const result = await deps.taskRepository.createReverseTasks({ suiteId: suite.id, reversePlanId: plan.id, taskGroupId, mode: plan.mode, idempotencyKey, items: items.map(({ reference, prompt }) => ({ referenceId: reference.id, ordinal: reference.ordinal, filename: reference.filename, promptVersionId: prompt.id, prompt: prompt.prompt })) });
