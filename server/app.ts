@@ -2087,9 +2087,6 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (typeof body.promptDraft === "string") await deps.taskRepository.updateTask(task.id, { promptDraft: body.promptDraft });
       const current = await deps.taskRepository.getTask(task.id);
       try {
-        if (current?.originKind === "replica") {
-          await clearReplicaCardFinalLocks(current);
-        }
         const history = await deps.taskRepository.listTaskVersions(task.id);
         const currentVersion = history.versions.find((version) => version.isCurrent);
         const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);

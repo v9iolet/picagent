@@ -1045,11 +1045,13 @@ test("PostgresLibraryRepository includes replica task_image_version without filt
 
 test("replica card image edit and final lock never swallow subsequent regeneration or edits, and edited cards keep replica analysis snapshot", async () => {
   let genCount = 0;
+  let failNextGen = false;
   const v1Png = await makePng(32, 32, { r: 10, g: 20, b: 30 });
   const v2Png = await makePng(32, 32, { r: 200, g: 50, b: 50 });
   const v3Png = await makePng(32, 32, { r: 50, g: 50, b: 200 });
   const f = await replicaFixture({
     providerEdit: async () => {
+      if (failNextGen) throw new Error("IMAGE_PROVIDER_FAILED");
       genCount += 1;
       return { bytes: genCount === 1 ? v1Png : genCount === 2 ? v2Png : v3Png, mimeType: "image/png" };
     },
@@ -1169,12 +1171,28 @@ test("replica card image edit and final lock never swallow subsequent regenerati
   assert.equal(manifestAfterV2.items[0].isEditedDerived, false);
   assert.equal(manifestAfterV2.items[0].versionNumber, 2);
 
-  // 3. Mark v2 as final, then regenerate parent v3 -> must clear v2 final lock and show v3 (while v1 & v2 remain in versions)
+  // 3. Mark v2 as final; if a subsequent regeneration fails, v2 final lock is preserved; once regeneration succeeds, v2 final lock is cleared and v3 is shown
   const v2Id = sAfterV2.cards[0].versionId;
   await f.app.request("POST", `/api/suite-tasks/${taskId}/versions/${v2Id}/select`, {
     headers: { "Idempotency-Key": "mark-v2-final" },
     body: { selection: "final" },
   });
+
+  failNextGen = true;
+  const failedRegen = await f.app.request("POST", `/api/suite-tasks/${taskId}/generation`, {
+    headers: { "Idempotency-Key": "regen-after-final-fail" },
+    body: {},
+  });
+  assert.equal(failedRegen.status, 202);
+  assert.equal(await waitBatchDone((failedRegen.body as any).data.batchId), "failed");
+  const versionsAfterFail = await f.app.request("GET", `/api/suite-tasks/${taskId}/versions`);
+  assert.equal(
+    (versionsAfterFail.body as any).data.versions.find((v: any) => v.id === v2Id)?.isFinal,
+    true,
+    "failed regeneration must preserve existing final lock",
+  );
+
+  failNextGen = false;
   const regenV3 = await f.app.request("POST", `/api/suite-tasks/${taskId}/generation`, {
     headers: { "Idempotency-Key": "regen-after-final-v3" },
     body: {},

@@ -183,6 +183,13 @@ function resolveModelInfoFromEditChild(child: DeliveryEditChildLike, version: De
 }
 
 function timestampOf(value: unknown): number {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
   if (typeof value !== "string" || !value) return 0;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
