@@ -92,6 +92,7 @@ export const errorMessages: Record<string, string> = {
   REVERSE_REFERENCE_NOT_FOUND: "反推参考图不存在",
   REVERSE_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
   REVERSE_OUTPUT_INVALID: "反推模型输出不符合契约",
+  REPLICA_OUTPUT_INVALID: "复刻视觉分析输出不符合契约",
 };
 
 export function fail(code: string, status = 400, message?: string): AppResponse {

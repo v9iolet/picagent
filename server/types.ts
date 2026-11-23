@@ -192,12 +192,43 @@ export interface CategoryPromptLlmInput extends PlanLlmInput {
 }
 export interface PlanVisionImage { id: string; sourceKind: "base" | "original"; sourceVersionId: string | null; mimeType: string; bytes: Buffer }
 export interface LlmModelSnapshot { name: string; model: string; isFake: boolean; channel?: ModelChannelSnapshot }
+export type ReplicaCloneLevel = "compose" | "high";
+export interface ReplicaPromptReferenceImage {
+  referenceId: string;
+  ordinal: number;
+  requirement?: string;
+  mimeType: string;
+  bytes: Buffer;
+}
+export interface ReplicaPromptProductImage {
+  id: string;
+  ordinal: number;
+  mimeType: string;
+  bytes: Buffer;
+}
+export interface ReplicaPromptLlmInput {
+  requestId?: string;
+  template: {
+    templateVersionId: string;
+    body: string;
+    userPromptTemplate?: string;
+  };
+  cloneLevel: ReplicaCloneLevel;
+  sceneType: string;
+  language: string;
+  styleUnified: boolean;
+  unifiedRequirement?: string;
+  productInfo?: string;
+  references: ReplicaPromptReferenceImage[];
+  productImages: ReplicaPromptProductImage[];
+}
 export interface LlmClient {
   channel?: ModelChannelSnapshot;
   provider: string; model: string; isFake: boolean;
   generatePlan(input: PlanLlmInput): Promise<unknown>;
   generateCategoryPrompt?(input: CategoryPromptLlmInput): Promise<unknown>;
   generateReversePrompt?(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; referenceMimeType?: string; baselineImage?: Buffer; baselineMimeType?: string; mode: "main" | "detail" }): Promise<unknown>;
+  generateReplicaPrompts?(input: ReplicaPromptLlmInput): Promise<unknown>;
   translateTexts?(input: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }): Promise<Array<{ id: string; originalText: string; translatedText: string }>>;
 }
 export type PlanAttemptStatus = "running" | "succeeded" | "failed";

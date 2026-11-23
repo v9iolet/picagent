@@ -17,9 +17,9 @@ ALTER TABLE suite_workbench.platform_profiles ALTER COLUMN listing_copy_rules SE
 ALTER TABLE prompt_library.prompt_templates DROP CONSTRAINT IF EXISTS prompt_templates_stage_check;
 ALTER TABLE prompt_library.prompt_template_versions DROP CONSTRAINT IF EXISTS prompt_template_versions_stage_check;
 ALTER TABLE prompt_library.prompt_templates ADD CONSTRAINT prompt_templates_stage_check
- CHECK (stage IN ('base_refine','plan','structure_plan','category_prompt','task_image','reverse_prompt','listing_copy'));
+ CHECK (stage IN ('base_refine','plan','structure_plan','category_prompt','task_image','reverse_prompt','listing_copy')) NOT VALID;
 ALTER TABLE prompt_library.prompt_template_versions ADD CONSTRAINT prompt_template_versions_stage_check
- CHECK (stage IN ('base_refine','plan','structure_plan','category_prompt','task_image','reverse_prompt','listing_copy'));
+ CHECK (stage IN ('base_refine','plan','structure_plan','category_prompt','task_image','reverse_prompt','listing_copy')) NOT VALID;
 
 CREATE TABLE IF NOT EXISTS suite_workbench.listing_copy_jobs (
  id uuid PRIMARY KEY, source_suite_id uuid REFERENCES suite_workbench.suites(id) ON DELETE SET NULL,
