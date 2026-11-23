@@ -1097,6 +1097,30 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }));
       return ok(canvasOnly ? enriched.filter((suite) => suite.origin !== "replica" && (suite.origin === "canvas" || suite.taskCount > 0)) : enriched);
     }
+    if (method === "POST" && path === "/api/library/resources/batch-delete") {
+      if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const body = asRecord(options.body, { allowArrays: true });
+      const rawIds = body.ids;
+      if (!Array.isArray(rawIds) || rawIds.length === 0) return fail("INVALID_LIBRARY_BATCH_DELETE", 400);
+      if (rawIds.length > 100) return fail("LIBRARY_BATCH_DELETE_LIMIT", 400);
+      const ids: string[] = [];
+      for (const item of rawIds) {
+        if (typeof item !== "string" || !item.trim()) return fail("INVALID_LIBRARY_BATCH_DELETE", 400);
+        ids.push(item.trim());
+      }
+      try {
+        const result = await deps.libraryRepository.deleteResources(ids);
+        if (result.deletedIds.length === 0 && result.alreadyDeletedIds.length === 0 && result.notFoundIds.length > 0) {
+          return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+        }
+        return ok(result);
+      } catch (error) {
+        if (error instanceof Error && error.message === "LIBRARY_RESOURCE_FORBIDDEN") {
+          return fail("LIBRARY_RESOURCE_FORBIDDEN", 403, "提示词模板不支持在图片资源库中删除");
+        }
+        throw error;
+      }
+    }
     const libraryResourceMatch = path.match(/^\/api\/library\/resources\/([^/]+)$/);
     if (method === "GET" && libraryResourceMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
@@ -1105,12 +1129,26 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const resource = await deps.libraryRepository.getResource(resourceId);
       return resource ? ok(resource) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     }
+    if (method === "DELETE" && libraryResourceMatch) {
+      if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const resourceId = safeDecodePathParam(libraryResourceMatch[1]);
+      if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      try {
+        const deleted = await deps.libraryRepository.deleteResource(resourceId);
+        return deleted ? ok(deleted) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      } catch (error) {
+        if (error instanceof Error && error.message === "LIBRARY_RESOURCE_FORBIDDEN") {
+          return fail("LIBRARY_RESOURCE_FORBIDDEN", 403, "提示词模板不支持在图片资源库中删除");
+        }
+        throw error;
+      }
+    }
     const libraryPreviewMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     if (method === "GET" && libraryPreviewMatch) return await (async () => {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       const resourceId = safeDecodePathParam(libraryPreviewMatch[1]);
       if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
-      const resource = await deps.libraryRepository.getResource(resourceId);
+      const resource = await deps.libraryRepository.getResource(resourceId, { includeDeleted: true });
       if (!resource) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       const target = await deps.libraryRepository.getPreviewObject(resource.id);
       return target ? previewObject(target.objectKey, deps.storage) : fail("OBJECT_NOT_FOUND", 404);
@@ -2377,7 +2415,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
     const decoded = safeDecodePathParam(resourceId);
     if (!decoded) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
-    const resource = await deps.libraryRepository.getResource(decoded);
+    const resource = await deps.libraryRepository.getResource(decoded, { includeDeleted: true });
     if (!resource) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     const target = await deps.libraryRepository.getPreviewObject(resource.id);
     return target ? previewObject(target.objectKey, deps.storage) : fail("OBJECT_NOT_FOUND", 404);

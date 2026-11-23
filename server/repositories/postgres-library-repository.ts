@@ -1,16 +1,324 @@
 import { assertReferenceAllowed } from "../library-reference-policy.js";
 import { randomUUID } from "node:crypto";
-import type { Pool, PoolClient } from "pg";
-import type { LibraryAssetStatus, LibraryReference, LibraryRepository, LibraryResource, LibraryResourceQuery } from "../types.js";
+import type { Pool } from "pg";
+import type {
+  LibraryAssetStatus,
+  LibraryReference,
+  LibraryRepository,
+  LibraryResource,
+  LibraryResourceBatchDeleteResult,
+  LibraryResourceDeletionResult,
+  LibraryResourceQuery,
+} from "../types.js";
 
-type ResourceRow = Omit<LibraryResource, "source"> & { source: Record<string, unknown> };
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function toIsoString(value: unknown): string {
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function normalizeTimestamps(resource: LibraryResource): LibraryResource {
+  return {
+    ...resource,
+    createdAt: toIsoString(resource.createdAt as unknown),
+    updatedAt: toIsoString(resource.updatedAt as unknown),
+  };
+}
 
 function mapReference(row: any): LibraryReference {
   return { id: row.id, suiteId: row.suiteId, resourceId: row.resourceId, resourceType: row.resourceType, targetType: row.targetType, targetId: row.targetId, resourceVersionId: row.resourceVersionId, snapshot: row.snapshot, createdAt: row.createdAt, createdBy: row.createdBy ?? null, archivedAt: row.archivedAt ?? null };
 }
 
+function mapTaskVersionRow(row: any): LibraryResource {
+  const isReplica = row.origin_kind === "replica";
+  const taskStage = isReplica ? "replica_prompt" as const : "task_image" as const;
+  const kindLabel = isReplica ? "爆品图复刻" : (row.image_type === "main" ? "主图" : "详情页");
+  const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
+  return normalizeTimestamps({
+    id: `task-version:${row.version_id}`,
+    resourceType: "task_image_version",
+    title: `${row.task_title} · 版本 ${row.version_number}`,
+    summary: `${kindLabel} · ${row.width} × ${row.height}`,
+    mimeType: row.mime_type,
+    previewUrl: `/api/suite-tasks/${row.task_id}/versions/${row.version_id}/preview`,
+    suiteId: row.suite_id,
+    taskId: row.task_id,
+    imageVersionId: row.version_id,
+    baseVersionId: null,
+    templateVersionId: null,
+    resourceVersionId: row.version_id,
+    stage: taskStage,
+    source: { objectKey: row.object_key, versionNumber: row.version_number, promptSummary: row.prompt_draft.slice(0, 180), model: row.model, channel: row.channel, ...originMeta },
+    promptSnapshot: row.prompt_snapshot_json,
+    status: "published",
+    createdAt: row.created_at,
+    updatedAt: row.created_at,
+  });
+}
+
+function mapProcessImageRow(row: any, objectKey: string, index: number): LibraryResource {
+  const isReplica = row.origin_kind === "replica";
+  const taskStage = isReplica ? "replica_prompt" as const : "task_image" as const;
+  const kindLabel = isReplica ? "爆品图复刻" : (row.image_type === "main" ? "主图" : "详情页");
+  const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
+  return normalizeTimestamps({
+    id: `process:${row.version_id}:${index}`,
+    resourceType: "process_image",
+    title: `${row.task_title} · 过程图 ${index + 1}`,
+    summary: `${kindLabel} · 版本 ${row.version_number}`,
+    mimeType: "image/png",
+    previewUrl: null,
+    suiteId: row.suite_id,
+    taskId: row.task_id,
+    imageVersionId: row.version_id,
+    baseVersionId: null,
+    templateVersionId: null,
+    resourceVersionId: `${row.version_id}:${index}`,
+    stage: taskStage,
+    source: { objectKey, versionId: row.version_id, processIndex: index, model: row.model, channel: row.channel, ...originMeta },
+    promptSnapshot: row.prompt_snapshot_json,
+    status: "published",
+    createdAt: row.created_at,
+    updatedAt: row.created_at,
+  });
+}
+
+function mapReverseRow(row: any): LibraryResource {
+  const stage = (row.source?.origin === "replica" ? "replica_prompt" : "task_image") as "replica_prompt" | "task_image";
+  return normalizeTimestamps({
+    id: `reverse:${row.id}`,
+    resourceType: "reverse_reference_asset",
+    title: row.title,
+    summary: row.summary,
+    mimeType: row.mimeType,
+    previewUrl: `/api/library/resources/reverse:${row.id}/preview`,
+    suiteId: row.suiteId,
+    taskId: null,
+    imageVersionId: null,
+    baseVersionId: null,
+    templateVersionId: typeof row.source?.templateVersionId === "string" ? row.source.templateVersionId : null,
+    resourceVersionId: row.id,
+    stage,
+    source: { objectKey: row.objectKey, visualStructure: row.visualStructure, ...row.source },
+    status: row.status,
+    promptSnapshot: row.promptSnapshot,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
+}
+
+type ParsedResourceId =
+  | { kind: "prompt"; uuid: string }
+  | { kind: "input"; uuid: string }
+  | { kind: "base"; uuid: string }
+  | { kind: "task-version"; uuid: string }
+  | { kind: "process"; uuid: string; index: number }
+  | { kind: "reverse"; uuid: string };
+
+function parseResourceId(resourceId: string): ParsedResourceId | null {
+  if (resourceId.startsWith("prompt:")) {
+    const uuid = resourceId.slice("prompt:".length);
+    return UUID_RE.test(uuid) ? { kind: "prompt", uuid } : null;
+  }
+  if (resourceId.startsWith("input:")) {
+    const uuid = resourceId.slice("input:".length);
+    return UUID_RE.test(uuid) ? { kind: "input", uuid } : null;
+  }
+  if (resourceId.startsWith("base:")) {
+    const uuid = resourceId.slice("base:".length);
+    return UUID_RE.test(uuid) ? { kind: "base", uuid } : null;
+  }
+  if (resourceId.startsWith("task-version:")) {
+    const uuid = resourceId.slice("task-version:".length);
+    return UUID_RE.test(uuid) ? { kind: "task-version", uuid } : null;
+  }
+  if (resourceId.startsWith("process:")) {
+    const rest = resourceId.slice("process:".length);
+    const sep = rest.indexOf(":");
+    if (sep <= 0) return null;
+    const uuid = rest.slice(0, sep);
+    const rawIdx = rest.slice(sep + 1);
+    if (!UUID_RE.test(uuid) || !/^\d+$/.test(rawIdx)) return null;
+    const index = Number(rawIdx);
+    return Number.isSafeInteger(index) ? { kind: "process", uuid, index } : null;
+  }
+  if (resourceId.startsWith("reverse:")) {
+    const uuid = resourceId.slice("reverse:".length);
+    return UUID_RE.test(uuid) ? { kind: "reverse", uuid } : null;
+  }
+  return null;
+}
+
 export class PostgresLibraryRepository implements LibraryRepository {
   constructor(private readonly pool: Pool) {}
+
+  private async findResourceRaw(resourceId: string): Promise<LibraryResource | null> {
+    const parsed = parseResourceId(resourceId);
+    if (!parsed) return null;
+    if (parsed.kind === "prompt") {
+      const result = await this.pool.query<any>(
+        `SELECT 'prompt:' || v.id::text AS id, 'prompt_template' AS "resourceType", v.name AS title,
+          left(regexp_replace(v.body, '\\s+', ' ', 'g'), 180) AS summary, NULL::text AS "mimeType", NULL::text AS "previewUrl",
+          NULL::uuid AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", NULL::uuid AS "baseVersionId",
+          v.id::text AS "templateVersionId", v.id::text AS "resourceVersionId", v.stage,
+          jsonb_build_object('templateId', t.id::text, 'code', t.code, 'versionNo', v.version_no, 'status', v.status, 'body', v.body, 'userPromptTemplate', v.user_prompt_template, 'inputSchema', v.input_schema, 'outputSchema', v.output_schema, 'applicability', v.applicability) AS source,
+          v.status AS status, v.created_at AS "createdAt", COALESCE(v.published_at, v.created_at) AS "updatedAt"
+         FROM prompt_library.prompt_templates t
+         JOIN prompt_library.prompt_template_versions v ON v.id = t.published_version_id
+         WHERE t.lifecycle_status = 'active' AND v.status = 'published' AND v.id = $1::uuid`,
+        [parsed.uuid],
+      );
+      return result.rows[0] ? normalizeTimestamps({ ...result.rows[0], status: "published" as const }) : null;
+    }
+    if (parsed.kind === "input") {
+      const result = await this.pool.query<any>(
+        `SELECT 'input:' || i.id::text AS id, 'input_image' AS "resourceType", i.original_filename AS title,
+          concat(i.width, ' × ', i.height, ' · ', i.mime_type) AS summary, i.mime_type AS "mimeType",
+          '/api/suites/' || i.suite_id::text || '/input-images/' || i.id::text || '/preview/thumbnail' AS "previewUrl",
+          i.suite_id AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", NULL::uuid AS "baseVersionId",
+          i.id::text AS "resourceVersionId", NULL::text AS "templateVersionId", NULL::text AS stage,
+          jsonb_build_object('objectKey', i.original_object_key, 'originalFilename', i.original_filename, 'ordinal', i.ordinal) AS source,
+          i.created_at AS "createdAt", i.created_at AS "updatedAt"
+         FROM suite_workbench.input_images i WHERE i.id = $1::uuid`,
+        [parsed.uuid],
+      );
+      return result.rows[0] ? normalizeTimestamps({ ...result.rows[0], status: "published" as const }) : null;
+    }
+    if (parsed.kind === "base") {
+      const result = await this.pool.query<any>(
+        `SELECT 'base:' || b.id::text AS id, 'base_image' AS "resourceType", concat('白底底图 · 版本 ', b.version_number) AS title,
+          concat(i.original_filename, ' · ', b.width, ' × ', b.height) AS summary, b.mime_type AS "mimeType",
+          '/api/suites/' || b.suite_id::text || '/input-images/' || b.input_image_id::text || '/base-versions/' || b.id::text || '/preview' AS "previewUrl",
+          b.suite_id AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", b.id AS "baseVersionId",
+          b.id::text AS "resourceVersionId", NULL::text AS "templateVersionId", NULL::text AS stage,
+          jsonb_build_object('objectKey', b.object_key, 'inputImageId', b.input_image_id, 'versionNumber', b.version_number, 'promptTemplateVersionId', ga.prompt_template_version_id, 'model', ga.model, 'channel', ga.channel_snapshot_json) AS source,
+          jsonb_build_object('prompt', ga.prompt, 'templateVersionId', ga.prompt_template_version_id, 'dynamicInput', ga.dynamic_input_json) AS "promptSnapshot",
+          b.created_at AS "createdAt", b.created_at AS "updatedAt"
+         FROM suite_workbench.base_image_versions b
+         JOIN suite_workbench.input_images i ON i.id = b.input_image_id
+         JOIN suite_workbench.generation_attempts ga ON ga.id = b.attempt_id
+         WHERE b.id = $1::uuid`,
+        [parsed.uuid],
+      );
+      return result.rows[0] ? normalizeTimestamps({ ...result.rows[0], status: "published" as const }) : null;
+    }
+    if (parsed.kind === "task-version" || parsed.kind === "process") {
+      const result = await this.pool.query<any>(
+        `SELECT v.id AS version_id, v.task_id, v.object_key, v.process_object_keys_json, v.prompt_snapshot_json, a.model, v.context_snapshot_json->'channel' AS channel, v.mime_type, v.width, v.height, v.version_number, v.created_at,
+          t.suite_id, t.title AS task_title, t.image_type, t.prompt_draft, t.origin_kind
+         FROM suite_workbench.task_image_versions v
+         JOIN suite_workbench.suite_tasks t ON t.id = v.task_id
+         JOIN suite_workbench.task_generation_attempts a ON a.id = v.attempt_id
+         WHERE v.id = $1::uuid`,
+        [parsed.uuid],
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      if (parsed.kind === "task-version") return mapTaskVersionRow(row);
+      if (!Array.isArray(row.process_object_keys_json) || parsed.index >= row.process_object_keys_json.length) return null;
+      const objectKey = row.process_object_keys_json[parsed.index];
+      if (typeof objectKey !== "string") return null;
+      return mapProcessImageRow(row, objectKey, parsed.index);
+    }
+    const result = await this.pool.query<any>(
+      `SELECT id, suite_id AS "suiteId", title, summary, mime_type AS "mimeType", object_key AS "objectKey",
+        prompt_snapshot_json AS "promptSnapshot", visual_structure_json AS "visualStructure", source_json AS source, status, created_at AS "createdAt", updated_at AS "updatedAt"
+       FROM suite_workbench.reverse_reference_assets WHERE id = $1::uuid`,
+      [parsed.uuid],
+    );
+    return result.rows[0] ? mapReverseRow(result.rows[0]) : null;
+  }
+
+  private async findExistingIds(resourceIds: string[]): Promise<{ validIds: string[]; notFoundIds: string[]; hasPromptTemplate: boolean }> {
+    const parsedEntries = resourceIds.map((id) => ({ id, parsed: parseResourceId(id) }));
+    const promptUuids: string[] = [];
+    const inputUuids: string[] = [];
+    const baseUuids: string[] = [];
+    const taskVersionUuids: string[] = [];
+    const processEntries: Array<{ id: string; uuid: string; index: number }> = [];
+    const reverseUuids: string[] = [];
+
+    for (const entry of parsedEntries) {
+      if (!entry.parsed) continue;
+      switch (entry.parsed.kind) {
+        case "prompt": promptUuids.push(entry.parsed.uuid); break;
+        case "input": inputUuids.push(entry.parsed.uuid); break;
+        case "base": baseUuids.push(entry.parsed.uuid); break;
+        case "task-version": taskVersionUuids.push(entry.parsed.uuid); break;
+        case "process": processEntries.push({ id: entry.id, uuid: entry.parsed.uuid, index: entry.parsed.index }); break;
+        case "reverse": reverseUuids.push(entry.parsed.uuid); break;
+      }
+    }
+
+    const existing = new Set<string>();
+    let hasPromptTemplate = false;
+
+    if (promptUuids.length) {
+      const res = await this.pool.query<{ id: string }>(
+        `SELECT v.id::text AS id
+         FROM prompt_library.prompt_templates t
+         JOIN prompt_library.prompt_template_versions v ON v.id = t.published_version_id
+         WHERE t.lifecycle_status = 'active' AND v.status = 'published' AND v.id = ANY($1::uuid[])`,
+        [promptUuids],
+      );
+      if (res.rows.length > 0) hasPromptTemplate = true;
+      for (const row of res.rows) existing.add(`prompt:${row.id}`);
+    }
+    if (inputUuids.length) {
+      const res = await this.pool.query<{ id: string }>(
+        `SELECT id::text AS id FROM suite_workbench.input_images WHERE id = ANY($1::uuid[])`,
+        [inputUuids],
+      );
+      for (const row of res.rows) existing.add(`input:${row.id}`);
+    }
+    if (baseUuids.length) {
+      const res = await this.pool.query<{ id: string }>(
+        `SELECT b.id::text AS id
+         FROM suite_workbench.base_image_versions b
+         JOIN suite_workbench.input_images i ON i.id = b.input_image_id
+         JOIN suite_workbench.generation_attempts ga ON ga.id = b.attempt_id
+         WHERE b.id = ANY($1::uuid[])`,
+        [baseUuids],
+      );
+      for (const row of res.rows) existing.add(`base:${row.id}`);
+    }
+    const allTaskVersionUuids = [...new Set([...taskVersionUuids, ...processEntries.map((item) => item.uuid)])];
+    if (allTaskVersionUuids.length) {
+      const res = await this.pool.query<{ id: string; process_object_keys_json: unknown }>(
+        `SELECT v.id::text AS id, v.process_object_keys_json
+         FROM suite_workbench.task_image_versions v
+         JOIN suite_workbench.suite_tasks t ON t.id = v.task_id
+         JOIN suite_workbench.task_generation_attempts a ON a.id = v.attempt_id
+         WHERE v.id = ANY($1::uuid[])`,
+        [allTaskVersionUuids],
+      );
+      const byId = new Map(res.rows.map((row) => [row.id, row.process_object_keys_json]));
+      for (const uuid of taskVersionUuids) {
+        if (byId.has(uuid)) existing.add(`task-version:${uuid}`);
+      }
+      for (const proc of processEntries) {
+        const list = byId.get(proc.uuid);
+        if (Array.isArray(list) && proc.index < list.length && typeof list[proc.index] === "string") {
+          existing.add(proc.id);
+        }
+      }
+    }
+    if (reverseUuids.length) {
+      const res = await this.pool.query<{ id: string }>(
+        `SELECT id::text AS id FROM suite_workbench.reverse_reference_assets WHERE id = ANY($1::uuid[])`,
+        [reverseUuids],
+      );
+      for (const row of res.rows) existing.add(`reverse:${row.id}`);
+    }
+
+    const validIds: string[] = [];
+    const notFoundIds: string[] = [];
+    for (const id of resourceIds) {
+      if (existing.has(id)) validIds.push(id);
+      else notFoundIds.push(id);
+    }
+    return { validIds, notFoundIds, hasPromptTemplate };
+  }
 
   async listResources(query: LibraryResourceQuery) {
     const resources: LibraryResource[] = [];
@@ -24,7 +332,9 @@ export class PostgresLibraryRepository implements LibraryRepository {
         v.status AS status, v.created_at AS "createdAt", COALESCE(v.published_at, v.created_at) AS "updatedAt"
         FROM prompt_library.prompt_templates t JOIN prompt_library.prompt_template_versions v ON v.id = t.published_version_id
         WHERE t.lifecycle_status = 'active' AND v.status = 'published' AND ($1::text IS NULL OR v.stage = $1)
-          AND ($2::text IS NULL OR v.name ILIKE $2 OR v.body ILIKE $2) ORDER BY v.created_at DESC`, [query.stage ?? null, needle]);
+          AND ($2::text IS NULL OR v.name ILIKE $2 OR v.body ILIKE $2)
+          AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'prompt:' || v.id::text)
+        ORDER BY v.created_at DESC`, [query.stage ?? null, needle]);
       resources.push(...result.rows.map((row) => ({ ...row, status: "published" as const })));
     }
     if (!query.resourceType || query.resourceType === "input_image") {
@@ -33,7 +343,10 @@ export class PostgresLibraryRepository implements LibraryRepository {
         '/api/suites/' || i.suite_id::text || '/input-images/' || i.id::text || '/preview/thumbnail' AS "previewUrl",
         i.suite_id AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", NULL::uuid AS "baseVersionId", i.id::text AS "resourceVersionId", NULL::text AS "templateVersionId", NULL::text AS stage,
         jsonb_build_object('objectKey', i.original_object_key, 'originalFilename', i.original_filename, 'ordinal', i.ordinal) AS source, i.created_at AS "createdAt", i.created_at AS "updatedAt"
-        FROM suite_workbench.input_images i WHERE ($1::uuid IS NULL OR i.suite_id = $1) AND ($2::text IS NULL OR i.original_filename ILIKE $2) ORDER BY i.created_at DESC`, [suiteId, needle]);
+        FROM suite_workbench.input_images i
+        WHERE ($1::uuid IS NULL OR i.suite_id = $1) AND ($2::text IS NULL OR i.original_filename ILIKE $2)
+          AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'input:' || i.id::text)
+        ORDER BY i.created_at DESC`, [suiteId, needle]);
       resources.push(...result.rows.map((row) => ({ ...row, status: "published" as const })));
     }
     if (!query.resourceType || query.resourceType === "base_image") {
@@ -45,55 +358,126 @@ export class PostgresLibraryRepository implements LibraryRepository {
         jsonb_build_object('prompt', ga.prompt, 'templateVersionId', ga.prompt_template_version_id, 'dynamicInput', ga.dynamic_input_json) AS "promptSnapshot",
         b.created_at AS "createdAt", b.created_at AS "updatedAt"
         FROM suite_workbench.base_image_versions b JOIN suite_workbench.input_images i ON i.id = b.input_image_id JOIN suite_workbench.generation_attempts ga ON ga.id = b.attempt_id
-        WHERE ($1::uuid IS NULL OR b.suite_id = $1) AND ($2::text IS NULL OR i.original_filename ILIKE $2) ORDER BY b.created_at DESC`, [suiteId, needle]);
+        WHERE ($1::uuid IS NULL OR b.suite_id = $1) AND ($2::text IS NULL OR i.original_filename ILIKE $2)
+          AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'base:' || b.id::text)
+        ORDER BY b.created_at DESC`, [suiteId, needle]);
       resources.push(...result.rows.map((row) => ({ ...row, status: "published" as const })));
     }
     if (!query.resourceType || query.resourceType === "task_image_version" || query.resourceType === "process_image") {
+      const taskVersionFilter = query.resourceType === "task_image_version"
+        ? " AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'task-version:' || v.id::text)"
+        : "";
       const result = await this.pool.query<any>(`SELECT v.id AS version_id, v.task_id, v.object_key, v.process_object_keys_json, v.prompt_snapshot_json, a.model, v.context_snapshot_json->'channel' AS channel, v.mime_type, v.width, v.height, v.version_number, v.created_at,
         t.suite_id, t.title AS task_title, t.image_type, t.prompt_draft, t.origin_kind
         FROM suite_workbench.task_image_versions v JOIN suite_workbench.suite_tasks t ON t.id = v.task_id
         JOIN suite_workbench.task_generation_attempts a ON a.id = v.attempt_id
-        WHERE ($1::uuid IS NULL OR t.suite_id = $1) AND ($2::text IS NULL OR t.title ILIKE $2 OR t.prompt_draft ILIKE $2) ORDER BY v.created_at DESC`, [suiteId, needle]);
+        WHERE ($1::uuid IS NULL OR t.suite_id = $1) AND ($2::text IS NULL OR t.title ILIKE $2 OR t.prompt_draft ILIKE $2)${taskVersionFilter}
+        ORDER BY v.created_at DESC`, [suiteId, needle]);
       for (const row of result.rows) {
-        const isReplica = row.origin_kind === "replica";
-        const taskStage = isReplica ? "replica_prompt" as const : "task_image" as const;
-        const kindLabel = isReplica ? "爆品图复刻" : (row.image_type === "main" ? "主图" : "详情页");
-        const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
-        if (!query.resourceType || query.resourceType === "task_image_version") resources.push({ id: `task-version:${row.version_id}`, resourceType: "task_image_version", title: `${row.task_title} · 版本 ${row.version_number}`, summary: `${kindLabel} · ${row.width} × ${row.height}`, mimeType: row.mime_type, previewUrl: `/api/suite-tasks/${row.task_id}/versions/${row.version_id}/preview`, suiteId: row.suite_id, taskId: row.task_id, imageVersionId: row.version_id, baseVersionId: null, templateVersionId: null, resourceVersionId: row.version_id, stage: taskStage, source: { objectKey: row.object_key, versionNumber: row.version_number, promptSummary: row.prompt_draft.slice(0, 180), model: row.model, channel: row.channel, ...originMeta }, promptSnapshot: row.prompt_snapshot_json, status: "published", createdAt: row.created_at, updatedAt: row.created_at });
-        if ((!query.resourceType || query.resourceType === "process_image") && Array.isArray(row.process_object_keys_json)) row.process_object_keys_json.forEach((objectKey: string, index: number) => resources.push({ id: `process:${row.version_id}:${index}`, resourceType: "process_image", title: `${row.task_title} · 过程图 ${index + 1}`, summary: `${kindLabel} · 版本 ${row.version_number}`, mimeType: "image/png", previewUrl: null, suiteId: row.suite_id, taskId: row.task_id, imageVersionId: row.version_id, baseVersionId: null, templateVersionId: null, resourceVersionId: `${row.version_id}:${index}`, stage: taskStage, source: { objectKey, versionId: row.version_id, processIndex: index, model: row.model, channel: row.channel, ...originMeta }, promptSnapshot: row.prompt_snapshot_json, status: "published", createdAt: row.created_at, updatedAt: row.created_at }));
+        if (!query.resourceType || query.resourceType === "task_image_version") resources.push(mapTaskVersionRow(row));
+        if ((!query.resourceType || query.resourceType === "process_image") && Array.isArray(row.process_object_keys_json)) {
+          row.process_object_keys_json.forEach((objectKey: string, index: number) => resources.push(mapProcessImageRow(row, objectKey, index)));
+        }
       }
     }
     if (!query.resourceType || query.resourceType === "reverse_reference_asset") {
       const result = await this.pool.query<any>(`SELECT id, suite_id AS "suiteId", title, summary, mime_type AS "mimeType", object_key AS "objectKey",
         prompt_snapshot_json AS "promptSnapshot", visual_structure_json AS "visualStructure", source_json AS source, status, created_at AS "createdAt", updated_at AS "updatedAt"
-        FROM suite_workbench.reverse_reference_assets
-        WHERE ($1::uuid IS NULL OR suite_id = $1 OR suite_id IS NULL) AND ($2::text IS NULL OR title ILIKE $2 OR summary ILIKE $2)
-        ORDER BY updated_at DESC`, [suiteId, needle]);
-      resources.push(...result.rows.map((row) => ({ id: `reverse:${row.id}`, resourceType: "reverse_reference_asset" as const, title: row.title, summary: row.summary, mimeType: row.mimeType, previewUrl: `/api/library/resources/reverse:${row.id}/preview`, suiteId: row.suiteId, taskId: null, imageVersionId: null, baseVersionId: null, templateVersionId: typeof row.source?.templateVersionId === "string" ? row.source.templateVersionId : null, resourceVersionId: row.id, stage: (row.source?.origin === "replica" ? "replica_prompt" : "task_image") as "replica_prompt" | "task_image", source: { objectKey: row.objectKey, visualStructure: row.visualStructure, ...row.source }, status: row.status, promptSnapshot: row.promptSnapshot, createdAt: row.createdAt, updatedAt: row.updatedAt })));
+        FROM suite_workbench.reverse_reference_assets r
+        WHERE ($1::uuid IS NULL OR r.suite_id = $1 OR r.suite_id IS NULL) AND ($2::text IS NULL OR r.title ILIKE $2 OR r.summary ILIKE $2)
+          AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'reverse:' || r.id::text)
+        ORDER BY r.updated_at DESC`, [suiteId, needle]);
+      resources.push(...result.rows.map(mapReverseRow));
+    }
+    if (resources.length > 0 && (!query.resourceType || query.resourceType === "process_image")) {
+      const idsToCheck = resources
+        .filter((resource) => resource.resourceType === "task_image_version" || resource.resourceType === "process_image")
+        .map((resource) => resource.id);
+      if (idsToCheck.length > 0) {
+        const deleted = await this.pool.query<{ resource_id: string }>(
+          `SELECT resource_id FROM suite_workbench.library_resource_deletions WHERE resource_id = ANY($1::text[])`,
+          [idsToCheck],
+        );
+        if (deleted.rows.length > 0) {
+          const deletedSet = new Set(deleted.rows.map((row) => row.resource_id));
+          resources.splice(0, resources.length, ...resources.filter((resource) => !deletedSet.has(resource.id)));
+        }
+      }
     }
     if (query.stage && query.resourceType !== "prompt_template") resources.splice(0, resources.length, ...resources.filter((resource) => resource.stage === query.stage));
     if (query.status) resources.splice(0, resources.length, ...resources.filter((resource) => resource.status === query.status));
     for (const resource of resources) {
-      const createdAt = resource.createdAt as unknown;
-      const updatedAt = resource.updatedAt as unknown;
-      resource.createdAt = createdAt instanceof Date ? createdAt.toISOString() : String(createdAt);
-      resource.updatedAt = updatedAt instanceof Date ? updatedAt.toISOString() : String(updatedAt);
+      resource.createdAt = toIsoString(resource.createdAt as unknown);
+      resource.updatedAt = toIsoString(resource.updatedAt as unknown);
     }
     resources.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const page = Math.max(1, query.page ?? 1); const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 24));
     return { items: resources.slice((page - 1) * pageSize, page * pageSize), total: resources.length, page, pageSize };
   }
 
-  async getResource(resourceId: string) {
-    const resourceType = resourceId.startsWith("prompt:") ? "prompt_template" : resourceId.startsWith("input:") ? "input_image" : resourceId.startsWith("base:") ? "base_image" : resourceId.startsWith("task-version:") ? "task_image_version" : resourceId.startsWith("process:") ? "process_image" : resourceId.startsWith("reverse:") ? "reverse_reference_asset" : undefined;
-    if (!resourceType) return null;
-    const result = await this.listResources({ resourceType, page: 1, pageSize: 1000 });
-    return result.items.find((resource) => resource.id === resourceId) ?? null;
+  async getResource(resourceId: string, options?: { includeDeleted?: boolean }) {
+    const resource = await this.findResourceRaw(resourceId);
+    if (!resource) return null;
+    if (!options?.includeDeleted) {
+      const deleted = await this.pool.query<{ resource_id: string }>(
+        `SELECT resource_id FROM suite_workbench.library_resource_deletions WHERE resource_id = $1`,
+        [resourceId],
+      );
+      if (deleted.rows.length > 0) return null;
+    }
+    return resource;
   }
 
   async getPreviewObject(resourceId: string) {
-    const resource = await this.getResource(resourceId); const objectKey = typeof resource?.source.objectKey === "string" ? resource.source.objectKey : null;
+    const resource = await this.getResource(resourceId, { includeDeleted: true });
+    const objectKey = typeof resource?.source.objectKey === "string" ? resource.source.objectKey : null;
     return objectKey ? { objectKey } : null;
+  }
+
+  async deleteResource(resourceId: string): Promise<LibraryResourceDeletionResult | null> {
+    const resource = await this.findResourceRaw(resourceId);
+    if (!resource) return null;
+    if (resource.resourceType === "prompt_template") throw new Error("LIBRARY_RESOURCE_FORBIDDEN");
+    const result = await this.pool.query<{ resource_id: string; deleted_at: unknown; already_deleted: boolean }>(
+      `WITH ins AS (
+        INSERT INTO suite_workbench.library_resource_deletions (resource_id, deleted_at)
+        VALUES ($1, now())
+        ON CONFLICT (resource_id) DO NOTHING
+        RETURNING resource_id, deleted_at, false AS already_deleted
+      )
+      SELECT resource_id, deleted_at, already_deleted FROM ins
+      UNION ALL
+      SELECT resource_id, deleted_at, true AS already_deleted
+      FROM suite_workbench.library_resource_deletions
+      WHERE resource_id = $1 AND NOT EXISTS (SELECT 1 FROM ins)`,
+      [resourceId],
+    );
+    const row = result.rows[0];
+    return {
+      id: resourceId,
+      deletedAt: toIsoString(row?.deleted_at ?? new Date()),
+      alreadyDeleted: Boolean(row?.already_deleted),
+    };
+  }
+
+  async deleteResources(resourceIds: string[]): Promise<LibraryResourceBatchDeleteResult> {
+    const uniqueIds = [...new Set(resourceIds)];
+    const { validIds, notFoundIds, hasPromptTemplate } = await this.findExistingIds(uniqueIds);
+    if (hasPromptTemplate) throw new Error("LIBRARY_RESOURCE_FORBIDDEN");
+    if (validIds.length === 0) {
+      return { deletedIds: [], alreadyDeletedIds: [], notFoundIds, deletedCount: 0 };
+    }
+    const inserted = await this.pool.query<{ resource_id: string }>(
+      `INSERT INTO suite_workbench.library_resource_deletions (resource_id, deleted_at)
+       SELECT id, now() FROM unnest($1::text[]) AS id
+       ON CONFLICT (resource_id) DO NOTHING
+       RETURNING resource_id`,
+      [validIds],
+    );
+    const insertedSet = new Set(inserted.rows.map((row) => row.resource_id));
+    const deletedIds = validIds.filter((id) => insertedSet.has(id));
+    const alreadyDeletedIds = validIds.filter((id) => !insertedSet.has(id));
+    return { deletedIds, alreadyDeletedIds, notFoundIds, deletedCount: deletedIds.length };
   }
 
   async createReference(input: { suiteId: string; resourceId: string; targetType: "plan" | "task"; targetId: string; idempotencyKey: string; createdBy?: string | null }) {
@@ -139,16 +523,23 @@ export class PostgresLibraryRepository implements LibraryRepository {
         updated_at = now()
       RETURNING id, suite_id AS "suiteId", title, summary, mime_type AS "mimeType", object_key AS "objectKey", prompt_snapshot_json AS "promptSnapshot", visual_structure_json AS "visualStructure", source_json AS source, status, created_at AS "createdAt", updated_at AS "updatedAt"`, [input.suiteId ?? null, input.title, input.summary ?? "", input.objectKey, input.mimeType, JSON.stringify(input.promptSnapshot), JSON.stringify(input.visualStructure ?? {}), JSON.stringify(input.source ?? {})]);
     const row = result.rows[0];
-    const stage = row.source?.origin === "replica" ? "replica_prompt" as const : "task_image" as const;
-    return { id: `reverse:${row.id}`, resourceType: "reverse_reference_asset", title: row.title, summary: row.summary, mimeType: row.mimeType, previewUrl: `/api/library/resources/reverse:${row.id}/preview`, suiteId: row.suiteId, taskId: null, imageVersionId: null, baseVersionId: null, templateVersionId: typeof row.source?.templateVersionId === "string" ? row.source.templateVersionId : null, resourceVersionId: row.id, stage, source: { objectKey: row.objectKey, visualStructure: row.visualStructure, ...row.source }, status: row.status, promptSnapshot: row.promptSnapshot, createdAt: row.createdAt, updatedAt: row.updatedAt };
+    await this.pool.query(`DELETE FROM suite_workbench.library_resource_deletions WHERE resource_id = $1`, [`reverse:${row.id}`]);
+    return mapReverseRow(row);
   }
 
   async setResourceStatus(resourceId: string, status: LibraryAssetStatus): Promise<LibraryResource | null> {
     if (!resourceId.startsWith("reverse:")) return null;
-    const result = await this.pool.query<any>(`UPDATE suite_workbench.reverse_reference_assets SET status=$2, updated_at=now(), archived_at=CASE WHEN $2='archived' THEN COALESCE(archived_at,now()) ELSE archived_at END WHERE id=$1::uuid RETURNING id, suite_id AS "suiteId", title, summary, mime_type AS "mimeType", object_key AS "objectKey", prompt_snapshot_json AS "promptSnapshot", visual_structure_json AS "visualStructure", source_json AS source, status, created_at AS "createdAt", updated_at AS "updatedAt"`, [resourceId.slice("reverse:".length), status]);
+    const rawId = resourceId.slice("reverse:".length);
+    if (!UUID_RE.test(rawId)) return null;
+    const result = await this.pool.query<any>(
+      `UPDATE suite_workbench.reverse_reference_assets r
+       SET status=$2, updated_at=now(), archived_at=CASE WHEN $2='archived' THEN COALESCE(archived_at,now()) ELSE archived_at END
+       WHERE r.id=$1::uuid
+         AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'reverse:' || r.id::text)
+       RETURNING id, suite_id AS "suiteId", title, summary, mime_type AS "mimeType", object_key AS "objectKey", prompt_snapshot_json AS "promptSnapshot", visual_structure_json AS "visualStructure", source_json AS source, status, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [rawId, status],
+    );
     if (!result.rows[0]) return null;
-    const row = result.rows[0];
-    const stage = row.source?.origin === "replica" ? "replica_prompt" as const : "task_image" as const;
-    return { id: resourceId, resourceType: "reverse_reference_asset", title: row.title, summary: row.summary, mimeType: row.mimeType, previewUrl: `/api/library/resources/${resourceId}/preview`, suiteId: row.suiteId, taskId: null, imageVersionId: null, baseVersionId: null, templateVersionId: typeof row.source?.templateVersionId === "string" ? row.source.templateVersionId : null, resourceVersionId: row.id, stage, source: { objectKey: row.objectKey, visualStructure: row.visualStructure, ...row.source }, status: row.status, promptSnapshot: row.promptSnapshot, createdAt: row.createdAt, updatedAt: row.updatedAt };
+    return mapReverseRow(result.rows[0]);
   }
 }

@@ -1,14 +1,24 @@
 import { assertReferenceAllowed } from "../library-reference-policy.js";
 import { randomUUID } from "node:crypto";
-import type { LibraryAssetStatus, LibraryReference, LibraryRepository, LibraryResource, LibraryResourceQuery } from "../types.js";
+import type {
+  LibraryAssetStatus,
+  LibraryReference,
+  LibraryRepository,
+  LibraryResource,
+  LibraryResourceBatchDeleteResult,
+  LibraryResourceDeletionResult,
+  LibraryResourceQuery,
+} from "../types.js";
 
 export class MemoryLibraryRepository implements LibraryRepository {
   private readonly resources = new Map<string, LibraryResource>();
   private readonly references = new Map<string, LibraryReference>();
   private readonly idempotency = new Map<string, string>();
+  private readonly deletedAt = new Map<string, string>();
 
   addResource(resource: LibraryResource): LibraryResource {
     this.resources.set(resource.id, resource);
+    this.deletedAt.delete(resource.id);
     return resource;
   }
 
@@ -16,7 +26,8 @@ export class MemoryLibraryRepository implements LibraryRepository {
     const page = Math.max(1, query.page ?? 1); const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 24));
     const needle = query.query?.trim().toLocaleLowerCase();
     const filtered = [...this.resources.values()].filter((resource) =>
-      (!query.resourceType || resource.resourceType === query.resourceType)
+      !this.deletedAt.has(resource.id)
+      && (!query.resourceType || resource.resourceType === query.resourceType)
       && (!query.stage || resource.stage === query.stage)
       && (!query.suiteId || resource.suiteId === query.suiteId || resource.suiteId === null)
       && (!query.status || resource.status === query.status)
@@ -25,7 +36,10 @@ export class MemoryLibraryRepository implements LibraryRepository {
     return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
   }
 
-  async getResource(resourceId: string) { return this.resources.get(resourceId) ?? null; }
+  async getResource(resourceId: string, options?: { includeDeleted?: boolean }) {
+    if (!options?.includeDeleted && this.deletedAt.has(resourceId)) return null;
+    return this.resources.get(resourceId) ?? null;
+  }
 
   async getPreviewObject(resourceId: string) {
     const resource = this.resources.get(resourceId);
@@ -33,8 +47,43 @@ export class MemoryLibraryRepository implements LibraryRepository {
     return objectKey ? { objectKey } : null;
   }
 
+  async deleteResource(resourceId: string): Promise<LibraryResourceDeletionResult | null> {
+    const resource = this.resources.get(resourceId);
+    if (!resource) return null;
+    if (resource.resourceType === "prompt_template") throw new Error("LIBRARY_RESOURCE_FORBIDDEN");
+    const existing = this.deletedAt.get(resourceId);
+    if (existing) return { id: resourceId, deletedAt: existing, alreadyDeleted: true };
+    const now = new Date().toISOString();
+    this.deletedAt.set(resourceId, now);
+    return { id: resourceId, deletedAt: now, alreadyDeleted: false };
+  }
+
+  async deleteResources(resourceIds: string[]): Promise<LibraryResourceBatchDeleteResult> {
+    const uniqueIds = [...new Set(resourceIds)];
+    for (const id of uniqueIds) {
+      const resource = this.resources.get(id);
+      if (resource?.resourceType === "prompt_template") throw new Error("LIBRARY_RESOURCE_FORBIDDEN");
+    }
+    const deletedIds: string[] = [];
+    const alreadyDeletedIds: string[] = [];
+    const notFoundIds: string[] = [];
+    const now = new Date().toISOString();
+    for (const id of uniqueIds) {
+      const resource = this.resources.get(id);
+      if (!resource) {
+        notFoundIds.push(id);
+      } else if (this.deletedAt.has(id)) {
+        alreadyDeletedIds.push(id);
+      } else {
+        this.deletedAt.set(id, now);
+        deletedIds.push(id);
+      }
+    }
+    return { deletedIds, alreadyDeletedIds, notFoundIds, deletedCount: deletedIds.length };
+  }
+
   async createReference(input: { suiteId: string; resourceId: string; targetType: "plan" | "task"; targetId: string; idempotencyKey: string; createdBy?: string | null }) {
-    const resource = this.resources.get(input.resourceId);
+    const resource = await this.getResource(input.resourceId);
     if (!resource) throw new Error("LIBRARY_RESOURCE_NOT_FOUND");
     assertReferenceAllowed(resource, input.suiteId, input.targetType);
     const existingId = this.idempotency.get(`${input.suiteId}:${input.idempotencyKey}`);
@@ -85,10 +134,13 @@ export class MemoryLibraryRepository implements LibraryRepository {
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
-    this.resources.set(resource.id, resource); return resource;
+    this.resources.set(resource.id, resource);
+    this.deletedAt.delete(resource.id);
+    return resource;
   }
 
   async setResourceStatus(resourceId: string, status: LibraryAssetStatus) {
+    if (this.deletedAt.has(resourceId)) return null;
     const resource = this.resources.get(resourceId); if (!resource) return null;
     const next = { ...resource, status, updatedAt: new Date().toISOString() }; this.resources.set(resourceId, next); return next;
   }
