@@ -1100,6 +1100,30 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }));
       return ok(canvasOnly ? enriched.filter((suite) => suite.origin !== "replica" && (suite.origin === "canvas" || suite.taskCount > 0)) : enriched);
     }
+    if (method === "POST" && path === "/api/library/resources/batch-delete") {
+      if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const body = asRecord(options.body, { allowArrays: true });
+      const rawIds = body.ids;
+      if (!Array.isArray(rawIds) || rawIds.length === 0) return fail("INVALID_LIBRARY_BATCH_DELETE", 400);
+      if (rawIds.length > 100) return fail("LIBRARY_BATCH_DELETE_LIMIT", 400);
+      const ids: string[] = [];
+      for (const item of rawIds) {
+        if (typeof item !== "string" || !item.trim()) return fail("INVALID_LIBRARY_BATCH_DELETE", 400);
+        ids.push(item.trim());
+      }
+      try {
+        const result = await deps.libraryRepository.deleteResources(ids);
+        if (result.deletedIds.length === 0 && result.alreadyDeletedIds.length === 0 && result.notFoundIds.length > 0) {
+          return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+        }
+        return ok(result);
+      } catch (error) {
+        if (error instanceof Error && error.message === "LIBRARY_RESOURCE_FORBIDDEN") {
+          return fail("LIBRARY_RESOURCE_FORBIDDEN", 403, "提示词模板不支持在图片资源库中删除");
+        }
+        throw error;
+      }
+    }
     const libraryResourceMatch = path.match(/^\/api\/library\/resources\/([^/]+)$/);
     if (method === "GET" && libraryResourceMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
@@ -1108,12 +1132,26 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const resource = await deps.libraryRepository.getResource(resourceId);
       return resource ? ok(resource) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     }
+    if (method === "DELETE" && libraryResourceMatch) {
+      if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const resourceId = safeDecodePathParam(libraryResourceMatch[1]);
+      if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      try {
+        const deleted = await deps.libraryRepository.deleteResource(resourceId);
+        return deleted ? ok(deleted) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      } catch (error) {
+        if (error instanceof Error && error.message === "LIBRARY_RESOURCE_FORBIDDEN") {
+          return fail("LIBRARY_RESOURCE_FORBIDDEN", 403, "提示词模板不支持在图片资源库中删除");
+        }
+        throw error;
+      }
+    }
     const libraryPreviewMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     if (method === "GET" && libraryPreviewMatch) return await (async () => {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       const resourceId = safeDecodePathParam(libraryPreviewMatch[1]);
       if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
-      const resource = await deps.libraryRepository.getResource(resourceId);
+      const resource = await deps.libraryRepository.getResource(resourceId, { includeDeleted: true });
       if (!resource) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       const target = await deps.libraryRepository.getPreviewObject(resource.id);
       return target ? previewObject(target.objectKey, deps.storage) : fail("OBJECT_NOT_FOUND", 404);
@@ -1122,11 +1160,17 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       const params = new URLSearchParams(path.split("?")[1] ?? "");
       const resourceType = params.get("resourceType") as import("./types.js").LibraryResourceType | null;
+      const scopeParam = params.get("scope");
+      if (scopeParam && scopeParam !== "image") return fail("INVALID_LIBRARY_SCOPE");
       const stage = params.get("stage") as PromptStage | null;
       if (stage && !PROMPT_STAGES.includes(stage)) return fail("INVALID_PROMPT_STAGE");
       const status = params.get("status") as import("./types.js").LibraryAssetStatus | null;
       if (status && !["draft", "published", "archived"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
-      return ok(await deps.libraryRepository.listResources({ resourceType: resourceType ?? undefined, stage: stage ?? undefined, suiteId: params.get("suiteId") ?? undefined, query: params.get("query") ?? undefined, status: status ?? undefined, page: Number(params.get("page") ?? 1), pageSize: Number(params.get("pageSize") ?? 24) }));
+      const rawPage = Number(params.get("page") ?? 1);
+      const rawPageSize = Number(params.get("pageSize") ?? 24);
+      const page = Number.isFinite(rawPage) ? Math.floor(rawPage) : 1;
+      const pageSize = Number.isFinite(rawPageSize) ? Math.floor(rawPageSize) : 24;
+      return ok(await deps.libraryRepository.listResources({ resourceType: resourceType ?? undefined, scope: scopeParam === "image" ? "image" : undefined, stage: stage ?? undefined, suiteId: params.get("suiteId") ?? undefined, query: params.get("query") ?? undefined, status: status ?? undefined, page, pageSize }));
     }
     const reverseAssetStatusMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/status$/);
     if (method === "POST" && reverseAssetStatusMatch) {
@@ -2133,7 +2177,11 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (method === "POST" && selectTaskVersionMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const selection = asRecord(options.body, { allowArrays: true }).selection === "final" ? "final" : "current";
-      const version = await deps.taskRepository.selectVersion(selectTaskVersionMatch[1], selectTaskVersionMatch[2], selection); return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
+      const version = await deps.taskRepository.selectVersion(selectTaskVersionMatch[1], selectTaskVersionMatch[2], selection);
+      if (version && selection === "final" && deps.libraryRepository) {
+        await deps.libraryRepository.restoreResource(`task-version:${version.id}`);
+      }
+      return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
     }
     const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
     if (method === "GET" && taskPreviewMatch) return await previewTaskVersion(taskPreviewMatch[1], taskPreviewMatch[2]);
@@ -2380,7 +2428,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
     const decoded = safeDecodePathParam(resourceId);
     if (!decoded) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
-    const resource = await deps.libraryRepository.getResource(decoded);
+    const resource = await deps.libraryRepository.getResource(decoded, { includeDeleted: true });
     if (!resource) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     const target = await deps.libraryRepository.getPreviewObject(resource.id);
     return target ? previewObject(target.objectKey, deps.storage) : fail("OBJECT_NOT_FOUND", 404);

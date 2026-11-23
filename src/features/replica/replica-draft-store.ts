@@ -543,6 +543,21 @@ export const replicaDraftStore = {
     }));
   },
 
+  removeDeletedLibraryProducts(removedIds: ReadonlySet<string>, notice?: string): void {
+    if (!removedIds.size) return;
+    updateSnapshot((prev) => {
+      const nextProducts = prev.products.filter(
+        (item) => item.sourceKind !== "library" || !removedIds.has(item.libraryResourceId),
+      );
+      if (nextProducts.length === prev.products.length && !notice) return prev;
+      return {
+        ...prev,
+        products: nextProducts,
+        productNotice: notice ?? prev.productNotice,
+      };
+    });
+  },
+
   moveProduct(fromIndex: number, toIndex: number): void {
     updateSnapshot((prev) => ({
       ...prev,

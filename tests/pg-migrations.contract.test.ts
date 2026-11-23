@@ -1117,3 +1117,254 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
     assert.ok(archived?.archivedAt, "PostgresTaskRepository.updateTask must set archived_at when archiving");
   });
 });
+
+test("034 adds library_resource_deletions table and PostgresLibraryRepository soft-deletes across sources while keeping frozen previews intact", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool, schemas }) => {
+    const suites = new PostgresSuiteRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const library = new PostgresLibraryRepository(pool);
+
+    // Verify 034 table & index exist and replay is idempotent
+    const tableCheck = await pool.query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = $1 AND table_name = 'library_resource_deletions'`,
+      [schemas[0]],
+    );
+    assert.equal(tableCheck.rows.length, 1);
+    const indexCheck = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = $1 AND tablename = 'library_resource_deletions' AND indexname = 'library_resource_deletions_deleted_at_idx'`,
+      [schemas[0]],
+    );
+    assert.equal(indexCheck.rows.length, 1);
+    await runMigrations(pool);
+
+    const suite = await suites.createSuite("PG 删除资源测试");
+    const inputId = randomUUID();
+    const inputPrefix = `suites/${suite.id}/inputs/${inputId}/`;
+    await suites.createInputImage({
+      id: inputId,
+      suiteId: suite.id,
+      ordinal: 1,
+      originalObjectKey: inputPrefix + "original",
+      thumbnailObjectKey: inputPrefix + "thumbnail",
+      sha256: "1".repeat(64),
+      width: 512,
+      height: 512,
+      mimeType: "image/png",
+      originalFilename: "pg-delete-input.png",
+      currentBaseVersionId: null,
+      createdAt: timestamp,
+    });
+
+    const { task } = await tasks.createCustomTask({
+      suiteId: suite.id,
+      planSnapshotId: null,
+      imageType: "main",
+      title: "PG 删除测试任务",
+      purpose: "主图",
+      promptDraft: "展示商品主体",
+      sourceInputImageId: inputId,
+      generationParams: {},
+    });
+
+    // Bind input resource to task before deleting
+    const { reference } = await library.createReference({
+      suiteId: suite.id,
+      resourceId: `input:${inputId}`,
+      targetType: "task",
+      targetId: task.id,
+      idempotencyKey: "pg-ref-before-delete",
+    });
+    assert.equal(reference.resourceId, `input:${inputId}`);
+
+    // Create task version with a process image
+    const batchId = randomUUID();
+    const slotId = randomUUID();
+    const attemptId = randomUUID();
+    await tasks.beginBatch({
+      batch: {
+        id: batchId,
+        suiteId: suite.id,
+        kind: "single",
+        requestedCount: 1,
+        taskIds: [task.id],
+        status: "running",
+        idempotencyKey: "pg-del-task-batch-1",
+        createdAt: timestamp,
+        startedAt: timestamp,
+        finishedAt: null,
+      },
+      slots: [{
+        id: slotId,
+        batchId,
+        taskId: task.id,
+        slotOrdinal: 1,
+        retryOfSlotId: null,
+        status: "generating",
+        selectedVersionId: null,
+        createdAt: timestamp,
+        completedAt: null,
+      }],
+      attempts: [{
+        id: attemptId,
+        slotId,
+        attemptNo: 1,
+        provider: "fake",
+        model: "gpt-image-2",
+        endpoint: "/v1/images/edits",
+        requestSummary: {},
+        promptSnapshot: { prompt: "展示商品主体" },
+        promptSha256: "2".repeat(64),
+        contextSnapshot: {},
+        sourceKind: "original",
+        sourceObjectKey: inputPrefix + "original",
+        sourceInputImageId: inputId,
+        sourceBaseVersionId: null,
+        status: "running",
+        errorCode: null,
+        errorMessage: null,
+        externalRequestId: null,
+        startedAt: timestamp,
+        finishedAt: null,
+      }],
+    });
+    const { version } = await tasks.completeAttempt({
+      attemptId,
+      slotId,
+      taskId: task.id,
+      objectKey: `suites/${suite.id}/tasks/${task.id}/versions/v1/final.png`,
+      processObjectKeys: [`suites/${suite.id}/tasks/${task.id}/versions/v1/proc0.png`],
+      sha256: "3".repeat(64),
+      width: 512,
+      height: 512,
+      mimeType: "image/png",
+      completedAt: timestamp,
+    });
+
+    const reverseAsset = await library.createReverseReferenceAsset({
+      suiteId: suite.id,
+      title: "PG 反推删除测试",
+      summary: "摘要",
+      objectKey: `reverse/${suite.id}/ref.png`,
+      mimeType: "image/png",
+      promptSnapshot: { prompt: "反推提示词" },
+      source: { origin: "replica" },
+    });
+
+    const inputResourceId = `input:${inputId}`;
+    const taskVersionResourceId = `task-version:${version.id}`;
+    const processResourceId = `process:${version.id}:0`;
+
+    // Invalid / malformed IDs return null cleanly without throwing PG 22P02
+    assert.equal(await library.deleteResource("input:not-a-uuid"), null);
+    assert.equal(await library.getResource("reverse:not-a-uuid"), null);
+
+    // Single delete + idempotency
+    const del1 = await library.deleteResource(inputResourceId);
+    assert.ok(del1);
+    assert.equal(del1.alreadyDeleted, false);
+    const del2 = await library.deleteResource(inputResourceId);
+    assert.ok(del2);
+    assert.equal(del2.alreadyDeleted, true);
+    assert.equal(del2.deletedAt, del1.deletedAt);
+
+    // Deleted input is hidden from list & default getResource, but still resolvable for frozen preview
+    assert.equal(await library.getResource(inputResourceId), null);
+    assert.ok(await library.getResource(inputResourceId, { includeDeleted: true }));
+    assert.deepEqual(await library.getPreviewObject(inputResourceId), { objectKey: inputPrefix + "original" });
+    const listedInputs = await library.listResources({ resourceType: "input_image", suiteId: suite.id });
+    assert.equal(listedInputs.items.some((item) => item.id === inputResourceId), false);
+
+    // Frozen reference and underlying input_image / task_image_versions rows remain intact
+    assert.equal((await library.listReferences(suite.id, "task", task.id)).length, 1);
+    assert.ok(await suites.getInputImage(suite.id, inputId));
+
+    // Archive reverse asset before deleting to verify re-save resets status='draft' and archived_at=NULL
+    const archivedReverse = await library.setResourceStatus(reverseAsset.id, "archived");
+    assert.equal(archivedReverse?.status, "archived");
+    const archivedDbBefore = await pool.query<{ status: string; archived_at: unknown }>(
+      `SELECT status, archived_at FROM suite_workbench.reverse_reference_assets WHERE id = $1::uuid`,
+      [reverseAsset.resourceVersionId],
+    );
+    assert.equal(archivedDbBefore.rows[0]?.status, "archived");
+    assert.ok(archivedDbBefore.rows[0]?.archived_at);
+
+    // Batch delete task version, process image, reverse asset + already deleted input + nonexistent ID
+    const batch = await library.deleteResources([
+      taskVersionResourceId,
+      processResourceId,
+      reverseAsset.id,
+      inputResourceId,
+      "input:not-a-uuid",
+    ]);
+    assert.deepEqual(batch.deletedIds, [taskVersionResourceId, processResourceId, reverseAsset.id]);
+    assert.deepEqual(batch.alreadyDeletedIds, [inputResourceId]);
+    assert.deepEqual(batch.notFoundIds, ["input:not-a-uuid"]);
+    assert.equal(batch.deletedCount, 3);
+
+    // Repeat batch delete is idempotent
+    const batchRepeat = await library.deleteResources([taskVersionResourceId, processResourceId, reverseAsset.id]);
+    assert.deepEqual(batchRepeat.deletedIds, []);
+    assert.deepEqual(batchRepeat.alreadyDeletedIds, [taskVersionResourceId, processResourceId, reverseAsset.id]);
+    assert.equal(batchRepeat.deletedCount, 0);
+
+    // None of the deleted resources appear in listResources (including scope=image), and status update on deleted reverse asset returns null
+    const remaining = await library.listResources({ scope: "image", suiteId: suite.id, pageSize: 100 });
+    assert.equal(remaining.total, 0);
+    assert.equal(remaining.items.length, 0);
+    assert.equal(await library.setResourceStatus(reverseAsset.id, "published"), null);
+
+    // Task versions remain intact in TaskRepository; selecting final via app restores task-version visibility
+    const taskVersions = await tasks.listTaskVersions(task.id);
+    assert.equal(taskVersions.versions.length, 1);
+    const pgApp = createSuiteStudioApp({ repository: suites, taskRepository: tasks, libraryRepository: library, storage: new MemoryStorage() });
+    const selectFinalRes = await pgApp.request("POST", `/api/suite-tasks/${task.id}/versions/${version.id}/select`, {
+      body: { selection: "final" },
+    });
+    assert.equal(selectFinalRes.status, 200);
+    assert.ok(await library.getResource(taskVersionResourceId));
+
+    // scope=image excludes prompt_template and counts only image resources
+    const imageScoped = await library.listResources({ scope: "image", page: 1, pageSize: 10 });
+    assert.equal(imageScoped.items.some((item) => item.resourceType === "prompt_template"), false);
+    assert.equal(imageScoped.total, 1);
+
+    // Re-saving deleted reverse asset via upsert clears deletion marker, resets status to draft and archived_at to NULL
+    const restoredReverse = await library.createReverseReferenceAsset({
+      suiteId: suite.id,
+      title: "PG 反推重新保存",
+      summary: "恢复",
+      objectKey: `reverse/${suite.id}/ref.png`,
+      mimeType: "image/png",
+      promptSnapshot: { prompt: "新提示词" },
+      source: { origin: "replica" },
+    });
+    assert.equal(restoredReverse.id, reverseAsset.id);
+    assert.equal(restoredReverse.status, "draft");
+    const restoredDb = await pool.query<{ status: string; archived_at: unknown }>(
+      `SELECT status, archived_at FROM suite_workbench.reverse_reference_assets WHERE id = $1::uuid`,
+      [reverseAsset.resourceVersionId],
+    );
+    assert.equal(restoredDb.rows[0]?.status, "draft");
+    assert.equal(restoredDb.rows[0]?.archived_at, null);
+    assert.ok(await library.getResource(reverseAsset.id));
+
+    // Deleting a prompt_template is forbidden
+    const promptList = await library.listResources({ resourceType: "prompt_template", pageSize: 5 });
+    if (promptList.items.length > 0) {
+      await assert.rejects(
+        library.deleteResource(promptList.items[0].id),
+        /LIBRARY_RESOURCE_FORBIDDEN/,
+      );
+      await assert.rejects(
+        library.deleteResources([promptList.items[0].id]),
+        /LIBRARY_RESOURCE_FORBIDDEN/,
+      );
+    }
+
+    // Re-running migrations preserves deletion rows cleanly
+    await runMigrations(pool);
+    assert.equal(await library.getResource(inputResourceId), null);
+  });
+});
