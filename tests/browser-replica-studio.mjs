@@ -214,7 +214,11 @@ async function offlineReplicaStudio(t, gates = {}) {
               } else {
                 const body = payload.length ? JSON.parse(payload.toString()) : undefined;
                 calls.push({ method: req.method, path, body });
-                result = await api.request(req.method, path, { headers: req.headers, body });
+                if (req.method === "POST" && path === "/api/replicas" && gates.shouldFailCreate?.(body)) {
+                  result = { status: 500, body: { error: { code: "REPLICA_CREATE_FAILED", message: "模拟提交失败" } } };
+                } else {
+                  result = await api.request(req.method, path, { headers: req.headers, body });
+                }
               }
               res.writeHead(result.status, result.raw ? result.headers : { "Content-Type": "application/json" });
               res.end(result.raw ?? JSON.stringify(result.body));
@@ -643,4 +647,322 @@ test("爆品图复刻：无产品图风格示意角标尺寸正常且 /reverse/:
   await page.goto(url + "reverse/missing-plan-id");
   assert.equal(new URL(page.url()).pathname, "/reverse/missing-plan-id");
   await page.getByRole("heading", { name: "旧反推方案（只读）", exact: true }).waitFor();
+});
+
+test("爆品图复刻：切换功能保留草稿（参考图、产品图、顺序与配置），刷新恢复文字配置，提交失败保留草稿", async (t) => {
+  let failCreate = false;
+  const { url, page } = await offlineReplicaStudio(t, {
+    shouldFailCreate: () => failCreate,
+  });
+
+  await page.goto(url + "create/replica");
+  await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+
+  // Upload 2 reference images, fill remarks, and reorder (move 2nd to 1st)
+  const refInput = page.getByLabel("上传参考图", { exact: true });
+  await refInput.setInputFiles("public/assets/gan65-product.jpg");
+  await refInput.setInputFiles("public/assets/tokyo-desk-v3.jpg");
+  await page.getByRole("button", { name: "一键复刻（2张）", exact: true }).waitFor();
+
+  await page.getByLabel("单张参考要求 1", { exact: true }).fill("参考图一局部要求");
+  await page.getByLabel("单张参考要求 2", { exact: true }).fill("参考图二顶部留白");
+  await page.getByRole("button", { name: "上移参考图 2", exact: true }).click();
+  assert.equal(await page.getByLabel("单张参考要求 1", { exact: true }).inputValue(), "参考图二顶部留白");
+
+  // Upload 1 local product + pick 1 library product, reorder so library is 1st
+  await page.getByLabel("上传产品原图", { exact: true }).setInputFiles("public/assets/gan65-product-tight.jpg");
+  await page.getByRole("button", { name: "从资源库选择", exact: true }).click();
+  const picker = page.getByRole("dialog", { name: "从资源库选择产品原图" });
+  await picker.waitFor();
+  await picker.getByRole("button", { name: /已发布白底产品图\.jpg/ }).click();
+  await picker.getByRole("button", { name: "确认选择", exact: true }).click();
+  await picker.waitFor({ state: "hidden" });
+  assert.equal(await page.locator("[data-product-item]").count(), 2);
+  await page.getByRole("button", { name: "左移产品图 已发布白底产品图.jpg", exact: true }).click();
+
+  // Modify all config fields away from defaults
+  await page.getByRole("radio", { name: "服饰电商图", exact: true }).click();
+  await page.getByRole("radio", { name: /参考风格/ }).click();
+  await page.getByLabel("统一复刻要求", { exact: true }).fill("保持参考图构图与暖色调");
+  await page.getByLabel("商品信息", { exact: true }).fill("380g 重磅纯棉连帽卫衣");
+  await page.getByRole("checkbox", { name: "输出风格保持一致", exact: true }).uncheck();
+  await page.getByLabel("输出语言", { exact: true }).selectOption("en");
+  await page.getByLabel("比例", { exact: true }).selectOption("4:3");
+  await page.getByLabel("分辨率", { exact: true }).selectOption("2K");
+
+  // Switch to /create/suite and back to /create/replica via CreateToolsNav (SPA navigation)
+  const tools = page.getByRole("navigation", { name: "创作功能" });
+  await tools.getByRole("link", { name: "商品套图", exact: true }).click();
+  await page.waitForURL("**/create/suite");
+  await tools.getByRole("link", { name: "爆品图复刻", exact: true }).click();
+  await page.waitForURL("**/create/replica");
+
+  // Verify reference images, order, remarks, and naturalWidth > 0
+  const refItems = page.locator("[data-ref-item]");
+  assert.equal(await refItems.count(), 2);
+  assert.equal(await refItems.nth(0).locator(".rp-ref-top strong").textContent(), "tokyo-desk-v3.jpg");
+  assert.equal(await refItems.nth(1).locator(".rp-ref-top strong").textContent(), "gan65-product.jpg");
+  assert.equal(await page.getByLabel("单张参考要求 1", { exact: true }).inputValue(), "参考图二顶部留白");
+  assert.equal(await page.getByLabel("单张参考要求 2", { exact: true }).inputValue(), "参考图一局部要求");
+
+  const refWidths = await refItems.locator(".rp-ref-thumb-wrap img").evaluateAll((imgs) =>
+    Promise.all(
+      imgs.map(
+        (img) =>
+          new Promise((resolve) => {
+            if (img.complete) return resolve(img.naturalWidth);
+            img.addEventListener("load", () => resolve(img.naturalWidth), { once: true });
+            img.addEventListener("error", () => resolve(0), { once: true });
+          }),
+      ),
+    ),
+  );
+  assert.ok(
+    refWidths.length === 2 && refWidths.every((w) => w > 0),
+    `expected restored reference thumbnails to load with naturalWidth > 0, got ${JSON.stringify(refWidths)}`,
+  );
+
+  // Verify product images, order, and naturalWidth > 0
+  const productItems = page.locator("[data-product-item]");
+  assert.equal(await productItems.count(), 2);
+  assert.equal(await productItems.nth(0).locator(".rp-product-source").textContent(), "资源库");
+  assert.equal(await productItems.nth(1).locator(".rp-product-source").textContent(), "本地");
+  const productWidths = await productItems.locator("img").evaluateAll((imgs) =>
+    Promise.all(
+      imgs.map(
+        (img) =>
+          new Promise((resolve) => {
+            if (img.complete) return resolve(img.naturalWidth);
+            img.addEventListener("load", () => resolve(img.naturalWidth), { once: true });
+            img.addEventListener("error", () => resolve(0), { once: true });
+          }),
+      ),
+    ),
+  );
+  assert.ok(
+    productWidths.length === 2 && productWidths.every((w) => w > 0),
+    `expected restored product thumbnails to load with naturalWidth > 0, got ${JSON.stringify(productWidths)}`,
+  );
+
+  // Verify all config fields restored
+  assert.equal(await page.getByRole("radio", { name: "服饰电商图", exact: true }).getAttribute("aria-checked"), "true");
+  assert.equal(await page.getByRole("radio", { name: /参考风格/ }).getAttribute("aria-checked"), "true");
+  assert.equal(await page.getByLabel("统一复刻要求", { exact: true }).inputValue(), "保持参考图构图与暖色调");
+  assert.equal(await page.getByLabel("商品信息", { exact: true }).inputValue(), "380g 重磅纯棉连帽卫衣");
+  assert.equal(await page.getByRole("checkbox", { name: "输出风格保持一致", exact: true }).isChecked(), false);
+  assert.equal(await page.getByLabel("输出语言", { exact: true }).inputValue(), "en");
+  await page.waitForFunction(() => document.querySelector('select[aria-label="比例"]')?.value === "4:3");
+  assert.equal(await page.getByLabel("分辨率", { exact: true }).inputValue(), "2K");
+
+  // Submit failure preserves draft (references, products, config)
+  failCreate = true;
+  await page.getByRole("button", { name: "一键复刻（2张）", exact: true }).click();
+  await page.getByRole("alert").filter({ hasText: "模拟提交失败" }).waitFor();
+  assert.equal(await page.locator("[data-ref-item]").count(), 2);
+  assert.equal(await page.locator("[data-product-item]").count(), 2);
+  assert.equal(await page.getByLabel("统一复刻要求", { exact: true }).inputValue(), "保持参考图构图与暖色调");
+
+  // Full page reload restores text/select configs from sessionStorage
+  await page.reload();
+  await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+  assert.equal(await page.getByRole("radio", { name: "服饰电商图", exact: true }).getAttribute("aria-checked"), "true");
+  assert.equal(await page.getByRole("radio", { name: /参考风格/ }).getAttribute("aria-checked"), "true");
+  assert.equal(await page.getByLabel("统一复刻要求", { exact: true }).inputValue(), "保持参考图构图与暖色调");
+  assert.equal(await page.getByLabel("商品信息", { exact: true }).inputValue(), "380g 重磅纯棉连帽卫衣");
+  assert.equal(await page.getByLabel("输出语言", { exact: true }).inputValue(), "en");
+  await page.waitForFunction(() => document.querySelector('select[aria-label="比例"]')?.value === "4:3");
+  assert.equal(await page.getByLabel("分辨率", { exact: true }).inputValue(), "2K");
+});
+
+test("爆品图复刻：进行中批次切换功能后自动恢复并继续轮询（replace 不增历史），新建复刻与删除后不恢复", async (t) => {
+  const analysisGate = Promise.withResolvers();
+  const imageGate = Promise.withResolvers();
+  const { url, page } = await offlineReplicaStudio(t, {
+    beforeAnalysisDone: analysisGate.promise,
+    beforeImageDone: imageGate.promise,
+  });
+
+  try {
+    await page.goto(url + "create/replica");
+    await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+    await page.getByLabel("统一复刻要求", { exact: true }).fill("提交后应清空的草稿");
+    await page.getByRole("button", { name: "一键复刻（1张）", exact: true }).click();
+    await page.waitForURL(/\/create\/replica\?suite=[^&]+/);
+    const suiteId = new URL(page.url()).searchParams.get("suite");
+    assert.ok(suiteId);
+
+    // Draft is cleared upon successful submit
+    assert.equal(await page.locator("[data-ref-item]").count(), 0);
+    assert.equal(await page.getByLabel("统一复刻要求", { exact: true }).inputValue(), "");
+
+    const batch = page.getByRole("region", { name: "复刻批次" });
+    await batch.locator('[data-status="running"]').waitFor();
+    assert.match(await batch.locator('[data-status="running"]').textContent(), /分析中/);
+
+    // Switch to /create/suite, then return via CreateToolsNav (no ?suite param)
+    const tools = page.getByRole("navigation", { name: "创作功能" });
+    await tools.getByRole("link", { name: "商品套图", exact: true }).click();
+    await page.waitForURL("**/create/suite");
+    const historyLenOnSuite = await page.evaluate(() => window.history.length);
+
+    await tools.getByRole("link", { name: "爆品图复刻", exact: true }).click();
+    await page.waitForURL(`**/create/replica?suite=${suiteId}`);
+    const historyLenAfterReturn = await page.evaluate(() => window.history.length);
+    assert.equal(
+      historyLenAfterReturn,
+      historyLenOnSuite + 1,
+      "恢复最近批次应使用 replace，不新增额外历史记录",
+    );
+
+    // Continues displaying progress and polling until completion
+    await batch.locator('[data-status="running"]').waitFor();
+    analysisGate.resolve();
+    await batch.getByText(/生成中 0\/1/).waitFor({ timeout: 8000 });
+    imageGate.resolve();
+    await batch.locator('[data-status="completed"]').waitFor({ timeout: 10000 });
+    const batchTitle = (await batch.locator("h3").textContent())?.trim();
+    assert.ok(batchTitle, "completed batch should display a heading title");
+
+    // Clicking "＋ 新建复刻" clears remembered suiteId -> navigating away & back does NOT restore old batch
+    await page.getByRole("button", { name: "＋ 新建复刻", exact: true }).click();
+    await page.waitForURL(/\/create\/replica$/);
+    await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+
+    await tools.getByRole("link", { name: "商品套图", exact: true }).click();
+    await page.waitForURL("**/create/suite");
+    await tools.getByRole("link", { name: "爆品图复刻", exact: true }).click();
+    await page.waitForURL(/\/create\/replica$/);
+    await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get("suite"), null);
+
+    // Select batch from history, delete it -> navigating away & back does NOT restore deleted batch
+    await page.getByRole("button", { name: "生成记录", exact: true }).click();
+    const drawer = page.getByRole("dialog", { name: "生成记录" });
+    await drawer.waitFor();
+    await drawer.getByRole("button", { name: new RegExp(batchTitle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click();
+    await page.waitForURL(`**/create/replica?suite=${suiteId}`);
+    await batch.getByRole("heading", { name: batchTitle, exact: true }).waitFor();
+
+    await batch.getByRole("button", { name: "删除批次", exact: true }).click();
+    const deleteDialog = page.getByRole("dialog", { name: "删除复刻批次" });
+    await deleteDialog.waitFor();
+    await deleteDialog.getByRole("button", { name: "确认删除", exact: true }).click();
+    await deleteDialog.waitFor({ state: "hidden" });
+    await page.waitForURL(/\/create\/replica$/);
+
+    await tools.getByRole("link", { name: "商品套图", exact: true }).click();
+    await page.waitForURL("**/create/suite");
+    await tools.getByRole("link", { name: "爆品图复刻", exact: true }).click();
+    await page.waitForURL(/\/create\/replica$/);
+    await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+
+    // Stale/deleted suiteId in sessionStorage is silently cleared without showing an error
+    await page.evaluate(() => {
+      window.sessionStorage.setItem("picagent:replica-studio:last-suite-id", "non-existent-suite-id");
+    });
+    await page.reload();
+    await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get("suite"), null);
+    assert.equal(await page.locator("[data-batch-error]").count(), 0);
+    assert.equal(
+      await page.evaluate(() => window.sessionStorage.getItem("picagent:replica-studio:last-suite-id")),
+      null,
+    );
+  } finally {
+    analysisGate.resolve();
+    imageGate.resolve();
+  }
+});
+
+test("爆品图复刻：配置栏最小宽度下参考图条目与产品图条目不溢出边框", async (t) => {
+  const { url, page } = await offlineReplicaStudio(t);
+  const sampleBytes = await readFile("public/assets/gan65-product.jpg");
+  const sampleBytes2 = await readFile("public/assets/tokyo-desk-v3.jpg");
+
+  // 750px viewport triggers @media (max-width: 1000px) -> config panel hits its 265px minimum width
+  await page.setViewportSize({ width: 750, height: 900 });
+  await page.goto(url + "create/replica");
+  await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+
+  const panelBox = await page.locator(".rp-config-panel").boundingBox();
+  assert.ok(panelBox && panelBox.width <= 270, `expected narrow config panel (~265px), got ${panelBox?.width}`);
+
+  await page.getByLabel("上传参考图", { exact: true }).setInputFiles([
+    {
+      name: "ultra-long-reference-filename-for-narrow-panel-overflow-check-001.jpg",
+      mimeType: "image/jpeg",
+      buffer: sampleBytes,
+    },
+    {
+      name: "ultra-long-reference-filename-for-narrow-panel-overflow-check-002.jpg",
+      mimeType: "image/jpeg",
+      buffer: sampleBytes2,
+    },
+  ]);
+  await page.getByRole("button", { name: "一键复刻（2张）", exact: true }).waitFor();
+  await page.getByLabel("单张参考要求 1", { exact: true }).fill("测试窄宽度下计数和输入框都不溢出");
+
+  // Also upload 2 product images (2nd has both ← and × buttons)
+  await page.getByLabel("上传产品原图", { exact: true }).setInputFiles([
+    {
+      name: "long-product-filename-001.jpg",
+      mimeType: "image/jpeg",
+      buffer: sampleBytes,
+    },
+    {
+      name: "long-product-filename-002.jpg",
+      mimeType: "image/jpeg",
+      buffer: sampleBytes2,
+    },
+  ]);
+  assert.equal(await page.locator("[data-product-item]").count(), 2);
+
+  const assertInside = (outer, inner, label) => {
+    assert.ok(outer && inner, `${label}: bounding boxes must exist`);
+    const eps = 0.5;
+    assert.ok(
+      inner.x >= outer.x - eps &&
+        inner.y >= outer.y - eps &&
+        inner.x + inner.width <= outer.x + outer.width + eps &&
+        inner.y + inner.height <= outer.y + outer.height + eps,
+      `${label} overflows container: inner=${JSON.stringify(inner)} outer=${JSON.stringify(outer)}`,
+    );
+  };
+
+  const refItems = page.locator(".rp-ref-item");
+  assert.equal(await refItems.count(), 2);
+  for (let i = 0; i < 2; i += 1) {
+    const item = refItems.nth(i);
+    const itemBox = await item.boundingBox();
+    const opsBox = await item.locator(".rp-item-ops").boundingBox();
+    const countBox = await item.locator(".rp-char-count").boundingBox();
+    const inputBox = await item.locator(".rp-remark-wrap input").boundingBox();
+    const titleEl = item.locator(".rp-ref-top strong");
+    const titleBox = await titleEl.boundingBox();
+
+    assertInside(itemBox, opsBox, `ref[${i}] .rp-item-ops`);
+    assertInside(itemBox, countBox, `ref[${i}] .rp-char-count`);
+    assertInside(itemBox, inputBox, `ref[${i}] remark input`);
+    assertInside(itemBox, titleBox, `ref[${i}] title`);
+    assert.ok(
+      titleBox.x + titleBox.width <= opsBox.x + 0.5,
+      `ref[${i}] title overlaps ops: title=${JSON.stringify(titleBox)} ops=${JSON.stringify(opsBox)}`,
+    );
+    const titleStyle = await titleEl.evaluate((el) => ({
+      textOverflow: getComputedStyle(el).textOverflow,
+      truncated: el.scrollWidth > el.clientWidth,
+    }));
+    assert.equal(titleStyle.textOverflow, "ellipsis");
+    assert.equal(titleStyle.truncated, true, `ref[${i}] long filename should truncate with ellipsis`);
+  }
+
+  const productItems = page.locator("[data-product-item]");
+  for (let i = 0; i < 2; i += 1) {
+    const item = productItems.nth(i);
+    const itemBox = await item.boundingBox();
+    const controlsBox = await item.locator(".rp-product-controls").boundingBox();
+    const sourceBox = await item.locator(".rp-product-source").boundingBox();
+    assertInside(itemBox, controlsBox, `product[${i}] .rp-product-controls`);
+    assertInside(itemBox, sourceBox, `product[${i}] .rp-product-source`);
+  }
 });

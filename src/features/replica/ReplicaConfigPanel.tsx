@@ -217,7 +217,7 @@ export function ReplicaConfigPanel({
                             value={item.remark}
                             onChange={(event) => onUpdateReferenceRemark(item.localId, event.target.value)}
                           />
-                          <small className={overLimit ? "rp-error-text" : "rp-char-count"}>
+                          <small className={overLimit ? "rp-char-count rp-error-text" : "rp-char-count"}>
                             {remarkLen}/{REPLICA_REMARK_MAX_LENGTH}
                           </small>
                         </div>
