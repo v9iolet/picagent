@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt", "listing_copy"] as const;
+export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt", "listing_copy", "replica_prompt"] as const;
 export type PromptStage = (typeof PROMPT_STAGES)[number];
 export type PromptVersionStatus = "draft" | "published" | "retired";
 
@@ -73,7 +73,20 @@ const V11_STAGE_CONTRACTS = {
   },
 } as const;
 
-export function validatePromptTemplateContract(record: Pick<PromptTemplateRecord, "code" | "kind" | "stage" | "executionTarget" | "inputSchema" | "outputSchema" | "body">): void {
+export function validatePromptTemplateContract(
+  record: Pick<PromptTemplateRecord, "code" | "kind" | "stage" | "executionTarget" | "inputSchema" | "outputSchema" | "body"> & {
+    applicability?: Record<string, unknown>;
+  },
+): void {
+  if (record.stage === "replica_prompt") {
+    if (record.kind !== "planner" || record.executionTarget !== "llm") throw new Error(`Replica template ${record.code} must be an llm planner`);
+    const schemaVersion = (record.outputSchema.properties as Record<string, unknown> | undefined)?.schemaVersion as Record<string, unknown> | undefined;
+    if (!schemaVersion || schemaVersion.const !== "replica-prompt-v1") throw new Error(`Replica template ${record.code} has incompatible output schema`);
+    if (!record.body.includes("replica-prompt-v1")) throw new Error(`Replica template ${record.code} body must declare replica-prompt-v1`);
+    const cloneLevel = record.applicability?.cloneLevel;
+    if (cloneLevel !== "compose" && cloneLevel !== "high") throw new Error(`Replica template ${record.code} applicability.cloneLevel must be compose or high`);
+    return;
+  }
   if (record.stage !== "structure_plan" && record.stage !== "category_prompt" && record.stage !== "listing_copy") return;
   const contract = V11_STAGE_CONTRACTS[record.stage];
   if (record.code !== contract.code) throw new Error(`V1.1 template code must be ${contract.code}`);
@@ -256,11 +269,41 @@ export function parsePromptMarkdown(markdown: string, sourceFile: string): Promp
   return records;
 }
 
+function frontmatterBlock(markdown: string): string {
+  const match = markdown.trimStart().match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  return match ? match[1] : markdown;
+}
+
 function frontmatterValue(markdown: string, key: string): string | undefined {
-  const match = markdown.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
+  const match = frontmatterBlock(markdown).match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
   if (!match) return undefined;
   const value = match[1].trim();
-  return value.replace(/^['\"]|['\"]$/g, "");
+  if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith("\"") && value.endsWith("\""))) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function parseFrontmatterApplicability(markdown: string, sourceFile: string): Record<string, unknown> {
+  const raw = frontmatterValue(markdown, "applicability");
+  let applicability: Record<string, unknown> = {};
+  if (raw) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`Invalid normalized prompt applicability JSON: ${sourceFile}`);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`Normalized prompt applicability must be a JSON object: ${sourceFile}`);
+    }
+    applicability = parsed as Record<string, unknown>;
+  }
+  const cloneLevel = frontmatterValue(markdown, "clone_level");
+  if (cloneLevel && applicability.cloneLevel === undefined) {
+    applicability = { ...applicability, cloneLevel };
+  }
+  return applicability;
 }
 
 function sectionBody(markdown: string, heading: string, nextHeading: string): string {
@@ -330,7 +373,7 @@ export function parseNormalizedPromptMarkdown(markdown: string, sourceFile: stri
     executionTarget,
     inputSchema: parseNormalizedInputSchema(markdown),
     outputSchema,
-    applicability: {},
+    applicability: parseFrontmatterApplicability(markdown, sourceFile),
     body,
     userPromptTemplate,
     sourceFile,

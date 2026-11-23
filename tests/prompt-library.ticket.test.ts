@@ -171,3 +171,63 @@ test("base generation loads a published PG template and freezes its version and 
   assert.equal(attempts[0].promptTemplateVersionId, draft.templateVersionId);
   assert.deepEqual(attempts[0].dynamicInput, {});
 });
+
+test("replica_prompt normalized templates parse applicability.cloneLevel, publish, and query by stage", async () => {
+  const composePath = "prompt/normalized/replica-compose.md";
+  const highPath = "prompt/normalized/replica-high.md";
+  const composeMd = await readFile(composePath, "utf8");
+  const highMd = await readFile(highPath, "utf8");
+  assert.equal(isNormalizedPromptMarkdown(composeMd), true);
+  assert.equal(isNormalizedPromptMarkdown(highMd), true);
+
+  const composeRecord = parseNormalizedPromptMarkdown(composeMd, composePath);
+  const highRecord = parseNormalizedPromptMarkdown(highMd, highPath);
+  assert.equal(composeRecord.code, "replica.compose");
+  assert.equal(composeRecord.stage, "replica_prompt");
+  assert.equal(composeRecord.applicability.cloneLevel, "compose");
+  assert.equal(highRecord.code, "replica.high");
+  assert.equal(highRecord.stage, "replica_prompt");
+  assert.equal(highRecord.applicability.cloneLevel, "high");
+
+  for (const record of [composeRecord, highRecord]) {
+    assert.equal((record.outputSchema.properties as Record<string, { const?: string }>).schemaVersion?.const, "replica-prompt-v1");
+    assert.match(record.body, /构图/);
+    assert.match(record.body, /品牌/);
+    assert.match(record.body, /\{\{productInfo\}\}/);
+    assert.match(record.body, /\{\{language\}\}/);
+    assert.match(record.body, /AI 虚拟模特|AI 模特/);
+    assert.match(record.body, /通用示意商品/);
+    assert.match(record.body, /\{\{sceneType\}\}/);
+    assert.match(record.body, /\{\{unifiedRequirement\}\}/);
+    assert.match(record.body, /\{\{styleUnified\}\}/);
+    assert.match(record.body, /参考图/);
+    assert.match(record.body, /替换为/);
+  }
+  assert.match(composeRecord.body, /重新调整配色|重新调整色彩与场景/);
+  assert.match(highRecord.body, /保持参考图的视觉结构|保持参考图视觉结构/);
+
+  const prompts = new MemoryPromptRepository();
+  const imported = await prompts.importRecords([composeRecord, highRecord]);
+  assert.deepEqual(await prompts.listPublished("replica_prompt"), []);
+  for (const version of imported) await prompts.publishVersion(version.templateVersionId);
+
+  const listed = await prompts.listPublished("replica_prompt");
+  assert.deepEqual(listed.map((item) => item.code).sort(), ["replica.compose", "replica.high"]);
+  assert.equal(listed.find((item) => item.code === "replica.compose")?.applicability.cloneLevel, "compose");
+  assert.equal(listed.find((item) => item.code === "replica.high")?.applicability.cloneLevel, "high");
+
+  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts });
+  const response = await api.request("GET", "/api/prompt-templates?stage=replica_prompt");
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    response.body.data.map((item: { code: string; applicability: { cloneLevel?: string } }) => [item.code, item.applicability.cloneLevel]).sort(),
+    [["replica.compose", "compose"], ["replica.high", "high"]],
+  );
+  assert.equal("body" in response.body.data[0], false);
+
+  const migrationSql = await readFile("db/migrations/032_replica_prompt_templates.sql", "utf8");
+  assert.match(migrationSql, /'replica_prompt'/);
+  assert.match(migrationSql, /'replica\.compose'/);
+  assert.match(migrationSql, /'replica\.high'/);
+  assert.match(migrationSql, /'cloneLevel'/);
+});
