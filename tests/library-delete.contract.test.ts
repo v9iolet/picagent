@@ -367,3 +367,137 @@ test("deleting a library image referenced by a task keeps task card, frozen refe
   }
   assert.equal(finalStatus, "completed");
 });
+
+test("GET /api/library/resources supports scope=image pagination & resourceType filtering, reverse re-save resets draft, and selecting final restores deleted task-version", async () => {
+  const { app, tasks, library, canvasSuite, sourceSuite, reverseRes, baseRes, pngA } = await createFixture();
+
+  // Invalid scope -> 400
+  const badScope = await app.request("GET", "/api/library/resources?scope=invalid");
+  assert.equal(badScope.status, 400);
+  assert.equal((badScope.body as any).error.code, "INVALID_LIBRARY_SCOPE");
+
+  // Seed 26 published input images + keep prompt_template in library
+  for (let i = 1; i <= 26; i++) {
+    library.addResource(
+      makeResource({
+        id: `input:page-img-${String(i).padStart(2, "0")}`,
+        resourceType: "input_image",
+        title: `分页测试原图 ${String(i).padStart(2, "0")}`,
+        suiteId: sourceSuite.id,
+        resourceVersionId: `page-img-${i}`,
+        updatedAt: `2026-11-23T11:${String(i).padStart(2, "0")}:00.000Z`,
+      }),
+    );
+  }
+
+  // scope=image excludes prompt_template and returns true total across pages
+  const page1 = await app.request("GET", "/api/library/resources?scope=image&status=published&page=1&pageSize=24");
+  assert.equal(page1.status, 200);
+  const p1Data = (page1.body as any).data;
+  assert.equal(p1Data.items.some((item: any) => item.resourceType === "prompt_template"), false);
+  // 26 seeded + inputRes + baseRes + taskVerRes + processRes = 30 published image assets (reverseRes is draft)
+  assert.equal(p1Data.total, 30);
+  assert.equal(p1Data.items.length, 24);
+
+  const page2 = await app.request("GET", "/api/library/resources?scope=image&status=published&page=2&pageSize=24");
+  assert.equal(page2.status, 200);
+  const p2Data = (page2.body as any).data;
+  assert.equal(p2Data.total, 30);
+  assert.equal(p2Data.items.length, 6);
+
+  // scope=image with resourceType=input_image filters cleanly on server
+  const onlyInputs = await app.request("GET", "/api/library/resources?scope=image&resourceType=input_image&status=published&page=2&pageSize=24");
+  assert.equal(onlyInputs.status, 200);
+  assert.equal((onlyInputs.body as any).data.total, 27);
+  assert.equal((onlyInputs.body as any).data.items.length, 3);
+  assert.equal((onlyInputs.body as any).data.items.every((item: any) => item.resourceType === "input_image"), true);
+
+  // Reverse asset: archive -> soft-delete -> re-save resets status back to draft
+  const archived = await app.request("POST", `/api/library/resources/${encodeURIComponent(reverseRes.id)}/status`, {
+    body: { status: "archived" },
+  });
+  assert.equal(archived.status, 200);
+  assert.equal((archived.body as any).data.status, "archived");
+  const delRev = await app.request("DELETE", `/api/library/resources/${encodeURIComponent(reverseRes.id)}`);
+  assert.equal(delRev.status, 200);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(reverseRes.id)}`)).status, 404);
+
+  const resaved = await library.createReverseReferenceAsset({
+    suiteId: sourceSuite.id,
+    title: "爆品参考图 1 重存",
+    summary: "重新保存",
+    objectKey: "reverse/ref-1.png",
+    mimeType: "image/png",
+    promptSnapshot: { prompt: "新提示词" },
+    source: { origin: "replica" },
+  });
+  assert.equal(resaved.id, reverseRes.id);
+  assert.equal(resaved.status, "draft");
+  const visibleAgain = await app.request("GET", `/api/library/resources/${encodeURIComponent(reverseRes.id)}`);
+  assert.equal(visibleAgain.status, 200);
+  assert.equal((visibleAgain.body as any).data.status, "draft");
+
+  // Task version: generate -> register in library -> soft-delete -> select as final restores visibility in library
+  const { task } = await tasks.createCustomTask!({
+    suiteId: canvasSuite.id,
+    planSnapshotId: null,
+    imageType: "main",
+    title: "终版恢复测试",
+    purpose: "主图",
+    promptDraft: "展示商品",
+    sourceInputImageId: null,
+    generationParams: { size: "1K", ratio: "1:1" },
+  });
+  await app.request("POST", `/api/suite-tasks/${task.id}/white-resource`, {
+    headers: { "idempotency-key": "bind-final-restore" },
+    body: { resourceIds: [baseRes.id] },
+  });
+  const gen = await app.request("POST", `/api/suite-tasks/${task.id}/generation`, {
+    headers: { "idempotency-key": "gen-final-restore" },
+    body: {},
+  });
+  assert.equal(gen.status, 202);
+  const batchId = (gen.body as any).data.batchId as string;
+  for (let i = 0; i < 40; i++) {
+    const st = await app.request("GET", `/api/generation-batches/${batchId}`);
+    if ((st.body as any).data.batch.status !== "running") break;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  const versionsRes = await app.request("GET", `/api/suite-tasks/${task.id}/versions`);
+  const versionId = (versionsRes.body as any).data.versions[0].id as string;
+  const tvResourceId = `task-version:${versionId}`;
+  library.addResource(
+    makeResource({
+      id: tvResourceId,
+      resourceType: "task_image_version",
+      title: "终版恢复测试 · 版本 1",
+      suiteId: canvasSuite.id,
+      taskId: task.id,
+      imageVersionId: versionId,
+      resourceVersionId: versionId,
+      stage: "replica_prompt",
+      source: { objectKey: "tasks/final-restore.png" },
+    }),
+  );
+  assert.ok(pngA.length > 0);
+  const delTv = await app.request("DELETE", `/api/library/resources/${encodeURIComponent(tvResourceId)}`);
+  assert.equal(delTv.status, 200);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(tvResourceId)}`)).status, 404);
+
+  // Selecting as current does NOT clear deletion; selecting as final DOES restore visibility
+  const selectCurrent = await app.request("POST", `/api/suite-tasks/${task.id}/versions/${versionId}/select`, {
+    headers: { "idempotency-key": "select-current-1" },
+    body: { selection: "current" },
+  });
+  assert.equal(selectCurrent.status, 200);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(tvResourceId)}`)).status, 404);
+
+  const selectFinal = await app.request("POST", `/api/suite-tasks/${task.id}/versions/${versionId}/select`, {
+    headers: { "idempotency-key": "select-final-1" },
+    body: { selection: "final" },
+  });
+  assert.equal(selectFinal.status, 200);
+  const restoredTv = await app.request("GET", `/api/library/resources/${encodeURIComponent(tvResourceId)}`);
+  assert.equal(restoredTv.status, 200);
+  assert.equal((restoredTv.body as any).data.id, tvResourceId);
+});

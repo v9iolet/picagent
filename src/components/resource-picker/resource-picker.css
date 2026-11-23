@@ -79,6 +79,26 @@
   color: var(--pa-danger, #dc2626);
 }
 
+.rp-picker-notice {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  border: 1px solid #f5d08a;
+  border-radius: 7px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 12px;
+}
+
+.rp-picker-order .rp-picker-remove-btn {
+  border-color: #f3c4c4;
+  color: #b91c1c;
+}
+
+.rp-picker-order .rp-picker-remove-btn:hover:not(:disabled) {
+  border-color: #dc2626;
+  background: #fef2f2;
+}
+
 .rp-picker-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));

@@ -1268,6 +1268,16 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
     assert.equal((await library.listReferences(suite.id, "task", task.id)).length, 1);
     assert.ok(await suites.getInputImage(suite.id, inputId));
 
+    // Archive reverse asset before deleting to verify re-save resets status='draft' and archived_at=NULL
+    const archivedReverse = await library.setResourceStatus(reverseAsset.id, "archived");
+    assert.equal(archivedReverse?.status, "archived");
+    const archivedDbBefore = await pool.query<{ status: string; archived_at: unknown }>(
+      `SELECT status, archived_at FROM suite_workbench.reverse_reference_assets WHERE id = $1::uuid`,
+      [reverseAsset.resourceVersionId],
+    );
+    assert.equal(archivedDbBefore.rows[0]?.status, "archived");
+    assert.ok(archivedDbBefore.rows[0]?.archived_at);
+
     // Batch delete task version, process image, reverse asset + already deleted input + nonexistent ID
     const batch = await library.deleteResources([
       taskVersionResourceId,
@@ -1287,16 +1297,28 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
     assert.deepEqual(batchRepeat.alreadyDeletedIds, [taskVersionResourceId, processResourceId, reverseAsset.id]);
     assert.equal(batchRepeat.deletedCount, 0);
 
-    // None of the deleted resources appear in listResources, and status update on deleted reverse asset returns null
-    const remaining = await library.listResources({ suiteId: suite.id, pageSize: 100 });
-    assert.equal(remaining.items.filter((item) => item.resourceType !== "prompt_template").length, 0);
+    // None of the deleted resources appear in listResources (including scope=image), and status update on deleted reverse asset returns null
+    const remaining = await library.listResources({ scope: "image", suiteId: suite.id, pageSize: 100 });
+    assert.equal(remaining.total, 0);
+    assert.equal(remaining.items.length, 0);
     assert.equal(await library.setResourceStatus(reverseAsset.id, "published"), null);
 
-    // Task versions remain intact in TaskRepository
+    // Task versions remain intact in TaskRepository; selecting final via app restores task-version visibility
     const taskVersions = await tasks.listTaskVersions(task.id);
     assert.equal(taskVersions.versions.length, 1);
+    const pgApp = createSuiteStudioApp({ repository: suites, taskRepository: tasks, libraryRepository: library, storage: new MemoryStorage() });
+    const selectFinalRes = await pgApp.request("POST", `/api/suite-tasks/${task.id}/versions/${version.id}/select`, {
+      body: { selection: "final" },
+    });
+    assert.equal(selectFinalRes.status, 200);
+    assert.ok(await library.getResource(taskVersionResourceId));
 
-    // Re-saving reverse asset via upsert clears deletion marker and restores visibility
+    // scope=image excludes prompt_template and counts only image resources
+    const imageScoped = await library.listResources({ scope: "image", page: 1, pageSize: 10 });
+    assert.equal(imageScoped.items.some((item) => item.resourceType === "prompt_template"), false);
+    assert.equal(imageScoped.total, 1);
+
+    // Re-saving deleted reverse asset via upsert clears deletion marker, resets status to draft and archived_at to NULL
     const restoredReverse = await library.createReverseReferenceAsset({
       suiteId: suite.id,
       title: "PG 反推重新保存",
@@ -1307,6 +1329,13 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
       source: { origin: "replica" },
     });
     assert.equal(restoredReverse.id, reverseAsset.id);
+    assert.equal(restoredReverse.status, "draft");
+    const restoredDb = await pool.query<{ status: string; archived_at: unknown }>(
+      `SELECT status, archived_at FROM suite_workbench.reverse_reference_assets WHERE id = $1::uuid`,
+      [reverseAsset.resourceVersionId],
+    );
+    assert.equal(restoredDb.rows[0]?.status, "draft");
+    assert.equal(restoredDb.rows[0]?.archived_at, null);
     assert.ok(await library.getResource(reverseAsset.id));
 
     // Deleting a prompt_template is forbidden

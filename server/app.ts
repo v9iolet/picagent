@@ -1157,11 +1157,17 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       const params = new URLSearchParams(path.split("?")[1] ?? "");
       const resourceType = params.get("resourceType") as import("./types.js").LibraryResourceType | null;
+      const scopeParam = params.get("scope");
+      if (scopeParam && scopeParam !== "image") return fail("INVALID_LIBRARY_SCOPE");
       const stage = params.get("stage") as PromptStage | null;
       if (stage && !PROMPT_STAGES.includes(stage)) return fail("INVALID_PROMPT_STAGE");
       const status = params.get("status") as import("./types.js").LibraryAssetStatus | null;
       if (status && !["draft", "published", "archived"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
-      return ok(await deps.libraryRepository.listResources({ resourceType: resourceType ?? undefined, stage: stage ?? undefined, suiteId: params.get("suiteId") ?? undefined, query: params.get("query") ?? undefined, status: status ?? undefined, page: Number(params.get("page") ?? 1), pageSize: Number(params.get("pageSize") ?? 24) }));
+      const rawPage = Number(params.get("page") ?? 1);
+      const rawPageSize = Number(params.get("pageSize") ?? 24);
+      const page = Number.isFinite(rawPage) ? Math.floor(rawPage) : 1;
+      const pageSize = Number.isFinite(rawPageSize) ? Math.floor(rawPageSize) : 24;
+      return ok(await deps.libraryRepository.listResources({ resourceType: resourceType ?? undefined, scope: scopeParam === "image" ? "image" : undefined, stage: stage ?? undefined, suiteId: params.get("suiteId") ?? undefined, query: params.get("query") ?? undefined, status: status ?? undefined, page, pageSize }));
     }
     const reverseAssetStatusMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/status$/);
     if (method === "POST" && reverseAssetStatusMatch) {
@@ -2168,7 +2174,11 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (method === "POST" && selectTaskVersionMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const selection = asRecord(options.body, { allowArrays: true }).selection === "final" ? "final" : "current";
-      const version = await deps.taskRepository.selectVersion(selectTaskVersionMatch[1], selectTaskVersionMatch[2], selection); return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
+      const version = await deps.taskRepository.selectVersion(selectTaskVersionMatch[1], selectTaskVersionMatch[2], selection);
+      if (version && selection === "final" && deps.libraryRepository) {
+        await deps.libraryRepository.restoreResource(`task-version:${version.id}`);
+      }
+      return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
     }
     const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
     if (method === "GET" && taskPreviewMatch) return await previewTaskVersion(taskPreviewMatch[1], taskPreviewMatch[2]);

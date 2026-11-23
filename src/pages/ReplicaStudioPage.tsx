@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { defaultImageOptions } from "../../shared/model-settings";
-import { modelSettingsApi } from "../api/client";
+import { ApiHttpError, modelSettingsApi, suiteApi } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import {
   GenerationHistoryDrawer,
@@ -552,17 +552,51 @@ export function ReplicaStudioPage({
     [navigate, suiteId],
   );
 
+  const pruneDeletedLibraryProducts = useCallback(async (candidates: readonly ReplicaProductDraft[]) => {
+    const libraryItems = candidates.filter((item) => item.sourceKind === "library");
+    if (!libraryItems.length) return { remaining: candidates.slice(), removedIds: new Set<string>() };
+    const removedIds = new Set<string>();
+    await Promise.all(
+      libraryItems.map(async (item) => {
+        try {
+          const detail = await suiteApi.getLibraryResource(item.libraryResourceId);
+          if (
+            detail.status !== "published" ||
+            (detail.resourceType !== "base_image" && detail.resourceType !== "input_image")
+          ) {
+            removedIds.add(item.libraryResourceId);
+          }
+        } catch (error) {
+          if (error instanceof ApiHttpError && error.status === 404) {
+            removedIds.add(item.libraryResourceId);
+          }
+        }
+      }),
+    );
+    if (removedIds.size > 0) {
+      setProducts((prev) =>
+        prev.filter((item) => item.sourceKind !== "library" || !removedIds.has(item.libraryResourceId)),
+      );
+      setProductNotice(`已移除 ${removedIds.size} 张已删除的图片`);
+    }
+    const remaining = candidates.filter(
+      (item) => item.sourceKind !== "library" || !removedIds.has(item.libraryResourceId),
+    );
+    return { remaining, removedIds };
+  }, []);
+
   const handleSubmit = useCallback(async () => {
     const submitState = getReplicaSubmitState(references, products, effectiveConfig, submitting);
     if (!submitState.canSubmit) return;
 
     const validRefs = references.filter((item) => item.status === "ready");
-    const validProducts = products.filter((item) => item.status === "ready");
+    const readyProducts = products.filter((item) => item.status === "ready");
 
     setSubmitting(true);
     setPageNotice("");
     setBatchError("");
     try {
+      const { remaining: validProducts } = await pruneDeletedLibraryProducts(readyProducts);
       const result = await replicaApi.create({
         references: validRefs.map((item) => ({
           filename: item.filename,
@@ -599,7 +633,7 @@ export function ReplicaStudioPage({
     } finally {
       setSubmitting(false);
     }
-  }, [references, products, effectiveConfig, submitting, suiteId, navigate]);
+  }, [references, products, effectiveConfig, submitting, suiteId, navigate, pruneDeletedLibraryProducts]);
 
   const renderHistoryMeta = useCallback((item: GenerationHistoryFeedItem) => {
     const cfg = item.pipeline?.config;

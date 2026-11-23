@@ -19,6 +19,9 @@ type DeleteConfirmState =
   | { mode: "single"; resource: ApiLibraryResource }
   | { mode: "batch"; ids: string[] };
 
+const PAGE_SIZE = 24;
+const BATCH_DELETE_MAX = 100;
+
 function imagePreview(resource: ApiLibraryResource) {
   if (resource.previewUrl) return <img src={resource.previewUrl} alt={resource.title} loading="lazy" />;
   return (
@@ -31,8 +34,12 @@ function imagePreview(resource: ApiLibraryResource) {
 
 export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }) {
   const [query, setQuery] = useState("");
+  const [submittedQuery, setSubmittedQuery] = useState("");
   const [resourceFilter, setResourceFilter] = useState<ImageResourceFilter>("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "published" | "draft" | "archived">("published");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [reloadTick, setReloadTick] = useState(0);
   const [items, setItems] = useState<ApiLibraryResource[]>([]);
   const [selected, setSelected] = useState<ApiLibraryResource | null>(null);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
@@ -53,34 +60,55 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
 
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2400); };
 
-  const load = async () => {
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  useEffect(() => {
+    let active = true;
     const sequence = ++loadSequence.current;
     setLoading(true);
     setError("");
-    try {
-      const result = await suiteApi.listLibraryResources({
+    void suiteApi
+      .listLibraryResources({
+        scope: "image",
+        resourceType: resourceFilter === "all" ? undefined : resourceFilter,
         status: statusFilter === "all" ? undefined : statusFilter,
-        query: query.trim() || undefined,
+        query: submittedQuery || undefined,
+        page,
+        pageSize: PAGE_SIZE,
+      })
+      .then((result) => {
+        if (!active || sequence !== loadSequence.current) return;
+        const visible = result.items.filter((item) => item.resourceType !== "prompt_template");
+        if (visible.length === 0 && result.total > 0 && page > 1) {
+          const lastPage = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
+          setTotal(result.total);
+          setCheckedIds(new Set());
+          setPage(lastPage);
+          return;
+        }
+        const visibleIds = new Set(visible.map((item) => item.id));
+        setItems(visible);
+        setTotal(result.total);
+        setCheckedIds((current) => {
+          if (!current.size) return current;
+          const next = new Set<string>();
+          current.forEach((id) => { if (visibleIds.has(id)) next.add(id); });
+          return next;
+        });
+        setSelected((current) => visible.find((item) => item.id === current?.id) ?? visible[0] ?? null);
+      })
+      .catch((cause) => {
+        if (!active || sequence !== loadSequence.current) return;
+        setError(cause instanceof Error ? cause.message : "图片资产加载失败，请重试");
+      })
+      .finally(() => {
+        if (active && sequence === loadSequence.current) setLoading(false);
       });
-      if (sequence !== loadSequence.current) return;
-      const visible = result.items.filter((item) => item.resourceType !== "prompt_template");
-      const visibleIds = new Set(visible.map((item) => item.id));
-      setItems(visible);
-      setCheckedIds((current) => {
-        if (!current.size) return current;
-        const next = new Set<string>();
-        current.forEach((id) => { if (visibleIds.has(id)) next.add(id); });
-        return next;
-      });
-      setSelected((current) => visible.find((item) => item.id === current?.id) ?? visible[0] ?? null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "图片资产加载失败，请重试");
-    } finally {
-      setLoading(false);
-    }
-  };
+    return () => {
+      active = false;
+    };
+  }, [statusFilter, resourceFilter, submittedQuery, page, reloadTick]);
 
-  useEffect(() => { load().catch(() => undefined); }, [statusFilter]);
   useEffect(() => {
     if (!promptModal && !deleteConfirm) return;
     const close = (event: KeyboardEvent) => {
@@ -92,27 +120,54 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
     return () => window.removeEventListener("keydown", close);
   }, [promptModal, deleteConfirm, deleting]);
 
-  const filtered = useMemo(() => items.filter((item) => {
-    if (resourceFilter !== "all" && item.resourceType !== resourceFilter) return false;
-    return true;
-  }), [items, resourceFilter]);
-
   const visibleCheckedIds = useMemo(
-    () => filtered.filter((item) => checkedIds.has(item.id)).map((item) => item.id),
-    [filtered, checkedIds],
+    () => items.filter((item) => checkedIds.has(item.id)).map((item) => item.id),
+    [items, checkedIds],
   );
-  const allVisibleChecked = filtered.length > 0 && visibleCheckedIds.length === filtered.length;
+  const allVisibleChecked = items.length > 0 && visibleCheckedIds.length === items.length;
   const someVisibleChecked = visibleCheckedIds.length > 0 && !allVisibleChecked;
 
   useEffect(() => {
     if (selectAllRef.current) selectAllRef.current.indeterminate = someVisibleChecked;
   }, [someVisibleChecked]);
 
+  const handleResourceFilterChange = (next: ImageResourceFilter) => {
+    setResourceFilter(next);
+    setPage(1);
+    setCheckedIds(new Set());
+  };
+
+  const handleStatusFilterChange = (next: "all" | "published" | "draft" | "archived") => {
+    setStatusFilter(next);
+    setPage(1);
+    setCheckedIds(new Set());
+  };
+
+  const handleSearch = () => {
+    const trimmed = query.trim();
+    setCheckedIds(new Set());
+    if (trimmed !== submittedQuery) {
+      setSubmittedQuery(trimmed);
+      setPage(1);
+    } else if (page !== 1) {
+      setPage(1);
+    } else {
+      setReloadTick((n) => n + 1);
+    }
+  };
+
+  const handlePageChange = (nextPage: number) => {
+    const clamped = Math.min(totalPages, Math.max(1, nextPage));
+    if (clamped === page) return;
+    setCheckedIds(new Set());
+    setPage(clamped);
+  };
+
   const toggleCheck = (id: string) => {
     setCheckedIds((current) => {
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
-      else next.add(id);
+      else if (next.size < BATCH_DELETE_MAX) next.add(id);
       return next;
     });
   };
@@ -121,20 +176,16 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
     setCheckedIds((current) => {
       const next = new Set(current);
       if (allVisibleChecked) {
-        filtered.forEach((item) => next.delete(item.id));
+        items.forEach((item) => next.delete(item.id));
       } else {
-        filtered.forEach((item) => next.add(item.id));
+        items.slice(0, BATCH_DELETE_MAX).forEach((item) => next.add(item.id));
       }
       return next;
     });
   };
 
   const clearChecked = () => {
-    setCheckedIds((current) => {
-      const next = new Set(current);
-      filtered.forEach((item) => next.delete(item.id));
-      return next;
-    });
+    setCheckedIds(new Set());
   };
 
   const changeStatus = async (resource: ApiLibraryResource, status: "published" | "archived") => {
@@ -142,7 +193,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
       const updated = await suiteApi.setLibraryResourceStatus(resource.id, status);
       setSelected(updated);
       notify(status === "published" ? "资源已发布" : "资源已归档");
-      await load();
+      setReloadTick((n) => n + 1);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "状态更新失败，请重试");
     }
@@ -163,7 +214,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
         setDeleteConfirm(null);
         notify("图片已从资源库删除");
       } else {
-        const ids = deleteConfirm.ids;
+        const ids = deleteConfirm.ids.slice(0, BATCH_DELETE_MAX);
         const result = await suiteApi.batchDeleteLibraryResources(ids);
         const removed = new Set([...result.deletedIds, ...result.alreadyDeletedIds]);
         setCheckedIds((current) => {
@@ -174,7 +225,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
         setDeleteConfirm(null);
         notify(`已删除 ${removed.size} 张图片`);
       }
-      await load();
+      setReloadTick((n) => n + 1);
     } catch (cause) {
       setDeleteConfirm(null);
       setError(cause instanceof Error ? cause.message : "删除失败，请重试");
@@ -189,7 +240,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
       navigate={navigate}
       fullHeight
       crumbs={[{ label: "图片库" }]}
-      statusText={loading ? "正在同步图片资产…" : `已加载 ${filtered.length} 项`}
+      statusText={loading ? "正在同步图片资产…" : `共 ${total} 项`}
       statusTone={loading ? "running" : error ? "error" : "pass"}
     >
       <main className="workarea styles-layout style-library-workarea">
@@ -199,7 +250,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
               <strong className="panel-title">图片筛选</strong>
               <div className="panel-subtitle">按图片类型与发布状态筛选</div>
             </div>
-            <span className="badge">{filtered.length} 项</span>
+            <span className="badge">{total} 项</span>
           </header>
           <div className="panel-scroll">
             <div className="style-filters">
@@ -214,7 +265,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
                   ["reverse_reference_asset", "爆品图反推"],
                 ] as [ImageResourceFilter, string][]).map(([value, label]) => (
                   <label className="style-check" key={value}>
-                    <input type="radio" name="resourceType" checked={resourceFilter === value} onChange={() => setResourceFilter(value)} />
+                    <input type="radio" name="resourceType" checked={resourceFilter === value} onChange={() => handleResourceFilterChange(value)} />
                     {label}
                   </label>
                 ))}
@@ -228,7 +279,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
                   ["all", "全部状态"],
                 ] as const).map(([value, label]) => (
                   <label className="style-check" key={value}>
-                    <input type="radio" name="resourceStatus" checked={statusFilter === value} onChange={() => setStatusFilter(value)} />
+                    <input type="radio" name="resourceStatus" checked={statusFilter === value} onChange={() => handleStatusFilterChange(value)} />
                     {label}
                   </label>
                 ))}
@@ -241,7 +292,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
           </div>
         </section>
 
-        <section className="styles-center style-library-center">
+        <section className="styles-center style-library-center style-assets-center">
           <header className="panel-header style-catalog-toolbar">
             <div>
               <strong className="panel-title">图片资产</strong>
@@ -250,9 +301,9 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
           </header>
           <div className="style-library-toolbar">
             <div className="search-wrap">
-              <input className="input" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") load().catch(() => undefined); }} placeholder="搜索图片资产标题或摘要" />
+              <input className="input" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") handleSearch(); }} placeholder="搜索图片资产标题或摘要" />
             </div>
-            <button className="btn" type="button" onClick={() => load().catch(() => undefined)}>搜索</button>
+            <button className="btn" type="button" onClick={handleSearch}>搜索</button>
           </div>
           <div className="style-boundary style-library-selection-bar">
             <label className="style-select-all">
@@ -260,13 +311,13 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
                 ref={selectAllRef}
                 type="checkbox"
                 checked={allVisibleChecked}
-                disabled={!filtered.length || deleting}
+                disabled={!items.length || deleting}
                 onChange={toggleSelectAll}
               />
               <span>全选当前页</span>
             </label>
             <span className="style-selection-count">
-              {visibleCheckedIds.length > 0 ? `已选 ${visibleCheckedIds.length} / ${filtered.length} 项` : `当前共 ${filtered.length} 项`}
+              {visibleCheckedIds.length > 0 ? `已选 ${visibleCheckedIds.length} / ${items.length} 项 · 共 ${total} 项` : `当前共 ${total} 项`}
             </span>
             <div className="style-selection-actions">
               {visibleCheckedIds.length > 0 && (
@@ -276,7 +327,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
                 className="btn btn-danger-outline"
                 type="button"
                 disabled={!visibleCheckedIds.length || deleting}
-                onClick={() => setDeleteConfirm({ mode: "batch", ids: visibleCheckedIds })}
+                onClick={() => setDeleteConfirm({ mode: "batch", ids: visibleCheckedIds.slice(0, BATCH_DELETE_MAX) })}
               >
                 {visibleCheckedIds.length > 0 ? `批量删除 (${visibleCheckedIds.length})` : "批量删除"}
               </button>
@@ -286,8 +337,8 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
             <div className="style-grid">
               {loading ? (
                 <div className="style-library-loading">正在加载图片资产…</div>
-              ) : filtered.length ? (
-                filtered.map((item) => {
+              ) : items.length ? (
+                items.map((item) => {
                   const isChecked = checkedIds.has(item.id);
                   return (
                     <article
@@ -327,6 +378,29 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
               )}
             </div>
           </div>
+          <footer className="style-library-pagination" aria-label="图片资产分页">
+            <span className="style-pagination-info">
+              第 {page} / {totalPages} 页 · 共 {total} 项
+            </span>
+            <div className="style-pagination-actions">
+              <button
+                className="btn"
+                type="button"
+                disabled={loading || deleting || page <= 1}
+                onClick={() => handlePageChange(page - 1)}
+              >
+                上一页
+              </button>
+              <button
+                className="btn"
+                type="button"
+                disabled={loading || deleting || page >= totalPages}
+                onClick={() => handlePageChange(page + 1)}
+              >
+                下一页
+              </button>
+            </div>
+          </footer>
         </section>
 
         <aside className="panel right style-inspector">

@@ -14,7 +14,7 @@ import { MemorySuiteRepository } from "../server/repositories/memory-suite-repos
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 
-async function offlineAssetsApp(t) {
+async function offlineAssetsApp(t, { extraImages = 0 } = {}) {
   const sampleProduct = await readFile("public/assets/gan65-product.jpg");
   const sampleResult = await readFile("public/assets/tokyo-desk-v3.jpg");
 
@@ -30,6 +30,25 @@ async function offlineAssetsApp(t) {
     const md = await readFile(rel, "utf8");
     const [draft] = await promptRepository.importRecords([parseNormalizedPromptMarkdown(md, rel)]);
     await promptRepository.publishVersion(draft.templateVersionId);
+    libraryRepository.addResource({
+      id: `prompt:${draft.templateVersionId}`,
+      resourceType: "prompt_template",
+      title: draft.name,
+      summary: "模板不应计入图片分页",
+      mimeType: null,
+      previewUrl: null,
+      suiteId: null,
+      taskId: null,
+      imageVersionId: null,
+      baseVersionId: null,
+      templateVersionId: draft.templateVersionId,
+      resourceVersionId: draft.templateVersionId,
+      stage: draft.stage,
+      source: { code: draft.code, versionNo: draft.versionNo, body: "模板正文" },
+      status: "published",
+      createdAt: "2026-11-23T12:00:00.000Z",
+      updatedAt: "2026-11-23T12:00:00.000Z",
+    });
   }
 
   await storage.put({ key: "lib/base-a.jpg", bytes: sampleProduct, contentType: "image/jpeg" });
@@ -52,8 +71,8 @@ async function offlineAssetsApp(t) {
     stage: null,
     source: { objectKey: "lib/base-a.jpg" },
     status: "published",
-    createdAt: "2026-11-23T08:00:00.000Z",
-    updatedAt: "2026-11-23T08:00:00.000Z",
+    createdAt: "2026-11-23T11:50:00.000Z",
+    updatedAt: "2026-11-23T11:50:00.000Z",
   });
   libraryRepository.addResource({
     id: "base:lib-b",
@@ -71,8 +90,8 @@ async function offlineAssetsApp(t) {
     stage: null,
     source: { objectKey: "lib/base-b.jpg" },
     status: "published",
-    createdAt: "2026-11-23T09:00:00.000Z",
-    updatedAt: "2026-11-23T09:00:00.000Z",
+    createdAt: "2026-11-23T11:40:00.000Z",
+    updatedAt: "2026-11-23T11:40:00.000Z",
   });
   libraryRepository.addResource({
     id: "input:lib-c",
@@ -90,13 +109,37 @@ async function offlineAssetsApp(t) {
     stage: null,
     source: { objectKey: "lib/input-c.jpg" },
     status: "published",
-    createdAt: "2026-11-23T10:00:00.000Z",
-    updatedAt: "2026-11-23T10:00:00.000Z",
+    createdAt: "2026-11-23T11:30:00.000Z",
+    updatedAt: "2026-11-23T11:30:00.000Z",
   });
 
-  // Create a canvas suite with a custom task so we can open canvas ProductResourcePickerModal
+  for (let i = 1; i <= extraImages; i++) {
+    const id = `input:extra-${String(i).padStart(2, "0")}`;
+    const min = String(Math.floor(i / 60)).padStart(2, "0");
+    const sec = String(i % 60).padStart(2, "0");
+    libraryRepository.addResource({
+      id,
+      resourceType: "input_image",
+      title: `分页图片 ${String(i).padStart(2, "0")}`,
+      summary: "1024 × 1024",
+      mimeType: "image/jpeg",
+      previewUrl: `/api/library/resources/${encodeURIComponent(id)}/preview`,
+      suiteId: null,
+      taskId: null,
+      imageVersionId: null,
+      baseVersionId: null,
+      templateVersionId: null,
+      resourceVersionId: `ver-extra-${i}`,
+      stage: null,
+      source: { objectKey: "lib/input-c.jpg" },
+      status: "published",
+      createdAt: `2026-11-23T08:${min}:${sec}.000Z`,
+      updatedAt: `2026-11-23T08:${min}:${sec}.000Z`,
+    });
+  }
+
   const canvasSuite = await repository.createSuite("画布选图验证", undefined, "canvas");
-  await taskRepository.createCustomTask({
+  const { task: canvasTask } = await taskRepository.createCustomTask({
     suiteId: canvasSuite.id,
     planSnapshotId: null,
     imageType: "main",
@@ -115,6 +158,26 @@ async function offlineAssetsApp(t) {
     pipelineRepository,
     replicaRepository,
     storage,
+    imageRetryDelayMs: 0,
+    llmClient: {
+      provider: "offline-vision",
+      model: "qwen-vl",
+      isFake: true,
+      async generatePlan() { return {}; },
+      async generateReplicaPrompts(input) {
+        return {
+          schemaVersion: "replica-prompt-v1",
+          taskName: "复刻验证",
+          sharedStyle: null,
+          items: input.references.map((ref) => ({
+            referenceId: ref.referenceId,
+            visualStructure: { layout: "居中构图" },
+            copy: [],
+            prompt: "生成同款电商主图",
+          })),
+        };
+      },
+    },
     provider: {
       supportsMultipleImages: true,
       async edit() {
@@ -182,73 +245,77 @@ async function offlineAssetsApp(t) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   page.setDefaultTimeout(8000);
   await page.route("**/*", (route) => (new URL(route.request().url()).origin === new URL(url).origin ? route.continue() : route.abort()));
-  return { url, page, canvasSuite };
+  return { api, url, page, canvasSuite, canvasTask };
 }
 
-test("图片资源库：多选批量删除与详情单个删除后，列表与画布/复刻资源选择弹窗同步移除且预览不断链", async (t) => {
-  const { url, page, canvasSuite } = await offlineAssetsApp(t);
+test("图片资源库：超过 24 张图片分页翻页批量删除、真实 total 统计与资产类型后端筛选", async (t) => {
+  // 3 base/input + 24 extra = 27 image assets (+ 2 prompt_template that must be excluded)
+  const { url, page } = await offlineAssetsApp(t, { extraImages: 24 });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
 
-  // 1. Open /assets and verify initial 3 items
   await page.goto(url + "assets");
   await page.locator(".style-card").first().waitFor();
+  assert.equal(await page.locator(".style-card").count(), 24);
+  await page.getByText("第 1 / 2 页 · 共 27 项").waitFor();
+  await page.getByText("当前共 27 项").waitFor();
+
+  // Navigate to page 2 -> 3 items visible (extra-03, extra-02, extra-01)
+  await page.getByRole("button", { name: "下一页" }).click();
+  await page.getByText("第 2 / 2 页 · 共 27 项").waitFor();
+  await page.locator(".style-card", { hasText: "分页图片 01" }).waitFor();
   assert.equal(await page.locator(".style-card").count(), 3);
-  await page.getByText("当前共 3 项").waitFor();
 
-  // 2. Test "全选当前页" toggle on & off, then check two specific cards for batch delete
-  const selectAll = page.getByLabel("全选当前页");
-  await selectAll.check();
-  await page.getByText("已选 3 / 3 项").waitFor();
-  await selectAll.uncheck();
-  await page.getByText("当前共 3 项").waitFor();
-
-  await page.getByLabel("选择 可删除白底图 A").check();
-  await page.getByLabel("选择 可删除白底图 B").check();
-  await page.getByText("已选 2 / 3 项").waitFor();
-
-  // Click batch delete and verify confirmation modal text
+  // Select 2 items on page 2 and batch delete
+  await page.getByLabel("选择 分页图片 01").check();
+  await page.getByLabel("选择 分页图片 02").check();
   await page.getByRole("button", { name: "批量删除 (2)" }).click();
-  const confirmDialog = page.getByRole("dialog");
-  await confirmDialog.waitFor();
-  const dialogText = await confirmDialog.innerText();
-  assert.match(dialogText, /删除后不会影响已生成的任务和历史记录/);
-
-  await confirmDialog.getByRole("button", { name: "确认删除" }).click();
+  const confirm = page.getByRole("dialog");
+  await confirm.waitFor();
+  assert.match(await confirm.innerText(), /删除后不会影响已生成的任务和历史记录/);
+  await confirm.getByRole("button", { name: "确认删除" }).click();
   await page.getByText("已删除 2 张图片").waitFor();
 
-  // List & count refresh immediately: only "保留商品原图 C" remains
+  // Still on page 2 with 1 remaining item and updated total = 25
+  await page.getByText("第 2 / 2 页 · 共 25 项").waitFor();
+  await page.locator(".style-card", { hasText: "分页图片 03" }).waitFor();
   assert.equal(await page.locator(".style-card").count(), 1);
-  await page.getByText("当前共 1 项").waitFor();
-  assert.equal(await page.locator(".style-card", { hasText: "保留商品原图 C" }).count(), 1);
-  assert.equal(await page.locator(".style-card", { hasText: "可删除白底图 A" }).count(), 0);
-  assert.equal(await page.locator(".style-card", { hasText: "可删除白底图 B" }).count(), 0);
 
-  // Deleted image preview endpoint still responds 200 for frozen references
-  const previewRes = await page.request.get(url + "api/library/resources/base%3Alib-a/preview");
-  assert.equal(previewRes.status(), 200);
+  // Select-all current page (the last 1 item on page 2) and delete -> auto-fallback to page 1 (24 items)
+  await page.getByLabel("全选当前页").check();
+  await page.getByRole("button", { name: "批量删除 (1)" }).click();
+  const confirmLast = page.getByRole("dialog");
+  await confirmLast.waitFor();
+  await confirmLast.getByRole("button", { name: "确认删除" }).click();
+  await page.getByText("已删除 1 张图片").waitFor();
+  await page.getByText("第 1 / 1 页 · 共 24 项").waitFor();
+  await page.locator(".style-card", { hasText: "可删除白底图 A" }).waitFor();
+  assert.equal(await page.locator(".style-card").count(), 24);
 
-  // 3. Verify Replica Studio ProductResourcePickerModal does not show deleted items
-  await page.goto(url + "create/replica");
-  await page.getByRole("button", { name: /资源库选择/ }).click();
-  const replicaPicker = page.getByRole("dialog");
-  await replicaPicker.getByText("保留商品原图 C").waitFor();
-  assert.equal(await replicaPicker.getByText("可删除白底图 A").count(), 0);
-  assert.equal(await replicaPicker.getByText("可删除白底图 B").count(), 0);
-  await replicaPicker.getByRole("button", { name: "取消" }).click();
+  // Filter by resourceType=base_image -> server returns only the 2 base images
+  await page.getByRole("radio", { name: "白底底图", exact: true }).check();
+  await page.getByText("第 1 / 1 页 · 共 2 项").waitFor();
+  await page.locator(".style-card", { hasText: "可删除白底图 A" }).waitFor();
+  assert.equal(await page.locator(".style-card").count(), 2);
 
-  // 4. Verify Canvas ProductResourcePickerModal does not show deleted items
-  await page.goto(url + `create/canvas/${canvasSuite.id}`);
-  await page.getByRole("button", { name: "从图片库选择" }).click();
-  const canvasPicker = page.getByRole("dialog", { name: "选择图片库参考图" });
-  await canvasPicker.getByText("保留商品原图 C").waitFor();
-  assert.equal(await canvasPicker.getByText("可删除白底图 A").count(), 0);
-  assert.equal(await canvasPicker.getByText("可删除白底图 B").count(), 0);
-  await canvasPicker.getByRole("button", { name: "取消" }).click();
+  assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);
+});
 
-  // 5. Return to /assets and test single delete from right detail panel
+test("画布已绑资源软删除后：节点预览正常、选择器剔除已删项并支持移除与换绑；复刻草稿遇已删资源提交不报 404", async (t) => {
+  const { api, url, page, canvasSuite, canvasTask } = await offlineAssetsApp(t);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+
+  // 1. Bind base:lib-a to canvas task BEFORE deleting it
+  const bindRes = await api.request("POST", `/api/suite-tasks/${canvasTask.id}/white-resource`, {
+    headers: { "idempotency-key": "canvas-bind-lib-a" },
+    body: { resourceIds: ["base:lib-a"] },
+  });
+  assert.equal(bindRes.status, 201);
+
+  // 2. Delete base:lib-a from /assets detail panel
   await page.goto(url + "assets");
-  await page.locator(".style-card", { hasText: "保留商品原图 C" }).click();
+  await page.locator(".style-card", { hasText: "可删除白底图 A" }).click();
   await page.getByRole("button", { name: "删除图片" }).click();
   const singleConfirm = page.getByRole("dialog");
   await singleConfirm.waitFor();
@@ -256,9 +323,63 @@ test("图片资源库：多选批量删除与详情单个删除后，列表与�
   await singleConfirm.getByRole("button", { name: "确认删除" }).click();
   await page.getByText("图片已从资源库删除").waitFor();
 
-  assert.equal(await page.locator(".style-card").count(), 0);
-  await page.getByText("当前共 0 项").waitFor();
-  await page.getByText("没有匹配的图片资产").waitFor();
+  // 3. Open canvas -> frozen reference preview still responds 200 & node image loads cleanly
+  const previewCheck = await page.request.get(url + "api/library/resources/base%3Alib-a/preview");
+  assert.equal(previewCheck.status(), 200);
+
+  await page.goto(url + `create/canvas/${canvasSuite.id}`);
+  await page.getByRole("button", { name: "从图片库选择" }).waitFor();
+  // Verify the canvas node referencing the deleted image still renders an intact preview image
+  const nodeImg = page.locator('img[src*="/api/library/resources/base%3Alib-a/preview"]').first();
+  await nodeImg.waitFor();
+  const imgComplete = await nodeImg.evaluate((el) => el.complete && el.naturalWidth > 0);
+  assert.equal(imgComplete, true, "Frozen canvas reference preview image must remain viewable after library deletion");
+
+  // 4. Open ProductResourcePickerModal -> deleted item automatically removed with notice, rebinding succeeds!
+  await page.getByRole("button", { name: "从图片库选择" }).click();
+  const canvasPicker = page.getByRole("dialog", { name: "选择图片库参考图" });
+  await canvasPicker.getByText("已移除 1 张已删除的图片").waitFor();
+  assert.equal(await canvasPicker.getByText("可删除白底图 A").count(), 0);
+
+  // Select two items, test explicit "移除" button on order list, then confirm rebind with 保留商品原图 C
+  await canvasPicker.getByRole("button", { name: /可删除白底图 B/ }).click();
+  await canvasPicker.getByRole("button", { name: /保留商品原图 C/ }).click();
+  const orderSection = canvasPicker.locator(".rp-picker-order");
+  await orderSection.getByText("1. 可删除白底图 B").waitFor();
+  await orderSection.getByRole("button", { name: "移除" }).first().click();
+  assert.equal(await orderSection.getByText("可删除白底图 B").count(), 0);
+  await orderSection.getByText("1. 保留商品原图 C").waitFor();
+
+  const rebindReq = page.waitForResponse(
+    (res) => res.request().method() === "POST" && res.url().endsWith(`/api/suite-tasks/${canvasTask.id}/white-resource`),
+  );
+  await canvasPicker.getByRole("button", { name: "确认绑定" }).click();
+  const rebindHttp = await rebindReq;
+  assert.ok(rebindHttp.status() === 200 || rebindHttp.status() === 201, `Expected rebind 200/201, got ${rebindHttp.status()}`);
+  await page.getByRole("status").filter({ hasText: "已绑定图片库参考图" }).waitFor();
+
+  // 5. Replica studio: select base:lib-b from resource picker, delete base:lib-b concurrently, then submit -> must prune and NOT 404
+  await page.goto(url + "create/replica");
+  await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+  await page.getByRole("button", { name: /资源库选择/ }).click();
+  const replicaPicker = page.getByRole("dialog");
+  await replicaPicker.getByText("可删除白底图 B").waitFor();
+  assert.equal(await replicaPicker.getByText("可删除白底图 A").count(), 0);
+  await replicaPicker.getByRole("button", { name: /可删除白底图 B/ }).click();
+  await replicaPicker.getByRole("button", { name: /确认/ }).click();
+
+  // Soft-delete base:lib-b after it's already in the replica draft
+  const delB = await page.request.delete(url + "api/library/resources/base%3Alib-b");
+  assert.equal(delB.status(), 200);
+
+  // Submit replica -> must auto-prune deleted base:lib-b and succeed with 201 (not 404)
+  const createReq = page.waitForResponse(
+    (res) => res.request().method() === "POST" && res.url().endsWith("/api/replicas"),
+  );
+  await page.getByRole("button", { name: "一键复刻（1张）", exact: true }).click();
+  const createRes = await createReq;
+  assert.equal(createRes.status(), 201, `Replica submit must not fail with 404 after library product deletion, got ${createRes.status()}`);
+  await page.waitForURL(/\/create\/replica\?suite=[^&]+/);
 
   assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);
 });

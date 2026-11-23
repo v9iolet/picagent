@@ -27,6 +27,7 @@ export class MemoryLibraryRepository implements LibraryRepository {
     const needle = query.query?.trim().toLocaleLowerCase();
     const filtered = [...this.resources.values()].filter((resource) =>
       !this.deletedAt.has(resource.id)
+      && (query.scope !== "image" || resource.resourceType !== "prompt_template")
       && (!query.resourceType || resource.resourceType === query.resourceType)
       && (!query.stage || resource.stage === query.stage)
       && (!query.suiteId || resource.suiteId === query.suiteId || resource.suiteId === null)
@@ -82,6 +83,10 @@ export class MemoryLibraryRepository implements LibraryRepository {
     return { deletedIds, alreadyDeletedIds, notFoundIds, deletedCount: deletedIds.length };
   }
 
+  async restoreResource(resourceId: string): Promise<void> {
+    this.deletedAt.delete(resourceId);
+  }
+
   async createReference(input: { suiteId: string; resourceId: string; targetType: "plan" | "task"; targetId: string; idempotencyKey: string; createdBy?: string | null }) {
     const resource = await this.getResource(input.resourceId);
     if (!resource) throw new Error("LIBRARY_RESOURCE_NOT_FOUND");
@@ -112,6 +117,7 @@ export class MemoryLibraryRepository implements LibraryRepository {
     const existing = [...this.resources.values()].find(
       (item) => item.resourceType === "reverse_reference_asset" && item.source.objectKey === input.objectKey,
     );
+    const wasDeleted = existing ? this.deletedAt.has(existing.id) : false;
     const id = existing?.id ?? `reverse:${randomUUID()}`;
     const stage = input.source?.origin === "replica" ? "replica_prompt" : "task_image";
     const resource: LibraryResource = {
@@ -129,7 +135,7 @@ export class MemoryLibraryRepository implements LibraryRepository {
       resourceVersionId: existing?.resourceVersionId ?? randomUUID(),
       stage,
       source: { objectKey: input.objectKey, ...(input.source ?? {}), visualStructure: input.visualStructure ?? {} },
-      status: existing?.status ?? "draft",
+      status: wasDeleted ? "draft" : (existing?.status ?? "draft"),
       promptSnapshot: input.promptSnapshot,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,

@@ -321,10 +321,14 @@ export class PostgresLibraryRepository implements LibraryRepository {
   }
 
   async listResources(query: LibraryResourceQuery) {
+    const page = Math.max(1, query.page ?? 1); const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 24));
+    if (query.scope === "image" && query.resourceType === "prompt_template") {
+      return { items: [], total: 0, page, pageSize };
+    }
     const resources: LibraryResource[] = [];
     const suiteId = query.suiteId ?? null;
     const needle = query.query?.trim() ? `%${query.query.trim()}%` : null;
-    if (!query.resourceType || query.resourceType === "prompt_template") {
+    if (query.scope !== "image" && (!query.resourceType || query.resourceType === "prompt_template")) {
       const result = await this.pool.query<any>(`SELECT 'prompt:' || v.id::text AS id, 'prompt_template' AS "resourceType", v.name AS title,
         left(regexp_replace(v.body, '\\s+', ' ', 'g'), 180) AS summary, NULL::text AS "mimeType", NULL::text AS "previewUrl",
         NULL::uuid AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", NULL::uuid AS "baseVersionId",
@@ -411,7 +415,6 @@ export class PostgresLibraryRepository implements LibraryRepository {
       resource.updatedAt = toIsoString(resource.updatedAt as unknown);
     }
     resources.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const page = Math.max(1, query.page ?? 1); const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 24));
     return { items: resources.slice((page - 1) * pageSize, page * pageSize), total: resources.length, page, pageSize };
   }
 
@@ -480,6 +483,10 @@ export class PostgresLibraryRepository implements LibraryRepository {
     return { deletedIds, alreadyDeletedIds, notFoundIds, deletedCount: deletedIds.length };
   }
 
+  async restoreResource(resourceId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM suite_workbench.library_resource_deletions WHERE resource_id = $1`, [resourceId]);
+  }
+
   async createReference(input: { suiteId: string; resourceId: string; targetType: "plan" | "task"; targetId: string; idempotencyKey: string; createdBy?: string | null }) {
     const resource = await this.getResource(input.resourceId); if (!resource) throw new Error("LIBRARY_RESOURCE_NOT_FOUND");
     assertReferenceAllowed(resource, input.suiteId, input.targetType);
@@ -520,10 +527,24 @@ export class PostgresLibraryRepository implements LibraryRepository {
         prompt_snapshot_json = EXCLUDED.prompt_snapshot_json,
         visual_structure_json = EXCLUDED.visual_structure_json,
         source_json = EXCLUDED.source_json,
+        status = CASE
+          WHEN EXISTS (
+            SELECT 1 FROM suite_workbench.library_resource_deletions d
+            WHERE d.resource_id = 'reverse:' || suite_workbench.reverse_reference_assets.id::text
+          ) THEN 'draft'
+          ELSE suite_workbench.reverse_reference_assets.status
+        END,
+        archived_at = CASE
+          WHEN EXISTS (
+            SELECT 1 FROM suite_workbench.library_resource_deletions d
+            WHERE d.resource_id = 'reverse:' || suite_workbench.reverse_reference_assets.id::text
+          ) THEN NULL
+          ELSE suite_workbench.reverse_reference_assets.archived_at
+        END,
         updated_at = now()
       RETURNING id, suite_id AS "suiteId", title, summary, mime_type AS "mimeType", object_key AS "objectKey", prompt_snapshot_json AS "promptSnapshot", visual_structure_json AS "visualStructure", source_json AS source, status, created_at AS "createdAt", updated_at AS "updatedAt"`, [input.suiteId ?? null, input.title, input.summary ?? "", input.objectKey, input.mimeType, JSON.stringify(input.promptSnapshot), JSON.stringify(input.visualStructure ?? {}), JSON.stringify(input.source ?? {})]);
     const row = result.rows[0];
-    await this.pool.query(`DELETE FROM suite_workbench.library_resource_deletions WHERE resource_id = $1`, [`reverse:${row.id}`]);
+    await this.restoreResource(`reverse:${row.id}`);
     return mapReverseRow(row);
   }
 

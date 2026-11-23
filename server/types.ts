@@ -519,6 +519,7 @@ export interface LibraryReference {
 }
 export interface LibraryResourceQuery {
   resourceType?: LibraryResourceType;
+  scope?: "image";
   stage?: PromptStage;
   suiteId?: string;
   query?: string;
@@ -543,6 +544,7 @@ export interface LibraryRepository {
   getPreviewObject(resourceId: string): Promise<{ objectKey: string } | null>;
   deleteResource(resourceId: string): Promise<LibraryResourceDeletionResult | null>;
   deleteResources(resourceIds: string[]): Promise<LibraryResourceBatchDeleteResult>;
+  restoreResource(resourceId: string): Promise<void>;
   createReference(input: { suiteId: string; resourceId: string; targetType: LibraryReferenceTargetType; targetId: string; idempotencyKey: string; createdBy?: string | null }): Promise<{ reference: LibraryReference; duplicate: boolean }>;
   listReferences(suiteId: string, targetType?: LibraryReferenceTargetType, targetId?: string): Promise<LibraryReference[]>;
   archiveReference(suiteId: string, referenceId: string): Promise<LibraryReference | null>;
