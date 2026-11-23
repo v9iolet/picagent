@@ -2,87 +2,246 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createSuiteStudioApp } from "../server/app.js";
-import { MemoryStorage } from "../server/storage/memory-storage.js";
+import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
+import { MemoryReverseRepository } from "../server/repositories/memory-reverse-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
-import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
-import type { LlmClient, PromptRepository, PromptTemplateRuntime } from "../server/types.js";
+import { MemoryStorage } from "../server/storage/memory-storage.js";
+import type { ReversePlan } from "../server/types.js";
 
-const template: PromptTemplateRuntime = { templateId: "t-main", templateVersionId: "tv-main", versionNo: 1, code: "reverse.main", name: "主图反推", kind: "planner", stage: "reverse_prompt", executionTarget: "llm", inputSchema: [], outputSchema: {}, applicability: { targetType: "main" }, body: "reverse-prompt-v1", userPromptTemplate: "请输出 JSON", status: "published", sourceFile: "test", sourceHeading: "主图", sourceSha256: "a".repeat(64) };
-const detailTemplate: PromptTemplateRuntime = { ...template, templateId: "t-detail", templateVersionId: "tv-detail", code: "reverse.detail", name: "详情图反推", applicability: { targetType: "detail" }, sourceHeading: "详情图", sourceSha256: "b".repeat(64) };
-const prompts: PromptRepository = { importRecords: async () => [], publishVersion: async () => template, listPublished: async () => [template, detailTemplate], getPublishedVersion: async (id) => id === template.templateVersionId ? template : id === detailTemplate.templateVersionId ? detailTemplate : null, listVersions: async () => [template], getVersion: async () => template, updateDraft: async () => null, copyVersion: async () => null, retireVersion: async () => null };
-const llm: LlmClient = { provider: "qwen", model: "qwen-vl-max", isFake: true, generatePlan: async () => ({}), generateReversePrompt: async ({ referenceImageId }) => ({ schemaVersion: "reverse-prompt-v1", referenceImageId, prompt: "以上传的产品白底图为唯一外观来源，提炼参考图的构图与光影。" }) };
 const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const pngBytes = Buffer.from(pngBase64, "base64");
 
-test("reverse plan persists validated image, template, model output and user prompt version", async () => {
-  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts, llmClient: llm });
-  const created = await api.request("POST", "/api/reverse-plans", { headers: { "idempotency-key": "plan-1" }, body: { mode: "main" } });
-  assert.equal(created.status, 201); const planId = (created.body as any).data.id;
-  const uploaded = await api.request("POST", `/api/reverse-plans/${planId}/references`, { headers: { "idempotency-key": "ref-1" }, body: { filename: "a.png", mimeType: "image/png", bytesBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" } });
-  assert.equal(uploaded.status, 201); const refId = (uploaded.body as any).data.id;
-  assert.equal((await api.request("PATCH", `/api/reverse-plans/${planId}/references/${refId}`, { headers: { "idempotency-key": "tpl-1" }, body: { templateVersionId: template.templateVersionId } })).status, 200);
-  const run = await api.request("POST", `/api/reverse-plans/${planId}/references/${refId}/run`, { headers: { "idempotency-key": "run-1" } }); assert.equal(run.status, 202);
-  await new Promise((resolve) => setTimeout(resolve, 10)); const state = await api.request("GET", `/api/reverse-plans/${planId}`); const ref = (state.body as any).data.references[0]; assert.equal(ref.attempts[0].status, "succeeded");
-  const saved = await api.request("PATCH", `/api/reverse-plans/${planId}/references/${refId}/prompt`, { headers: { "idempotency-key": "save-1" }, body: { prompt: "用户编辑后的有效提示词" } }); assert.equal(saved.status, 201); assert.equal((saved.body as any).data.kind, "user");
-});
+async function seedLegacyReversePlan(
+  reverseRepository: MemoryReverseRepository,
+  storage: MemoryStorage,
+  mode: "main" | "detail" = "detail",
+) {
+  const now = "2026-10-01T08:00:00.000Z";
+  const planId = "legacy-reverse-plan-1";
+  const refId = "legacy-reverse-ref-1";
+  const attemptId = "legacy-reverse-attempt-1";
+  const promptVersionId = "legacy-reverse-prompt-1";
+  const objectKey = `reverse-plans/${planId}/references/${refId}/original`;
+  const thumbnailObjectKey = `reverse-plans/${planId}/references/${refId}/thumbnail`;
 
-test("a completed reverse attempt does not remove a reference uploaded while it was running", async () => {
-  let finishReverse: (() => void) | undefined;
-  const delayedLlm: LlmClient = {
-    ...llm,
-    generateReversePrompt: ({ referenceImageId }) => new Promise((resolve) => {
-      finishReverse = () => resolve({ schemaVersion: "reverse-prompt-v1", referenceImageId, prompt: "保留最新方案中的全部参考图。" });
-    }),
+  await storage.put({ key: objectKey, bytes: pngBytes, contentType: "image/png" });
+  await storage.put({ key: thumbnailObjectKey, bytes: pngBytes, contentType: "image/jpeg" });
+
+  const plan: ReversePlan = {
+    id: planId,
+    mode,
+    status: "draft",
+    baselineReferenceId: mode === "detail" ? refId : null,
+    references: [
+      {
+        id: refId,
+        planId,
+        ordinal: 1,
+        filename: "detail.png",
+        mimeType: "image/png",
+        sha256: "a".repeat(64),
+        width: 800,
+        height: 800,
+        objectKey,
+        thumbnailObjectKey,
+        templateVersionId: "tv-detail",
+        attempts: [
+          {
+            id: attemptId,
+            referenceId: refId,
+            status: "succeeded",
+            retryOfAttemptId: null,
+            templateVersionId: "tv-detail",
+            mode,
+            baselineReferenceId: mode === "detail" ? refId : null,
+            requestSummary: { provider: "qwen", model: "qwen-vl-max", inputRoles: ["reference"] },
+            rawOutput: { schemaVersion: "reverse-prompt-v1", referenceImageId: refId, prompt: "以上传的产品白底图为唯一外观来源，提炼参考图的构图与光影。" },
+            errorCode: null,
+            errorMessage: null,
+            promptVersionId,
+            createdAt: now,
+            completedAt: now,
+          },
+        ],
+        promptVersions: [
+          {
+            id: promptVersionId,
+            referenceId: refId,
+            kind: "model",
+            prompt: "以上传的产品白底图为唯一外观来源，提炼参考图的构图与光影。",
+            rawOutput: null,
+            templateVersionId: "tv-detail",
+            mode,
+            provider: { provider: "qwen", model: "qwen-vl-max" },
+            createdAt: now,
+          },
+        ],
+        effectivePromptVersionId: promptVersionId,
+        createdAt: now,
+      },
+    ],
+    createdAt: now,
+    updatedAt: now,
   };
-  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts, llmClient: delayedLlm });
-  const created = await api.request("POST", "/api/reverse-plans", { body: { mode: "main" } });
-  const planId = (created.body as any).data.id;
-  const first = await api.request("POST", `/api/reverse-plans/${planId}/references`, { body: { filename: "first.png", mimeType: "image/png", bytesBase64: pngBase64 } });
-  const firstId = (first.body as any).data.id;
-  await api.request("PATCH", `/api/reverse-plans/${planId}/references/${firstId}`, { body: { templateVersionId: template.templateVersionId } });
-  await api.request("POST", `/api/reverse-plans/${planId}/references/${firstId}/run`);
+  await reverseRepository.savePlan(plan);
+  return { planId, refId, attemptId, promptVersionId, plan };
+}
 
-  const secondBytes = Buffer.concat([Buffer.from(pngBase64, "base64"), Buffer.from([0])]).toString("base64");
-  const second = await api.request("POST", `/api/reverse-plans/${planId}/references`, { body: { filename: "second.png", mimeType: "image/png", bytesBase64: secondBytes } });
-  const secondId = (second.body as any).data.id;
-  finishReverse?.();
-  await new Promise((resolve) => setTimeout(resolve, 10));
+test("reverse plan write endpoints return 410 REVERSE_PLAN_READ_ONLY without mutating legacy plans", async () => {
+  const storage = new MemoryStorage();
+  const reverseRepository = new MemoryReverseRepository();
+  const seeded = await seedLegacyReversePlan(reverseRepository, storage, "main");
+  const api = createSuiteStudioApp({
+    repository: new MemorySuiteRepository(),
+    storage,
+    reverseRepository,
+  });
 
-  const state = await api.request("GET", `/api/reverse-plans/${planId}`);
-  assert.equal((state.body as any).data.references.length, 2);
-  assert.equal((await api.request("PATCH", `/api/reverse-plans/${planId}/references/${secondId}`, { body: { templateVersionId: template.templateVersionId } })).status, 200);
+  const writeRequests: Array<[string, string, unknown?]> = [
+    ["POST", "/api/reverse-plans", { mode: "main" }],
+    ["PATCH", `/api/reverse-plans/${seeded.planId}`, { mode: "detail" }],
+    ["POST", `/api/reverse-plans/${seeded.planId}/references`, { filename: "new.png", mimeType: "image/png", bytesBase64: pngBase64 }],
+    ["PATCH", `/api/reverse-plans/${seeded.planId}/references/${seeded.refId}`, { templateVersionId: "tv-main", ordinal: 1 }],
+    ["DELETE", `/api/reverse-plans/${seeded.planId}/references/${seeded.refId}`],
+    ["POST", `/api/reverse-plans/${seeded.planId}/references/${seeded.refId}/run`],
+    ["POST", `/api/reverse-plans/${seeded.planId}/references/${seeded.refId}/retry`],
+    ["POST", `/api/reverse-plans/${seeded.planId}/attempts`],
+    ["PATCH", `/api/reverse-plans/${seeded.planId}/references/${seeded.refId}/prompt`, { prompt: "尝试修改历史提示词" }],
+  ];
+
+  for (const [method, path, body] of writeRequests) {
+    const response = await api.request(method, path, {
+      headers: { "idempotency-key": `ro-${method}-${path}` },
+      body,
+    });
+    assert.equal(response.status, 410, `${method} ${path} should return 410`);
+    assert.equal((response.body as any).error.code, "REVERSE_PLAN_READ_ONLY", `${method} ${path} should return REVERSE_PLAN_READ_ONLY`);
+  }
+
+  const unchanged = await reverseRepository.getPlan(seeded.planId);
+  assert.equal(unchanged?.mode, "main");
+  assert.equal(unchanged?.references.length, 1);
+  assert.equal(unchanged?.references[0].promptVersions.length, 1);
 });
 
-test("concurrent reverse reference uploads preserve every image", async () => {
-  const api = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), promptRepository: prompts, llmClient: llm });
-  const created = await api.request("POST", "/api/reverse-plans", { body: { mode: "main" } });
-  const planId = (created.body as any).data.id;
-  const firstBytes = Buffer.concat([Buffer.from(pngBase64, "base64"), Buffer.from([1])]).toString("base64");
-  const secondBytes = Buffer.concat([Buffer.from(pngBase64, "base64"), Buffer.from([2])]).toString("base64");
+test("legacy reverse plans remain readable with previews and asset archiving", async () => {
+  const storage = new MemoryStorage();
+  const reverseRepository = new MemoryReverseRepository();
+  const libraryRepository = new MemoryLibraryRepository();
+  const seeded = await seedLegacyReversePlan(reverseRepository, storage, "detail");
+  const api = createSuiteStudioApp({
+    repository: new MemorySuiteRepository(),
+    storage,
+    reverseRepository,
+    libraryRepository,
+  });
 
-  const responses = await Promise.all([
-    api.request("POST", `/api/reverse-plans/${planId}/references`, { body: { filename: "one.png", mimeType: "image/png", bytesBase64: firstBytes } }),
-    api.request("POST", `/api/reverse-plans/${planId}/references`, { body: { filename: "two.png", mimeType: "image/png", bytesBase64: secondBytes } }),
-  ]);
+  const list = await api.request("GET", "/api/reverse-plans");
+  assert.equal(list.status, 200);
+  assert.equal((list.body as any).data.length, 1);
+  assert.equal((list.body as any).data[0].id, seeded.planId);
 
-  assert.deepEqual(responses.map((response) => response.status), [201, 201]);
-  const state = await api.request("GET", `/api/reverse-plans/${planId}`);
-  assert.equal((state.body as any).data.references.length, 2);
+  const detail = await api.request("GET", `/api/reverse-plans/${seeded.planId}`);
+  assert.equal(detail.status, 200);
+  assert.equal((detail.body as any).data.references[0].id, seeded.refId);
+
+  const attempt = await api.request("GET", `/api/reverse-plans/${seeded.planId}/attempts/${seeded.attemptId}`);
+  assert.equal(attempt.status, 200);
+  assert.equal((attempt.body as any).data.status, "succeeded");
+
+  const thumb = await api.previewReverseReference(seeded.planId, seeded.refId, "thumbnail");
+  assert.equal(thumb.status, 200);
+  assert.deepEqual(thumb.raw, pngBytes);
+
+  const original = await api.previewReverseReference(seeded.planId, seeded.refId, "original");
+  assert.equal(original.status, 200);
+  assert.deepEqual(original.raw, pngBytes);
+
+  const archived = await api.request("POST", `/api/reverse-plans/${seeded.planId}/references/${seeded.refId}/asset`, {
+    headers: { "idempotency-key": "archive-legacy-ref" },
+  });
+  assert.equal(archived.status, 201);
+  assert.equal((archived.body as any).data.resourceType, "reverse_reference_asset");
+  assert.equal((archived.body as any).data.source.reversePlanId, seeded.planId);
+  assert.equal((archived.body as any).data.source.referenceId, seeded.refId);
+  assert.equal((archived.body as any).data.promptSnapshot.promptVersionId, seeded.promptVersionId);
 });
 
-test("successful reverse results import as an idempotent task group and preserve source snapshots", async () => {
-  const storage = new MemoryStorage(); const reverse = new MemorySuiteRepository(); const tasks = new MemoryTaskRepository(); const library = new MemoryLibraryRepository();
-  const api = createSuiteStudioApp({ repository: reverse, storage, taskRepository: tasks, libraryRepository: library, promptRepository: prompts, llmClient: llm });
-  const created = await api.request("POST", "/api/reverse-plans", { headers: { "idempotency-key": "canvas-plan" }, body: { mode: "detail" } }); const planId = (created.body as any).data.id;
-  const uploaded = await api.request("POST", `/api/reverse-plans/${planId}/references`, { headers: { "idempotency-key": "canvas-ref" }, body: { filename: "detail.png", mimeType: "image/png", bytesBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" } }); const refId = (uploaded.body as any).data.id;
-  await api.request("PATCH", `/api/reverse-plans/${planId}/references/${refId}`, { body: { templateVersionId: detailTemplate.templateVersionId } }); await api.request("POST", `/api/reverse-plans/${planId}/references/${refId}/run`); await new Promise((resolve) => setTimeout(resolve, 10));
-  const imported = await api.request("POST", `/api/reverse-plans/${planId}/canvas-imports`, { headers: { "idempotency-key": "canvas-import" }, body: { name: "反推套图" } }); assert.equal(imported.status, 201); const suiteId = (imported.body as any).data.suiteId; assert.equal((imported.body as any).data.taskIds.length, 1);
-  const duplicate = await api.request("POST", `/api/reverse-plans/${planId}/canvas-imports`, { headers: { "idempotency-key": "canvas-import" }, body: { name: "反推套图" } }); assert.equal(duplicate.status, 200); assert.equal((duplicate.body as any).data.duplicate, true);
-  const workbench = await api.request("GET", `/api/suites/${suiteId}/workbench`); const task = (workbench.body as any).data.tasks.find((item: any) => item.originKind === "reverse_import"); assert.equal((workbench.body as any).data.suite.origin, "canvas"); assert.ok(task); assert.equal(task.planSnapshotId, null); assert.equal(task.reversePlanId, planId); assert.equal(task.reverseReferenceId, refId);
+test("legacy reverse plan canvas-imports stays idempotent and rejects replica target suites", async () => {
+  const storage = new MemoryStorage();
+  const suites = new MemorySuiteRepository();
+  const tasks = new MemoryTaskRepository();
+  const library = new MemoryLibraryRepository();
+  const reverseRepository = new MemoryReverseRepository();
+  const seeded = await seedLegacyReversePlan(reverseRepository, storage, "detail");
+  const api = createSuiteStudioApp({
+    repository: suites,
+    storage,
+    taskRepository: tasks,
+    libraryRepository: library,
+    reverseRepository,
+  });
+
+  const imported = await api.request("POST", `/api/reverse-plans/${seeded.planId}/canvas-imports`, {
+    headers: { "idempotency-key": "canvas-import" },
+    body: { name: "反推套图" },
+  });
+  assert.equal(imported.status, 201);
+  const suiteId = (imported.body as any).data.suiteId;
+  assert.equal((imported.body as any).data.taskIds.length, 1);
+
+  const duplicate = await api.request("POST", `/api/reverse-plans/${seeded.planId}/canvas-imports`, {
+    headers: { "idempotency-key": "canvas-import" },
+    body: { name: "反推套图" },
+  });
+  assert.equal(duplicate.status, 200);
+  assert.equal((duplicate.body as any).data.duplicate, true);
+
+  const workbench = await api.request("GET", `/api/suites/${suiteId}/workbench`);
+  const task = (workbench.body as any).data.tasks.find((item: any) => item.originKind === "reverse_import");
+  assert.equal((workbench.body as any).data.suite.origin, "canvas");
+  assert.ok(task);
+  assert.equal(task.planSnapshotId, null);
+  assert.equal(task.reversePlanId, seeded.planId);
+  assert.equal(task.reverseReferenceId, seeded.refId);
+
+  const replicaSuite = await suites.createSuite("爆品复刻批次", undefined, "replica");
+  const rejectedReplica = await api.request("POST", `/api/reverse-plans/${seeded.planId}/canvas-imports`, {
+    headers: { "idempotency-key": "canvas-import-to-replica" },
+    body: { targetSuiteId: replicaSuite.id },
+  });
+  assert.equal(rejectedReplica.status, 400);
+  assert.equal((rejectedReplica.body as any).error.code, "INVALID_SUITE_ORIGIN");
+  assert.equal((await tasks.listTasks(replicaSuite.id)).length, 0);
+
+  const existingCanvas = await suites.createSuite("已有画布", undefined, "canvas");
+  const importedToCanvas = await api.request("POST", `/api/reverse-plans/${seeded.planId}/canvas-imports`, {
+    headers: { "idempotency-key": "canvas-import-to-canvas" },
+    body: { targetSuiteId: existingCanvas.id },
+  });
+  assert.equal(importedToCanvas.status, 201);
+  assert.equal((importedToCanvas.body as any).data.suiteId, existingCanvas.id);
 });
 
-test("ReversePage copies FileList into an array before resetting file input value", async () => {
-  const source = await readFile("src/pages/ReversePage.tsx", "utf8");
-  assert.match(source, /const files = Array\.from\(event\.target\.files \?\? \[\]\);\s*event\.target\.value = "";/);
-  assert.doesNotMatch(source, /const files = event\.target\.files;\s*event\.target\.value = "";/);
+test("ReversePage is read-only with upgrade banner and WorkbenchBoardPage skips polling for replica suites", async () => {
+  const reversePage = await readFile("src/pages/ReversePage.tsx", "utf8");
+  assert.match(reversePage, /爆品图反推已升级为爆品图复刻/);
+  assert.match(reversePage, /\/create\/replica/);
+  assert.match(reversePage, /canvas-imports/);
+  assert.match(reversePage, /\/asset/);
+  assert.match(reversePage, /readOnly/);
+  assert.doesNotMatch(reversePage, /type="file"/);
+  assert.doesNotMatch(reversePage, /\/attempts/);
+  assert.doesNotMatch(reversePage, /\/(run|retry)/);
+  assert.doesNotMatch(reversePage, /\/prompt`/);
+  assert.doesNotMatch(reversePage, /"DELETE"/);
+  assert.doesNotMatch(reversePage, /"PATCH"/);
+  assert.doesNotMatch(reversePage, /api<Plan>\("\/api\/reverse-plans"/);
+
+  const workbenchPage = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
+  assert.match(
+    workbenchPage,
+    /useEffect\(\(\) => \{\s*if \(workbench\?\.suite\.origin === "replica"\) return;\s*const ordinaryTaskRunning/,
+  );
 });

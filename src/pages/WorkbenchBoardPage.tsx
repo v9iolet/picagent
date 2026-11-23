@@ -1653,6 +1653,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
   }, [selectedNodeId, canvasFilter, mode, rebuildGraph]);
 
   useEffect(() => {
+    if (workbench?.suite.origin === "replica") return;
     const ordinaryTaskRunning = workbench?.tasks.some((task) => task.status === "generating");
     const editChildRunning = workbench?.imageEditChildren?.some((child) => String(child.task.status) === "generating");
     if (!ordinaryTaskRunning && !editChildRunning) return;
