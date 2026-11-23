@@ -5,6 +5,8 @@ import test from "node:test";
 import { createServer } from "vite";
 import { chromium } from "playwright";
 import { createSuiteStudioApp } from "../server/app.js";
+import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
+import { createImageEditorApi } from "../server/image-editor-api.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
@@ -13,6 +15,7 @@ import { MemoryReplicaRepository } from "../server/repositories/memory-replica-r
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
+import { readZipEntries } from "../server/zip.js";
 
 async function offlineReplicaStudio(t, gates = {}) {
   const sampleProduct = await readFile("public/assets/gan65-product.jpg");
@@ -25,6 +28,36 @@ async function offlineReplicaStudio(t, gates = {}) {
   const pipelineRepository = new MemoryPipelineRepository();
   const replicaRepository = new MemoryReplicaRepository();
   const libraryRepository = new MemoryLibraryRepository();
+  const editorRepository = new MemoryImageEditorRepository();
+
+  const editorSource = { bytes: sampleResult, mimeType: "image/jpeg", width: 64, height: 64 };
+  const editorService = new ImageEditorService(
+    editorRepository,
+    {
+      name: "offline",
+      version: "1",
+      capabilitiesVersion: "1",
+      capabilities: () => ({ imageToImage: true, changeText: true, currentVersionInput: true }),
+      edit: async () => editorSource,
+    },
+    storage,
+    async () => editorSource,
+    {
+      name: "offline OCR",
+      version: "1",
+      recognize: async () => ({
+        blocks: [
+          {
+            id: "line1",
+            text: "快充随行",
+            confidence: 1,
+            bounds: { x: 0.1, y: 0.1, width: 0.5, height: 0.2 },
+            rotation: 0,
+          },
+        ],
+      }),
+    },
+  );
 
   for (const rel of ["prompt/normalized/replica-compose.md", "prompt/normalized/replica-high.md"]) {
     const md = await readFile(rel, "utf8");
@@ -75,6 +108,7 @@ async function offlineReplicaStudio(t, gates = {}) {
   });
 
   const api = createSuiteStudioApp({
+    imageEditorApi: createImageEditorApi(editorService),
     repository,
     storage,
     promptRepository,
@@ -111,8 +145,11 @@ async function offlineReplicaStudio(t, gates = {}) {
     },
     provider: {
       supportsMultipleImages: true,
-      edit: async () => {
+      edit: async (request) => {
         if (gates.beforeImageDone) await gates.beforeImageDone;
+        if (gates.shouldFailImage?.(request)) {
+          throw new Error("IMAGE_PROVIDER_FAILED");
+        }
         return { bytes: sampleResult, mimeType: "image/jpeg" };
       },
     },
@@ -160,12 +197,18 @@ async function offlineReplicaStudio(t, gates = {}) {
               const payload = Buffer.concat(chunks);
               const libPreview = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
               const versionPreview = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
+              const editedPreview = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
               let result;
               if (libPreview) {
-                const obj = await storage.get(libObjectKey);
-                result = { status: 200, raw: obj.bytes, headers: { "content-type": obj.contentType } };
+                result = await api.previewLibraryResource(decodeURIComponent(libPreview[1]));
               } else if (versionPreview) {
                 result = await api.previewTaskVersion(versionPreview[1], versionPreview[2]);
+              } else if (editedPreview) {
+                const version = (await editorRepository.listVersions(editedPreview[1])).find(
+                  (v) => v.id === editedPreview[2],
+                );
+                const obj = await storage.get(version.objectKey);
+                result = { status: 200, raw: obj.bytes, headers: { "content-type": obj.contentType } };
               } else if (path === "/api/model-settings") {
                 result = { status: 200, body: { data: settings } };
               } else {
@@ -192,12 +235,12 @@ async function offlineReplicaStudio(t, gates = {}) {
     await vite.close();
   });
   const url = vite.resolvedUrls.local[0];
-  const page = await browser.newPage({ viewport: { width: 1480, height: 960 } });
+  const page = await browser.newPage({ viewport: { width: 1480, height: 960 }, acceptDownloads: true });
   page.setDefaultTimeout(10000);
   return { api, calls, url, page };
 }
 
-test("爆品图复刻：路由重定向、配置栏交互与校验、资源库选择、提交进度与只读结果", async (t) => {
+test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与批次操作、生成记录与新建清空", async (t) => {
   const analysisGate = Promise.withResolvers();
   const imageGate = Promise.withResolvers();
   const { calls, url, page } = await offlineReplicaStudio(t, {
@@ -368,23 +411,166 @@ test("爆品图复刻：路由重定向、配置栏交互与校验、资源库�
     "终态后不应继续轮询",
   );
 
-  // 8. New replica returns to empty state, history drawer can reopen the batch
+  // 8. Rename batch inline
+  await batch.getByRole("button", { name: "重命名任务", exact: true }).click();
+  const renameInput = batch.getByLabel("任务名称", { exact: true });
+  await renameInput.fill("桌面快充升级版");
+  await batch.getByRole("button", { name: "保存", exact: true }).click();
+  await batch.getByRole("heading", { name: "桌面快充升级版", exact: true }).waitFor();
+
+  // 9. Edit prompt & regenerate card 1 -> creates v2 & promptRevision v2
+  const firstCard = cards.first();
+  await firstCard.getByRole("button", { name: "提示词", exact: true }).click();
+  const promptDialog = page.getByRole("dialog", { name: /提示词/ });
+  await promptDialog.waitFor();
+  await promptDialog.getByText("提示词修订 v1", { exact: true }).waitFor();
+  const promptBox = promptDialog.getByLabel("复刻提示词", { exact: true });
+  const editedPromptText = "暖木桌面高级棚拍桌面快充套装，突出折叠插脚与柔和侧光。";
+  await promptBox.fill(editedPromptText);
+  const promptRegenReq = page.waitForResponse(
+    (res) => res.request().method() === "POST" && res.url().includes("/api/suite-tasks/") && res.url().endsWith("/generation"),
+  );
+  await promptDialog.getByRole("button", { name: "保存并重新生成", exact: true }).click();
+  await promptRegenReq;
+  await promptDialog.waitFor({ state: "hidden" });
+  await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
+  await firstCard.getByText("v2", { exact: true }).waitFor();
+  const regenPromptCall = calls.findLast(
+    (c) => c.method === "POST" && c.path.startsWith("/api/suite-tasks/") && c.path.endsWith("/generation"),
+  );
+  assert.equal(regenPromptCall?.body?.promptDraft, editedPromptText);
+
+  // Reopen prompt dialog and verify promptRevision updated to v2 with edited prompt
+  await firstCard.getByRole("button", { name: "提示词", exact: true }).click();
+  await promptDialog.waitFor();
+  await promptDialog.getByText("提示词修订 v2", { exact: true }).waitFor();
+  assert.equal(await promptDialog.getByLabel("复刻提示词", { exact: true }).inputValue(), editedPromptText);
+  await promptDialog.getByRole("button", { name: "取消", exact: true }).click();
+  await promptDialog.waitFor({ state: "hidden" });
+
+  // 10. Single-card download & batch ZIP download
+  const singleDownload = page.waitForEvent("download");
+  await firstCard.getByRole("button", { name: "下载", exact: true }).click();
+  const singleFile = await singleDownload;
+  assert.ok(singleFile.suggestedFilename().length > 0);
+
+  const zipDownload = page.waitForEvent("download");
+  await batch.getByRole("button", { name: "ZIP 下载（2）", exact: true }).click();
+  const zipPath = await (await zipDownload).path();
+  const zipEntries = readZipEntries(await readFile(zipPath));
+  assert.equal([...zipEntries.keys()].filter((name) => /\.(png|jpe?g|webp)$/i.test(name)).length, 2);
+  assert.ok(zipEntries.has("manifest.json"));
+
+  // 11. In-place Image Editor on card 1 (stays on /create/replica?suite=...)
+  await firstCard.getByRole("button", { name: "编辑图片", exact: true }).click();
+  const editorDialog = page.getByRole("dialog", { name: "图片编辑器" });
+  await editorDialog.waitFor();
+  assert.equal(new URL(page.url()).pathname, "/create/replica");
+  assert.equal(new URL(page.url()).searchParams.get("suite"), suiteId);
+  await editorDialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
+  await editorDialog.getByRole("button", { name: /快充随行/ }).waitFor();
+  await editorDialog.getByLabel("新文字").fill("极速快充");
+  const editSubmitReq = page.waitForResponse(
+    (res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/submit"),
+  );
+  await editorDialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
+  await editSubmitReq;
+  await editorDialog.waitFor({ state: "hidden" });
+  await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
+
+  // 12. Card 2: regenerate with original prompt, save to image library (mark final), save as reverse asset, then delete card 2
+  const secondCard = cards.nth(1);
+  const origRegenReq = page.waitForResponse(
+    (res) => res.request().method() === "POST" && res.url().includes("/api/suite-tasks/") && res.url().endsWith("/generation"),
+  );
+  await secondCard.getByRole("button", { name: "重新生成", exact: true }).click();
+  await origRegenReq;
+  await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
+  await secondCard.getByText("v2", { exact: true }).waitFor();
+
+  await secondCard.getByRole("button", { name: /更多操作/ }).click();
+  await secondCard.getByRole("menuitem", { name: "保存到图片资源库", exact: true }).click();
+  await batch.getByText(/已设为终版并确认归档到图片资源库/).waitFor();
+  await secondCard.getByText(/终版/).waitFor();
+
+  await secondCard.getByRole("button", { name: /更多操作/ }).click();
+  const saveReverseReq = page.waitForResponse(
+    (res) => res.request().method() === "POST" && res.url().includes(`/api/replicas/${suiteId}/tasks/`) && res.url().endsWith("/reverse-asset"),
+  );
+  await secondCard.getByRole("menuitem", { name: "存为爆品图反推资产", exact: true }).click();
+  const saveReverseRes = await saveReverseReq;
+  assert.equal(saveReverseRes.status(), 201);
+  await batch.getByText(/已存为爆品图反推资产/).waitFor();
+
+  await secondCard.getByRole("button", { name: /更多操作/ }).click();
+  await secondCard.getByRole("menuitem", { name: "删除", exact: true }).click();
+  const deleteCardDialog = page.getByRole("dialog", { name: "删除复刻卡片" });
+  await deleteCardDialog.waitFor();
+  await deleteCardDialog.getByRole("button", { name: "确认删除", exact: true }).click();
+  await deleteCardDialog.waitFor({ state: "hidden" });
+  assert.equal(await cards.count(), 1);
+
+  // 13. New replica clears current batch AND resets config panel back to defaults
   await page.getByRole("button", { name: "＋ 新建复刻", exact: true }).click();
   await page.waitForURL(/\/create\/replica$/);
   await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+  assert.equal(await page.locator("[data-ref-item]").count(), 0);
+  assert.equal(await page.locator("[data-product-item]").count(), 0);
+  assert.equal(await submitBtn.textContent(), "一键复刻（0张）");
+  assert.equal(await submitBtn.isDisabled(), true);
+  assert.equal(await page.getByLabel("统一复刻要求", { exact: true }).inputValue(), "");
+  assert.equal(await page.getByLabel("商品信息", { exact: true }).inputValue(), "");
+  assert.equal(await page.getByRole("radio", { name: /高度复刻/ }).getAttribute("aria-checked"), "true");
+  assert.equal(await ratioSelect.inputValue(), "reference");
+  assert.equal(await sizeSelect.inputValue(), "1K");
 
+  // 14. Generation history drawer switches back to the renamed batch, then delete batch removes it
   await page.getByRole("button", { name: "生成记录", exact: true }).click();
   const drawer = page.getByRole("dialog", { name: "生成记录" });
   await drawer.waitFor();
-  await drawer.getByRole("button", { name: /桌面快充套装/ }).click();
+  await drawer.getByRole("button", { name: /桌面快充升级版/ }).click();
   await page.waitForURL(`**/create/replica?suite=${suiteId}`);
-  await batch.locator('[data-status="completed"]').waitFor();
+  await batch.getByRole("heading", { name: "桌面快充升级版", exact: true }).waitFor();
+  assert.equal(await batch.locator("[data-replica-card]").count(), 1);
 
-  // 9. Template library includes replica_prompt stage filter & label
+  await batch.getByRole("button", { name: "删除批次", exact: true }).click();
+  const deleteBatchDialog = page.getByRole("dialog", { name: "删除复刻批次" });
+  await deleteBatchDialog.waitFor();
+  await deleteBatchDialog.getByRole("button", { name: "确认删除", exact: true }).click();
+  await deleteBatchDialog.waitFor({ state: "hidden" });
+  await page.waitForURL(/\/create\/replica$/);
+  await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+
+  // 15. Template library includes replica_prompt stage filter & label
   await page.goto(url + "templates");
   await page.getByRole("radio", { name: "爆品图复刻", exact: true }).check();
   await page.locator(".template-card").first().waitFor();
   assert.equal(await page.locator(".template-card .badge", { hasText: "爆品图复刻" }).count() >= 2, true);
+});
+
+test("爆品图复刻：失败单卡展示错误原因并支持单卡重新生成恢复", async (t) => {
+  let failFirstRun = true;
+  const { url, page } = await offlineReplicaStudio(t, {
+    shouldFailImage: () => failFirstRun,
+  });
+
+  await page.goto(url + "create/replica");
+  await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+  await page.getByRole("button", { name: "一键复刻（1张）", exact: true }).click();
+  await page.waitForURL(/\/create\/replica\?suite=[^&]+/);
+
+  const batch = page.getByRole("region", { name: "复刻批次" });
+  await batch.locator('[data-status="failed"]').waitFor({ timeout: 10000 });
+  const card = batch.locator("[data-replica-card]").first();
+  await card.getByText("生成失败", { exact: true }).waitFor();
+  await card.getByText("套图图片生成失败", { exact: true }).waitFor();
+
+  // Recover via single-card regenerate button
+  failFirstRun = false;
+  await card.getByRole("button", { name: "重新生成", exact: true }).click();
+  await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
+  await batch.locator('[data-status="completed"]').waitFor({ timeout: 10000 });
+  await card.locator("img").first().waitFor();
 });
 
 test("爆品图复刻：无产品图风格示意角标尺寸正常且 /reverse/:id 只读页仍可访问", async (t) => {

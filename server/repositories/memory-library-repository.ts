@@ -60,7 +60,31 @@ export class MemoryLibraryRepository implements LibraryRepository {
 
   async createReverseReferenceAsset(input: { suiteId?: string | null; title: string; summary?: string; objectKey: string; mimeType: string; promptSnapshot: Record<string, unknown>; visualStructure?: Record<string, unknown>; source?: Record<string, unknown> }): Promise<LibraryResource> {
     const now = new Date().toISOString();
-    const resource: LibraryResource = { id: `reverse:${randomUUID()}`, resourceType: "reverse_reference_asset", title: input.title, summary: input.summary ?? "", mimeType: input.mimeType, previewUrl: null, suiteId: input.suiteId ?? null, taskId: null, imageVersionId: null, baseVersionId: null, templateVersionId: typeof input.source?.templateVersionId === "string" ? input.source.templateVersionId : null, resourceVersionId: randomUUID(), stage: "task_image", source: { objectKey: input.objectKey, ...(input.source ?? {}), visualStructure: input.visualStructure ?? {} }, status: "draft", promptSnapshot: input.promptSnapshot, createdAt: now, updatedAt: now };
+    const existing = [...this.resources.values()].find(
+      (item) => item.resourceType === "reverse_reference_asset" && item.source.objectKey === input.objectKey,
+    );
+    const id = existing?.id ?? `reverse:${randomUUID()}`;
+    const stage = input.source?.origin === "replica" ? "replica_prompt" : "task_image";
+    const resource: LibraryResource = {
+      id,
+      resourceType: "reverse_reference_asset",
+      title: input.title,
+      summary: input.summary ?? "",
+      mimeType: input.mimeType,
+      previewUrl: `/api/library/resources/${id}/preview`,
+      suiteId: input.suiteId ?? null,
+      taskId: null,
+      imageVersionId: null,
+      baseVersionId: null,
+      templateVersionId: typeof input.source?.templateVersionId === "string" ? input.source.templateVersionId : null,
+      resourceVersionId: existing?.resourceVersionId ?? randomUUID(),
+      stage,
+      source: { objectKey: input.objectKey, ...(input.source ?? {}), visualStructure: input.visualStructure ?? {} },
+      status: existing?.status ?? "draft",
+      promptSnapshot: input.promptSnapshot,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
     this.resources.set(resource.id, resource); return resource;
   }
 

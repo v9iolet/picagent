@@ -649,11 +649,13 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         ])
       : [[], []];
     const styleSketch = isReplica ? replicaProducts.length === 0 : false;
-    const taskById = new Map(activeTasks.map((task) => [task.id, task]));
+    const taskAggregateById = new Map(taskAggregates.map((task) => [task.id, task]));
+    const replicaRefById = new Map(replicaReferences.map((ref) => [ref.id, ref]));
     const cards = isReplica
       ? resolvedCards.map((card) => {
-          const task = taskById.get(card.parentTaskId);
+          const task = taskAggregateById.get(card.parentTaskId);
           const replicaReferenceId = task?.replicaReferenceId ?? null;
+          const replicaRef = replicaReferenceId ? replicaRefById.get(replicaReferenceId) ?? null : null;
           const replicaReferenceThumbnailUrl = replicaReferenceId
             ? buildReplicaReferencePreviewUrl(suite.id, replicaReferenceId, "thumbnail")
             : null;
@@ -666,12 +668,20 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           const templateVersionId =
             card.templateVersionId ??
             (typeof taskReplicaSnapshot?.templateVersionId === "string" ? taskReplicaSnapshot.templateVersionId : null);
+          const latestAttempt = task?.attempts.at(-1) ?? null;
+          const isLatestFailed = latestAttempt?.status === "failed";
           return {
             ...card,
             templateVersionId,
             promptSnapshot,
+            taskStatus: task?.status ?? "pending",
+            promptDraft: task?.promptDraft ?? card.promptText,
+            promptRevision: task?.promptRevision ?? 1,
+            errorCode: isLatestFailed ? (latestAttempt?.errorCode ?? null) : null,
+            errorMessage: isLatestFailed ? (latestAttempt?.errorMessage ?? null) : null,
             replicaReferenceId,
             replicaReferenceThumbnailUrl,
+            replicaReferenceFilename: replicaRef?.filename ?? null,
             ...(styleSketch ? { styleSketch: true as const } : { styleSketch: false as const }),
           };
         })
@@ -729,7 +739,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
                 : [],
           }
         : { snapshot: snapshot ? planSnapshotView(snapshot) : null, notGeneratedReasons: [] };
-    const total = cards.length || (isReplica ? replicaReferences.length : 0);
+    const total = cards.length || (isReplica && tasks.length === 0 ? replicaReferences.length : 0);
     const done = cards.filter((card) => card.sourceRole !== "pending").length;
     const listingCopy = (pipeline && await listingRepository.summary(pipeline.id))
       ?? await listingRepository.findLatestBySuiteId(suite.id);

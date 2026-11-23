@@ -891,3 +891,147 @@ test("033 adds task_result_slots(task_id) index and PostgresTaskRepository batch
     await runMigrations(pool);
   });
 });
+
+test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepository exposes replica task versions and upserts replica reverse assets", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const suites = new PostgresSuiteRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const library = new PostgresLibraryRepository(pool);
+
+    const replicaSuite = await suites.createSuite("PG 复刻资源库测试", undefined, "replica");
+    const refId = randomUUID();
+    await pool.query(
+      `INSERT INTO suite_workbench.replica_references
+         (id, suite_id, ordinal, filename, mime_type, sha256, width, height, object_key, thumbnail_object_key, remark, created_at)
+       VALUES ($1, $2, 1, 'ref.png', 'image/png', $3, 512, 512, $4, $5, '', $6)`,
+      [
+        refId,
+        replicaSuite.id,
+        "a".repeat(64),
+        `replicas/${replicaSuite.id}/references/${refId}/original`,
+        `replicas/${replicaSuite.id}/references/${refId}/thumbnail`,
+        timestamp,
+      ],
+    );
+
+    const { created } = await tasks.createReplicaTasks({
+      suiteId: replicaSuite.id,
+      items: [
+        {
+          referenceId: refId,
+          referenceObjectKey: `replicas/${replicaSuite.id}/references/${refId}/original`,
+          ordinal: 1,
+          title: "复刻图 1",
+          purpose: "爆品图复刻",
+          prompt: "PG 复刻提示词",
+          generationParams: { size: "1K", ratio: "1:1" },
+        },
+      ],
+    });
+    const task = created[0];
+    const batchId = randomUUID();
+    const slotId = randomUUID();
+    const attemptId = randomUUID();
+    await tasks.beginBatch({
+      batch: {
+        id: batchId,
+        suiteId: replicaSuite.id,
+        kind: "single",
+        requestedCount: 1,
+        taskIds: [task.id],
+        status: "running",
+        idempotencyKey: "pg-replica-lib-1",
+        createdAt: timestamp,
+        startedAt: timestamp,
+        finishedAt: null,
+      },
+      slots: [
+        {
+          id: slotId,
+          batchId,
+          taskId: task.id,
+          slotOrdinal: 1,
+          retryOfSlotId: null,
+          status: "generating",
+          selectedVersionId: null,
+          createdAt: timestamp,
+          completedAt: null,
+        },
+      ],
+      attempts: [
+        {
+          id: attemptId,
+          slotId,
+          attemptNo: 1,
+          provider: "fake",
+          model: "gpt-image-2",
+          endpoint: "/v1/images/edits",
+          requestSummary: {},
+          promptSnapshot: { prompt: "PG 复刻提示词" },
+          promptSha256: "b".repeat(64),
+          contextSnapshot: {},
+          sourceKind: "original",
+          sourceObjectKey: `replicas/${replicaSuite.id}/references/${refId}/original`,
+          sourceInputImageId: null,
+          sourceBaseVersionId: null,
+          status: "running",
+          errorCode: null,
+          errorMessage: null,
+          externalRequestId: null,
+          startedAt: timestamp,
+          finishedAt: null,
+        },
+      ],
+    });
+    const { version } = await tasks.completeAttempt({
+      attemptId,
+      slotId,
+      taskId: task.id,
+      objectKey: `suites/${replicaSuite.id}/tasks/${task.id}/versions/v1/final.png`,
+      processObjectKeys: [],
+      sha256: "c".repeat(64),
+      width: 512,
+      height: 512,
+      mimeType: "image/png",
+      completedAt: timestamp,
+    });
+
+    const listed = await library.listResources({ resourceType: "task_image_version", status: "published" });
+    const found = listed.items.find((item) => item.id === `task-version:${version.id}`);
+    assert.ok(found, "replica task_image_version must appear in library resources");
+    assert.equal(found.stage, "replica_prompt");
+    assert.equal(found.source.origin, "replica");
+    assert.match(found.summary, /爆品图复刻/);
+
+    // createReverseReferenceAsset persists replica provenance and upserts cleanly on duplicate objectKey
+    const objKey = `replicas/${replicaSuite.id}/references/${refId}/original`;
+    const saved1 = await library.createReverseReferenceAsset({
+      suiteId: replicaSuite.id,
+      title: "复刻反推 1",
+      summary: "复刻反推",
+      objectKey: objKey,
+      mimeType: "image/png",
+      promptSnapshot: { prompt: "初版提示词" },
+      source: { origin: "replica", replicaSuiteId: replicaSuite.id, taskId: task.id },
+    });
+    assert.equal(saved1.stage, "replica_prompt");
+    assert.equal(saved1.source.origin, "replica");
+
+    const saved2 = await library.createReverseReferenceAsset({
+      suiteId: replicaSuite.id,
+      title: "复刻反推 1",
+      summary: "复刻反推更新",
+      objectKey: objKey,
+      mimeType: "image/png",
+      promptSnapshot: { prompt: "修订提示词" },
+      source: { origin: "replica", replicaSuiteId: replicaSuite.id, taskId: task.id },
+    });
+    assert.equal(saved2.id, saved1.id);
+    assert.equal(saved2.promptSnapshot?.prompt, "修订提示词");
+
+    // Soft-archiving a task populates archived_at
+    const archived = await tasks.updateTask(task.id, { status: "archived" });
+    assert.equal(archived?.status, "archived");
+    assert.ok(archived?.archivedAt, "PostgresTaskRepository.updateTask must set archived_at when archiving");
+  });
+});

@@ -676,11 +676,11 @@ export function StartPage({ suiteId, navigate }: { suiteId?: string; navigate: (
                   <p>上传商品实拍 → 白底精修 → 冻结商品事实 → 两阶段规划主图与详情页 → 画布精修与成品 ZIP 交付。</p>
                 </div>
               </article>
-              <button type="button" className="pa-mode-card is-action" onClick={() => navigate("/reverse")}>
+              <button type="button" className="pa-mode-card is-action" onClick={() => navigate("/create/replica")}>
                 <div className="pa-mode-icon"><Icon name="sparkles" /></div>
                 <div className="pa-mode-body">
-                  <div className="pa-mode-head"><strong>爆品图反推</strong><span className="pa-badge">进入工具 →</span></div>
-                  <p>从爆品参考图批量提炼可复用构图与视觉结构提示词，进入共享画布绑定自家白底图生成商品图。</p>
+                  <div className="pa-mode-head"><strong>爆品图复刻</strong><span className="pa-badge">进入工具 →</span></div>
+                  <p>上传参考爆品图与产品原图，一键生成同款构图与视觉风格的复刻成品图，支持提示词编辑与图片精修。</p>
                 </div>
               </button>
               {demoSuite && (

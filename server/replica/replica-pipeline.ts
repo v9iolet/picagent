@@ -815,5 +815,131 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
     };
   }
 
-  return { createReplica, resumeReplica, previewReference };
+  async function saveReverseAsset(
+    suiteId: string,
+    taskId: string,
+    payload?: unknown,
+  ): Promise<AppResponse> {
+    if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+    if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
+    const suite = await deps.repository.getSuite(suiteId);
+    if (!suite) return fail("INVALID_SUITE_ID", 404);
+    if (suite.origin !== "replica") return fail("INVALID_SUITE_ORIGIN", 400);
+
+    const task = await deps.taskRepository.getTask(taskId);
+    if (!task || task.suiteId !== suite.id || task.status === "archived" || task.originKind !== "replica") {
+      return fail("INVALID_SUITE_TASK", 404);
+    }
+
+    const ref = task.replicaReferenceId
+      ? await replicaRepository.getReference(suite.id, task.replicaReferenceId)
+      : null;
+    const objectKey = ref?.objectKey ?? task.replicaReferenceObjectKey ?? "";
+    if (!objectKey) return fail("REPLICA_REFERENCE_NOT_FOUND", 404);
+    const mimeType = ref?.mimeType ?? "image/png";
+
+    const [history, run] = await Promise.all([
+      deps.taskRepository.listTaskVersions(task.id),
+      pipelineRepository.getLatestRun(suite.id),
+    ]);
+    const currentVersion =
+      history.versions.find((version) => version.isFinal) ??
+      history.versions.find((version) => version.isCurrent) ??
+      history.versions[0] ??
+      null;
+
+    const versionSnapshot = asRecord(currentVersion?.promptSnapshot);
+    const taskReplicaSnapshot = asRecord(task.generationParams?.replicaPromptSnapshot);
+    const runConfig = asRecord(run?.config);
+
+    const prompt = (
+      task.promptDraft.trim() ||
+      (typeof versionSnapshot.prompt === "string" ? versionSnapshot.prompt.trim() : "") ||
+      (typeof taskReplicaSnapshot.prompt === "string" ? taskReplicaSnapshot.prompt.trim() : "")
+    );
+    if (!prompt) return fail("INVALID_REVERSE_REFERENCE_ASSET", 400);
+
+    const sceneType =
+      (typeof runConfig.sceneType === "string" && runConfig.sceneType in REPLICA_SCENE_LABELS
+        ? (runConfig.sceneType as ReplicaSceneType)
+        : typeof task.generationParams?.sceneType === "string" && task.generationParams.sceneType in REPLICA_SCENE_LABELS
+          ? (task.generationParams.sceneType as ReplicaSceneType)
+          : null);
+    const cloneLevel =
+      runConfig.cloneLevel === "compose" || runConfig.cloneLevel === "high"
+        ? runConfig.cloneLevel
+        : task.generationParams?.cloneLevel === "compose" || task.generationParams?.cloneLevel === "high"
+          ? task.generationParams.cloneLevel
+          : null;
+    const templateVersionId =
+      (typeof versionSnapshot.templateVersionId === "string" ? versionSnapshot.templateVersionId : null) ??
+      (typeof taskReplicaSnapshot.templateVersionId === "string" ? taskReplicaSnapshot.templateVersionId : null) ??
+      (typeof runConfig.templateVersionId === "string" ? runConfig.templateVersionId : null);
+
+    const rawVisualStructure =
+      versionSnapshot.visualStructure && typeof versionSnapshot.visualStructure === "object" && !Array.isArray(versionSnapshot.visualStructure)
+        ? (versionSnapshot.visualStructure as Record<string, unknown>)
+        : taskReplicaSnapshot.visualStructure && typeof taskReplicaSnapshot.visualStructure === "object" && !Array.isArray(taskReplicaSnapshot.visualStructure)
+          ? (taskReplicaSnapshot.visualStructure as Record<string, unknown>)
+          : {};
+
+    const body = asRecord(payload);
+    const customTitle = typeof body.title === "string" ? body.title.trim() : "";
+    const title = customTitle || `${suite.name} · ${task.title}`;
+    const sceneLabel = sceneType ? REPLICA_SCENE_LABELS[sceneType] : "爆品图复刻";
+    const levelLabel = cloneLevel === "compose" ? "参考风格" : cloneLevel === "high" ? "高度复刻" : "";
+    const summary = `${sceneLabel}${levelLabel ? ` · ${levelLabel}` : ""}反推资产，不作为商品事实`;
+
+    const promptSnapshot: Record<string, unknown> = {
+      prompt,
+      promptRevision: task.promptRevision,
+      ...(typeof versionSnapshot.finalPrompt === "string" ? { finalPrompt: versionSnapshot.finalPrompt } : {}),
+      templateVersionId,
+      sharedStyle: versionSnapshot.sharedStyle ?? taskReplicaSnapshot.sharedStyle ?? null,
+      copy: Array.isArray(versionSnapshot.copy)
+        ? versionSnapshot.copy
+        : Array.isArray(taskReplicaSnapshot.copy)
+          ? taskReplicaSnapshot.copy
+          : [],
+      visualStructure: rawVisualStructure,
+      cloneLevel,
+      sceneType,
+      language: task.generationParams?.language ?? runConfig.language ?? null,
+      versionId: currentVersion?.id ?? null,
+      versionNumber: currentVersion?.versionNumber ?? null,
+    };
+
+    const source: Record<string, unknown> = {
+      origin: "replica",
+      replicaSuiteId: suite.id,
+      suiteId: suite.id,
+      taskId: task.id,
+      replicaReferenceId: ref?.id ?? task.replicaReferenceId ?? null,
+      referenceId: ref?.id ?? task.replicaReferenceId ?? null,
+      ...(ref?.sha256 ? { sha256: ref.sha256 } : {}),
+      ...(ref?.filename ? { filename: ref.filename } : {}),
+      ...(templateVersionId ? { templateVersionId } : {}),
+      ...(cloneLevel ? { cloneLevel } : {}),
+      ...(sceneType ? { sceneType } : {}),
+      ...(currentVersion?.id ? { imageVersionId: currentVersion.id } : {}),
+    };
+
+    const asset = await deps.libraryRepository.createReverseReferenceAsset({
+      suiteId: suite.id,
+      title,
+      summary,
+      objectKey,
+      mimeType,
+      promptSnapshot,
+      visualStructure: {
+        ...rawVisualStructure,
+        ...(sceneType ? { sceneType } : {}),
+        ...(cloneLevel ? { cloneLevel } : {}),
+      },
+      source,
+    });
+    return ok(asset, 201);
+  }
+
+  return { createReplica, resumeReplica, previewReference, saveReverseAsset };
 }

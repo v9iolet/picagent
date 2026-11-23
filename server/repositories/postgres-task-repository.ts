@@ -102,6 +102,7 @@ export class PostgresTaskRepository implements TaskRepository {
       title=COALESCE($2,title),purpose=COALESCE($3,purpose),prompt_draft=COALESCE($4,prompt_draft),prompt_revision=$5,
       source_input_image_id=CASE WHEN $12 THEN $6::uuid ELSE source_input_image_id END,
       generation_params_json=COALESCE($7,generation_params_json),status=COALESCE($8,status),
+      archived_at=CASE WHEN $8='archived' THEN COALESCE(archived_at,now()) ELSE archived_at END,
       source_library_reference_id=CASE WHEN $13 THEN $9::uuid ELSE source_library_reference_id END,
       source_resource_version_id=CASE WHEN $14 THEN $10::text ELSE source_resource_version_id END,
       source_revision=COALESCE($11,source_revision),updated_at=now() WHERE id=$1 RETURNING ${taskCols}`,

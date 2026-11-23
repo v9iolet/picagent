@@ -937,6 +937,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (method === "POST" && path === "/api/replicas") return replicaPipeline.createReplica(idempotencyKey, options.body);
     const replicaResumeMatch = path.match(/^\/api\/replicas\/([^/]+)\/resume$/);
     if (method === "POST" && replicaResumeMatch) return replicaPipeline.resumeReplica(replicaResumeMatch[1], idempotencyKey);
+    const replicaReverseAssetMatch = path.match(/^\/api\/replicas\/([^/]+)\/tasks\/([^/]+)\/reverse-asset$/);
+    if (method === "POST" && replicaReverseAssetMatch) return replicaPipeline.saveReverseAsset(replicaReverseAssetMatch[1], replicaReverseAssetMatch[2], options.body);
     const replicaPreviewMatch = path.match(/^\/api\/replicas\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?(?:\?(.*))?$/);
     if (method === "GET" && replicaPreviewMatch) {
       const queryKind = new URLSearchParams(replicaPreviewMatch[4] ?? "").get("kind");
