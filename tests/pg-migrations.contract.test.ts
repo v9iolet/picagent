@@ -11,6 +11,9 @@ import { PostgresLibraryRepository } from "../server/repositories/postgres-libra
 import { PostgresTaskRepository } from "../server/repositories/postgres-task-repository.js";
 import { PostgresListingRepository } from "../server/repositories/postgres-listing-copy-repository.js";
 import { PostgresPipelineRepository } from "../server/repositories/postgres-pipeline-repository.js";
+import { PostgresReplicaRepository } from "../server/repositories/postgres-replica-repository.js";
+import { PostgresPromptRepository } from "../server/repositories/postgres-prompt-repository.js";
+import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { PostgresPlatformRepository } from "../server/repositories/postgres-platform-repository.js";
 import { PostgresSuiteRepository } from "../server/repositories/postgres-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
@@ -619,6 +622,134 @@ test("031 extends origin, task origin_kind, pipeline phase, adds replica tables,
 
     // Replaying all migrations with live replica rows must succeed idempotently.
     await runMigrations(pool);
+  });
+});
+
+test("PG replica repository normalizes null remark, creates replica tasks, recovers replica_analyzing runs, and keeps 032 prompt import idempotent", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const suites = new PostgresSuiteRepository(pool);
+    const replicas = new PostgresReplicaRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const pipelines = new PostgresPipelineRepository(pool);
+    const prompts = new PostgresPromptRepository(pool);
+
+    const suite = await suites.createSuite("PG 复刻测试", undefined, "replica");
+    const refId = randomUUID();
+    const now = new Date().toISOString();
+    await pool.query(
+      `INSERT INTO suite_workbench.replica_references
+        (id, suite_id, ordinal, filename, mime_type, sha256, width, height, object_key, thumbnail_object_key, remark)
+       VALUES ($1,$2,1,'null-remark.png','image/png',$3,800,1000,'replicas/k1','replicas/t1',NULL)`,
+      [refId, suite.id, "f".repeat(64)],
+    );
+    const loadedRef = await replicas.getReference(suite.id, refId);
+    assert.ok(loadedRef);
+    assert.equal(loadedRef.remark, "");
+
+    const savedProducts = await replicas.saveProductImages(suite.id, [
+      {
+        id: randomUUID(),
+        suiteId: suite.id,
+        ordinal: 1,
+        sourceKind: "upload",
+        objectKey: `replicas/${suite.id}/products/1/original`,
+        thumbnailObjectKey: `replicas/${suite.id}/products/1/thumbnail`,
+        filename: "p1.png",
+        mimeType: "image/png",
+        sha256: "e".repeat(64),
+        width: 500,
+        height: 500,
+        libraryResourceId: null,
+        resourceVersionId: null,
+        createdAt: now,
+      },
+    ]);
+    assert.equal(savedProducts.length, 1);
+    assert.equal(savedProducts[0].sourceKind, "upload");
+
+    const materialized = await tasks.createReplicaTasks({
+      suiteId: suite.id,
+      globalStyleCard: { promptPrefix: "极简棚拍" },
+      items: [
+        {
+          referenceId: refId,
+          referenceObjectKey: "replicas/k1",
+          ordinal: 1,
+          title: "复刻图 1",
+          purpose: "爆品图复刻（高度复刻）",
+          prompt: "极简棚拍提示词",
+          generationParams: { ratio: "3:4", size: "1K", language: "zh", cloneLevel: "high", sceneType: "ecommerce_product" },
+        },
+      ],
+    });
+    assert.equal(materialized.created.length, 1);
+    assert.equal(materialized.created[0].originKind, "replica");
+    assert.equal(materialized.created[0].replicaReferenceId, refId);
+    // Calling again for same reference is idempotent
+    const secondMat = await tasks.createReplicaTasks({
+      suiteId: suite.id,
+      items: [
+        {
+          referenceId: refId,
+          referenceObjectKey: "replicas/k1",
+          ordinal: 1,
+          title: "复刻图 1",
+          purpose: "爆品图复刻（高度复刻）",
+          prompt: "极简棚拍提示词",
+          generationParams: { ratio: "3:4", size: "1K" },
+        },
+      ],
+    });
+    assert.equal(secondMat.created.length, 0);
+
+    // Startup recovery marks running replica_analyzing pipeline run as failed PIPELINE_INTERRUPTED
+    const { run } = await pipelines.createRun({
+      ...runningPipeline(suite.id),
+      currentPhase: "replica_analyzing",
+      config: { cloneLevel: "high", sceneType: "ecommerce_product" },
+    });
+    await runMigrations(pool, { recoverStaleAttempts: true });
+    const recovered = await pipelines.getRun(run.id);
+    assert.equal(recovered?.status, "failed");
+    assert.equal(recovered?.currentPhase, "replica_analyzing");
+    assert.equal(recovered?.errorCode, "PIPELINE_INTERRUPTED");
+
+    // Importing unchanged replica markdown after 032 seed must NOT create duplicate v2 drafts
+    const composeRecord = parseNormalizedPromptMarkdown(
+      await readFile("prompt/normalized/replica-compose.md", "utf8"),
+      "prompt/normalized/replica-compose.md",
+    );
+    const highRecord = parseNormalizedPromptMarkdown(
+      await readFile("prompt/normalized/replica-high.md", "utf8"),
+      "prompt/normalized/replica-high.md",
+    );
+    const imported = await prompts.importRecords([composeRecord, highRecord]);
+    assert.equal(imported.length, 2);
+    for (const version of imported) {
+      assert.equal(version.versionNo, 1);
+      assert.equal(version.status, "published");
+      const allVersions = await prompts.listVersions(version.templateId);
+      assert.equal(allVersions.length, 1);
+    }
+
+    // Semantic match in PG excludes retired versions and prefers published over draft
+    const publishedCompose = imported.find((v) => v.code === "replica.compose")!;
+    const composeCopyDraft = await prompts.copyVersion(publishedCompose.templateVersionId);
+    assert.ok(composeCopyDraft);
+    const [preferredPgPublished] = await prompts.importRecords([
+      { ...composeRecord, sourceSha256: "b".repeat(64), templateVersionId: randomUUID() },
+    ]);
+    assert.equal(preferredPgPublished.templateVersionId, publishedCompose.templateVersionId);
+    assert.equal(preferredPgPublished.status, "published");
+
+    await prompts.retireVersion(publishedCompose.templateVersionId);
+    await prompts.retireVersion(composeCopyDraft.templateVersionId);
+    const [freshDraftAfterRetire] = await prompts.importRecords([
+      { ...composeRecord, sourceSha256: "c".repeat(64), templateVersionId: randomUUID() },
+    ]);
+    assert.equal(freshDraftAfterRetire.status, "draft");
+    assert.notEqual(freshDraftAfterRetire.templateVersionId, publishedCompose.templateVersionId);
+    assert.equal(freshDraftAfterRetire.versionNo, 3);
   });
 });
 

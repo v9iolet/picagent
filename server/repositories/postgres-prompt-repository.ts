@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
+import { samePromptTemplateContent, validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
 
 const runtimeColumns = `t.id AS "templateId", v.id AS "templateVersionId", v.version_no AS "versionNo",
   t.code, v.name, v.kind, v.stage, v.execution_target AS "executionTarget", v.input_schema AS "inputSchema",
@@ -99,6 +100,12 @@ export class PostgresPromptRepository {
       }
       return existing.rows[0];
     }
+    const existingVersions = await client.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
+      FROM prompt_library.prompt_template_versions v JOIN prompt_library.prompt_templates t ON t.id = v.template_id
+      WHERE v.template_id = $1 AND v.status <> 'retired'
+      ORDER BY CASE WHEN v.status = 'published' THEN 0 ELSE 1 END, v.version_no DESC`, [templateId]);
+    const sameContent = existingVersions.rows.find((version) => samePromptTemplateContent(version, record));
+    if (sameContent) return sameContent;
     const next = await client.query<{ version_no: number }>("SELECT COALESCE(MAX(version_no), 0) + 1 AS version_no FROM prompt_library.prompt_template_versions WHERE template_id = $1", [templateId]);
     const inserted = await client.query<PromptTemplateRuntime>(`INSERT INTO prompt_library.prompt_template_versions
       (id, template_id, version_no, name, kind, stage, execution_target, input_schema, output_schema, applicability, body, user_prompt_template, status, source_file, source_heading, source_sha256)
@@ -181,13 +188,13 @@ export class PostgresPromptRepository {
     const source = await this.getVersion(versionId);
     if (!source) return null;
     const next = await this.pool.query<{ version_no: number }>("SELECT COALESCE(MAX(version_no),0)+1 AS version_no FROM prompt_library.prompt_template_versions WHERE template_id=$1", [source.templateId]);
-    const result = await this.pool.query<PromptTemplateRuntime>(`INSERT INTO prompt_library.prompt_template_versions
+    const result = await this.pool.query<{ id: string }>(`INSERT INTO prompt_library.prompt_template_versions
       (id, template_id, version_no, name, kind, stage, execution_target, input_schema, output_schema, applicability, body, user_prompt_template, status, source_file, source_heading, source_sha256)
       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft','manual',$12,$13)
-      RETURNING ${runtimeColumns}`, [source.templateId, next.rows[0].version_no, source.name, source.kind, source.stage, source.executionTarget,
+      RETURNING id`, [source.templateId, next.rows[0].version_no, source.name, source.kind, source.stage, source.executionTarget,
       JSON.stringify(source.inputSchema), JSON.stringify(source.outputSchema), JSON.stringify(source.applicability), source.body, source.userPromptTemplate,
-      `copy:${source.name}`, `${source.sourceSha256}:${next.rows[0].version_no}`]);
-    return result.rows[0] ?? null;
+      `copy:${source.name}`, createHash("sha256").update(`${source.sourceSha256}:${next.rows[0].version_no}`).digest("hex")]);
+    return result.rows[0] ? this.getVersion(result.rows[0].id) : null;
   }
 
   async retireVersion(versionId: string): Promise<PromptTemplateRuntime | null> {

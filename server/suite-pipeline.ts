@@ -7,6 +7,7 @@ import { resolveDeliverySlots, type DeliveryEditChildLike } from "../shared/work
 import { errorMessages, fail } from "./api-errors.js";
 import { ok, asRecord, dataOf, now, type AppResponse } from "./api-response.js";
 import type { ListingRepository } from "./listing-copy.js";
+import { buildReplicaReferencePreviewUrl } from "./replica/replica-pipeline.js";
 import type {
   InputImage,
   PipelineRepository,
@@ -14,6 +15,7 @@ import type {
   PlanSnapshot,
   PlatformRepository,
   PromptRepository,
+  ReplicaRepository,
   StorageAdapter,
   StructurePlanV2,
   SuitePipelineRun,
@@ -37,6 +39,7 @@ interface SuitePipelineDependencies {
   promptRepository?: PromptRepository;
   planRepository?: PlanRepository;
   taskRepository?: TaskRepository;
+  replicaRepository?: ReplicaRepository;
   pipelineRepository: PipelineRepository;
   listingRepository: ListingRepository;
   hasPlanningModel(): boolean;
@@ -635,9 +638,44 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       }),
     );
     const imageEditChildren = await loadSuiteImageEditChildren(activeTasks);
-    const cards = resolveDeliverySlots(taskAggregates, imageEditChildren, {
+    const resolvedCards = resolveDeliverySlots(taskAggregates, imageEditChildren, {
       defaultTemplateVersionId: snapshot?.templateVersionId ?? null,
     });
+    const isReplica = suite.origin === "replica";
+    const [replicaReferences, replicaProducts] = isReplica && deps.replicaRepository
+      ? await Promise.all([
+          deps.replicaRepository.listReferences(suite.id),
+          deps.replicaRepository.listProductImages(suite.id),
+        ])
+      : [[], []];
+    const styleSketch = isReplica ? replicaProducts.length === 0 : false;
+    const taskById = new Map(activeTasks.map((task) => [task.id, task]));
+    const cards = isReplica
+      ? resolvedCards.map((card) => {
+          const task = taskById.get(card.parentTaskId);
+          const replicaReferenceId = task?.replicaReferenceId ?? null;
+          const replicaReferenceThumbnailUrl = replicaReferenceId
+            ? buildReplicaReferencePreviewUrl(suite.id, replicaReferenceId, "thumbnail")
+            : null;
+          const taskReplicaSnapshot =
+            task?.generationParams && typeof task.generationParams.replicaPromptSnapshot === "object" && task.generationParams.replicaPromptSnapshot !== null
+              ? (task.generationParams.replicaPromptSnapshot as Record<string, unknown>)
+              : null;
+          const hasSnapshot = Object.keys(card.promptSnapshot ?? {}).length > 0;
+          const promptSnapshot = hasSnapshot ? card.promptSnapshot : (taskReplicaSnapshot ?? card.promptSnapshot);
+          const templateVersionId =
+            card.templateVersionId ??
+            (typeof taskReplicaSnapshot?.templateVersionId === "string" ? taskReplicaSnapshot.templateVersionId : null);
+          return {
+            ...card,
+            templateVersionId,
+            promptSnapshot,
+            replicaReferenceId,
+            replicaReferenceThumbnailUrl,
+            ...(styleSketch ? { styleSketch: true as const } : { styleSketch: false as const }),
+          };
+        })
+      : resolvedCards;
     let pipeline = latestPipeline;
     if (
       pipeline &&
@@ -691,7 +729,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
                 : [],
           }
         : { snapshot: snapshot ? planSnapshotView(snapshot) : null, notGeneratedReasons: [] };
-    const total = cards.length;
+    const total = cards.length || (isReplica ? replicaReferences.length : 0);
     const done = cards.filter((card) => card.sourceRole !== "pending").length;
     const listingCopy = (pipeline && await listingRepository.summary(pipeline.id))
       ?? await listingRepository.findLatestBySuiteId(suite.id);
@@ -704,6 +742,17 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       cards,
       progress: { total, completed: done, percent: total ? Math.round((done / total) * 100) : 0 },
       batches,
+      ...(isReplica
+        ? {
+            styleSketch,
+            replicaReferences: replicaReferences.map((ref) => ({
+              ...ref,
+              thumbnailPreviewUrl: buildReplicaReferencePreviewUrl(suite.id, ref.id, "thumbnail"),
+              originalPreviewUrl: buildReplicaReferencePreviewUrl(suite.id, ref.id, "original"),
+            })),
+            replicaProducts,
+          }
+        : {}),
     });
   }
 
@@ -779,12 +828,17 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         }
         if (thumbnails.length >= 4) break;
       }
+      const rawRefCount = Number(pipeline?.config?.referenceCount ?? 0);
+      const fallbackReplicaCount =
+        (suite.origin ?? "suite_studio") === "replica" && Number.isFinite(rawRefCount) && rawRefCount > 0
+          ? Math.trunc(rawRefCount)
+          : 0;
       return {
         suite,
         pipeline,
         card,
         thumbnails,
-        taskCount: activeTasks.length,
+        taskCount: activeTasks.length || fallbackReplicaCount,
       };
     });
     return ok({ items, total: eligible.length, limit, offset });

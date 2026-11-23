@@ -1,4 +1,4 @@
-import { validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
+import { samePromptTemplateContent, validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
 
 interface TemplateIdentity {
   id: string;
@@ -34,6 +34,16 @@ export class MemoryPromptRepository {
           sourceFile: record.sourceFile,
         });
         imported.push(existing);
+        continue;
+      }
+      const sameContentCandidates = [...this.versions.values()].filter(
+        (version) => version.templateId === template!.id && version.status !== "retired" && samePromptTemplateContent(version, record),
+      );
+      const sameContent =
+        sameContentCandidates.find((version) => version.status === "published") ??
+        sameContentCandidates.sort((a, b) => b.versionNo - a.versionNo)[0];
+      if (sameContent) {
+        imported.push(sameContent);
         continue;
       }
       const versionNo = Math.max(0, ...[...this.versions.values()].filter((version) => version.templateId === template!.id).map((version) => version.versionNo)) + 1;

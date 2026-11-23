@@ -63,6 +63,46 @@ export class MemoryTaskRepository implements TaskRepository {
     }
     this.reverseKeys.set(key, created.map((task) => task.id)); return { tasks: await this.listTasks(input.suiteId), created, duplicate: false };
   }
+  async createReplicaTasks(input: { suiteId: string; globalStyleCard?: Record<string, unknown>; items: Array<{ referenceId: string; referenceObjectKey: string; ordinal: number; title: string; purpose: string; prompt: string; generationParams: Record<string, unknown> }> }) {
+    const now = new Date().toISOString();
+    const existing = await this.listTasks(input.suiteId);
+    const created: SuiteTask[] = [];
+    for (const item of [...input.items].sort((a, b) => a.ordinal - b.ordinal)) {
+      const found = existing.find((task) => task.originKind === "replica" && task.replicaReferenceId === item.referenceId && task.status !== "archived");
+      if (found) continue;
+      const task: SuiteTask = {
+        id: randomUUID(),
+        suiteId: input.suiteId,
+        planSnapshotId: null,
+        planItemId: null,
+        ordinal: item.ordinal,
+        imageType: "main",
+        title: item.title,
+        purpose: item.purpose,
+        promptDraft: item.prompt,
+        promptRevision: 1,
+        sourceInputImageId: null,
+        generationParams: { size: "1K", quality: "medium", ...item.generationParams },
+        status: "pending",
+        archivedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        originKind: "replica",
+        replicaReferenceId: item.referenceId,
+        replicaReferenceObjectKey: item.referenceObjectKey,
+        sourceLibraryReferenceId: null,
+        sourceResourceVersionId: null,
+        sourceRevision: 0,
+        referenceImageIds: [item.referenceId],
+        factRefs: [],
+        globalStyleCard: input.globalStyleCard ?? {},
+        promptSha256: taskPromptHash(item.prompt),
+      };
+      this.tasks.set(task.id, task);
+      created.push(task);
+    }
+    return { tasks: await this.listTasks(input.suiteId), created };
+  }
   async getTask(id: string) { return this.tasks.get(id) ?? null; }
   async listTasks(suiteId: string) { return [...this.tasks.values()].filter((task) => task.suiteId === suiteId).sort((a, b) => a.ordinal - b.ordinal); }
   async updateTask(id: string, patch: Partial<Pick<SuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status" | "sourceLibraryReferenceId" | "sourceResourceVersionId" | "sourceRevision">>) { const current = this.tasks.get(id); if (!current) return null; const changed = patch.promptDraft !== undefined && patch.promptDraft !== current.promptDraft; const next = { ...current, ...patch, promptRevision: changed ? current.promptRevision + 1 : current.promptRevision, updatedAt: new Date().toISOString() }; this.tasks.set(id, next); return next; }

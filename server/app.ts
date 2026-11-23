@@ -20,6 +20,8 @@ import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptS
 import { MemoryCategoryPromptRepository } from "./repositories/memory-category-prompt-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { MemoryPipelineRepository } from "./repositories/memory-pipeline-repository.js";
+import { MemoryReplicaRepository } from "./repositories/memory-replica-repository.js";
+import { buildReplicaRolePrefix, createReplicaPipeline } from "./replica/replica-pipeline.js";
 import { buildProviderImagePrompt, materializeCategoryPlanItems } from "./suite-task-prompt.js";
 import {
   applyStyleOverrideToPrompt,
@@ -64,6 +66,7 @@ import type {
   LibraryRepository,
   ReverseRepository, ReversePlan, ReverseReference, ReverseAttempt, ReversePromptVersion,
   PipelineRepository,
+  ReplicaRepository,
 } from "./types.js";
 import { failObservation, finishObservation, startTool } from "./observability.js";
 
@@ -75,6 +78,14 @@ export interface SuiteStudioApp {
   previewTaskVersion(taskId: string, versionId: string): Promise<AppResponse>;
   previewLibraryResource(resourceId: string): Promise<AppResponse>;
   previewReverseReference(planId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+  previewReplicaReference(suiteId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+}
+
+function extensionForImageMime(mimeType: string): string {
+  const lower = mimeType.toLowerCase();
+  if (lower.includes("jpeg") || lower.includes("jpg")) return "jpg";
+  if (lower.includes("webp")) return "webp";
+  return "png";
 }
 
 function platformForPlanning(profile: PlatformProfile | null, background: unknown): PlatformProfile | undefined {
@@ -396,7 +407,7 @@ function llmSource(client: LlmClient) {
   return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };
 }
 
-export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
+export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
   const imageGenerationConcurrency = Math.max(1, Math.floor(Number.isFinite(deps.imageGenerationConcurrency) ? deps.imageGenerationConcurrency! : 3));
   const imageRetryDelayMs = Math.max(0, Math.floor(Number.isFinite(deps.imageRetryDelayMs) ? deps.imageRetryDelayMs! : 1500));
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
@@ -418,6 +429,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const styleOverrideIdempotency = new Map<string, { suite: import("./types.js").Suite; planStyleGuide: string; styleOverride: string | null; effectiveStyleGuide: string }>();
   const categoryPromptRepository = deps.categoryPromptRepository ?? new MemoryCategoryPromptRepository();
   const pipelineRepository = deps.pipelineRepository ?? new MemoryPipelineRepository();
+  const replicaRepository = deps.replicaRepository ?? new MemoryReplicaRepository();
   const listingRepository = deps.listingRepository ?? new MemoryListingRepository();
   const listing = createListingCopyApi({ jobs: listingRepository, suites: deps.repository, storage: deps.storage, pipelines: pipelineRepository, plans: deps.planRepository, platforms: deps.platformRepository, prompts: deps.promptRepository, vision: resolveVision });
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
@@ -611,72 +623,170 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const materialRefs = Array.isArray(generationParams.productMaterialRefs) ? generationParams.productMaterialRefs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 3) : [];
       const inputImages: Array<{ bytes: Buffer; mimeType: string; filename: string; role: string; objectKey: string; resourceId?: string; resourceVersionId?: string; libraryReferenceId?: string }> = [];
       const currentTaskVersionId = sourceVersionIds[task.id];
-      if (!currentTaskVersionId && materialRefs.length && deps.libraryRepository) {
-        const references = await deps.libraryRepository.listReferences(suiteId, "task", task.id);
-        for (const [materialIndex, material] of materialRefs.entries()) {
-          const referenceId = typeof material.libraryReferenceId === "string" ? material.libraryReferenceId : "";
-          const reference = references.find((item) => item.id === referenceId);
+      const isReplicaTask = task.originKind === "replica";
+      let replicaProductCount = 0;
+
+      if (isReplicaTask) {
+        const replicaProducts = await replicaRepository.listProductImages(suiteId);
+        replicaProductCount = replicaProducts.length;
+        for (const [productIndex, product] of replicaProducts.entries()) {
+          const stored = await deps.storage.get(product.objectKey);
+          if (!stored) throw new Error("TASK_INVALID_SOURCE");
+          const fallbackFilename = `product-${productIndex + 1}.${extensionForImageMime(stored.contentType)}`;
+          const resolvedFilename =
+            product.sourceKind === "upload" && product.filename && /\.(png|jpe?g|webp)$/i.test(product.filename)
+              ? product.filename
+              : fallbackFilename;
+          inputImages.push({
+            bytes: stored.bytes,
+            mimeType: stored.contentType,
+            filename: resolvedFilename,
+            role: productIndex === 0 ? "product_primary" : "product_detail",
+            objectKey: product.objectKey,
+            resourceId: product.libraryResourceId ?? undefined,
+            resourceVersionId: product.resourceVersionId ?? undefined,
+          });
+        }
+        const firstProduct = replicaProducts[0];
+        if (firstProduct) {
+          sourceKind = firstProduct.sourceKind === "library" ? "library" : "original";
+          sourceObjectKey = firstProduct.objectKey;
+          sourceResourceVersionId = firstProduct.resourceVersionId ?? null;
+        }
+      } else {
+        if (!currentTaskVersionId && materialRefs.length && deps.libraryRepository) {
+          const references = await deps.libraryRepository.listReferences(suiteId, "task", task.id);
+          for (const [materialIndex, material] of materialRefs.entries()) {
+            const referenceId = typeof material.libraryReferenceId === "string" ? material.libraryReferenceId : "";
+            const reference = references.find((item) => item.id === referenceId);
+            const source = reference?.snapshot.source as Record<string, unknown> | undefined;
+            if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
+            const stored = await deps.storage.get(source.objectKey);
+            if (!stored) throw new Error("TASK_INVALID_SOURCE");
+            inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: `product-${materialIndex + 1}.png`, role: materialIndex === 0 ? "product_primary" : "product_detail", objectKey: source.objectKey, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, libraryReferenceId: reference.id });
+          }
+          const first = inputImages[0];
+          if (first) {
+            const reference = references.find((item) => item.id === first.libraryReferenceId);
+            sourceKind = "library"; sourceObjectKey = first.objectKey; sourceLibraryReferenceId = first.libraryReferenceId ?? null; sourceResourceVersionId = first.resourceVersionId ?? null;
+            sourceBaseVersionId = typeof reference?.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
+          }
+        }
+        if (currentTaskVersionId) {
+          const history = await deps.taskRepository.listTaskVersions(task.id);
+          const current = history.versions.find((version) => version.id === currentTaskVersionId && version.isCurrent);
+          if (!current) throw new Error("TASK_CURRENT_VERSION_NOT_FOUND");
+          sourceKind = "original";
+          sourceObjectKey = current.objectKey;
+          sourceBaseVersionId = null;
+          sourceInputImageId = task.sourceInputImageId;
+        } else if (!inputImages.length && task.sourceLibraryReferenceId && deps.libraryRepository) {
+          const reference = (await deps.libraryRepository.listReferences(suiteId, "task", task.id)).find((item) => item.id === task.sourceLibraryReferenceId);
           const source = reference?.snapshot.source as Record<string, unknown> | undefined;
           if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
-          const stored = await deps.storage.get(source.objectKey);
-          if (!stored) throw new Error("TASK_INVALID_SOURCE");
-          inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: `product-${materialIndex + 1}.png`, role: materialIndex === 0 ? "product_primary" : "product_detail", objectKey: source.objectKey, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, libraryReferenceId: reference.id });
+          sourceKind = "library"; sourceObjectKey = source.objectKey; sourceLibraryReferenceId = reference.id; sourceResourceVersionId = reference.resourceVersionId;
+          sourceBaseVersionId = typeof reference.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
+        } else if (!inputImages.length) {
+          if (!task.sourceInputImageId) throw new Error("TASK_INVALID_SOURCE");
+          const image = await deps.repository.getInputImage(suiteId, task.sourceInputImageId);
+          if (!image) throw new Error("TASK_INVALID_SOURCE");
+          sourceKind = "original"; sourceObjectKey = image.originalObjectKey; sourceInputImageId = image.id;
+          if (!useOriginalImages && image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId); if (base) { sourceKind = "base"; sourceObjectKey = base.objectKey; sourceBaseVersionId = base.id; } }
         }
-        const first = inputImages[0];
-        if (first) {
-          const reference = references.find((item) => item.id === first.libraryReferenceId);
-          sourceKind = "library"; sourceObjectKey = first.objectKey; sourceLibraryReferenceId = first.libraryReferenceId ?? null; sourceResourceVersionId = first.resourceVersionId ?? null;
-          sourceBaseVersionId = typeof reference?.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
+        if (!inputImages.length) {
+          const stored = await deps.storage.get(sourceObjectKey);
+          inputImages.push({ bytes: stored?.bytes ?? Buffer.alloc(0), mimeType: stored?.contentType ?? "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
         }
       }
-      if (currentTaskVersionId) {
-        const history = await deps.taskRepository.listTaskVersions(task.id);
-        const current = history.versions.find((version) => version.id === currentTaskVersionId && version.isCurrent);
-        if (!current) throw new Error("TASK_CURRENT_VERSION_NOT_FOUND");
-        sourceKind = "original";
-        sourceObjectKey = current.objectKey;
-        sourceBaseVersionId = null;
-        sourceInputImageId = task.sourceInputImageId;
-      } else if (!inputImages.length && task.sourceLibraryReferenceId && deps.libraryRepository) {
-        const reference = (await deps.libraryRepository.listReferences(suiteId, "task", task.id)).find((item) => item.id === task.sourceLibraryReferenceId);
-        const source = reference?.snapshot.source as Record<string, unknown> | undefined;
-        if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
-        sourceKind = "library"; sourceObjectKey = source.objectKey; sourceLibraryReferenceId = reference.id; sourceResourceVersionId = reference.resourceVersionId;
-        sourceBaseVersionId = typeof reference.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
-      } else if (!inputImages.length) {
-        if (!task.sourceInputImageId) throw new Error("TASK_INVALID_SOURCE");
-        const image = await deps.repository.getInputImage(suiteId, task.sourceInputImageId);
-        if (!image) throw new Error("TASK_INVALID_SOURCE");
-        sourceKind = "original"; sourceObjectKey = image.originalObjectKey; sourceInputImageId = image.id;
-        if (!useOriginalImages && image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId); if (base) { sourceKind = "base"; sourceObjectKey = base.objectKey; sourceBaseVersionId = base.id; } }
-      }
-      if (!inputImages.length) {
-        const stored = await deps.storage.get(sourceObjectKey);
-        inputImages.push({ bytes: stored?.bytes ?? Buffer.alloc(0), mimeType: stored?.contentType ?? "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
-      }
-      if (task.originKind === "reverse_import" && generationParams.explosiveReferenceEnabled !== false && task.reversePlanId && task.reverseReferenceId) {
+
+      // Generalized reference image injection for both replica and reverse_import tasks.
+      let referenceInjection: { objectKey: string; filename: string; role: string; required: boolean } | null = null;
+      if (isReplicaTask) {
+        const refObjectKey =
+          task.replicaReferenceObjectKey ||
+          (task.replicaReferenceId
+            ? (await replicaRepository.getReference(suiteId, task.replicaReferenceId))?.objectKey ?? null
+            : null);
+        if (!refObjectKey) throw new Error("TASK_INVALID_SOURCE");
+        referenceInjection = {
+          objectKey: refObjectKey,
+          filename: "replica-reference.png",
+          role: "replica_reference",
+          required: true,
+        };
+      } else if (task.originKind === "reverse_import" && generationParams.explosiveReferenceEnabled !== false && task.reversePlanId && task.reverseReferenceId) {
         const ref = await reverseRepository.getPlan(task.reversePlanId).then((plan) => plan?.references.find((item) => item.id === task.reverseReferenceId));
-        const stored = ref ? await deps.storage.get(ref.objectKey) : null;
-        if (stored) inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: "explosive-reference.png", role: "explosive_reference", objectKey: ref?.objectKey ?? "" });
+        if (ref?.objectKey) {
+          referenceInjection = {
+            objectKey: ref.objectKey,
+            filename: "explosive-reference.png",
+            role: "explosive_reference",
+            required: false,
+          };
+        }
       }
+      if (referenceInjection) {
+        const stored = await deps.storage.get(referenceInjection.objectKey);
+        if (!stored) {
+          if (referenceInjection.required) throw new Error("TASK_INVALID_SOURCE");
+        } else {
+          inputImages.push({
+            bytes: stored.bytes,
+            mimeType: stored.contentType,
+            filename: referenceInjection.filename,
+            role: referenceInjection.role,
+            objectKey: referenceInjection.objectKey,
+          });
+          if (!sourceObjectKey) {
+            sourceKind = "original";
+            sourceObjectKey = referenceInjection.objectKey;
+          }
+        }
+      }
+
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
       const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import" && task.originKind !== "replica";
-      const finalPrompt = shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft;
+      const replicaPromptMeta = isReplicaTask ? asRecord(generationParams.replicaPromptSnapshot) : null;
+      const replicaRolePrefix = isReplicaTask ? buildReplicaRolePrefix(replicaProductCount) : null;
+      const finalPrompt = isReplicaTask
+        ? (task.promptDraft.startsWith(replicaRolePrefix!) ? task.promptDraft : `${replicaRolePrefix}\n${task.promptDraft}`)
+        : (shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft);
       const pureWhiteMain =
+        !isReplicaTask &&
         task.categoryCode === "main" &&
         (taskPlan?.dynamicInput.main_image_background === "pure_white_required" ||
           finalPrompt.includes(PURE_WHITE_MAIN_IMAGE_REQUIREMENTS));
       const providerPrompt = buildProviderImagePrompt(finalPrompt, {
-        categoryCode: task.categoryCode ?? null,
+        categoryCode: isReplicaTask ? null : (task.categoryCode ?? null),
         pureWhiteMain,
       });
       const effectiveGlobalStyleCard = shouldApplyStyleOverride
         ? { ...(task.globalStyleCard ?? {}), promptPrefix: activeStyleOverride, overridden: true }
         : (task.globalStyleCard ?? {});
-      const effectivePromptSha256 = shouldApplyStyleOverride
-        ? createHash("sha256").update(finalPrompt).digest("hex")
-        : (task.promptSha256 ?? createHash("sha256").update(finalPrompt).digest("hex"));
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      const effectiveTemplateVersionId =
+        (isReplicaTask && typeof replicaPromptMeta?.templateVersionId === "string"
+          ? replicaPromptMeta.templateVersionId
+          : null) ?? planTemplateVersionId;
+      const effectivePromptSha256 =
+        isReplicaTask || shouldApplyStyleOverride
+          ? createHash("sha256").update(finalPrompt).digest("hex")
+          : (task.promptSha256 ?? createHash("sha256").update(finalPrompt).digest("hex"));
+      const replicaFrozenFields = isReplicaTask
+        ? {
+            sharedStyle: replicaPromptMeta?.sharedStyle ?? null,
+            copy: Array.isArray(replicaPromptMeta?.copy) ? replicaPromptMeta.copy : [],
+            visualStructure:
+              replicaPromptMeta?.visualStructure && typeof replicaPromptMeta.visualStructure === "object"
+                ? replicaPromptMeta.visualStructure
+                : {},
+            cloneLevel: replicaPromptMeta?.cloneLevel ?? generationParams.cloneLevel ?? null,
+            sceneType: replicaPromptMeta?.sceneType ?? generationParams.sceneType ?? null,
+            language: replicaPromptMeta?.language ?? generationParams.language ?? null,
+            replicaReferenceId: task.replicaReferenceId ?? null,
+            styleSketch: replicaProductCount === 0,
+          }
+        : {};
+      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, ...replicaFrozenFields, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, replicaReferenceId: task.replicaReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
@@ -818,8 +928,21 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const pipeline = createSuitePipeline({
     repository: deps.repository, storage: deps.storage, platformRepository: deps.platformRepository,
     promptRepository: deps.promptRepository, planRepository: deps.planRepository, taskRepository: deps.taskRepository,
+    replicaRepository,
     hasPlanningModel: () => Boolean(deps.llmClient || deps.modelSettings), pipelineRepository, listingRepository,
     startListingCopy: listing.startPipeline, appendConfirmedSnapshot, loadSuiteImageEditChildren, request,
+  });
+  const replicaPipeline = createReplicaPipeline({
+    repository: deps.repository,
+    storage: deps.storage,
+    replicaRepository,
+    pipelineRepository,
+    taskRepository: deps.taskRepository,
+    promptRepository: deps.promptRepository,
+    libraryRepository: deps.libraryRepository,
+    resolveVision,
+    resolveImageOptions: async () => (await resolveImage()).imageOptions,
+    request,
   });
 
   async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
@@ -856,6 +979,16 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
     if (path.startsWith("/api/image-editor/")) return deps.imageEditorApi ? deps.imageEditorApi.request(method, path, options) : fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
+
+    if (method === "POST" && path === "/api/replicas") return replicaPipeline.createReplica(idempotencyKey, options.body);
+    const replicaResumeMatch = path.match(/^\/api\/replicas\/([^/]+)\/resume$/);
+    if (method === "POST" && replicaResumeMatch) return replicaPipeline.resumeReplica(replicaResumeMatch[1], idempotencyKey);
+    const replicaPreviewMatch = path.match(/^\/api\/replicas\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?(?:\?(.*))?$/);
+    if (method === "GET" && replicaPreviewMatch) {
+      const queryKind = new URLSearchParams(replicaPreviewMatch[4] ?? "").get("kind");
+      const kind = (replicaPreviewMatch[3] ?? queryKind) === "original" ? "original" : "thumbnail";
+      return replicaPipeline.previewReference(replicaPreviewMatch[1], replicaPreviewMatch[2], kind);
+    }
 
     if (method === "POST" && path === "/api/suites/one-click-generate") return pipeline.startRun(idempotencyKey, options.body);
     const resumeMatch = path.match(/^\/api\/suites\/([^/]+)\/one-click-generate\/resume$/);
@@ -1989,7 +2122,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         const currentVersion = history.versions.find((version) => version.isCurrent);
         const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);
         const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (current?.sourceRevision ?? 0);
-        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, currentVersion && sourceUnchanged ? { [task.id]: currentVersion.id } : {});
+        const useCurrentVersionAsSource = current?.originKind !== "replica" && currentVersion && sourceUnchanged;
+        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, useCurrentVersionAsSource ? { [task.id]: currentVersion.id } : {});
         return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
       }
       catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
@@ -2279,7 +2413,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   };
 
   const previewReverseReference = async (planId: string, referenceId: string, kind: "original" | "thumbnail" = "thumbnail"): Promise<AppResponse> => { const plan = await reverseRepository.getPlan(planId); const ref = plan?.references.find((item) => item.id === referenceId); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404); const object = await deps.storage.get(kind === "original" ? ref.objectKey : ref.thumbnailObjectKey); return object ? { status: 200, body: { data: { contentType: object.contentType }, requestId: randomUUID() }, headers: { "content-type": object.contentType }, raw: object.bytes } : fail("OBJECT_NOT_FOUND", 404); };
-  return { request, upload, preview, previewBaseVersion, previewTaskVersion, previewLibraryResource, previewReverseReference };
+  const previewReplicaReference = (suiteId: string, referenceId: string, kind: "original" | "thumbnail" = "thumbnail") =>
+    replicaPipeline.previewReference(suiteId, referenceId, kind);
+  return { request, upload, preview, previewBaseVersion, previewTaskVersion, previewLibraryResource, previewReverseReference, previewReplicaReference };
 }
 
 async function previewObject(key: string, storage: StorageAdapter): Promise<AppResponse> {

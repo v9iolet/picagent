@@ -22,6 +22,7 @@ import { PostgresPromptRepository } from "./repositories/postgres-prompt-reposit
 import { PostgresLibraryRepository } from "./repositories/postgres-library-repository.js";
 import { PostgresReverseRepository } from "./repositories/postgres-reverse-repository.js";
 import { PostgresPipelineRepository } from "./repositories/postgres-pipeline-repository.js";
+import { PostgresReplicaRepository } from "./repositories/postgres-replica-repository.js";
 import { MinioStorage } from "./storage/minio-storage.js";
 import { ImageEditorService, type ImageEditProvider, type ImageSource } from "./image-editor.js";
 import { createImageEditorApi } from "./image-editor-api.js";
@@ -142,6 +143,7 @@ const app = createSuiteStudioApp({
   taskRepository,
   listingRepository: new PostgresListingRepository(pool),
   pipelineRepository: new PostgresPipelineRepository(pool),
+  replicaRepository: new PostgresReplicaRepository(pool),
   imageEditorApi,
   libraryRepository: new PostgresLibraryRepository(pool),
   reverseRepository: new PostgresReverseRepository(pool),
@@ -167,9 +169,38 @@ async function serveStatic(pathname: string): Promise<{ bytes: Buffer; contentTy
   } catch { return null; }
 }
 
+// 单张图片最大 12 MiB，Base64 编码后约 16 MiB；复刻接口单次最多携带 6 张参考图 + 6 张产品图 = 12 张（192 MiB），预留 8 MiB JSON 元数据与字段余量，总上限 200 MiB。
+const MAX_REQUEST_BODY_BYTES = (12 * 16 + 8) * 1024 * 1024;
+
+async function readRequestBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer | null> {
+  const declaredLength = Number(req.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    req.resume();
+    return null;
+  }
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buf.length;
+    if (totalBytes > maxBytes) {
+      chunks.length = 0;
+      req.resume();
+      return null;
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks);
+}
+
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-  const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
-  const body = Buffer.concat(chunks);
+  const body = await readRequestBody(req, MAX_REQUEST_BODY_BYTES);
+  if (body === null) {
+    res.statusCode = 413;
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.end(JSON.stringify({ error: { code: "PAYLOAD_TOO_LARGE", message: "请求体超过大小限制" }, requestId: randomUUID() }));
+    return;
+  }
   const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
   const path = requestUrl.pathname + requestUrl.search;
   const headers = req.headers as Record<string, string | undefined>;
@@ -192,6 +223,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     const editTaskMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
     const libraryMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     const reverseMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
+    const replicaMatch = requestUrl.pathname.match(/^\/api\/replicas\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
     response = inputMatch
       ? await app.preview(inputMatch[1], inputMatch[2], inputMatch[3] as "original" | "thumbnail")
       : baseMatch
@@ -204,6 +236,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
           ? await app.previewLibraryResource(libraryMatch[1])
         : reverseMatch
           ? await app.previewReverseReference(reverseMatch[1], reverseMatch[2], (reverseMatch[3] as "original" | "thumbnail" | undefined) ?? "thumbnail")
+        : replicaMatch
+          ? await app.previewReplicaReference(replicaMatch[1], replicaMatch[2], ((replicaMatch[3] ?? requestUrl.searchParams.get("kind")) === "original" ? "original" : "thumbnail"))
         : { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } };
     if ((response.headers as Record<string, string> | undefined)?.location) { res.statusCode = response.status; res.setHeader("location", (response.headers as Record<string, string>).location); res.end(); return; }
     if (response.raw) { const rawHeaders = response.headers as Record<string, string> | undefined; res.statusCode = response.status; for (const [name, value] of Object.entries(rawHeaders ?? {})) res.setHeader(name, value); res.setHeader("content-type", rawHeaders?.["content-type"] ?? "application/octet-stream"); res.setHeader("cache-control", rawHeaders?.["cache-control"] ?? "private, max-age=60"); res.end(response.raw); return; }

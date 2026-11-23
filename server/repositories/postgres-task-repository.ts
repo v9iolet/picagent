@@ -47,6 +47,51 @@ export class PostgresTaskRepository implements TaskRepository {
   }
   async createTasksFromSnapshot(suiteId: string, snapshot: PlanSnapshot, inputImages: InputImage[]) { const client = await this.pool.connect(); const created: SuiteTask[] = []; try { await client.query("BEGIN"); await client.query("UPDATE suite_workbench.suite_tasks SET status='archived',archived_at=COALESCE(archived_at,now()),updated_at=now() WHERE suite_id=$1 AND plan_item_id<>ALL($2::uuid[]) AND status<>'archived'", [suiteId, snapshot.items.map((item) => item.id)]); for (const item of snapshot.items) { const found = await client.query<SuiteTask>("SELECT " + taskCols + " FROM suite_workbench.suite_tasks WHERE suite_id=$1 AND plan_item_id=$2", [suiteId,item.id]); if (found.rows[0]) continue; const now = new Date().toISOString(); const params = { size: "1K", quality: "medium", ...(item.suggestedParams ?? {}), ...(item.aspectRatio ? { aspectRatio: item.aspectRatio } : {}) }; const r = await client.query<SuiteTask>("INSERT INTO suite_workbench.suite_tasks (id,suite_id,plan_snapshot_id,plan_item_id,ordinal,image_type,title,purpose,prompt_draft,source_input_image_id,generation_params_json,status,category_code,reference_image_ids_json,fact_refs_json,global_style_card_json,prompt_sha256,created_at,updated_at) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12,$13,$14,$15,$16,$16) RETURNING " + taskCols, [suiteId,snapshot.id,item.id,item.ordinal,item.imageType,item.title,item.purpose,item.prompt,item.referenceImageIds?.[0] ?? inputImages[0]?.id ?? null,JSON.stringify(params),item.categoryCode ?? null,JSON.stringify(item.referenceImageIds ?? []),JSON.stringify(item.factRefs ?? []),JSON.stringify(item.globalStyleCard ?? {}),item.promptSha256 ?? null,now]); created.push(r.rows[0]); } await client.query("COMMIT"); return { tasks: await this.listTasks(suiteId), created }; } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); } }
   async createReverseTasks(input: { suiteId: string; reversePlanId: string; taskGroupId: string; mode: "main" | "detail"; idempotencyKey: string; items: Array<{ referenceId: string; ordinal: number; filename: string; promptVersionId: string; prompt: string }> }) { const c = await this.pool.connect(); const created: SuiteTask[] = []; try { await c.query("BEGIN"); const found = await c.query<{ taskIds: string[] }>('SELECT task_ids_json AS "taskIds" FROM suite_workbench.reverse_canvas_imports WHERE suite_id=$1 AND idempotency_key=$2', [input.suiteId,input.idempotencyKey]); if (found.rows[0]) { await c.query("COMMIT"); const tasks = await this.listTasks(input.suiteId); return { tasks, created: tasks.filter((task) => found.rows[0].taskIds.includes(task.id)), duplicate: true }; } const offset = Number((await c.query<{ n: number }>("SELECT COALESCE(MAX(ordinal),0) AS n FROM suite_workbench.suite_tasks WHERE suite_id=$1", [input.suiteId])).rows[0].n); const now = new Date().toISOString(); for (const item of input.items) { const row = await c.query<SuiteTask>(`INSERT INTO suite_workbench.suite_tasks (id,suite_id,plan_snapshot_id,plan_item_id,ordinal,image_type,title,purpose,prompt_draft,generation_params_json,status,created_at,updated_at,reference_image_ids_json,fact_refs_json,prompt_sha256,origin_kind,reverse_plan_id,reverse_reference_id,reverse_prompt_version_id,reverse_task_group_id,source_revision) VALUES (gen_random_uuid(),$1,NULL,NULL,$2,$3,$4,'爆品参考图反推生图',$5,'{"size":"1K","quality":"medium"}'::jsonb,'incomplete',$6,$6,$7,'[]'::jsonb,encode(digest($5,'sha256'),'hex'),'reverse_import',$8,$9,$10,$11,0) RETURNING ${taskCols}`, [input.suiteId,offset+item.ordinal,input.mode,item.filename,item.prompt,now,JSON.stringify([item.referenceId]),input.reversePlanId,item.referenceId,item.promptVersionId,input.taskGroupId]); created.push(row.rows[0]); } await c.query("INSERT INTO suite_workbench.reverse_canvas_imports (id,suite_id,reverse_plan_id,task_group_id,idempotency_key,task_ids_json,created_at) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6)", [input.suiteId,input.reversePlanId,input.taskGroupId,input.idempotencyKey,JSON.stringify(created.map((task) => task.id)),now]); await c.query("COMMIT"); return { tasks: await this.listTasks(input.suiteId), created, duplicate: false }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
+  async createReplicaTasks(input: { suiteId: string; globalStyleCard?: Record<string, unknown>; items: Array<{ referenceId: string; referenceObjectKey: string; ordinal: number; title: string; purpose: string; prompt: string; generationParams: Record<string, unknown> }> }) {
+    const client = await this.pool.connect();
+    const created: SuiteTask[] = [];
+    try {
+      await client.query("BEGIN");
+      const now = new Date().toISOString();
+      for (const item of [...input.items].sort((a, b) => a.ordinal - b.ordinal)) {
+        const existing = await client.query<SuiteTask>(
+          `SELECT ${taskCols} FROM suite_workbench.suite_tasks WHERE suite_id = $1 AND origin_kind = 'replica' AND replica_reference_id = $2 AND status <> 'archived'`,
+          [input.suiteId, item.referenceId],
+        );
+        if (existing.rows[0]) continue;
+        const params = { size: "1K", quality: "medium", ...item.generationParams };
+        const sha = createHash("sha256").update(item.prompt).digest("hex");
+        const inserted = await client.query<SuiteTask>(
+          `INSERT INTO suite_workbench.suite_tasks
+            (id, suite_id, plan_snapshot_id, plan_item_id, ordinal, image_type, title, purpose, prompt_draft, source_input_image_id, generation_params_json, status, reference_image_ids_json, fact_refs_json, global_style_card_json, prompt_sha256, origin_kind, replica_reference_id, replica_reference_object_key, source_revision, created_at, updated_at)
+           VALUES (gen_random_uuid(),$1,NULL,NULL,$2,'main',$3,$4,$5,NULL,$6,'pending',$7,'[]'::jsonb,$8,$9,'replica',$10,$11,0,$12,$12)
+           RETURNING ${taskCols}`,
+          [
+            input.suiteId,
+            item.ordinal,
+            item.title,
+            item.purpose,
+            item.prompt,
+            JSON.stringify(params),
+            JSON.stringify([item.referenceId]),
+            JSON.stringify(input.globalStyleCard ?? {}),
+            sha,
+            item.referenceId,
+            item.referenceObjectKey,
+            now,
+          ],
+        );
+        created.push(inserted.rows[0]);
+      }
+      await client.query("COMMIT");
+      return { tasks: await this.listTasks(input.suiteId), created };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
   async getTask(id: string) { const r = await this.pool.query<SuiteTask>("SELECT " + taskCols + " FROM suite_workbench.suite_tasks WHERE id=$1", [id]); return r.rows[0] ?? null; }
   async listTasks(suiteId: string) { const r = await this.pool.query<SuiteTask>("SELECT " + taskCols + " FROM suite_workbench.suite_tasks WHERE suite_id=$1 ORDER BY ordinal,id", [suiteId]); return r.rows; }
   async updateTask(id: string, patch: Partial<Pick<SuiteTask,"title"|"purpose"|"promptDraft"|"sourceInputImageId"|"generationParams"|"status"|"sourceLibraryReferenceId"|"sourceResourceVersionId"|"sourceRevision">>) {

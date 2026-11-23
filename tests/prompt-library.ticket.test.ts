@@ -231,3 +231,41 @@ test("replica_prompt normalized templates parse applicability.cloneLevel, publis
   assert.match(migrationSql, /'replica\.high'/);
   assert.match(migrationSql, /'cloneLevel'/);
 });
+
+test("re-importing unchanged replica markdown does not create a v2 draft when seeded sourceSha256 differs", async () => {
+  const composePath = "prompt/normalized/replica-compose.md";
+  const composeMd = await readFile(composePath, "utf8");
+  const record = parseNormalizedPromptMarkdown(composeMd, composePath);
+
+  const prompts = new MemoryPromptRepository();
+  const [seeded] = await prompts.importRecords([{ ...record, sourceSha256: "0".repeat(64) }]);
+  await prompts.publishVersion(seeded.templateVersionId);
+
+  const [reimported] = await prompts.importRecords([record]);
+  assert.equal(reimported.templateVersionId, seeded.templateVersionId);
+  assert.equal(reimported.versionNo, 1);
+  assert.equal((await prompts.listVersions(seeded.templateId)).length, 1);
+
+  const modifiedMd = composeMd.replace("重新调整配色方案", "重新调整配色方案与材质层次");
+  const modifiedRecord = parseNormalizedPromptMarkdown(modifiedMd, composePath);
+  const [v2] = await prompts.importRecords([modifiedRecord]);
+  assert.equal(v2.versionNo, 2);
+  assert.equal(v2.status, "draft");
+  assert.equal((await prompts.listVersions(seeded.templateId)).length, 2);
+
+  // Copy published v1 as an identical-content draft v3; semantic match must prefer published v1 over draft v3
+  const copiedDraft = await prompts.copyVersion(seeded.templateVersionId);
+  assert.ok(copiedDraft);
+  assert.equal(copiedDraft.status, "draft");
+  const [preferredPublished] = await prompts.importRecords([{ ...record, sourceSha256: "2".repeat(64) }]);
+  assert.equal(preferredPublished.templateVersionId, seeded.templateVersionId);
+  assert.equal(preferredPublished.status, "published");
+
+  // Publish v2 (retires v1) and retire copiedDraft; re-importing v1 content with a new sha256 must NOT match retired v1
+  await prompts.publishVersion(v2.templateVersionId);
+  await prompts.retireVersion(copiedDraft.templateVersionId);
+  const [v4] = await prompts.importRecords([{ ...record, sourceSha256: "3".repeat(64), templateVersionId: "11111111-1111-5111-8111-111111111111" }]);
+  assert.equal(v4.status, "draft");
+  assert.notEqual(v4.templateVersionId, seeded.templateVersionId);
+  assert.equal(v4.versionNo, 4);
+});

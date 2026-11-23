@@ -426,3 +426,31 @@ export function renderPromptTemplate(template: PromptTemplateRuntime, input: Rec
   });
   return lines.length === 0 ? template.body : `${template.body}\n\n用户输入：\n${lines.join("\n")}`;
 }
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => [key, stableJsonValue(item)]),
+  );
+}
+
+export function samePromptTemplateContent(
+  existing: Pick<PromptTemplateRuntime, "name" | "kind" | "stage" | "executionTarget" | "body" | "userPromptTemplate" | "inputSchema" | "outputSchema" | "applicability">,
+  record: PromptTemplateRecord,
+): boolean {
+  const norm = (value: string | undefined) => (value ?? "").replace(/\r\n/g, "\n").trim();
+  return (
+    existing.name === record.name &&
+    existing.kind === record.kind &&
+    existing.stage === record.stage &&
+    existing.executionTarget === record.executionTarget &&
+    norm(existing.body) === norm(record.body) &&
+    norm(existing.userPromptTemplate) === norm(record.userPromptTemplate) &&
+    JSON.stringify(stableJsonValue(existing.inputSchema)) === JSON.stringify(stableJsonValue(record.inputSchema)) &&
+    JSON.stringify(stableJsonValue(existing.outputSchema)) === JSON.stringify(stableJsonValue(record.outputSchema)) &&
+    JSON.stringify(stableJsonValue(existing.applicability)) === JSON.stringify(stableJsonValue(record.applicability))
+  );
+}

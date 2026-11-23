@@ -70,6 +70,7 @@ export interface BuildReplicaPromptInputParams {
 export interface ValidateReplicaPromptOptions {
   expectedReferenceIds: string[];
   styleUnified: boolean;
+  hasProductImages?: boolean;
 }
 
 export interface AnalyzeReplicaPromptsParams extends BuildReplicaPromptInputParams {
@@ -153,9 +154,64 @@ export function buildReplicaPromptInput(params: BuildReplicaPromptInputParams): 
   };
 }
 
+function normalizeVisualStringField(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    const joined = value
+      .map((item) => normalizeVisualStringField(item))
+      .filter((item): item is string => Boolean(item))
+      .join("；");
+    return joined || undefined;
+  }
+  return undefined;
+}
+
+function normalizeTextBlocks(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (!Array.isArray(value)) return [];
+  const blocks: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      const trimmed = entry.trim();
+      if (trimmed) blocks.push(trimmed);
+    } else if (isPlainObject(entry) && typeof entry.text === "string") {
+      const trimmed = entry.text.trim();
+      if (trimmed) blocks.push(trimmed);
+    } else if (typeof entry === "number" || typeof entry === "boolean") {
+      blocks.push(String(entry));
+    }
+  }
+  return blocks;
+}
+
 function normalizeVisualStructure(value: unknown, referenceId: string, errors: string[]): ReplicaVisualStructure {
   if (value === undefined || value === null) return {};
-  if (isPlainObject(value)) return { ...value };
+  if (isPlainObject(value)) {
+    const result: ReplicaVisualStructure = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "composition" || key === "lighting" || key === "palette" || key === "layout") {
+        const normalized = normalizeVisualStringField(entry);
+        if (normalized !== undefined) result[key] = normalized;
+      } else if (key === "textBlocks") {
+        const normalized = normalizeTextBlocks(entry);
+        if (normalized !== undefined) result.textBlocks = normalized;
+      } else {
+        result[key] = entry;
+      }
+    }
+    return result;
+  }
   if (typeof value === "string") {
     const trimmed = value.trim();
     return trimmed ? { summary: trimmed } : {};
@@ -229,7 +285,9 @@ export function parseAndValidateReplicaPromptOutput(
   }
 
   let taskName = "";
-  if (candidate.taskName === undefined || candidate.taskName === null) {
+  if (options.hasProductImages === false) {
+    taskName = "";
+  } else if (candidate.taskName === undefined || candidate.taskName === null) {
     taskName = "";
   } else if (typeof candidate.taskName === "string") {
     taskName = truncateChars(candidate.taskName.trim(), REPLICA_TASK_NAME_MAX_LENGTH);
@@ -320,6 +378,7 @@ export async function analyzeReplicaPrompts(params: AnalyzeReplicaPromptsParams)
   const output = parseAndValidateReplicaPromptOutput(rawOutput, {
     expectedReferenceIds: input.references.map((ref) => ref.referenceId),
     styleUnified: input.styleUnified,
+    hasProductImages: input.productImages.length > 0,
   });
   return { input, output, rawOutput };
 }
