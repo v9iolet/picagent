@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { CanvasLayout, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskRepository, TaskResultSlot } from "../types.js";
+import type { CanvasLayout, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskPreviewVersion, TaskRepository, TaskResultSlot } from "../types.js";
 
 export class MemoryTaskRepository implements TaskRepository {
   private tasks = new Map<string, SuiteTask>(); private batches = new Map<string, TaskGenerationBatch>();
@@ -116,6 +116,29 @@ export class MemoryTaskRepository implements TaskRepository {
   async failAttempt(id: string, code: string, message: string, completedAt: string) { const attempt = this.attempts.get(id); if (!attempt) throw new Error("INVALID_TASK_ATTEMPT"); const slot = this.slots.get(attempt.slotId); const task = slot ? this.tasks.get(slot.taskId) : null; const failed = { ...attempt, status: "failed" as const, errorCode: code, errorMessage: message, finishedAt: completedAt }; this.attempts.set(id, failed); if (slot) this.slots.set(slot.id, { ...slot, status: "failed", completedAt }); if (task) this.tasks.set(task.id, { ...task, status: task.status === "archived" ? "archived" : "failed", updatedAt: completedAt }); if (slot) await this.refreshBatch(slot.batchId, completedAt); return failed; }
   async selectVersion(taskId: string, versionId: string, selection: "current" | "final") { const version = this.versions.get(versionId); if (!version || version.taskId !== taskId) return null; for (const item of [...this.versions.values()].filter((item) => item.taskId === taskId)) this.versions.set(item.id, { ...item, ...(selection === "current" ? { isCurrent: item.id === versionId } : { isFinal: item.id === versionId }) }); return this.versions.get(versionId)!; }
   async listTaskVersions(taskId: string) { return { versions: [...this.versions.values()].filter((version) => version.taskId === taskId).sort((a, b) => b.versionNumber - a.versionNumber), attempts: [...this.attempts.values()].filter((attempt) => this.slots.get(attempt.slotId)?.taskId === taskId).sort((a, b) => a.startedAt.localeCompare(b.startedAt)) }; }
+  async listPreviewVersionsByTaskIds(taskIds: string[]) {
+    const result = new Map<string, TaskPreviewVersion>();
+    if (!taskIds.length) return result;
+    const wanted = new Set(taskIds);
+    const grouped = new Map<string, TaskImageVersion[]>();
+    for (const version of this.versions.values()) {
+      if (!wanted.has(version.taskId)) continue;
+      const list = grouped.get(version.taskId);
+      if (list) list.push(version);
+      else grouped.set(version.taskId, [version]);
+    }
+    for (const [taskId, versions] of grouped) {
+      versions.sort(
+        (a, b) =>
+          Number(b.isFinal) - Number(a.isFinal) ||
+          Number(b.isCurrent) - Number(a.isCurrent) ||
+          b.versionNumber - a.versionNumber,
+      );
+      const picked = versions[0];
+      if (picked) result.set(taskId, { taskId, versionId: picked.id, previewUrl: picked.previewUrl });
+    }
+    return result;
+  }
   async getLayout(suiteId: string) { return this.layouts.get(suiteId) ?? null; }
   async saveLayout(suiteId: string, expectedVersion: number, layout: Omit<CanvasLayout, "id" | "suiteId" | "layoutVersion" | "updatedAt">) { const current = this.layouts.get(suiteId); if (current && JSON.stringify({ viewport: current.viewport, nodes: current.nodes, groups: current.groups }) === JSON.stringify(layout)) return current; if (current && current.layoutVersion !== expectedVersion) throw new Error("LAYOUT_VERSION_CONFLICT"); const saved: CanvasLayout = { ...layout, id: current?.id ?? randomUUID(), suiteId, layoutVersion: (current?.layoutVersion ?? 0) + 1, updatedAt: new Date().toISOString() }; this.layouts.set(suiteId, saved); return saved; }
   private async refreshBatch(id: string, finishedAt: string) { const batch = this.batches.get(id); if (!batch) return; const slots = [...this.slots.values()].filter((slot) => slot.batchId === id); const done = slots.filter((slot) => slot.status === "succeeded").length; const failed = slots.filter((slot) => slot.status === "failed").length; const status = done + failed < slots.length ? "running" : failed === slots.length ? "failed" : failed ? "partial" : "completed"; this.batches.set(id, { ...batch, status, finishedAt: status === "running" ? null : finishedAt }); }

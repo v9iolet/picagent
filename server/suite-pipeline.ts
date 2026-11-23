@@ -771,7 +771,11 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     }
     const keyword = (query.get("keyword") ?? "").trim().toLowerCase();
     const suites = await deps.repository.listSuites();
-    const eligible = [];
+    const eligible: Array<{
+      suite: (typeof suites)[number];
+      pipeline: SuitePipelineRun | null;
+      activeTasks: SuiteTask[];
+    }> = [];
     for (const suite of suites) {
       if ((suite.origin ?? "suite_studio") !== originFilter) continue;
       const [pipeline, tasks] = await Promise.all([
@@ -787,21 +791,52 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       ) {
         continue;
       }
-      const first = [...active].sort((a, b) => a.ordinal - b.ordinal)[0];
-      let thumbnail = null;
-      if (first && deps.taskRepository) {
-        const versions = (await deps.taskRepository.listTaskVersions(first.id)).versions;
-        thumbnail = versions.find((version) => version.isFinal) ?? versions[0] ?? null;
-      }
-      eligible.push({
-        suite,
-        pipeline,
-        card: thumbnail ? { taskId: first!.id, previewUrl: thumbnail.previewUrl, title: first!.title } : null,
-      });
+      eligible.push({ suite, pipeline, activeTasks: active });
     }
     const toIso = (v: unknown) => (v instanceof Date ? v.toISOString() : String(v ?? ""));
     eligible.sort((a, b) => toIso(b.suite.createdAt).localeCompare(toIso(a.suite.createdAt)));
-    return ok({ items: eligible.slice(offset, offset + limit), total: eligible.length, limit, offset });
+    const page = eligible.slice(offset, offset + limit).map(({ suite, pipeline, activeTasks }) => ({
+      suite,
+      pipeline,
+      activeTasks,
+      ordered: [...activeTasks].sort((a, b) => a.ordinal - b.ordinal),
+    }));
+    const candidateTaskIds: string[] = [];
+    for (const entry of page) {
+      for (const task of entry.ordered) {
+        if (task.status === "pending" || task.status === "incomplete") continue;
+        candidateTaskIds.push(task.id);
+      }
+    }
+    const previewByTaskId =
+      deps.taskRepository && candidateTaskIds.length
+        ? await deps.taskRepository.listPreviewVersionsByTaskIds(candidateTaskIds)
+        : new Map<string, { taskId: string; versionId: string; previewUrl: string }>();
+
+    const items = page.map(({ suite, pipeline, activeTasks, ordered }) => {
+      const thumbnails: string[] = [];
+      let card: { taskId: string; previewUrl: string; title: string } | null = null;
+      for (const [index, task] of ordered.entries()) {
+        if (task.status === "pending" || task.status === "incomplete") continue;
+        const picked = previewByTaskId.get(task.id);
+        if (!picked?.previewUrl) continue;
+        if (index === 0) {
+          card = { taskId: task.id, previewUrl: picked.previewUrl, title: task.title };
+        }
+        if (thumbnails.length < 4) {
+          thumbnails.push(picked.previewUrl);
+        }
+        if (thumbnails.length >= 4) break;
+      }
+      return {
+        suite,
+        pipeline,
+        card,
+        thumbnails,
+        taskCount: activeTasks.length,
+      };
+    });
+    return ok({ items, total: eligible.length, limit, offset });
   }
 
   return { startRun, resumeRun, getStudioState, getFeed };

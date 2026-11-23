@@ -347,6 +347,12 @@
 .ss-results-head {
   margin-bottom: 22px;
 }
+.ss-results-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .ss-results-head h2 {
   font-size: 22px;
 }
@@ -504,6 +510,21 @@
 }
 .ss-note button {
   float: right;
+}
+.ss-batch-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 36px 20px;
+  border: 1px solid var(--pa-border);
+  border-radius: 12px;
+  background: var(--pa-surface);
+  color: var(--pa-muted);
+  text-align: center;
+}
+.ss-batch-error p {
+  color: var(--pa-danger);
 }
 .ss-pause {
   display: flex;

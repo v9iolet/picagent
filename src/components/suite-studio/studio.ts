@@ -14,6 +14,11 @@ import {
   type SuiteCategoryGroupCode,
 } from "../../../shared/suite-categories";
 import { resolveSellingPointLayouts, resolveVisualStyle } from "../../../shared/selling-point-layouts";
+import {
+  buildFeedUrl,
+  type GenerationHistoryFeedPage,
+  type GenerationHistoryOrigin,
+} from "../generation-history/history-model";
 
 export type Counts = Record<SuiteCategoryGroupCode, number>;
 export interface Config extends ListingConfig {
@@ -98,8 +103,20 @@ async function json<T>(url: string, body?: object): Promise<T> {
 }
 export const studioApi = {
   state: (id: string) => json<StudioState>(`${path(id)}/studio-state`),
-  feed: (offset: number) =>
-    json<{ items: { suite: ApiSuite }[]; total: number }>(`/api/suites/feed?limit=10&offset=${offset}`),
+  feed: (params: {
+    origin?: GenerationHistoryOrigin;
+    keyword?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) =>
+    json<GenerationHistoryFeedPage>(
+      buildFeedUrl({
+        origin: params.origin ?? "suite_studio",
+        keyword: params.keyword,
+        limit: params.limit ?? 10,
+        offset: params.offset ?? 0,
+      }),
+    ),
   start: (
     source: { suiteId: string } | { cloneFrom: { suiteId: string; imageIds: string[] } },
     config: Config,
