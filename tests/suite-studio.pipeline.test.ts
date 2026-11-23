@@ -1059,3 +1059,132 @@ test("selling-point categories lift main-image text ban on eBay and provider.edi
     assert.doesNotMatch(String(attempts[0].promptSnapshot.providerPrompt), /系统安全约束：/);
   }
 });
+
+test("vectorSellingPointOverlay mode strips image text directives, asks for clean blank space, and auto-composites v2 overlay", async () => {
+  const repository = new MemorySuiteRepository();
+  const storage = new MemoryStorage();
+  const prompts = new MemoryPromptRepository();
+  for (const name of ["general-structure-plan-groups.md", "general-category-prompt-groups.md"]) {
+    const record = parseNormalizedPromptMarkdown(await readFile(new URL(`../prompt/normalized/${name}`, import.meta.url), "utf8"), name);
+    const [version] = await prompts.importRecords([record]);
+    await prompts.publishVersion(version.templateVersionId);
+  }
+  const suite = await repository.createSuite("矢量卖点模式流水线测试");
+  const bytes = await sharp({ create: { width: 120, height: 120, channels: 3, background: { r: 235, g: 242, b: 250 } } }).png().toBuffer();
+  const inputId = randomUUID();
+  const originalKey = `suites/${suite.id}/inputs/${inputId}/original`;
+  const thumbKey = `suites/${suite.id}/inputs/${inputId}/thumbnail`;
+  await storage.put({ key: originalKey, bytes, contentType: "image/png" });
+  await storage.put({ key: thumbKey, bytes, contentType: "image/png" });
+  await repository.createInputImage({ id: inputId, suiteId: suite.id, ordinal: 1, originalObjectKey: originalKey, thumbnailObjectKey: thumbKey, sha256: "f".repeat(64), width: 120, height: 120, mimeType: "image/png", originalFilename: "product.png", currentBaseVersionId: null, createdAt: new Date().toISOString() });
+
+  const seenProviderPrompts: Array<{ prompt: string }> = [];
+  const taskRepository = new MemoryTaskRepository();
+  const app = createSuiteStudioApp({
+    repository,
+    storage,
+    promptRepository: prompts,
+    planRepository: new MemoryPlanRepository(),
+    categoryPromptRepository: new MemoryCategoryPromptRepository(),
+    taskRepository,
+    platformRepository: {
+      find: async (code) => ({
+        code,
+        name: "淘宝",
+        marketScope: "domestic",
+        mainImageBackground: "flexible",
+        mainImageStrategy: "",
+        galleryStrategy: "",
+        textStrategy: "",
+        modelStrategy: "",
+        sourceNote: "",
+        sortOrder: 1,
+      }),
+      listEnabled: async () => [],
+    },
+    provider: {
+      async edit(request) {
+        seenProviderPrompts.push({ prompt: request.prompt });
+        return { bytes, mimeType: "image/png" };
+      },
+    },
+    llmClient: {
+      provider: "fake",
+      model: "fake",
+      isFake: true,
+      async generatePlan() {
+        return {
+          schemaVersion: "suite-structure-plan-v2",
+          status: "READY_FOR_REVIEW",
+          mainAllocation: { category: "main", count: 1, reason: "主图", sourceImageIds: [inputId], factRefs: ["human_supplement"], missingFacts: [] },
+          detailImageCount: 1,
+          categoryAllocations: ["feature_benefit", "material_detail", "lifestyle_use", "comparison", "size_scale", "appearance_angles", "included_items", "compatibility_application", "variant_bundle", "packaging_unboxing", "care_instruction"].map((category) => ({
+            category,
+            requirement: "optional",
+            count: category === "feature_benefit" ? 1 : 0,
+            reason: "",
+            sourceImageIds: [inputId],
+            factRefs: category === "feature_benefit" ? ["human_supplement"] : [],
+            missingFacts: [],
+          })),
+          globalStyleCard: { promptPrefix: "深空质感商业棚拍" },
+        };
+      },
+      async generateCategoryPrompt(input) {
+        return {
+          schemaVersion: "suite-category-prompt-v1",
+          category: input.categoryCode,
+          items: [{
+            stableId: `${input.categoryCode}-1`,
+            category: input.categoryCode,
+            title: input.categoryCode === "main" ? "白底主图" : "功能卖点图",
+            purpose: "展示核心卖点",
+            referenceImageIds: [inputId],
+            factRefs: ["human_supplement"],
+            prompt: input.categoryCode === "main" ? "居中展示产品主图" : "右侧斜角展示产品",
+            allowsTextOverlay: input.categoryCode === "main" ? "no" : "yes",
+            textContent: input.categoryCode === "main" ? [] : [{ text: "65W 极速快充", source: "human_supplement" }, { text: "氮化镓低温芯", source: "human_supplement" }],
+            aspectRatio: input.categoryCode === "main" ? "1:1" : "3:4",
+            suggestedParams: {},
+          }],
+        };
+      },
+    },
+  });
+
+  const started = await start(app, suite.id, "vector-overlay-pipeline", {
+    platform: "taobao",
+    mode: "custom",
+    visualStyle: "dark_tech",
+    sellingPointLayouts: ["left_pills_right_hero"],
+    vectorSellingPointOverlay: true,
+    counts: { main: 1, selling_points: 1, lifestyle: 0, other: 0 },
+    sellingPoints: "65W 极速快充；氮化镓低温芯",
+  });
+  assert.equal(started.status, 202);
+  await waitPipeline(app, suite.id, ["completed"]);
+
+  const sellingPrompt = seenProviderPrompts.find((entry) => entry.prompt.includes("右侧斜角展示产品"));
+  assert.ok(sellingPrompt);
+  assert.doesNotMatch(sellingPrompt.prompt, /上图渲染文案/);
+  assert.match(sellingPrompt.prompt, /留出对应版式文案空白区，画面中不直接生成文字或图标/);
+
+  const tasks = await taskRepository.listTasks(suite.id);
+  const mainTask = tasks.find((task) => task.categoryCode === "main")!;
+  const sellingTask = tasks.find((task) => task.categoryCode === "feature_benefit")!;
+  assert.ok(mainTask && sellingTask);
+
+  const mainHistory = await taskRepository.listTaskVersions(mainTask.id);
+  assert.equal(mainHistory.versions.length, 1);
+
+  const sellingHistory = await taskRepository.listTaskVersions(sellingTask.id);
+  assert.equal(sellingHistory.versions.length, 2);
+  const v1 = sellingHistory.versions.find((v) => v.versionNumber === 1)!;
+  const v2 = sellingHistory.versions.find((v) => v.versionNumber === 2)!;
+  assert.equal(v2.isCurrent, true);
+  assert.equal(v2.promptSnapshot.cleanBaseVersionId, v1.id);
+  const overlay = v2.promptSnapshot.vectorOverlay as any;
+  assert.equal(overlay.layoutId, "left_pills_right_hero");
+  assert.equal(overlay.themeId, "dark_tech");
+  assert.ok(overlay.elements.some((el: any) => el.text.includes("65W 极速快充")));
+});

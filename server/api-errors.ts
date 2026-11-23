@@ -76,6 +76,8 @@ export const errorMessages: Record<string, string> = {
   TASK_INVALID_GENERATED_IMAGE: "套图图片生成结果无效",
   TASK_STORAGE_WRITE_FAILED: "套图图片保存失败",
   INVALID_TASK_VERSION: "图片版本不存在",
+  VECTOR_OVERLAY_INVALID: "矢量排版参数无效，请检查版式、配色与元素文案",
+  VECTOR_OVERLAY_NO_BASE_VERSION: "当前任务尚无底图版本，请先生成图片后再进行卖点排版",
   LAYOUT_VERSION_CONFLICT: "画布布局已被其他操作更新，请刷新后重试",
   LIBRARY_RESOURCE_NOT_FOUND: "资源不存在或已归档",
   LIBRARY_VERSION_INVALID: "资源版本无效",
