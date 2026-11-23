@@ -621,3 +621,142 @@ test("031 extends origin, task origin_kind, pipeline phase, adds replica tables,
     await runMigrations(pool);
   });
 });
+
+test("033 adds task_result_slots(task_id) index and PostgresTaskRepository batches preview versions with final > current > version priority", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const idx = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = 'suite_workbench' AND tablename = 'task_result_slots' AND indexname = 'task_result_slots_task_id_idx'`,
+    );
+    assert.equal(idx.rowCount, 1);
+
+    const suites = new PostgresSuiteRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const suite = await suites.createSuite("PG 批量缩略图测试", undefined, "suite_studio");
+
+    const { task: t1 } = await tasks.createCustomTask({
+      suiteId: suite.id,
+      planSnapshotId: null,
+      imageType: "main",
+      title: "卡 1",
+      purpose: "主图",
+      promptDraft: "白底主图",
+      sourceInputImageId: null,
+      generationParams: {},
+    });
+    const { task: t2 } = await tasks.createCustomTask({
+      suiteId: suite.id,
+      planSnapshotId: null,
+      imageType: "detail",
+      title: "卡 2",
+      purpose: "细节",
+      promptDraft: "细节图",
+      sourceInputImageId: null,
+      generationParams: {},
+    });
+    const { task: t3 } = await tasks.createCustomTask({
+      suiteId: suite.id,
+      planSnapshotId: null,
+      imageType: "detail",
+      title: "无版本卡",
+      purpose: "场景",
+      promptDraft: "场景图",
+      sourceInputImageId: null,
+      generationParams: {},
+    });
+
+    async function addVersion(taskId: string, key: string) {
+      const batchId = randomUUID();
+      const slotId = randomUUID();
+      const attemptId = randomUUID();
+      await tasks.beginBatch({
+        batch: {
+          id: batchId,
+          suiteId: suite.id,
+          kind: "single",
+          requestedCount: 1,
+          taskIds: [taskId],
+          status: "running",
+          idempotencyKey: key,
+          createdAt: timestamp,
+          startedAt: timestamp,
+          finishedAt: null,
+        },
+        slots: [
+          {
+            id: slotId,
+            batchId,
+            taskId,
+            slotOrdinal: 1,
+            retryOfSlotId: null,
+            status: "generating",
+            selectedVersionId: null,
+            createdAt: timestamp,
+            completedAt: null,
+          },
+        ],
+        attempts: [
+          {
+            id: attemptId,
+            slotId,
+            attemptNo: 1,
+            provider: "fake",
+            model: "test",
+            endpoint: "/v1/images/edits",
+            requestSummary: {},
+            promptSnapshot: {},
+            promptSha256: "sha",
+            contextSnapshot: {},
+            sourceKind: "original",
+            sourceObjectKey: "orig",
+            sourceInputImageId: null,
+            sourceBaseVersionId: null,
+            status: "running",
+            errorCode: null,
+            errorMessage: null,
+            externalRequestId: null,
+            startedAt: timestamp,
+            finishedAt: null,
+          },
+        ],
+      });
+      const { version } = await tasks.completeAttempt({
+        attemptId,
+        slotId,
+        taskId,
+        objectKey: `obj-${key}`,
+        processObjectKeys: [],
+        sha256: `sha-${key}`,
+        width: 512,
+        height: 512,
+        mimeType: "image/png",
+        completedAt: timestamp,
+      });
+      return version;
+    }
+
+    const t1v1 = await addVersion(t1.id, "pg-t1-v1");
+    const t1v2 = await addVersion(t1.id, "pg-t1-v2");
+    await tasks.selectVersion(t1.id, t1v1.id, "final"); // final v1 must beat current v2
+    assert.ok(t1v2.isCurrent);
+
+    const t2v1 = await addVersion(t2.id, "pg-t2-v1");
+    const t2v2 = await addVersion(t2.id, "pg-t2-v2");
+    await tasks.selectVersion(t2.id, t2v1.id, "current"); // current v1 must beat newer v2
+    assert.ok(t2v2.id);
+
+    const emptyMap = await tasks.listPreviewVersionsByTaskIds([]);
+    assert.equal(emptyMap.size, 0);
+
+    const previews = await tasks.listPreviewVersionsByTaskIds([t1.id, t2.id, t3.id, t1.id]);
+    assert.equal(previews.size, 2);
+    assert.equal(previews.get(t1.id)?.versionId, t1v1.id);
+    assert.equal(previews.get(t1.id)?.previewUrl, t1v1.previewUrl);
+    assert.equal(previews.get(t2.id)?.versionId, t2v1.id);
+    assert.equal(previews.get(t2.id)?.previewUrl, t2v1.previewUrl);
+    assert.equal(previews.has(t3.id), false);
+
+    // Replay all migrations idempotently after 033.
+    await runMigrations(pool);
+  });
+});

@@ -746,40 +746,47 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     }
     const toIso = (v: unknown) => (v instanceof Date ? v.toISOString() : String(v ?? ""));
     eligible.sort((a, b) => toIso(b.suite.createdAt).localeCompare(toIso(a.suite.createdAt)));
-    const page = eligible.slice(offset, offset + limit);
-    const items = await Promise.all(
-      page.map(async ({ suite, pipeline, activeTasks }) => {
-        const ordered = [...activeTasks].sort((a, b) => a.ordinal - b.ordinal);
-        const thumbnails: string[] = [];
-        let card: { taskId: string; previewUrl: string; title: string } | null = null;
-        if (deps.taskRepository && ordered.length) {
-          for (const [index, task] of ordered.entries()) {
-            const versions = (await deps.taskRepository.listTaskVersions(task.id)).versions;
-            const picked =
-              versions.find((version) => version.isFinal) ??
-              versions.find((version) => version.isCurrent) ??
-              versions[0] ??
-              null;
-            if (picked?.previewUrl) {
-              if (index === 0) {
-                card = { taskId: task.id, previewUrl: picked.previewUrl, title: task.title };
-              }
-              if (thumbnails.length < 4) {
-                thumbnails.push(picked.previewUrl);
-              }
-            }
-            if (thumbnails.length >= 4) break;
-          }
+    const page = eligible.slice(offset, offset + limit).map(({ suite, pipeline, activeTasks }) => ({
+      suite,
+      pipeline,
+      activeTasks,
+      ordered: [...activeTasks].sort((a, b) => a.ordinal - b.ordinal),
+    }));
+    const candidateTaskIds: string[] = [];
+    for (const entry of page) {
+      for (const task of entry.ordered) {
+        if (task.status === "pending" || task.status === "incomplete") continue;
+        candidateTaskIds.push(task.id);
+      }
+    }
+    const previewByTaskId =
+      deps.taskRepository && candidateTaskIds.length
+        ? await deps.taskRepository.listPreviewVersionsByTaskIds(candidateTaskIds)
+        : new Map<string, { taskId: string; versionId: string; previewUrl: string }>();
+
+    const items = page.map(({ suite, pipeline, activeTasks, ordered }) => {
+      const thumbnails: string[] = [];
+      let card: { taskId: string; previewUrl: string; title: string } | null = null;
+      for (const [index, task] of ordered.entries()) {
+        if (task.status === "pending" || task.status === "incomplete") continue;
+        const picked = previewByTaskId.get(task.id);
+        if (!picked?.previewUrl) continue;
+        if (index === 0) {
+          card = { taskId: task.id, previewUrl: picked.previewUrl, title: task.title };
         }
-        return {
-          suite,
-          pipeline,
-          card,
-          thumbnails,
-          taskCount: activeTasks.length,
-        };
-      }),
-    );
+        if (thumbnails.length < 4) {
+          thumbnails.push(picked.previewUrl);
+        }
+        if (thumbnails.length >= 4) break;
+      }
+      return {
+        suite,
+        pipeline,
+        card,
+        thumbnails,
+        taskCount: activeTasks.length,
+      };
+    });
     return ok({ items, total: eligible.length, limit, offset });
   }
 

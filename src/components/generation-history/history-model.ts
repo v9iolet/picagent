@@ -1,7 +1,22 @@
 import type { ApiSuite } from "../../api/client";
-import type { Pipeline } from "../suite-studio/studio";
 
 export type GenerationHistoryOrigin = "suite_studio" | "canvas" | "replica";
+
+export type GenerationHistoryPipelineStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "partial_failed"
+  | "waiting_base_refine_decision"
+  | "waiting_human_input";
+
+export interface GenerationHistoryPipeline {
+  status: GenerationHistoryPipelineStatus;
+  currentPhase: string;
+  config: Record<string, unknown>;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
 
 export interface GenerationHistoryFeedCard {
   taskId: string;
@@ -11,7 +26,7 @@ export interface GenerationHistoryFeedCard {
 
 export interface GenerationHistoryFeedItem {
   suite: ApiSuite;
-  pipeline: Pipeline | null;
+  pipeline: GenerationHistoryPipeline | null;
   card: GenerationHistoryFeedCard | null;
   thumbnails?: string[];
   taskCount?: number;

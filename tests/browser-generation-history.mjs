@@ -393,11 +393,16 @@ test("生成记录抽屉：单批次首屏、4 图拼图、20 条滚动分页、
   });
   await batchRegion.locator('[data-status="completed"]').waitFor({ timeout: 8000 });
 
-  // 7. Refresh preserves current batch, and ?suite=<id> URL also loads target batch directly.
+  // 7. Refresh preserves current batch, and ?suite=<id> URL (including trailing slash / trim) works cleanly.
   await page.reload();
   await batchRegion.getByRole("heading", { name: runningBatch.name, exact: true }).waitFor();
-  await page.goto(`${url}create/suite?suite=${seeded[0].id}`);
+  await page.goto(`${url}create/suite/?suite=%20${seeded[0].id}%20`);
   await batchRegion.getByRole("heading", { name: seeded[0].name, exact: true }).waitFor();
+
+  // Whitespace-only ?suite= is treated as unspecified and falls back to default latest batch.
+  await page.evaluate(() => window.sessionStorage.removeItem("picagent:suite-studio:last-suite-id"));
+  await page.goto(`${url}create/suite?suite=%20%20`);
+  await batchRegion.getByRole("heading", { name: latestBatch.name, exact: true }).waitFor();
 
   // 8. Clicking "＋ 新建套图" clears current batch and shows empty state.
   await page.getByRole("button", { name: "＋ 新建套图", exact: true }).click();

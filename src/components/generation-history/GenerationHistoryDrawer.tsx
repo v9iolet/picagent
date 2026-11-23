@@ -11,10 +11,18 @@ import {
   type GenerationHistoryFeedItem,
   type GenerationHistoryFeedPage,
   type GenerationHistoryOrigin,
+  type GenerationHistoryPipeline,
+  type GenerationHistoryPipelineStatus,
 } from "./history-model";
 import "./generation-history.css";
 
-export type { GenerationHistoryFeedItem, GenerationHistoryFeedPage, GenerationHistoryOrigin };
+export type {
+  GenerationHistoryFeedItem,
+  GenerationHistoryFeedPage,
+  GenerationHistoryOrigin,
+  GenerationHistoryPipeline,
+  GenerationHistoryPipelineStatus,
+};
 
 export interface GenerationHistoryDrawerProps {
   origin: GenerationHistoryOrigin;

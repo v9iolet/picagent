@@ -49,6 +49,8 @@ export function App() {
   }
   if (path === "/reverse" || reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;
   const pathSuiteId = canonical.match(/^\/create\/suite\/([^/]+)\/?$/)?.[1];
-  const querySuiteId = canonical === "/create/suite" ? new URLSearchParams(search).get("suite") || undefined : undefined;
+  const querySuiteId = /^\/create\/suite\/?$/.test(canonical)
+    ? new URLSearchParams(search).get("suite")?.trim() || undefined
+    : undefined;
   return <SuiteStudioPage suiteId={pathSuiteId ?? querySuiteId} navigate={navigate} />;
 }

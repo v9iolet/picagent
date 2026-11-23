@@ -433,13 +433,15 @@ async function seedSuiteBatch(app, sample, { name, idempotencyKey, counts, expec
   assert.fail(`Suite ${suiteId} did not reach ${expectedStatuses.join(" or ")}`);
 }
 
-test("进入套图页默认仅展示最近 1 条批次，抽屉分页列出历史且单条 studio-state 500 不阻断抽屉也不弹全局告警", async (t) => {
+test("进入套图页默认仅展示最近 1 条批次，抽屉点选 500 批次呈现可重试错误态且不弹全局告警，再切正常批次恢复", async (t) => {
   let brokenSuiteId = "";
+  let brokenHits = 0;
   const { app, page, url, sample } = await offlineProgressFixture(t, {
     interceptApi: async ({ method, path, next }) => {
       const match = method === "GET" ? path.match(/^\/api\/suites\/([^/]+)\/studio-state$/) : null;
       if (!match) return next();
       if (match[1] === brokenSuiteId) {
+        brokenHits += 1;
         return { status: 500, body: { error: { code: "INTERNAL_ERROR", message: "服务暂时不可用，请重试" } } };
       }
       return await next();
@@ -465,7 +467,7 @@ test("进入套图页默认仅展示最近 1 条批次，抽屉分页列出历�
   await regions.getByRole("heading", { name: latest.name, exact: true }).waitFor({ timeout: 10000 });
   assert.equal(await regions.count(), 1, "结果区应仅展示当前 1 个批次，不再纵向堆叠历史");
   assert.equal(await page.getByRole("button", { name: "加载更多历史批次" }).count(), 0);
-  assert.equal(await page.getByRole("alert").count(), 0, "单条历史批次 studio-state 500 时不得弹出全页告警");
+  assert.equal(await page.getByRole("alert").count(), 0);
 
   await page.getByRole("button", { name: "生成记录", exact: true }).click();
   const drawer = page.getByRole("dialog", { name: "生成记录" });
@@ -473,13 +475,39 @@ test("进入套图页默认仅展示最近 1 条批次，抽屉分页列出历�
   await drawer.getByText("共 6 条", { exact: true }).waitFor();
   assert.equal(await drawer.locator("[data-history-item]").count(), 6);
   assert.equal(await drawer.locator(`[data-history-item="${latest.id}"]`).getAttribute("data-current"), "true");
-  assert.equal(await page.getByRole("alert").count(), 0, "单条 studio-state 500 不应阻断抽屉列表或弹全局告警");
 
+  // 实际点击 brokenSuiteId 触发 500 分支：结果区展示可重试错误态，且不弹全局 alert
+  await drawer.locator(`[data-history-item="${brokenSuiteId}"]`).click();
+  await drawer.waitFor({ state: "hidden" });
+  await page.waitForURL(`**/create/suite/${brokenSuiteId}`);
+  const batchError = page.locator("[data-batch-error]");
+  await batchError.waitFor({ state: "visible" });
+  await batchError.getByText("服务暂时不可用，请重试", { exact: true }).waitFor();
+  assert.equal(brokenHits, 1, "500 拦截分支应真实被触发");
+  assert.equal(await regions.count(), 0);
+  assert.equal(await page.getByRole("alert").count(), 0, "单条 studio-state 500 不应弹出全局告警");
+
+  // 点击「重试加载」应再次请求 studio-state
+  const retryResponse = page.waitForResponse(
+    (res) => res.url().includes(`/api/suites/${brokenSuiteId}/studio-state`) && res.status() === 500,
+  );
+  await batchError.getByRole("button", { name: "重试加载", exact: true }).click();
+  await retryResponse;
+  assert.equal(brokenHits, 2, "点击重试应重新触发 studio-state 请求");
+  await batchError.waitFor({ state: "visible" });
+  assert.equal(await page.getByRole("alert").count(), 0);
+
+  // 再次打开抽屉不受单条 500 阻断，切换到正常批次后恢复展示该批次
+  await page.getByRole("button", { name: "生成记录", exact: true }).click();
+  await drawer.waitFor({ state: "visible" });
+  await drawer.getByText("共 6 条", { exact: true }).waitFor();
   await drawer.locator(`[data-history-item="${target.id}"]`).click();
   await drawer.waitFor({ state: "hidden" });
   await page.waitForURL(`**/create/suite/${target.id}`);
   await regions.getByRole("heading", { name: target.name, exact: true }).waitFor({ timeout: 10000 });
-  assert.equal(await regions.count(), 1, "切换历史批次后结果区应只渲染所选批次");
+  assert.equal(await regions.count(), 1, "切换回正常批次后结果区应只渲染所选批次");
+  assert.equal(await batchError.count(), 0);
+  assert.equal(await page.getByRole("alert").count(), 0);
 });
 
 test("partial_failed 批次单卡点击失败重试成功后，批次徽标立即收敛为已完成且清除失败告警", async (t) => {

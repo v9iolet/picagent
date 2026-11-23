@@ -94,6 +94,8 @@ export function SuiteStudioPage({
     [notice, setNotice] = useState("");
   const [currentState, setCurrentState] = useState<StudioState | null>(null),
     [loadingBatch, setLoadingBatch] = useState(true),
+    [batchError, setBatchError] = useState(""),
+    [reloadTick, setReloadTick] = useState(0),
     [historyOpen, setHistoryOpen] = useState(false),
     [active, setActive] = useState<string | undefined>(() => suiteId ?? readLastSuiteId() ?? undefined);
 
@@ -197,6 +199,7 @@ export function SuiteStudioPage({
 
     let live = true;
     setNotice("");
+    setBatchError("");
     setImages([]);
     setConfig(initialConfig);
     setClone(false);
@@ -251,7 +254,7 @@ export function SuiteStudioPage({
             if (readLastSuiteId() === suiteId) clearLastSuiteId();
             hydrated.current = undefined;
             applyState(null);
-            setNotice(message(e));
+            setBatchError(message(e));
           }
         })
         .finally(() => {
@@ -273,7 +276,7 @@ export function SuiteStudioPage({
     return () => {
       live = false;
     };
-  }, [suiteId, navigate, applyState, fetchStudioState, hydrate]);
+  }, [suiteId, reloadTick, navigate, applyState, fetchStudioState, hydrate]);
 
   const currentBatch = currentState && (currentState.cards.length || currentState.pipeline) ? currentState : null;
   const pollingSuiteId = currentBatch && isBatchPolling(currentBatch) ? currentBatch.suite.id : undefined;
@@ -317,24 +320,26 @@ export function SuiteStudioPage({
     setActive(undefined);
     applyState(null);
     setLoadingBatch(false);
+    setBatchError("");
     setNotice("");
     setImages([]);
     setConfig(initialConfig);
     setClone(false);
-    if (suiteId) {
-      skipDefaultFeed.current = true;
+    if (suiteId || window.location.pathname !== "/create/suite" || window.location.search) {
+      if (suiteId) skipDefaultFeed.current = true;
       navigate("/create/suite");
     }
   };
 
   const handleSelectHistory = (id: string) => {
     setHistoryOpen(false);
+    setBatchError("");
     skipDefaultFeed.current = false;
+    hydrated.current = undefined;
     if (id === suiteId) {
-      void refresh(id).catch((e) => setNotice(message(e)));
+      setReloadTick((n) => n + 1);
       return;
     }
-    hydrated.current = undefined;
     saveLastSuiteId(id);
     navigate(`/create/suite/${id}`);
   };
@@ -477,7 +482,25 @@ export function SuiteStudioPage({
               </button>
             </div>
           )}
-          {!currentBatch && (loadingBatch ? <p>正在读取批次…</p> : <EmptyStudio />)}
+          {!currentBatch &&
+            (loadingBatch ? (
+              <p>正在读取批次…</p>
+            ) : batchError ? (
+              <div className="ss-batch-error" data-batch-error>
+                <p>{batchError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBatchError("");
+                    setReloadTick((n) => n + 1);
+                  }}
+                >
+                  重试加载
+                </button>
+              </div>
+            ) : (
+              <EmptyStudio />
+            ))}
           {currentBatch && (
             <BatchResults
               key={currentBatch.suite.id}

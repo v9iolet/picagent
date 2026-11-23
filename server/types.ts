@@ -400,6 +400,11 @@ export interface TaskImageVersion {
   promptSnapshot: Record<string, unknown>; contextSnapshot: Record<string, unknown>;
   isCurrent: boolean; isFinal: boolean; createdAt: string; previewUrl: string;
 }
+export interface TaskPreviewVersion {
+  taskId: string;
+  versionId: string;
+  previewUrl: string;
+}
 export interface SuiteTaskAggregate extends SuiteTask {
   versions: TaskImageVersion[]; attempts: TaskGenerationAttempt[]; slots: TaskResultSlot[];
 }
@@ -426,6 +431,7 @@ export interface TaskRepository {
   failAttempt(attemptId: string, code: string, message: string, completedAt: string): Promise<TaskGenerationAttempt>;
   selectVersion(taskId: string, versionId: string, selection: "current" | "final"): Promise<TaskImageVersion | null>;
   listTaskVersions(taskId: string): Promise<{ versions: TaskImageVersion[]; attempts: TaskGenerationAttempt[] }>;
+  listPreviewVersionsByTaskIds(taskIds: string[]): Promise<Map<string, TaskPreviewVersion>>;
   getLayout(suiteId: string): Promise<CanvasLayout | null>;
   saveLayout(suiteId: string, expectedVersion: number, layout: Omit<CanvasLayout, "id" | "suiteId" | "layoutVersion" | "updatedAt">): Promise<CanvasLayout>;
 }

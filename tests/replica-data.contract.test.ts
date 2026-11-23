@@ -481,6 +481,162 @@ test("GET /api/suites/feed returns up to 4 thumbnails in task order, non-archive
   assert.equal(items[1].card, null);
 });
 
+test("GET /api/suites/feed batches preview version lookup once per page and skips pending/incomplete tasks", async () => {
+  const { app, repository, taskRepository, pipelineRepository } = fixture();
+  let batchCalls = 0;
+  let lastQueriedIds: string[] = [];
+  let singleVersionCalls = 0;
+
+  const origBatch = taskRepository.listPreviewVersionsByTaskIds.bind(taskRepository);
+  taskRepository.listPreviewVersionsByTaskIds = async (taskIds: string[]) => {
+    batchCalls += 1;
+    lastQueriedIds = [...taskIds];
+    return origBatch(taskIds);
+  };
+  const origSingle = taskRepository.listTaskVersions.bind(taskRepository);
+  taskRepository.listTaskVersions = async (taskId: string) => {
+    singleVersionCalls += 1;
+    return origSingle(taskId);
+  };
+
+  const s1 = await createTimedSuite(repository, "有已完成与未开始卡", "suite_studio", "2026-03-04T00:00:00.000Z");
+  await pipelineRepository.createRun(pipelineRun(s1.id));
+  const { task: doneTask } = await taskRepository.createCustomTask({
+    suiteId: s1.id,
+    planSnapshotId: null,
+    imageType: "main",
+    title: "已完成卡",
+    purpose: "主图",
+    promptDraft: "主图",
+    sourceInputImageId: null,
+    generationParams: {},
+  });
+  const batchId = randomUUID();
+  const slotId = randomUUID();
+  const attemptId = randomUUID();
+  const ts = "2026-03-04T00:00:01.000Z";
+  await taskRepository.beginBatch({
+    batch: {
+      id: batchId,
+      suiteId: s1.id,
+      kind: "single",
+      requestedCount: 1,
+      taskIds: [doneTask.id],
+      status: "running",
+      idempotencyKey: "batch-done",
+      createdAt: ts,
+      startedAt: ts,
+      finishedAt: null,
+    },
+    slots: [
+      {
+        id: slotId,
+        batchId,
+        taskId: doneTask.id,
+        slotOrdinal: 1,
+        retryOfSlotId: null,
+        status: "generating",
+        selectedVersionId: null,
+        createdAt: ts,
+        completedAt: null,
+      },
+    ],
+    attempts: [
+      {
+        id: attemptId,
+        slotId,
+        attemptNo: 1,
+        provider: "fake",
+        model: "test",
+        endpoint: "/v1/images/edits",
+        requestSummary: {},
+        promptSnapshot: {},
+        promptSha256: "sha",
+        contextSnapshot: {},
+        sourceKind: "original",
+        sourceObjectKey: "orig",
+        sourceInputImageId: null,
+        sourceBaseVersionId: null,
+        status: "running",
+        errorCode: null,
+        errorMessage: null,
+        externalRequestId: null,
+        startedAt: ts,
+        finishedAt: null,
+      },
+    ],
+  });
+  await taskRepository.completeAttempt({
+    attemptId,
+    slotId,
+    taskId: doneTask.id,
+    objectKey: "obj-done",
+    processObjectKeys: [],
+    sha256: "sha-done",
+    width: 512,
+    height: 512,
+    mimeType: "image/png",
+    completedAt: ts,
+  });
+
+  const { task: incompleteTask } = await taskRepository.createCustomTask({
+    suiteId: s1.id,
+    planSnapshotId: null,
+    imageType: "detail",
+    title: "未绑定输入图卡",
+    purpose: "详情",
+    promptDraft: "详情",
+    sourceInputImageId: null,
+    generationParams: {},
+  });
+  const { task: pendingTask } = await taskRepository.createCustomTask({
+    suiteId: s1.id,
+    planSnapshotId: null,
+    imageType: "detail",
+    title: "待生成卡",
+    purpose: "详情",
+    promptDraft: "详情",
+    sourceInputImageId: randomUUID(),
+    generationParams: {},
+  });
+  assert.equal(incompleteTask.status, "incomplete");
+  assert.equal(pendingTask.status, "pending");
+
+  const s2 = await createTimedSuite(repository, "纯待生成批次", "suite_studio", "2026-03-03T00:00:00.000Z");
+  await pipelineRepository.createRun(pipelineRun(s2.id, { status: "running", currentPhase: "image_generating", completedAt: null }));
+  await taskRepository.createCustomTask({
+    suiteId: s2.id,
+    planSnapshotId: null,
+    imageType: "main",
+    title: "仅待生成",
+    purpose: "主图",
+    promptDraft: "主图",
+    sourceInputImageId: randomUUID(),
+    generationParams: {},
+  });
+
+  const res = await app.request("GET", "/api/suites/feed?origin=suite_studio&limit=20&offset=0");
+  assert.equal(res.status, 200);
+  assert.equal(singleVersionCalls, 0, "getFeed 不应再逐卡调用 listTaskVersions");
+  assert.equal(batchCalls, 1, "getFeed 每页应只做一次批量预览版本查询");
+  assert.deepEqual(lastQueriedIds, [doneTask.id], "应跳过 pending 与 incomplete 任务");
+  const items = (res.body as any).data.items;
+  assert.equal(items.length, 2);
+  assert.equal(items[0].thumbnails.length, 1);
+  assert.equal(items[0].taskCount, 3);
+  assert.deepEqual(items[1].thumbnails, []);
+  assert.equal(items[1].taskCount, 1);
+});
+
+test("033 migration SQL creates task_result_slots(task_id) index safely and idempotently", async () => {
+  const sql = await readFile("db/migrations/033_task_result_slots_task_id_index.sql", "utf8");
+  assert.doesNotMatch(
+    sql,
+    /\bpublic\b"?\s*\.|\b(?:COMMIT|ROLLBACK|ABORT|END\s+(?:TRANSACTION|WORK)|SET\s+(?:LOCAL\s+|SESSION\s+)?search_path)\b|(?:^|;)\s*END\s*;/i,
+  );
+  assert.match(sql, /CREATE INDEX IF NOT EXISTS\s+task_result_slots_task_id_idx\s+ON\s+suite_workbench\.task_result_slots\s*\(\s*task_id\s*\)/i);
+});
+
 test("031 migration SQL defines replica tables, columns, and extended CHECK constraints safely", async () => {
   const sql = await readFile("db/migrations/031_product_replica.sql", "utf8");
   assert.doesNotMatch(
