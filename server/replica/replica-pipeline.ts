@@ -129,14 +129,39 @@ export function matchNearestAspectRatio(
   return best.label;
 }
 
-export function buildReplicaRolePrefix(productCount: number): string {
+export function resolveReplicaCloneLevel(
+  generationParams: Record<string, unknown> | null | undefined,
+): ReplicaCloneLevel {
+  const direct = generationParams?.cloneLevel;
+  if (direct === "compose" || direct === "high") return direct;
+  const snapshot = generationParams?.replicaPromptSnapshot;
+  if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)) {
+    const fromSnapshot = (snapshot as Record<string, unknown>).cloneLevel;
+    if (fromSnapshot === "compose" || fromSnapshot === "high") return fromSnapshot;
+  }
+  return "high";
+}
+
+export function buildReplicaRolePrefix(
+  productCount: number,
+  cloneLevel: ReplicaCloneLevel = "high",
+): string {
+  if (cloneLevel === "compose") {
+    if (productCount <= 0) {
+      return "输入图仅用于理解姿势与构图类型，不得沿用其中的人物、服装、陈设、配色、光线、品牌与文字，按下方描述重新设计画面，生成同风格的通用示意商品，不得出现可识别品牌。";
+    }
+    if (productCount === 1) {
+      return "第1张图为产品外观唯一依据，按下方描述重新设计画面。";
+    }
+    return `第1–${productCount}张图为产品外观唯一依据，按下方描述重新设计画面。`;
+  }
   if (productCount <= 0) {
-    return "输入图仅作为版式与风格参考，不得复制其中的品牌、文字与人物，请生成同风格的通用示意商品，不得出现可识别品牌。";
+    return "输入图仅作为版式与风格参考，保持构图与元素位置，不得复制其中的品牌、文字与人物，请生成同风格的通用示意商品，不得出现可识别品牌。";
   }
   if (productCount === 1) {
-    return "第1张图为产品外观唯一依据，第2张图仅作为版式与风格参考，不得复制其中的品牌、文字与人物。";
+    return "第1张图为产品外观唯一依据；第2张图为构图与版式基准：保持其构图、元素位置、镜头与光影，只替换为目标商品和新文案，不得复制其中的品牌、Logo、文字与真人肖像。";
   }
-  return `第1–${productCount}张图为产品外观唯一依据，第${productCount + 1}张图仅作为版式与风格参考，不得复制其中的品牌、文字与人物。`;
+  return `第1–${productCount}张图为产品外观唯一依据；第${productCount + 1}张图为构图与版式基准：保持其构图、元素位置、镜头与光影，只替换为目标商品和新文案，不得复制其中的品牌、Logo、文字与真人肖像。`;
 }
 
 export function buildReplicaReferencePreviewUrl(
