@@ -178,6 +178,7 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
                   ["task_image", "单卡创作"],
                   ["reverse_prompt", "爆品图反推"],
                   ["listing_copy", "上架文案"],
+                  ["replica_prompt", "爆品图复刻"],
                 ] as [StageFilter, string][]).map(([value, label]) => (
                   <label className="style-check" key={value}>
                     <input type="radio" name="templateStage" checked={stageFilter === value} onChange={() => setStageFilter(value)} />

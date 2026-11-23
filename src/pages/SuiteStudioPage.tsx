@@ -7,7 +7,7 @@ import {
   GenerationHistoryDrawer,
   type GenerationHistoryFeedItem,
 } from "../components/generation-history/GenerationHistoryDrawer";
-import { createTools } from "../features/create/tool-registry";
+import { CreateToolsNav } from "../features/create/CreateToolsNav";
 import { ConfigPanel } from "../components/suite-studio/ConfigPanel";
 import { BatchResults } from "../components/suite-studio/BatchResults";
 import {
@@ -19,7 +19,6 @@ import {
   type Config,
   type StudioState,
 } from "../components/suite-studio/studio";
-import { Icon } from "./shared";
 import "../components/suite-studio/studio.css";
 
 function EmptyStudio() {
@@ -416,24 +415,7 @@ export function SuiteStudioPage({
       statusTone={busy ? "running" : "pass"}
     >
       <div className="ss-layout">
-        <nav className="ss-tools" aria-label="创作功能">
-          {createTools.map((t) => (
-            <a
-              key={t.id}
-              href={t.path}
-              aria-current={t.id === "suite" ? "page" : undefined}
-              onClick={(e) => {
-                if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-                  e.preventDefault();
-                  navigate(t.path);
-                }
-              }}
-            >
-              <Icon name={t.icon} />
-              {t.label}
-            </a>
-          ))}
-        </nav>
+        <CreateToolsNav activeTool="suite" navigate={navigate} />
         <ConfigPanel
           config={effective}
           update={patch}
