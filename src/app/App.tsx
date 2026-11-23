@@ -48,5 +48,7 @@ export function App() {
     return tab === "templates" ? <PromptTemplatesPage navigate={navigate} /> : <ImageAssetsPage navigate={navigate} />;
   }
   if (path === "/reverse" || reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;
-  return <SuiteStudioPage suiteId={canonical.match(/^\/create\/suite\/([^/]+)\/?$/)?.[1]} navigate={navigate} />;
+  const pathSuiteId = canonical.match(/^\/create\/suite\/([^/]+)\/?$/)?.[1];
+  const querySuiteId = canonical === "/create/suite" ? new URLSearchParams(search).get("suite") || undefined : undefined;
+  return <SuiteStudioPage suiteId={pathSuiteId ?? querySuiteId} navigate={navigate} />;
 }

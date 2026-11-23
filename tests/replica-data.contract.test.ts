@@ -286,6 +286,201 @@ test("GET /api/suites/feed supports case-insensitive keyword matching across sui
   );
 });
 
+test("GET /api/suites/feed returns up to 4 thumbnails in task order, non-archived taskCount, and keeps card", async () => {
+  const { app, repository, taskRepository, pipelineRepository } = fixture();
+
+  const withMany = await createTimedSuite(repository, "多图套图批次", "suite_studio", "2026-03-02T00:00:00.000Z");
+  await pipelineRepository.createRun(pipelineRun(withMany.id));
+  const expectedUrls: string[] = [];
+
+  for (let i = 1; i <= 5; i += 1) {
+    const { task } = await taskRepository.createCustomTask({
+      suiteId: withMany.id,
+      planSnapshotId: null,
+      imageType: i === 1 ? "main" : "detail",
+      title: `任务卡 ${i}`,
+      purpose: "展示",
+      promptDraft: "提示词",
+      sourceInputImageId: null,
+      generationParams: {},
+    });
+    const batchId = randomUUID();
+    const slotId = randomUUID();
+    const attempt1Id = randomUUID();
+    const now = `2026-03-02T00:00:0${i}.000Z`;
+    await taskRepository.beginBatch({
+      batch: {
+        id: batchId,
+        suiteId: withMany.id,
+        kind: "single",
+        requestedCount: 1,
+        taskIds: [task.id],
+        status: "running",
+        idempotencyKey: `batch-${i}`,
+        createdAt: now,
+        startedAt: now,
+        finishedAt: null,
+      },
+      slots: [
+        {
+          id: slotId,
+          batchId,
+          taskId: task.id,
+          slotOrdinal: 1,
+          retryOfSlotId: null,
+          status: "generating",
+          selectedVersionId: null,
+          createdAt: now,
+          completedAt: null,
+        },
+      ],
+      attempts: [
+        {
+          id: attempt1Id,
+          slotId,
+          attemptNo: 1,
+          provider: "fake",
+          model: "test",
+          endpoint: "/v1/images/edits",
+          requestSummary: {},
+          promptSnapshot: {},
+          promptSha256: "sha",
+          contextSnapshot: {},
+          sourceKind: "original",
+          sourceObjectKey: "orig",
+          sourceInputImageId: null,
+          sourceBaseVersionId: null,
+          status: "running",
+          errorCode: null,
+          errorMessage: null,
+          externalRequestId: null,
+          startedAt: now,
+          finishedAt: null,
+        },
+      ],
+    });
+    const { version: v1 } = await taskRepository.completeAttempt({
+      attemptId: attempt1Id,
+      slotId,
+      taskId: task.id,
+      objectKey: `obj-${i}-v1`,
+      processObjectKeys: [],
+      sha256: `sha-${i}-v1`,
+      width: 512,
+      height: 512,
+      mimeType: "image/png",
+      completedAt: now,
+    });
+    if (i === 1) {
+      // Create a second version and mark it current to verify current version takes precedence over older v1.
+      const batch2Id = randomUUID();
+      const slot2Id = randomUUID();
+      const attempt2Id = randomUUID();
+      const now2 = "2026-03-02T00:01:00.000Z";
+      await taskRepository.beginBatch({
+        batch: {
+          id: batch2Id,
+          suiteId: withMany.id,
+          kind: "single",
+          requestedCount: 1,
+          taskIds: [task.id],
+          status: "running",
+          idempotencyKey: `batch-${i}-v2`,
+          createdAt: now2,
+          startedAt: now2,
+          finishedAt: null,
+        },
+        slots: [
+          {
+            id: slot2Id,
+            batchId: batch2Id,
+            taskId: task.id,
+            slotOrdinal: 1,
+            retryOfSlotId: null,
+            status: "generating",
+            selectedVersionId: null,
+            createdAt: now2,
+            completedAt: null,
+          },
+        ],
+        attempts: [
+          {
+            id: attempt2Id,
+            slotId: slot2Id,
+            attemptNo: 2,
+            provider: "fake",
+            model: "test",
+            endpoint: "/v1/images/edits",
+            requestSummary: {},
+            promptSnapshot: {},
+            promptSha256: "sha",
+            contextSnapshot: {},
+            sourceKind: "original",
+            sourceObjectKey: "orig",
+            sourceInputImageId: null,
+            sourceBaseVersionId: null,
+            status: "running",
+            errorCode: null,
+            errorMessage: null,
+            externalRequestId: null,
+            startedAt: now2,
+            finishedAt: null,
+          },
+        ],
+      });
+      const { version: v2 } = await taskRepository.completeAttempt({
+        attemptId: attempt2Id,
+        slotId: slot2Id,
+        taskId: task.id,
+        objectKey: `obj-${i}-v2`,
+        processObjectKeys: [],
+        sha256: `sha-${i}-v2`,
+        width: 512,
+        height: 512,
+        mimeType: "image/png",
+        completedAt: now2,
+      });
+      await taskRepository.selectVersion(task.id, v2.id, "current");
+      expectedUrls.push(v2.previewUrl);
+    } else {
+      expectedUrls.push(v1.previewUrl);
+    }
+  }
+
+  const archived = await taskRepository.createCustomTask({
+    suiteId: withMany.id,
+    planSnapshotId: null,
+    imageType: "detail",
+    title: "已归档任务卡",
+    purpose: "归档",
+    promptDraft: "归档",
+    sourceInputImageId: null,
+    generationParams: {},
+  });
+  await taskRepository.updateTask(archived.task.id, { status: "archived" });
+
+  const noImages = await createTimedSuite(repository, "无缩略图批次", "suite_studio", "2026-03-01T00:00:00.000Z");
+  await pipelineRepository.createRun(
+    pipelineRun(noImages.id, { status: "running", currentPhase: "structure_planning", completedAt: null }),
+  );
+
+  const res = await app.request("GET", "/api/suites/feed?origin=suite_studio&limit=10&offset=0");
+  assert.equal(res.status, 200);
+  const items = (res.body as any).data.items;
+  assert.equal(items.length, 2);
+
+  assert.equal(items[0].suite.id, withMany.id);
+  assert.equal(items[0].taskCount, 5);
+  assert.deepEqual(items[0].thumbnails, expectedUrls.slice(0, 4));
+  assert.equal(items[0].card.previewUrl, expectedUrls[0]);
+  assert.equal(items[0].card.title, "任务卡 1");
+
+  assert.equal(items[1].suite.id, noImages.id);
+  assert.equal(items[1].taskCount, 0);
+  assert.deepEqual(items[1].thumbnails, []);
+  assert.equal(items[1].card, null);
+});
+
 test("031 migration SQL defines replica tables, columns, and extended CHECK constraints safely", async () => {
   const sql = await readFile("db/migrations/031_product_replica.sql", "utf8");
   assert.doesNotMatch(

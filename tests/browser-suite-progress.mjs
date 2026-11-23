@@ -433,25 +433,16 @@ async function seedSuiteBatch(app, sample, { name, idempotencyKey, counts, expec
   assert.fail(`Suite ${suiteId} did not reach ${expectedStatuses.join(" or ")}`);
 }
 
-test("历史批次并发拉取 studio-state 峰值不超过 3，且单条 500 失败不阻断其余 5 条批次也不弹告警", async (t) => {
+test("进入套图页默认仅展示最近 1 条批次，抽屉分页列出历史且单条 studio-state 500 不阻断抽屉也不弹全局告警", async (t) => {
   let brokenSuiteId = "";
-  let inFlightStates = 0;
-  let maxInFlightStates = 0;
   const { app, page, url, sample } = await offlineProgressFixture(t, {
     interceptApi: async ({ method, path, next }) => {
       const match = method === "GET" ? path.match(/^\/api\/suites\/([^/]+)\/studio-state$/) : null;
       if (!match) return next();
-      inFlightStates += 1;
-      maxInFlightStates = Math.max(maxInFlightStates, inFlightStates);
-      try {
-        await new Promise((resolve) => setTimeout(resolve, 60));
-        if (match[1] === brokenSuiteId) {
-          return { status: 500, body: { error: { code: "INTERNAL_ERROR", message: "服务暂时不可用，请重试" } } };
-        }
-        return await next();
-      } finally {
-        inFlightStates -= 1;
+      if (match[1] === brokenSuiteId) {
+        return { status: 500, body: { error: { code: "INTERNAL_ERROR", message: "服务暂时不可用，请重试" } } };
       }
+      return await next();
     },
   });
 
@@ -466,24 +457,29 @@ test("历史批次并发拉取 studio-state 峰值不超过 3，且单条 500 �
     seeded.push({ id, name });
   }
   brokenSuiteId = seeded[2].id;
+  const latest = seeded[seeded.length - 1];
+  const target = seeded[1];
 
   await page.goto(url + "create/suite");
   const regions = page.getByRole("region", { name: "生成批次" });
-  await page.waitForFunction(
-    () => document.querySelectorAll('section[aria-label="生成批次"]').length === 5,
-    undefined,
-    { timeout: 10000 },
-  );
-  assert.equal(await regions.count(), 5);
-  assert.ok(maxInFlightStates >= 2 && maxInFlightStates <= 3, `期望在途并发峰值在 2..3，实际为 ${maxInFlightStates}`);
-  assert.equal(await page.getByRole("alert").count(), 0, "单条历史批次 500 时不得弹出全页告警");
-  for (const item of seeded) {
-    if (item.id === brokenSuiteId) {
-      assert.equal(await page.getByRole("heading", { name: item.name, exact: true }).count(), 0);
-    } else {
-      await page.getByRole("heading", { name: item.name, exact: true }).waitFor();
-    }
-  }
+  await regions.getByRole("heading", { name: latest.name, exact: true }).waitFor({ timeout: 10000 });
+  assert.equal(await regions.count(), 1, "结果区应仅展示当前 1 个批次，不再纵向堆叠历史");
+  assert.equal(await page.getByRole("button", { name: "加载更多历史批次" }).count(), 0);
+  assert.equal(await page.getByRole("alert").count(), 0, "单条历史批次 studio-state 500 时不得弹出全页告警");
+
+  await page.getByRole("button", { name: "生成记录", exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: "生成记录" });
+  await drawer.waitFor({ state: "visible" });
+  await drawer.getByText("共 6 条", { exact: true }).waitFor();
+  assert.equal(await drawer.locator("[data-history-item]").count(), 6);
+  assert.equal(await drawer.locator(`[data-history-item="${latest.id}"]`).getAttribute("data-current"), "true");
+  assert.equal(await page.getByRole("alert").count(), 0, "单条 studio-state 500 不应阻断抽屉列表或弹全局告警");
+
+  await drawer.locator(`[data-history-item="${target.id}"]`).click();
+  await drawer.waitFor({ state: "hidden" });
+  await page.waitForURL(`**/create/suite/${target.id}`);
+  await regions.getByRole("heading", { name: target.name, exact: true }).waitFor({ timeout: 10000 });
+  assert.equal(await regions.count(), 1, "切换历史批次后结果区应只渲染所选批次");
 });
 
 test("partial_failed 批次单卡点击失败重试成功后，批次徽标立即收敛为已完成且清除失败告警", async (t) => {

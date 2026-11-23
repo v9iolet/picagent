@@ -347,6 +347,12 @@
 .ss-results-head {
   margin-bottom: 22px;
 }
+.ss-results-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .ss-results-head h2 {
   font-size: 22px;
 }
