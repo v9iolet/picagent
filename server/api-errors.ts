@@ -28,6 +28,7 @@ export const errorMessages: Record<string, string> = {
   IMAGE_DIMENSIONS_TOO_LARGE: "图片尺寸超过限制",
   MISSING_IDEMPOTENCY_KEY: "生成请求缺少幂等键",
   INVALID_PROMPT_STAGE: "提示词阶段无效",
+  INVALID_PROMPT_STATUS: "提示词状态无效",
   PROMPT_REPOSITORY_NOT_CONFIGURED: "提示词库未配置",
   PROMPT_TEMPLATE_REQUIRED: "请选择提示词模板",
   PROMPT_TEMPLATE_NOT_FOUND: "提示词模板未发布或阶段不匹配",

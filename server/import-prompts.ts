@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Pool } from "pg";
 import { loadPostgresConfig } from "./config.js";
-import { isNormalizedPromptMarkdown, parseNormalizedPromptMarkdown, parsePromptMarkdown, type PromptTemplateRecord } from "./prompt-library.js";
+import { importPromptRecordsWithPolicy, isNormalizedPromptMarkdown, parseNormalizedPromptMarkdown, parsePromptMarkdown, type PromptTemplateRecord } from "./prompt-library.js";
 import { PostgresPromptRepository } from "./repositories/postgres-prompt-repository.js";
 import { runMigrations } from "./migrations.js";
 
@@ -26,8 +26,7 @@ try {
   await runMigrations(pool);
   const repository = new PostgresPromptRepository(pool);
   if (replace) await repository.pruneExcept(records.map((record) => record.code));
-  const imported = await repository.importRecords(records);
-  if (publish) for (const version of imported) await repository.publishVersion(version.templateVersionId);
-  console.log(JSON.stringify({ ...summary, imported: true, published: publish, versions: imported.map(({ templateVersionId, versionNo }) => ({ templateVersionId, versionNo })) }, null, 2));
+  const imported = await importPromptRecordsWithPolicy(repository, records, { publish });
+  console.log(JSON.stringify({ ...summary, imported: true, published: publish, versions: imported.map(({ templateVersionId, versionNo, status }) => ({ templateVersionId, versionNo, status })) }, null, 2));
 }
 finally { await pool.end(); }

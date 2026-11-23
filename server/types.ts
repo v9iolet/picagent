@@ -65,6 +65,7 @@ export interface PromptRepository {
   importRecords(records: import("./prompt-library.js").PromptTemplateRecord[]): Promise<import("./prompt-library.js").PromptTemplateRuntime[]>;
   publishVersion(versionId: string): Promise<import("./prompt-library.js").PromptTemplateRuntime | null>;
   listPublished(stage?: import("./prompt-library.js").PromptStage): Promise<import("./prompt-library.js").PromptTemplatePublic[]>;
+  listTemplates?(options?: { stage?: import("./prompt-library.js").PromptStage; status?: import("./prompt-library.js").PromptVersionStatus | "all" }): Promise<import("./prompt-library.js").PromptTemplatePublic[]>;
   getPublishedVersion(versionId: string, expectedStage?: import("./prompt-library.js").PromptStage): Promise<import("./prompt-library.js").PromptTemplateRuntime | null>;
   listVersions(templateId: string): Promise<import("./prompt-library.js").PromptTemplateRuntime[]>;
   getVersion(versionId: string): Promise<import("./prompt-library.js").PromptTemplateRuntime | null>;
@@ -482,7 +483,7 @@ export interface TaskRepository {
 }
 
 export type LibraryResourceType = "prompt_template" | "input_image" | "base_image" | "task_image_version" | "process_image" | "reverse_reference_asset";
-export type LibraryAssetStatus = "draft" | "published" | "archived";
+export type LibraryAssetStatus = "draft" | "published" | "archived" | "retired";
 export type LibraryReferenceTargetType = "plan" | "task";
 export interface LibraryResource {
   id: string;
@@ -500,6 +501,7 @@ export interface LibraryResource {
   stage: PromptStage | null;
   source: Record<string, unknown>;
   status?: LibraryAssetStatus;
+  usedBy?: string[];
   promptSnapshot?: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;

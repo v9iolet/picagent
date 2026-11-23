@@ -16,7 +16,7 @@ import type { ModelSettings } from "./model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { processGeneratedImage, processImage } from "./image.js";
-import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptStage, type PromptTemplateRuntime } from "./prompt-library.js";
+import { PROMPT_STAGES, renderPromptTemplate, resolvePromptTemplateUsedBy, validateDynamicInput, withPromptTemplateUsage, type PromptStage, type PromptTemplateRuntime, type PromptVersionStatus } from "./prompt-library.js";
 import { MemoryCategoryPromptRepository } from "./repositories/memory-category-prompt-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { MemoryPipelineRepository } from "./repositories/memory-pipeline-repository.js";
@@ -1097,13 +1097,25 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }));
       return ok(canvasOnly ? enriched.filter((suite) => suite.origin !== "replica" && (suite.origin === "canvas" || suite.taskCount > 0)) : enriched);
     }
+    const enrichLibraryResource = (resource: import("./types.js").LibraryResource): import("./types.js").LibraryResource => {
+      if (resource.resourceType !== "prompt_template") return resource;
+      const source = resource.source && typeof resource.source === "object" ? resource.source : {};
+      const usedBy = Array.isArray(resource.usedBy)
+        ? resource.usedBy
+        : resolvePromptTemplateUsedBy({
+          code: typeof source.code === "string" ? source.code : null,
+          stage: resource.stage,
+          applicability: source.applicability && typeof source.applicability === "object" ? (source.applicability as Record<string, unknown>) : null,
+        });
+      return { ...resource, usedBy, source: { ...source, usedBy } };
+    };
     const libraryResourceMatch = path.match(/^\/api\/library\/resources\/([^/]+)$/);
     if (method === "GET" && libraryResourceMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       const resourceId = safeDecodePathParam(libraryResourceMatch[1]);
       if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       const resource = await deps.libraryRepository.getResource(resourceId);
-      return resource ? ok(resource) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      return resource ? ok(enrichLibraryResource(resource)) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     }
     const libraryPreviewMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     if (method === "GET" && libraryPreviewMatch) return await (async () => {
@@ -1122,8 +1134,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const stage = params.get("stage") as PromptStage | null;
       if (stage && !PROMPT_STAGES.includes(stage)) return fail("INVALID_PROMPT_STAGE");
       const status = params.get("status") as import("./types.js").LibraryAssetStatus | null;
-      if (status && !["draft", "published", "archived"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
-      return ok(await deps.libraryRepository.listResources({ resourceType: resourceType ?? undefined, stage: stage ?? undefined, suiteId: params.get("suiteId") ?? undefined, query: params.get("query") ?? undefined, status: status ?? undefined, page: Number(params.get("page") ?? 1), pageSize: Number(params.get("pageSize") ?? 24) }));
+      if (status && !["draft", "published", "archived", "retired"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
+      const listed = await deps.libraryRepository.listResources({ resourceType: resourceType ?? undefined, stage: stage ?? undefined, suiteId: params.get("suiteId") ?? undefined, query: params.get("query") ?? undefined, status: status ?? undefined, page: Number(params.get("page") ?? 1), pageSize: Number(params.get("pageSize") ?? 24) });
+      return ok({ ...listed, items: listed.items.map(enrichLibraryResource) });
     }
     const reverseAssetStatusMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/status$/);
     if (method === "POST" && reverseAssetStatusMatch) {
@@ -1173,9 +1186,18 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const promptVersionMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/versions$/);
     if (method === "GET" && promptVersionMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      return ok(await deps.promptRepository.listVersions(promptVersionMatch[1]));
+      const versions = await deps.promptRepository.listVersions(promptVersionMatch[1]);
+      return ok(versions.map((version) => withPromptTemplateUsage(version)));
     }
-    const promptLifecycleMatch = path.match(/^\/api\/prompt-templates\/([^/]+)$/);
+    const promptLifecycleMatch = path.match(/^\/api\/prompt-templates\/([^/?]+)$/);
+    if (method === "GET" && promptLifecycleMatch) {
+      if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
+      const versionId = safeDecodePathParam(promptLifecycleMatch[1]);
+      if (!versionId) return fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      const version = await deps.promptRepository.getVersion(versionId);
+      if (!version) return fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      return ok(withPromptTemplateUsage(version));
+    }
     if (method === "PATCH" && promptLifecycleMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       const body = asRecord(options.body, { allowArrays: true });
@@ -1187,25 +1209,25 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         outputSchema: body.outputSchema && typeof body.outputSchema === "object" ? body.outputSchema as Record<string, unknown> : undefined,
         applicability: body.applicability && typeof body.applicability === "object" ? body.applicability as Record<string, unknown> : undefined,
       });
-      return updated ? ok(updated) : fail("PROMPT_DRAFT_NOT_FOUND", 404);
+      return updated ? ok(withPromptTemplateUsage(updated)) : fail("PROMPT_DRAFT_NOT_FOUND", 404);
     }
     const promptCopyPostMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/copy$/);
     if (method === "POST" && promptCopyPostMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       const copied = await deps.promptRepository.copyVersion(promptCopyPostMatch[1]);
-      return copied ? ok(copied, 201) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      return copied ? ok(withPromptTemplateUsage(copied), 201) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
     }
     const promptPublishMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/publish$/);
     if (method === "POST" && promptPublishMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       const published = await deps.promptRepository.publishVersion(promptPublishMatch[1]);
-      return published ? ok(published) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      return published ? ok(withPromptTemplateUsage(published)) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
     }
     const promptRetireMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/retire$/);
     if (method === "POST" && promptRetireMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       const retired = await deps.promptRepository.retireVersion(promptRetireMatch[1]);
-      return retired ? ok(retired) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      return retired ? ok(withPromptTemplateUsage(retired)) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
     }
     if (method === "GET" && promptCopyMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
@@ -1214,13 +1236,22 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (stageValue && !PROMPT_STAGES.includes(stageValue as PromptStage)) return fail("INVALID_PROMPT_STAGE");
       const template = await deps.promptRepository.getPublishedVersion(promptCopyMatch[1], stageValue as PromptStage | undefined);
       if (!template) return fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
-      return ok({ templateId: template.templateId, templateVersionId: template.templateVersionId, versionNo: template.versionNo, code: template.code, name: template.name, kind: template.kind, stage: template.stage, executionTarget: template.executionTarget, inputSchema: template.inputSchema, applicability: template.applicability, body: template.body, userPromptTemplate: template.userPromptTemplate });
+      return ok(withPromptTemplateUsage({ templateId: template.templateId, templateVersionId: template.templateVersionId, versionNo: template.versionNo, code: template.code, name: template.name, kind: template.kind, stage: template.stage, executionTarget: template.executionTarget, inputSchema: template.inputSchema, applicability: template.applicability, body: template.body, userPromptTemplate: template.userPromptTemplate }));
     }
-    if (method === "GET" && path.startsWith("/api/prompt-templates")) {
+    const promptListMatch = path.match(/^\/api\/prompt-templates(?:\?(.*))?$/);
+    if (method === "GET" && promptListMatch) {
       if (!deps.promptRepository) return ok([]);
-      const stageValue = new URLSearchParams(path.split("?")[1] ?? "").get("stage") ?? undefined;
+      const params = new URLSearchParams(promptListMatch[1] ?? "");
+      const stageValue = params.get("stage") ?? undefined;
       if (stageValue && !PROMPT_STAGES.includes(stageValue as PromptStage)) return fail("INVALID_PROMPT_STAGE");
-      return ok(await deps.promptRepository.listPublished(stageValue as PromptStage | undefined));
+      const statusValue = params.get("status") ?? "published";
+      if (!["published", "draft", "retired", "all"].includes(statusValue)) return fail("INVALID_PROMPT_STATUS");
+      const listed = statusValue === "published"
+        ? await deps.promptRepository.listPublished(stageValue as PromptStage | undefined)
+        : deps.promptRepository.listTemplates
+          ? await deps.promptRepository.listTemplates({ stage: stageValue as PromptStage | undefined, status: statusValue as PromptVersionStatus | "all" })
+          : await deps.promptRepository.listPublished(stageValue as PromptStage | undefined);
+      return ok(listed.map((item) => withPromptTemplateUsage(item)));
     }
     if (method === "GET" && path === "/api/platforms") {
       return ok(deps.platformRepository ? await deps.platformRepository.listEnabled() : []);

@@ -80,7 +80,7 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
   }, []);
 
   useEffect(() => {
-    api<Template[]>("/api/prompt-templates?stage=reverse_prompt")
+    api<Template[]>("/api/prompt-templates?stage=reverse_prompt&status=all")
       .then(setTemplates)
       .catch(() => undefined);
   }, []);

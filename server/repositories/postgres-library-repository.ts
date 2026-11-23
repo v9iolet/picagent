@@ -1,9 +1,29 @@
 import { assertReferenceAllowed } from "../library-reference-policy.js";
 import { randomUUID } from "node:crypto";
-import type { Pool, PoolClient } from "pg";
+import type { Pool } from "pg";
+import { resolvePromptTemplateUsedBy } from "../prompt-library.js";
 import type { LibraryAssetStatus, LibraryReference, LibraryRepository, LibraryResource, LibraryResourceQuery } from "../types.js";
 
-type ResourceRow = Omit<LibraryResource, "source"> & { source: Record<string, unknown> };
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function mapPromptTemplateRow(row: any): LibraryResource {
+  const source = row.source && typeof row.source === "object" ? (row.source as Record<string, unknown>) : {};
+  const usedBy = resolvePromptTemplateUsedBy({
+    code: typeof source.code === "string" ? source.code : null,
+    stage: row.stage,
+    applicability: source.applicability && typeof source.applicability === "object" ? (source.applicability as Record<string, unknown>) : null,
+  });
+  const createdAt = row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt);
+  const updatedAt = row.updatedAt instanceof Date ? row.updatedAt.toISOString() : String(row.updatedAt);
+  return {
+    ...row,
+    status: row.status as LibraryAssetStatus,
+    usedBy,
+    source: { ...source, usedBy },
+    createdAt,
+    updatedAt,
+  };
+}
 
 function mapReference(row: any): LibraryReference {
   return { id: row.id, suiteId: row.suiteId, resourceId: row.resourceId, resourceType: row.resourceType, targetType: row.targetType, targetId: row.targetId, resourceVersionId: row.resourceVersionId, snapshot: row.snapshot, createdAt: row.createdAt, createdBy: row.createdBy ?? null, archivedAt: row.archivedAt ?? null };
@@ -17,15 +37,28 @@ export class PostgresLibraryRepository implements LibraryRepository {
     const suiteId = query.suiteId ?? null;
     const needle = query.query?.trim() ? `%${query.query.trim()}%` : null;
     if (!query.resourceType || query.resourceType === "prompt_template") {
-      const result = await this.pool.query<any>(`SELECT 'prompt:' || v.id::text AS id, 'prompt_template' AS "resourceType", v.name AS title,
-        left(regexp_replace(v.body, '\\s+', ' ', 'g'), 180) AS summary, NULL::text AS "mimeType", NULL::text AS "previewUrl",
-        NULL::uuid AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", NULL::uuid AS "baseVersionId",
-        v.id::text AS "templateVersionId", v.id::text AS "resourceVersionId", v.stage, jsonb_build_object('templateId', t.id::text, 'code', t.code, 'versionNo', v.version_no, 'status', v.status, 'body', v.body, 'userPromptTemplate', v.user_prompt_template, 'inputSchema', v.input_schema, 'outputSchema', v.output_schema, 'applicability', v.applicability) AS source,
-        v.status AS status, v.created_at AS "createdAt", COALESCE(v.published_at, v.created_at) AS "updatedAt"
-        FROM prompt_library.prompt_templates t JOIN prompt_library.prompt_template_versions v ON v.id = t.published_version_id
-        WHERE t.lifecycle_status = 'active' AND v.status = 'published' AND ($1::text IS NULL OR v.stage = $1)
-          AND ($2::text IS NULL OR v.name ILIKE $2 OR v.body ILIKE $2) ORDER BY v.created_at DESC`, [query.stage ?? null, needle]);
-      resources.push(...result.rows.map((row) => ({ ...row, status: "published" as const })));
+      const result = await this.pool.query<any>(`
+        SELECT * FROM (
+          SELECT DISTINCT ON (t.id)
+            'prompt:' || v.id::text AS id, 'prompt_template' AS "resourceType", v.name AS title,
+            left(regexp_replace(v.body, '\\s+', ' ', 'g'), 180) AS summary, NULL::text AS "mimeType", NULL::text AS "previewUrl",
+            NULL::uuid AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", NULL::uuid AS "baseVersionId",
+            v.id::text AS "templateVersionId", v.id::text AS "resourceVersionId", v.stage,
+            jsonb_build_object('templateId', t.id::text, 'code', t.code, 'versionNo', v.version_no, 'status', v.status, 'body', v.body, 'userPromptTemplate', v.user_prompt_template, 'inputSchema', v.input_schema, 'outputSchema', v.output_schema, 'applicability', v.applicability) AS source,
+            v.status AS status, v.created_at AS "createdAt", COALESCE(v.published_at, v.created_at) AS "updatedAt"
+          FROM prompt_library.prompt_templates t
+          JOIN prompt_library.prompt_template_versions v ON v.template_id = t.id
+          WHERE ($1::text IS NULL OR v.stage = $1)
+            AND ($2::text IS NULL OR v.name ILIKE $2 OR v.body ILIKE $2 OR t.code ILIKE $2)
+          ORDER BY t.id,
+            CASE WHEN v.id = t.published_version_id AND t.lifecycle_status = 'active' AND v.status = 'published' THEN 0
+                 WHEN v.status = 'published' AND t.lifecycle_status = 'active' THEN 1
+                 WHEN v.status = 'draft' THEN 2
+                 ELSE 3 END,
+            v.version_no DESC
+        ) latest
+        ORDER BY latest."updatedAt" DESC`, [query.stage ?? null, needle]);
+      resources.push(...result.rows.map(mapPromptTemplateRow));
     }
     if (!query.resourceType || query.resourceType === "input_image") {
       const result = await this.pool.query<any>(`SELECT 'input:' || i.id::text AS id, 'input_image' AS "resourceType", i.original_filename AS title,
@@ -85,7 +118,21 @@ export class PostgresLibraryRepository implements LibraryRepository {
   }
 
   async getResource(resourceId: string) {
-    const resourceType = resourceId.startsWith("prompt:") ? "prompt_template" : resourceId.startsWith("input:") ? "input_image" : resourceId.startsWith("base:") ? "base_image" : resourceId.startsWith("task-version:") ? "task_image_version" : resourceId.startsWith("process:") ? "process_image" : resourceId.startsWith("reverse:") ? "reverse_reference_asset" : undefined;
+    if (resourceId.startsWith("prompt:")) {
+      const versionId = resourceId.slice("prompt:".length);
+      if (!UUID_PATTERN.test(versionId)) return null;
+      const result = await this.pool.query<any>(`SELECT 'prompt:' || v.id::text AS id, 'prompt_template' AS "resourceType", v.name AS title,
+        left(regexp_replace(v.body, '\\s+', ' ', 'g'), 180) AS summary, NULL::text AS "mimeType", NULL::text AS "previewUrl",
+        NULL::uuid AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", NULL::uuid AS "baseVersionId",
+        v.id::text AS "templateVersionId", v.id::text AS "resourceVersionId", v.stage,
+        jsonb_build_object('templateId', t.id::text, 'code', t.code, 'versionNo', v.version_no, 'status', v.status, 'body', v.body, 'userPromptTemplate', v.user_prompt_template, 'inputSchema', v.input_schema, 'outputSchema', v.output_schema, 'applicability', v.applicability) AS source,
+        v.status AS status, v.created_at AS "createdAt", COALESCE(v.published_at, v.created_at) AS "updatedAt"
+        FROM prompt_library.prompt_template_versions v
+        JOIN prompt_library.prompt_templates t ON t.id = v.template_id
+        WHERE v.id = $1::uuid`, [versionId]);
+      return result.rows[0] ? mapPromptTemplateRow(result.rows[0]) : null;
+    }
+    const resourceType = resourceId.startsWith("input:") ? "input_image" : resourceId.startsWith("base:") ? "base_image" : resourceId.startsWith("task-version:") ? "task_image_version" : resourceId.startsWith("process:") ? "process_image" : resourceId.startsWith("reverse:") ? "reverse_reference_asset" : undefined;
     if (!resourceType) return null;
     const result = await this.listResources({ resourceType, page: 1, pageSize: 1000 });
     return result.items.find((resource) => resource.id === resourceId) ?? null;

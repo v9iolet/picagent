@@ -14,7 +14,7 @@ import { PostgresListingRepository } from "../server/repositories/postgres-listi
 import { PostgresPipelineRepository } from "../server/repositories/postgres-pipeline-repository.js";
 import { PostgresReplicaRepository } from "../server/repositories/postgres-replica-repository.js";
 import { PostgresPromptRepository } from "../server/repositories/postgres-prompt-repository.js";
-import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
+import { importPromptRecordsWithPolicy, parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { PostgresPlatformRepository } from "../server/repositories/postgres-platform-repository.js";
 import { PostgresSuiteRepository } from "../server/repositories/postgres-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
@@ -1103,5 +1103,116 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
     const archived = await tasks.updateTask(task.id, { status: "archived" });
     assert.equal(archived?.status, "archived");
     assert.ok(archived?.archivedAt, "PostgresTaskRepository.updateTask must set archived_at when archiving");
+  });
+});
+
+test("035 idempotently retires unused templates, preserves read-by-id & library filtering, and keeps active edit/publish working", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const library = new PostgresLibraryRepository(pool);
+
+    // 1. After fresh migrations (001..035): reverse.* seeded in 018 are retired; replica.* seeded in 032 stay published with usedBy
+    const initialPublished = await prompts.listPublished();
+    assert.deepEqual(
+      initialPublished.map((item) => item.code).sort(),
+      ["replica.compose", "replica.high"],
+    );
+    assert.deepEqual(initialPublished.find((i) => i.code === "replica.compose")?.usedBy, ["爆品图复刻·参考风格"]);
+    assert.deepEqual(initialPublished.find((i) => i.code === "replica.high")?.usedBy, ["爆品图复刻·高度复刻"]);
+
+    const initialRetired = await prompts.listTemplates({ status: "retired" });
+    assert.equal(initialRetired.length, 10, "All 10 reverse_prompt templates seeded by 018 must be retired by 035");
+    assert.ok(initialRetired.every((item) => item.stage === "reverse_prompt" && item.status === "retired"));
+    assert.ok(initialRetired.every((item) => Array.isArray(item.usedBy) && item.usedBy.length === 0));
+
+    // Retired reverse version remains readable by ID from both prompt repository and library repository
+    const retiredReverseId = initialRetired[0].templateVersionId;
+    const retiredVersion = await prompts.getVersion(retiredReverseId);
+    assert.ok(retiredVersion);
+    assert.equal(retiredVersion.status, "retired");
+    assert.ok(retiredVersion.body.length > 0);
+    const retiredLibResource = await library.getResource(`prompt:${retiredReverseId}`);
+    assert.ok(retiredLibResource);
+    assert.equal(retiredLibResource.status, "retired");
+    assert.deepEqual(retiredLibResource.usedBy, []);
+
+    // 2. Import normalized active + unused templates via seed policy (publish=true)
+    const files = [
+      "prompt/normalized/general-base-refine.md",
+      "prompt/normalized/general-structure-plan-groups.md",
+      "prompt/normalized/general-category-prompt-groups.md",
+      "prompt/normalized/general-listing-copy.md",
+      "prompt/normalized/replica-compose.md",
+      "prompt/normalized/replica-high.md",
+      "prompt/normalized/general-plan-combined.md",
+      "prompt/normalized/seafood-plan-main.md",
+      "prompt/normalized/general-repair-design.md",
+    ];
+    const records = await Promise.all(
+      files.map(async (file) => parseNormalizedPromptMarkdown(await readFile(file, "utf8"), file)),
+    );
+    await importPromptRecordsWithPolicy(prompts, records, { publish: true });
+
+    const activeAfterImport = await prompts.listPublished();
+    assert.deepEqual(
+      activeAfterImport.map((item) => item.code).sort(),
+      [
+        "general.base_refine",
+        "general.category-prompt",
+        "general.listing-copy",
+        "general.structure-plan",
+        "replica.compose",
+        "replica.high",
+      ],
+    );
+
+    // Library repository filters published vs retired vs all accurately with usedBy
+    const libPublished = await library.listResources({ resourceType: "prompt_template", status: "published", pageSize: 100 });
+    assert.equal(libPublished.items.length, 6);
+    assert.ok(libPublished.items.every((item) => (item.usedBy?.length ?? 0) > 0));
+    const libRetired = await library.listResources({ resourceType: "prompt_template", status: "retired", pageSize: 100 });
+    assert.equal(libRetired.items.length, 13); // 10 reverse + 2 plan + 1 repair
+    const libAll = await library.listResources({ resourceType: "prompt_template", pageSize: 100 });
+    assert.equal(libAll.items.length, 19);
+
+    // 3. Active template copy -> edit draft -> publish flow works end-to-end in PG
+    const baseRefine = activeAfterImport.find((i) => i.code === "general.base_refine")!;
+    const draftCopy = await prompts.copyVersion(baseRefine.templateVersionId);
+    assert.ok(draftCopy);
+    assert.equal(draftCopy.status, "draft");
+    const edited = await prompts.updateDraft(draftCopy.templateVersionId, {
+      name: "产品图转干净产品底图（精修版）",
+      body: `${draftCopy.body}\n保持产品材质与轮廓一致。`,
+    });
+    assert.ok(edited);
+    assert.equal(edited.name, "产品图转干净产品底图（精修版）");
+    const republished = await prompts.publishVersion(edited.templateVersionId);
+    assert.ok(republished);
+    assert.equal(republished.status, "published");
+    assert.deepEqual(republished.usedBy, ["套图·白底精修"]);
+
+    // Old v1 of general.base_refine is now retired, yet still readable by ID
+    const oldV1 = await library.getResource(`prompt:${baseRefine.templateVersionId}`);
+    assert.ok(oldV1);
+    assert.equal(oldV1.status, "retired");
+
+    // 4. Replaying all migrations AND re-running seed import must keep unused templates retired and active templates published
+    await runMigrations(pool);
+    await importPromptRecordsWithPolicy(prompts, records, { publish: true });
+    const publishedAfterReplay = await prompts.listPublished();
+    assert.deepEqual(
+      publishedAfterReplay.map((item) => item.code).sort(),
+      [
+        "general.base_refine",
+        "general.category-prompt",
+        "general.listing-copy",
+        "general.structure-plan",
+        "replica.compose",
+        "replica.high",
+      ],
+    );
+    const retiredAfterReplay = await prompts.listTemplates({ status: "retired" });
+    assert.equal(retiredAfterReplay.length, 13);
+    assert.ok(retiredAfterReplay.every((item) => item.status === "retired"));
   });
 });
