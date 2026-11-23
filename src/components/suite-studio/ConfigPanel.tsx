@@ -249,26 +249,37 @@ export function ConfigPanel({
                     </div>
                   </div>
                   {key === "selling_points" && (
-                    <button
-                      type="button"
-                      ref={layoutEntry}
-                      className="ss-layout-entry"
-                      aria-label="选择卖点图版式参考"
-                      aria-describedby={c.sellingPointLayouts.length ? `${layoutsHelpId} ${layoutCountId}` : layoutsHelpId}
-                      aria-haspopup="dialog"
-                      disabled={value === 0}
-                      onClick={() => setShowLayouts(true)}
-                    >
-                      <span className="ss-layout-entry-icon" aria-hidden="true">?</span>
-                      <span>
-                        <strong>选择卖点图版式参考</strong>
-                        <small id={layoutsHelpId}>每种版式用于一张卖点图</small>
-                      </span>
-                      {c.sellingPointLayouts.length > 0 && (
-                        <span id={layoutCountId} className="ss-layout-entry-badge">已选 {c.sellingPointLayouts.length} 个版式</span>
-                      )}
-                      <span className="ss-layout-entry-arrow" aria-hidden="true">›</span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        ref={layoutEntry}
+                        className="ss-layout-entry"
+                        aria-label="选择卖点图版式参考"
+                        aria-describedby={c.sellingPointLayouts.length ? `${layoutsHelpId} ${layoutCountId}` : layoutsHelpId}
+                        aria-haspopup="dialog"
+                        disabled={value === 0}
+                        onClick={() => setShowLayouts(true)}
+                      >
+                        <span className="ss-layout-entry-icon" aria-hidden="true">?</span>
+                        <span>
+                          <strong>选择卖点图版式参考</strong>
+                          <small id={layoutsHelpId}>每种版式用于一张卖点图</small>
+                        </span>
+                        {c.sellingPointLayouts.length > 0 && (
+                          <span id={layoutCountId} className="ss-layout-entry-badge">已选 {c.sellingPointLayouts.length} 个版式</span>
+                        )}
+                        <span className="ss-layout-entry-arrow" aria-hidden="true">›</span>
+                      </button>
+                      <label className="ss-switch ss-layout-switch">
+                        纯净底图 + 画布矢量排版（零乱码可拖拽改字）
+                        <input
+                          type="checkbox"
+                          disabled={value === 0}
+                          checked={value > 0 && Boolean(c.vectorSellingPointOverlay)}
+                          onChange={(e) => update({ vectorSellingPointOverlay: e.target.checked })}
+                        />
+                      </label>
+                    </>
                   )}
                 </Fragment>
               );

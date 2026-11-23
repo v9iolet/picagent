@@ -21,6 +21,7 @@ import { BeforeAfterLightbox, type LightboxPreview } from "../components/BeforeA
 import { CustomTaskModal } from "../components/CustomTaskModal";
 import { DeliveryGalleryView } from "../components/DeliveryGalleryView";
 import { VersionCompareModal } from "../components/VersionCompareModal";
+import { VectorOverlayEditorModal } from "../components/canvas/VectorOverlayEditorModal";
 import { Icon, ImageWithState, ModelSettingsMessage } from "./shared";
 import { Circle as KonvaCircle, Layer, Line, Rect as KonvaRect, Stage, Text as KonvaText, Transformer } from "react-konva";
 import type Konva from "konva";
@@ -53,6 +54,7 @@ type BoardData = {
   onCopy?: (task: ApiSuiteTask) => void;
   onRegenerate?: (task: ApiSuiteTask) => void;
   onEdit?: (task: ApiSuiteTask, version?: ApiTaskVersion) => void;
+  onVectorOverlay?: (task: ApiSuiteTask, version?: ApiTaskVersion) => void;
   onCompareVersions?: (task: ApiSuiteTask) => void;
   onEditStyle?: () => void;
   onSelectVersion?: (task: ApiSuiteTask, versionId: string, selection: "current" | "final") => void;
@@ -108,6 +110,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
   const onGenerate = data.onGenerate ?? (() => undefined);
   const onRegenerate = data.onRegenerate ?? (() => undefined);
   const onEdit = data.onEdit ?? (() => undefined);
+  const onVectorOverlay = data.onVectorOverlay ?? (() => undefined);
   const onCompareVersions = data.onCompareVersions ?? (() => undefined);
   const onEditStyle = data.onEditStyle ?? (() => undefined);
   const onSelectVersion = data.onSelectVersion ?? (() => undefined);
@@ -115,6 +118,7 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
   const availableVersions = data.task?.versions ?? [];
   const versionIds = availableVersions.map((version) => version.id).join("|");
   const [selectedVersionId, setSelectedVersionId] = useState(data.version?.id ?? "");
+  const previousCurrentVersionId = useRef(data.version?.id ?? "");
 
   useEffect(() => {
     if (data.task?.status !== "generating") { setSimulatedProgress(0); return; }
@@ -124,7 +128,15 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
   }, [data.task?.status]);
 
   useEffect(() => {
-    if (!availableVersions.some((version) => version.id === selectedVersionId)) setSelectedVersionId(data.version?.id ?? availableVersions[0]?.id ?? "");
+    const currentId = data.version?.id ?? "";
+    if (currentId && currentId !== previousCurrentVersionId.current) {
+      previousCurrentVersionId.current = currentId;
+      setSelectedVersionId(currentId);
+      return;
+    }
+    if (!availableVersions.some((version) => version.id === selectedVersionId)) {
+      setSelectedVersionId(currentId || availableVersions[0]?.id || "");
+    }
   }, [data.version?.id, selectedVersionId, versionIds]);
 
   const highlightClass = data.isHighlighted ? "is-lineage-active" : data.isDimmed ? "is-lineage-dim" : "";
@@ -229,6 +241,11 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
         <button type="button" className="wb-card-edit" disabled={!version} onClick={(event) => { event.stopPropagation(); onEdit(task, version); }}>
           <Icon name="edit" />编辑图片
         </button>
+        {!data.isEditChild && (
+          <button type="button" className="wb-card-vector-overlay" disabled={!version} onClick={(event) => { event.stopPropagation(); onVectorOverlay(task, version); }}>
+            卖点排版
+          </button>
+        )}
       </div>
       {missingReference && <small>{missingReferenceHint}</small>}
       {version && (
@@ -350,7 +367,7 @@ function projectComposeGraph(
   selectedNodeId: string | null,
   canvasFilter: CanvasFilter,
   layoutOptions: LaneLayoutOptions,
-  handlers: Pick<BoardData, "onPreview" | "onSelect" | "onGenerate" | "onCopy" | "onRegenerate" | "onEdit" | "onCompareVersions" | "onEditStyle" | "onSelectVersion">,
+  handlers: Pick<BoardData, "onPreview" | "onSelect" | "onGenerate" | "onCopy" | "onRegenerate" | "onEdit" | "onVectorOverlay" | "onCompareVersions" | "onEditStyle" | "onSelectVersion">,
 ) {
   const saved = new Map((layout?.nodes ?? []).map((node) => [node.nodeId, { x: node.x, y: node.y }]));
   const active = workbench.tasks
@@ -1435,6 +1452,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
   const [edges, setEdges] = useState<Edge[]>([]);
   const [preview, setPreview] = useState<LightboxPreview | null>(null);
   const [editor, setEditor] = useState<{ task: ApiSuiteTask; version: ApiTaskVersion } | null>(null);
+  const [vectorEditor, setVectorEditor] = useState<{ task: ApiSuiteTask; version: ApiTaskVersion } | null>(null);
   const [compareTaskId, setCompareTaskId] = useState<string | null>(null);
   const [customTaskOpen, setCustomTaskOpen] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
@@ -1539,6 +1557,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
       onCopy: (task) => copyPrompt(task).catch(() => notify("复制失败")),
       onRegenerate: (task) => regenerateTask(task).catch((error) => notify(error instanceof Error ? error.message : "重新生成提交失败")),
       onEdit: (task, version) => { if (version) setEditor({ task, version }); },
+      onVectorOverlay: (task, version) => { if (version) setVectorEditor({ task, version }); },
       onCompareVersions: (task) => setCompareTaskId(task.id),
       onEditStyle: openStyleDrawer,
       onSelectVersion: (task, versionId, selection) => selectVersion(task, versionId, selection).catch(() => notify("版本选择失败")),
@@ -2005,6 +2024,11 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
                     </button>
                     <button type="button" onClick={() => copyPrompt({ ...selectedTask, promptDraft }).catch(() => notify("复制失败"))}><Icon name="copy" />复制提示词</button>
                     {currentVersion && <button type="button" onClick={() => setEditor({ task: selectedTask, version: currentVersion })}><Icon name="edit" />编辑图片</button>}
+                    {!selectedIsImageEditChild && currentVersion && (
+                      <button type="button" onClick={() => setVectorEditor({ task: selectedTask, version: currentVersion })}>
+                        卖点排版
+                      </button>
+                    )}
                     {selectedTask.versions.length > 0 && (
                       <button type="button" onClick={() => setCompareTaskId(selectedTask.id)}>
                         <Icon name="columns" />版本对比 ({selectedTask.versions.length})
@@ -2072,6 +2096,16 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
           onOperationAdded={(operation, instruction) => persistEditOperation(editor.task, operation, instruction)}
           onRegenerate={() => regenerateTask(editor.task)}
           onSubmit={(spec, instruction) => submitEdit(editor.task, spec, instruction)}
+        />
+      )}
+
+      {vectorEditor && (
+        <VectorOverlayEditorModal
+          task={vectorEditor.task}
+          version={vectorEditor.version}
+          onClose={() => setVectorEditor(null)}
+          onSaved={reload}
+          onNotify={notify}
         />
       )}
 

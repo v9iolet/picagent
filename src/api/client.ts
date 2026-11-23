@@ -1,5 +1,6 @@
 import type { ListingConfig, ListingContent, ListingRules } from "../../shared/listing-config";
 import type { ModelChannelInput, ModelChannelSnapshot, ModelPreferences, ModelSettingsView } from "../../shared/model-settings";
+import type { VectorOverlayDocument } from "../../shared/vector-overlay";
 
 export interface ApiImage {
   id: string; suiteId: string; ordinal: number; originalObjectKey: string; thumbnailObjectKey: string;
@@ -224,6 +225,7 @@ export const suiteApi = {
   getBatch(batchId: string) { return request<{ batch: ApiTaskBatch; slots: ApiTaskSlot[]; attempts: ApiTaskAttempt[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}`); },
   getTaskVersions(taskId: string) { return request<{ versions: ApiTaskVersion[]; attempts: ApiTaskAttempt[] }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/versions`); },
   selectTaskVersion(taskId: string, versionId: string, selection: "current" | "final") { return request<ApiTaskVersion>(`/api/suite-tasks/${encodeURIComponent(taskId)}/versions/${encodeURIComponent(versionId)}/select`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ selection }) }); },
+  renderVectorOverlay(taskId: string, body: { baseVersionId?: string; overlay: VectorOverlayDocument }) { return request<{ version: ApiTaskVersion; task: ApiSuiteTask }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/vector-overlay/render`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   retryAttempt(attemptId: string) { return request<{ batchId: string; status: string }>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({}) }); },
   imageEditorCapabilities() { return request<{ provider: { name: string; version: string; capabilitiesVersion: string; channel?: ModelChannelSnapshot } | null; capabilities: Record<string, boolean> }>("/api/image-editor/capabilities"); },
   getImageEditDraft(sessionId: string) { return request<{ sessionId: string; operations: Array<Record<string, unknown>>; summary: string }>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}`); },

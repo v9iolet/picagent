@@ -10,6 +10,8 @@ import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../
 import { PURE_WHITE_MAIN_IMAGE_REQUIREMENTS } from "../shared/platform-main-background.js";
 import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
 import { allocateSellingPointLayouts, resolveSellingPointLayouts } from "../shared/selling-point-layouts.js";
+import { safeValidateVectorOverlayDocument } from "../shared/vector-overlay.js";
+import { compositeVectorOverlay } from "./vector-overlay-renderer.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
 import type { ModelSettings } from "./model-settings.js";
@@ -580,9 +582,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const { provider, model, channel, imageOptions } = await resolveImage();
     if (deps.modelSettings && !provider) throw new Error("TASK_IMAGE_PROVIDER_NOT_CONFIGURED");
     const now = new Date().toISOString();
-    const [suiteForStyle, latestPlanSnapshot] = await Promise.all([
+    const [suiteForStyle, latestPlanSnapshot, latestPipelineRun] = await Promise.all([
       deps.repository.getSuite(suiteId),
       deps.planRepository ? deps.planRepository.getLatestSnapshot(suiteId) : Promise.resolve(null),
+      pipelineRepository.getLatestRun(suiteId),
     ]);
     const activeStyleOverride = suiteForStyle?.styleOverride?.trim() || null;
     const planTemplateVersionId = latestPlanSnapshot?.templateVersionId ?? null;
@@ -665,9 +668,14 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         task.categoryCode === "main" &&
         (taskPlan?.dynamicInput.main_image_background === "pure_white_required" ||
           finalPrompt.includes(PURE_WHITE_MAIN_IMAGE_REQUIREMENTS));
+      const vectorSellingPointOverlay =
+        taskPlan?.requestSummary.vectorSellingPointOverlay === true ||
+        taskPlan?.dynamicInput.vector_selling_point_overlay === true ||
+        (latestPipelineRun?.config?.mode === "custom" && latestPipelineRun.config.vectorSellingPointOverlay === true);
       const providerPrompt = buildProviderImagePrompt(finalPrompt, {
         categoryCode: task.categoryCode ?? null,
         pureWhiteMain,
+        vectorSellingPointOverlay,
       });
       const effectiveGlobalStyleCard = shouldApplyStyleOverride
         ? { ...(task.globalStyleCard ?? {}), promptPrefix: activeStyleOverride, overridden: true }
@@ -675,7 +683,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const effectivePromptSha256 = shouldApplyStyleOverride
         ? createHash("sha256").update(finalPrompt).digest("hex")
         : (task.promptSha256 ?? createHash("sha256").update(finalPrompt).digest("hex"));
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium", ...(vectorSellingPointOverlay ? { vectorSellingPointOverlay: true } : {}) }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
@@ -1983,6 +1991,200 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
     const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
     if (method === "GET" && taskPreviewMatch) return await previewTaskVersion(taskPreviewMatch[1], taskPreviewMatch[2]);
+
+    const vectorOverlayRenderMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/vector-overlay\/render$/);
+    if (method === "POST" && vectorOverlayRenderMatch) {
+      if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
+      const task = await deps.taskRepository.getTask(vectorOverlayRenderMatch[1]);
+      if (!task || task.status === "archived") return fail("INVALID_SUITE_TASK", 404);
+
+      const body = asRecord(options.body, { allowArrays: true });
+      const overlayCheck = safeValidateVectorOverlayDocument(body.overlay);
+      if (!overlayCheck.ok) {
+        return fail("VECTOR_OVERLAY_INVALID", 400, `${errorMessages.VECTOR_OVERLAY_INVALID}（${overlayCheck.error}）`);
+      }
+      const validatedOverlay = overlayCheck.value;
+
+      const { versions, attempts } = await deps.taskRepository.listTaskVersions(task.id);
+      if (!versions.length) {
+        return fail("VECTOR_OVERLAY_NO_BASE_VERSION", 409);
+      }
+
+      const requestedBaseVersionId = typeof body.baseVersionId === "string" && body.baseVersionId.trim()
+        ? body.baseVersionId.trim()
+        : null;
+
+      let baseVersion = requestedBaseVersionId
+        ? versions.find((item) => item.id === requestedBaseVersionId) ?? null
+        : null;
+      if (requestedBaseVersionId && !baseVersion) {
+        return fail("INVALID_TASK_VERSION", 404);
+      }
+
+      if (!baseVersion) {
+        const currentVersion = versions.find((item) => item.isCurrent) ?? versions[0];
+        const candidateCleanId = typeof currentVersion.promptSnapshot?.cleanBaseVersionId === "string"
+          ? currentVersion.promptSnapshot.cleanBaseVersionId
+          : null;
+        baseVersion = (candidateCleanId ? versions.find((item) => item.id === candidateCleanId) : null) ?? currentVersion;
+      }
+
+      const inheritedCleanId = typeof baseVersion.promptSnapshot?.cleanBaseVersionId === "string"
+        ? baseVersion.promptSnapshot.cleanBaseVersionId
+        : null;
+      const cleanBaseVersionId = (inheritedCleanId && versions.some((item) => item.id === inheritedCleanId))
+        ? inheritedCleanId
+        : baseVersion.id;
+
+      const renderKey = idempotencyKey || `vector-overlay:${randomUUID()}`;
+      if (idempotencyKey) {
+        const existingBatch = (await deps.taskRepository.listBatches(task.suiteId)).find((batch) => batch.idempotencyKey === renderKey);
+        if (existingBatch && existingBatch.status === "completed") {
+          const suiteSlots = await deps.taskRepository.listSlots(task.suiteId);
+          const existingSlot = suiteSlots.find((slot) => slot.batchId === existingBatch.id && slot.taskId === task.id);
+          const existingVersion = (existingSlot?.selectedVersionId ? versions.find((item) => item.id === existingSlot.selectedVersionId) : null)
+            ?? versions.find((item) => item.isCurrent)
+            ?? versions[0];
+          const hydratedTask = {
+            ...taskView(task),
+            versions: versions.map(taskVersionView),
+            attempts: attempts.map(taskAttemptView),
+            slots: suiteSlots.filter((slot) => slot.taskId === task.id).map(taskSlotView),
+          };
+          return ok({ version: taskVersionView(existingVersion), task: hydratedTask }, 200);
+        }
+      }
+
+      const sourceObject = await deps.storage.get(baseVersion.objectKey);
+      if (!sourceObject) {
+        return fail("INPUT_OBJECT_NOT_FOUND", 404);
+      }
+
+      const composited = await compositeVectorOverlay(sourceObject.bytes, validatedOverlay);
+      const processed = await processGeneratedImage(composited.bytes);
+      const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
+      await deps.storage.put({ key: objectKey, bytes: processed.bytes, contentType: processed.mimeType });
+
+      const baseAttempt = attempts.find((item) => item.id === baseVersion.attemptId) ?? attempts[attempts.length - 1];
+      const timestamp = new Date().toISOString();
+      const batchId = randomUUID();
+      const slotId = randomUUID();
+      const attemptId = randomUUID();
+      const snapshotBase = baseVersion.promptSnapshot ?? {};
+      const promptSnapshot: Record<string, unknown> = {
+        ...snapshotBase,
+        finalPrompt: typeof snapshotBase.finalPrompt === "string" ? snapshotBase.finalPrompt : task.promptDraft,
+        prompt: typeof snapshotBase.prompt === "string" ? snapshotBase.prompt : task.promptDraft,
+        categoryCode: snapshotBase.categoryCode ?? task.categoryCode ?? null,
+        globalStyleCard: snapshotBase.globalStyleCard ?? task.globalStyleCard ?? {},
+        vectorOverlay: validatedOverlay,
+        cleanBaseVersionId,
+        renderEngine: "sharp-svg-v1",
+      };
+      const contextSnapshot: Record<string, unknown> = {
+        ...(baseAttempt?.contextSnapshot ?? {}),
+        suiteTaskId: task.id,
+        imageType: task.imageType,
+        categoryCode: task.categoryCode ?? null,
+        renderEndpoint: "/api/suite-tasks/:taskId/vector-overlay/render",
+        baseVersionId: baseVersion.id,
+        cleanBaseVersionId,
+        layoutId: validatedOverlay.layoutId,
+        themeId: validatedOverlay.themeId,
+      };
+      const overlaySha256 = createHash("sha256").update(JSON.stringify(validatedOverlay)).digest("hex");
+
+      const batch: TaskGenerationBatch = {
+        id: batchId,
+        suiteId: task.suiteId,
+        kind: "single",
+        requestedCount: 1,
+        taskIds: [task.id],
+        status: "running",
+        idempotencyKey: renderKey,
+        createdAt: timestamp,
+        startedAt: timestamp,
+        finishedAt: null,
+      };
+      const slot: TaskResultSlot = {
+        id: slotId,
+        batchId,
+        taskId: task.id,
+        slotOrdinal: 1,
+        retryOfSlotId: null,
+        status: "generating",
+        selectedVersionId: null,
+        createdAt: timestamp,
+        completedAt: null,
+      };
+      const attempt: TaskGenerationAttempt = {
+        id: attemptId,
+        slotId,
+        attemptNo: 1,
+        provider: "vector-overlay",
+        model: "sharp-svg-v1",
+        endpoint: "/v1/images/edits",
+        requestSummary: {
+          n: 1,
+          kind: "vector_overlay",
+          renderEndpoint: "/api/suite-tasks/:taskId/vector-overlay/render",
+          layoutId: validatedOverlay.layoutId,
+          themeId: validatedOverlay.themeId,
+          elementCount: validatedOverlay.elements.length,
+          baseVersionId: baseVersion.id,
+          cleanBaseVersionId,
+        },
+        promptSnapshot,
+        promptSha256: overlaySha256,
+        contextSnapshot,
+        sourceKind: baseAttempt?.sourceKind ?? (task.sourceLibraryReferenceId ? "library" : "original"),
+        sourceObjectKey: baseAttempt?.sourceObjectKey ?? baseVersion.objectKey,
+        sourceInputImageId: baseAttempt?.sourceInputImageId ?? task.sourceInputImageId ?? null,
+        sourceBaseVersionId: baseAttempt?.sourceBaseVersionId ?? null,
+        sourceLibraryReferenceId: baseAttempt?.sourceLibraryReferenceId ?? task.sourceLibraryReferenceId ?? null,
+        sourceResourceVersionId: baseAttempt?.sourceResourceVersionId ?? task.sourceResourceVersionId ?? null,
+        status: "running",
+        errorCode: null,
+        errorMessage: null,
+        externalRequestId: null,
+        startedAt: timestamp,
+        finishedAt: null,
+      };
+
+      const reservation = await deps.taskRepository.beginBatch({
+        batch,
+        slots: [slot],
+        attempts: [attempt],
+      });
+      if (!reservation.duplicate) {
+        await deps.taskRepository.completeAttempt({
+          attemptId,
+          slotId,
+          taskId: task.id,
+          objectKey,
+          processObjectKeys: [],
+          sha256: processed.sha256,
+          width: processed.width,
+          height: processed.height,
+          mimeType: processed.mimeType,
+          completedAt: new Date().toISOString(),
+        });
+      }
+
+      const [latestTask, updatedHistory, suiteSlots] = await Promise.all([
+        deps.taskRepository.getTask(task.id),
+        deps.taskRepository.listTaskVersions(task.id),
+        deps.taskRepository.listSlots(task.suiteId),
+      ]);
+      const finalVersion = updatedHistory.versions.find((item) => item.isCurrent) ?? updatedHistory.versions[0];
+      const hydratedTask = {
+        ...taskView(latestTask ?? task),
+        versions: updatedHistory.versions.map(taskVersionView),
+        attempts: updatedHistory.attempts.map(taskAttemptView),
+        slots: suiteSlots.filter((item) => item.taskId === task.id).map(taskSlotView),
+      };
+      return ok({ version: taskVersionView(finalVersion), task: hydratedTask }, 200);
+    }
 
     const removeImageMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)$/);
     if (method === "DELETE" && removeImageMatch) {
