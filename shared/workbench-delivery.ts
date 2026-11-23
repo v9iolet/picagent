@@ -1,3 +1,5 @@
+import { listingFieldEnabled, type ListingContent, type ListingRules } from "./listing-config.js";
+
 export type DeliverySourceRole = "edit_final" | "parent_final" | "edit_current" | "parent_current" | "pending";
 
 export interface DeliveryVersionLike {
@@ -766,4 +768,96 @@ export function computeOutpaintPreviewBox(
   const innerY = (1 - innerHeight) / 2;
 
   return { targetWidth, targetHeight, anchor, innerX, innerY, innerWidth, innerHeight };
+}
+
+export interface ListingCopyMarkdownInput {
+  suiteName: string;
+  platformName?: string;
+  marketScope?: string;
+  job: {
+    platform: string;
+    targetMarket: string;
+    outputLanguage: string;
+  };
+  version: {
+    versionNumber: number;
+    createdAt: string;
+    content: ListingContent;
+  };
+  rules?: ListingRules;
+  exportedAt: string;
+}
+
+/** Formats a listing-copy version into a UTF-8 Markdown document for delivery ZIP export. */
+export function formatListingCopyMarkdown(input: ListingCopyMarkdownInput): string {
+  const { suiteName, platformName, marketScope, job, version, rules, exportedAt } = input;
+  const content = version.content;
+  const domestic = marketScope === "domestic";
+  const lines: string[] = [
+    `# ${suiteName} — 商品上架文案`,
+    "",
+    `- 目标平台：${platformName ? `${platformName} (${job.platform})` : job.platform}`,
+    `- 目标市场：${job.targetMarket}`,
+    `- 输出语言：${job.outputLanguage}`,
+    `- 版本号：v${version.versionNumber}`,
+    `- 导出时间：${exportedAt}`,
+    "",
+  ];
+
+  const pushTextSection = (heading: string, value?: string) => {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+    lines.push(`## ${heading}`, "", trimmed, "");
+  };
+
+  lines.push("## 标题", "", content.title?.trim() || "（空）", "");
+
+  if (listingFieldEnabled("itemHighlights", rules) || content.itemHighlights?.trim()) {
+    pushTextSection("商品亮点 (Item Highlights)", content.itemHighlights);
+  }
+
+  if (listingFieldEnabled("subtitle", rules) || content.subtitle?.trim()) {
+    pushTextSection("促销副标题", content.subtitle);
+  }
+
+  const bullets = (content.bulletPoints ?? []).map((item) => item.trim()).filter(Boolean);
+  lines.push(`## ${domestic ? "卖点短句" : "五点描述"}`, "");
+  if (bullets.length) {
+    bullets.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
+  } else {
+    lines.push("（空）");
+  }
+  lines.push("");
+
+  lines.push("## 商品描述", "", content.description?.trim() || "（空）", "");
+
+  const searchTerms = (content.searchTerms ?? []).map((item) => item.trim()).filter(Boolean);
+  if ((listingFieldEnabled("searchTerms", rules) || searchTerms.length > 0) && searchTerms.length > 0) {
+    lines.push("## 后台搜索词", "", searchTerms.join(" "), "");
+    for (const term of searchTerms) lines.push(`- ${term}`);
+    lines.push("");
+  }
+
+  const tags = (content.tags ?? []).map((item) => item.trim()).filter(Boolean);
+  if ((listingFieldEnabled("tags", rules) || tags.length > 0) && tags.length > 0) {
+    lines.push("## 商品标签 (Tags)", "", tags.join(", "), "");
+    for (const tag of tags) lines.push(`- ${tag}`);
+    lines.push("");
+  }
+
+  if (listingFieldEnabled("seoTitle", rules) || content.seoTitle?.trim()) {
+    pushTextSection("SEO Meta Title", content.seoTitle);
+  }
+
+  if (listingFieldEnabled("seoDescription", rules) || content.seoDescription?.trim()) {
+    pushTextSection("SEO Meta Description", content.seoDescription);
+  }
+
+  const hashtags = (content.hashtags ?? []).map((item) => item.trim()).filter(Boolean);
+  if ((listingFieldEnabled("hashtags", rules) || hashtags.length > 0) && hashtags.length > 0) {
+    const formatted = hashtags.map((tag) => (tag.startsWith("#") ? tag : `#${tag}`));
+    lines.push("## 话题标签 (#Tag)", "", formatted.join(" "), "");
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
 }

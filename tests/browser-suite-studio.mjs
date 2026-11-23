@@ -335,10 +335,9 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   const first = cards.first();
   assert.equal(await first.getByRole("button", { name: "编辑文字" }).count(), 0);
   await first.getByRole("button", { name: "编辑图片" }).click();
-  await page.waitForURL(new RegExp(`/create/canvas/${suiteId}`));
   const dialog = page.getByRole("dialog", { name: "图片编辑器" });
   await dialog.waitFor();
-  await page.waitForFunction(() => !window.location.search.includes("editTask=") && !window.location.search.includes("editVersion="));
+  assert.equal(new URL(page.url()).pathname, `/create/suite/${suiteId}`);
   assert.equal(await dialog.isVisible(), true);
   await dialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
   await dialog.getByRole("button", { name: /折叠插脚/ }).waitFor();
@@ -348,16 +347,19 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
   await Promise.all([opReq, submitReq]);
   await dialog.waitFor({ state: "hidden" });
+  assert.equal(new URL(page.url()).pathname, `/create/suite/${suiteId}`);
   assert.equal(
     fixture.calls.find((x) => x.path.endsWith("/operations")).body.operation.payload.newText,
     "折叠设计",
   );
   assert.ok(fixture.calls.some((x) => x.path.endsWith("/submit")));
-  await page.getByRole("button", { name: "返回套图", exact: true }).click();
-  await page.waitForURL(`**/create/suite/${suiteId}`);
-  await batch.locator('[data-status="completed"]').waitFor();
+  await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
   await first.getByRole("combobox").selectOption("4K");
+  const regenReq = page.waitForResponse(
+    (res) => res.request().method() === "POST" && res.url().includes("/api/suite-tasks/") && res.url().endsWith("/generation"),
+  );
   await first.getByRole("button", { name: "重新生成" }).click();
+  await regenReq;
   await batch.getByText("图片已更新", { exact: true }).waitFor();
   assert.deepEqual(fixture.calls.find((x) => x.path.endsWith("/tasks/batch-params")).body.generationParams, {
     size: "4K",

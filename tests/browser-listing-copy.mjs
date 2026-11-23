@@ -14,6 +14,7 @@ import { MemoryPlanRepository } from "../server/repositories/memory-plan-reposit
 import { MemoryCategoryPromptRepository } from "../server/repositories/memory-category-prompt-repository.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
+import { readZipEntries } from "../server/zip.js";
 import { DETAIL_CATEGORY_CODES } from "../shared/suite-categories.js";
 
 const photo = "public/assets/gan65-product.jpg";
@@ -141,7 +142,7 @@ async function offlineBrowser(t, { pendingCopy, legacyEtsy = false } = {}) {
   t.after(() => vite.close());
   const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
   t.after(() => browser.close());
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, permissions: ["clipboard-read", "clipboard-write"] });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, permissions: ["clipboard-read", "clipboard-write"], acceptDownloads: true });
   page.setDefaultTimeout(8000);
   const url = vite.resolvedUrls.local[0];
   await page.route("**/*", (route) => route.request().url().startsWith(url) ? route.continue() : route.abort());
@@ -209,6 +210,18 @@ test("Amazon 随套图并行直出商品亮点和后台搜索词，超长字段�
     assert.equal(state.listingCopy.id, state.pipeline.id);
     assert.equal(state.listingCopy.status, "succeeded");
     assert.equal(calls.length, 1);
+
+    await drawer.getByRole("button", { name: "关闭", exact: true }).click();
+    const batch = page.getByRole("region", { name: "生成批次" });
+    await batch.getByLabel("全选本批次").check();
+    const dl = page.waitForEvent("download");
+    await batch.getByRole("button", { name: "下载所选（1）" }).click();
+    const entries = readZipEntries(await readFile(await (await dl).path()));
+    assert.ok(entries.has("listing-copy.md"));
+    const listingMd = entries.get("listing-copy.md").toString("utf8");
+    assert.match(listingMd, new RegExp("A".repeat(76)));
+    assert.match(listingMd, /Foldable plug/);
+    assert.match(listingMd, /茶/);
   } finally {
     pendingCopy.resolve();
   }

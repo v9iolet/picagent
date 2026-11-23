@@ -183,7 +183,7 @@ test("026 persists a pipeline and maps competing running inserts to HTTP 409", {
     assert.deepEqual(first, {
       duplicate: false,
       run: {
-        ...initial, createdAt: new Date(timestamp), updatedAt: new Date(timestamp),
+        ...initial, createdAt: timestamp, updatedAt: timestamp,
         resumeCount: 0, lastResumeKey: null, resumeKeys: [], structureSnapshotId: null, taskIds: [],
       },
     });
@@ -240,7 +240,7 @@ test("026 updates only the requested run fields and resumes with a fresh key and
     assert.deepEqual(await pipelines.getRun(seed.id), original);
     const failed = await pipelines.updateRun(seed.id, patch);
     assert.ok(failed);
-    assert.deepEqual(failed, { ...original, ...patch, updatedAt: new Date(timestamp), completedAt: new Date(timestamp) });
+    assert.deepEqual(failed, { ...original, ...patch, updatedAt: timestamp, completedAt: timestamp });
     assert.equal(await pipelines.resumeRun(original, "wrong-status", "structure_planning", seed.config), null);
     assert.deepEqual(await pipelines.getRun(seed.id), failed);
 
@@ -250,7 +250,7 @@ test("026 updates only the requested run fields and resumes with a fresh key and
     const { rows: [{ now }] } = await pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now");
     assert.deepEqual(resumed, {
       ...failed, status: "running", resumeCount: 1, lastResumeKey: "fresh-key", resumeKeys: ["fresh-key"],
-      config, errorCode: null, errorMessage: null, completedAt: null, updatedAt: now,
+      config, errorCode: null, errorMessage: null, completedAt: null, updatedAt: now.toISOString(),
     });
     assert.deepEqual(await pipelines.getRun(seed.id), resumed);
     const failedAgain = await pipelines.updateRun(seed.id, { status: "failed", completedAt: timestamp });
@@ -345,7 +345,7 @@ test("listing jobs preserve old versions and find the latest generated job for t
     assert.equal(await jobs.save(draft, null), true);
     assert.equal(await jobs.save(hidden, null), true);
     assert.equal(await jobs.save(draft, null), false);
-    assert.deepEqual(await jobs.get(draft.id), { ...draft, createdAt: new Date(timestamp), updatedAt: new Date(timestamp) });
+    assert.deepEqual(await jobs.get(draft.id), draft);
     assert.deepEqual(await jobs.list(10, 0), []);
     assert.equal(await jobs.findLatestBySuiteId(suiteId), null);
 
@@ -407,7 +407,7 @@ test("startup recovery fails running pipelines and listing jobs and increments t
     assert.deepEqual(await jobs.summary(run.id), {
       id: run.id, sourceSuiteId: suiteId, platform: "amazon", targetMarket: "US", outputLanguage: "en",
       input: { sellingPoints: "Steel drinking bottle" }, status: "running", revision: 4, errorCode: null,
-      createdAt: new Date(timestamp), updatedAt: new Date(timestamp),
+      createdAt: timestamp, updatedAt: timestamp,
     });
     assert.equal(await jobs.summary(randomUUID()), null);
 
@@ -446,5 +446,52 @@ test("PG library binds a published input_image from another suite to a canvas ta
     assert.equal(reference.resourceVersionId, id);
     assert.equal(reference.snapshot.suiteId, source.id);
     assert.deepEqual(await library.listReferences(canvas.id, "task", task.id), [reference]);
+  });
+});
+
+test("PG suites feed returns multiple suite_studio batches in descending createdAt order with string timestamps", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const suites = new PostgresSuiteRepository(pool);
+    const pipelines = new PostgresPipelineRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const listings = new PostgresListingRepository(pool);
+
+    const older = await suites.createSuite("较早套图批次");
+    const newer = await suites.createSuite("最新套图批次");
+    await pool.query("UPDATE suite_workbench.suites SET created_at = $2, updated_at = $2 WHERE id = $1", [older.id, "2026-01-01T00:00:00.000Z"]);
+    await pool.query("UPDATE suite_workbench.suites SET created_at = $2, updated_at = $2 WHERE id = $1", [newer.id, "2026-01-02T00:00:00.000Z"]);
+
+    await pipelines.createRun({ ...runningPipeline(older.id), status: "completed", currentPhase: "done", completedAt: timestamp });
+    await tasks.createCustomTask({
+      suiteId: newer.id, planSnapshotId: null, imageType: "main", title: "主图",
+      purpose: "展示主体", promptDraft: "白底主图", sourceInputImageId: null, generationParams: {},
+    });
+
+    const app = createSuiteStudioApp({
+      repository: suites,
+      pipelineRepository: pipelines,
+      taskRepository: tasks,
+      listingRepository: listings,
+      storage: new MemoryStorage(),
+    });
+
+    const feedRes = await app.request("GET", "/api/suites/feed?limit=10&offset=0");
+    assert.equal(feedRes.status, 200);
+    const feed = feedRes.body.data as {
+      items: Array<{ suite: { id: string; createdAt: unknown; updatedAt: unknown }; pipeline: unknown }>;
+      total: number;
+    };
+    assert.equal(feed.total, 2);
+    assert.deepEqual(feed.items.map((item) => item.suite.id), [newer.id, older.id]);
+    for (const item of feed.items) {
+      assert.equal(typeof item.suite.createdAt, "string");
+      assert.equal(typeof item.suite.updatedAt, "string");
+    }
+
+    const stateRes = await app.request("GET", `/api/suites/${older.id}/studio-state`);
+    assert.equal(stateRes.status, 200);
+    const studioState = stateRes.body.data as { suite: { createdAt: unknown; updatedAt: unknown } };
+    assert.equal(typeof studioState.suite.createdAt, "string");
+    assert.equal(typeof studioState.suite.updatedAt, "string");
   });
 });

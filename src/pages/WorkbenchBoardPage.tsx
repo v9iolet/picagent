@@ -78,7 +78,7 @@ const parameterOptions = (options: string[], value: string) => <>
   {!options.includes(value) && <option value={value} disabled>{value}（当前值）</option>}
   {options.map((option) => <option key={option}>{option}</option>)}
 </>;
-const versionGenerationPrompt = (version: ApiTaskVersion, fallback = "") => {
+const versionGenerationPrompt = (version: Pick<ApiTaskVersion, "promptSnapshot">, fallback = "") => {
   const snapshot = version.promptSnapshot ?? {};
   const value = snapshot.finalPrompt ?? snapshot.prompt;
   return typeof value === "string" && value.trim() ? value : fallback;
@@ -777,7 +777,13 @@ function formatClientOcrError(error: unknown): string {
   return "文字识别失败，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
 }
 
-function ImageEditorModal({
+export type ImageEditorTaskInput = Pick<ApiSuiteTask, "id" | "title" | "promptDraft">;
+export type ImageEditorVersionInput = Pick<
+  ApiTaskVersion,
+  "id" | "versionNumber" | "previewUrl" | "width" | "height" | "promptSnapshot"
+>;
+
+export function ImageEditorModal({
   task,
   version,
   onClose,
@@ -785,8 +791,8 @@ function ImageEditorModal({
   onOperationAdded,
   onRegenerate = async () => undefined,
 }: {
-  task: ApiSuiteTask;
-  version: ApiTaskVersion;
+  task: ImageEditorTaskInput;
+  version: ImageEditorVersionInput;
   onClose: () => void;
   onSubmit: (spec: Record<string, unknown>, instruction: string) => Promise<void>;
   onOperationAdded?: (operation: DraftOperation, instruction: string) => Promise<void>;
