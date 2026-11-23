@@ -495,3 +495,129 @@ test("PG suites feed returns multiple suite_studio batches in descending created
     assert.equal(typeof studioState.suite.updatedAt, "string");
   });
 });
+
+test("031 extends origin, task origin_kind, pipeline phase, adds replica tables, and rejects invalid CHECK values", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const suites = new PostgresSuiteRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const pipelines = new PostgresPipelineRepository(pool);
+
+    const expectRejected = async (sql: string, values: unknown[], expected: { code: string; constraint?: string }) => {
+      const tx = await pool.connect();
+      try {
+        await tx.query("BEGIN");
+        await assert.rejects(tx.query(sql, values), expected);
+      } finally {
+        try {
+          await tx.query("ROLLBACK");
+        } finally {
+          tx.release();
+        }
+      }
+    };
+
+    const replicaSuite = await suites.createSuite("PG 复刻批次", undefined, "replica");
+    assert.equal(replicaSuite.origin, "replica");
+    await expectRejected(
+      `INSERT INTO suite_workbench.suites (id, name, status, origin, created_at, updated_at)
+       VALUES ($1, $2, 'draft', $3, now(), now())`,
+      [randomUUID(), "非法来源", "invalid_origin"],
+      { code: "23514", constraint: "suites_origin_check" },
+    );
+
+    const refId = randomUUID();
+    const refObjectKey = `replicas/${replicaSuite.id}/references/${refId}/original`;
+    const refThumbKey = `replicas/${replicaSuite.id}/references/${refId}/thumbnail`;
+    await pool.query(
+      `INSERT INTO suite_workbench.replica_references
+        (id, suite_id, ordinal, filename, mime_type, sha256, width, height, object_key, thumbnail_object_key, remark)
+       VALUES ($1,$2,1,'ref.png','image/png',$3,1024,1024,$4,$5,$6)`,
+      [refId, replicaSuite.id, "a".repeat(64), refObjectKey, refThumbKey, "精".repeat(200)],
+    );
+    await expectRejected(
+      `INSERT INTO suite_workbench.replica_references
+        (id, suite_id, ordinal, filename, mime_type, sha256, width, height, object_key, thumbnail_object_key, remark)
+       VALUES ($1,$2,2,'ref2.png','image/png',$3,1024,1024,$4,$5,$6)`,
+      [randomUUID(), replicaSuite.id, "b".repeat(64), "k1", "k2", "超".repeat(201)],
+      { code: "23514", constraint: "replica_references_remark_check" },
+    );
+    for (const badOrdinal of [0, 7]) {
+      await expectRejected(
+        `INSERT INTO suite_workbench.replica_references
+          (id, suite_id, ordinal, filename, mime_type, sha256, width, height, object_key, thumbnail_object_key)
+         VALUES ($1,$2,$3,'ref.png','image/png',$4,100,100,'k3','k4')`,
+        [randomUUID(), replicaSuite.id, badOrdinal, "c".repeat(64)],
+        { code: "23514", constraint: "replica_references_ordinal_check" },
+      );
+    }
+    await expectRejected(
+      `INSERT INTO suite_workbench.replica_references
+        (id, suite_id, ordinal, filename, mime_type, sha256, width, height, object_key, thumbnail_object_key)
+       VALUES ($1,$2,2,'dup.png','image/png',$3,100,100,'k5','k6')`,
+      [randomUUID(), replicaSuite.id, "a".repeat(64)],
+      { code: "23505" },
+    );
+
+    await pool.query(
+      `INSERT INTO suite_workbench.replica_product_images
+        (id, suite_id, ordinal, source_kind, object_key, library_resource_id, resource_version_id)
+       VALUES ($1,$2,1,'upload',$3,NULL,NULL), ($4,$2,2,'library',$5,'base:123','ver-1')`,
+      [randomUUID(), replicaSuite.id, `replicas/${replicaSuite.id}/products/1/original`, randomUUID(), "suites/other/base/1"],
+    );
+    await expectRejected(
+      `INSERT INTO suite_workbench.replica_product_images
+        (id, suite_id, ordinal, source_kind, object_key)
+       VALUES ($1,$2,3,'url','https://example.com/a.png')`,
+      [randomUUID(), replicaSuite.id],
+      { code: "23514", constraint: "replica_product_images_source_kind_check" },
+    );
+    for (const badOrdinal of [0, 7]) {
+      await expectRejected(
+        `INSERT INTO suite_workbench.replica_product_images
+          (id, suite_id, ordinal, source_kind, object_key)
+         VALUES ($1,$2,$3,'upload','replicas/x')`,
+        [randomUUID(), replicaSuite.id, badOrdinal],
+        { code: "23514", constraint: "replica_product_images_ordinal_check" },
+      );
+    }
+
+    const replicaTaskId = randomUUID();
+    await pool.query(
+      `INSERT INTO suite_workbench.suite_tasks
+        (id, suite_id, plan_snapshot_id, plan_item_id, ordinal, image_type, title, purpose, prompt_draft, generation_params_json, status, origin_kind, replica_reference_id, replica_reference_object_key, created_at, updated_at)
+       VALUES ($1,$2,NULL,NULL,1,'main','复刻卡 1','爆品复刻','提示词','{"size":"1K","ratio":"1:1"}'::jsonb,'pending','replica',$3,$4,$5,$5)`,
+      [replicaTaskId, replicaSuite.id, refId, refObjectKey, timestamp],
+    );
+    const loadedTask = await tasks.getTask(replicaTaskId);
+    assert.ok(loadedTask);
+    assert.equal(loadedTask.originKind, "replica");
+    assert.equal(loadedTask.replicaReferenceId, refId);
+    assert.equal(loadedTask.replicaReferenceObjectKey, refObjectKey);
+    await expectRejected(
+      `INSERT INTO suite_workbench.suite_tasks
+        (id, suite_id, plan_snapshot_id, plan_item_id, ordinal, image_type, title, purpose, prompt_draft, generation_params_json, status, origin_kind, created_at, updated_at)
+       VALUES ($1,$2,NULL,NULL,2,'main','非法卡','测试','提示词','{}'::jsonb,'pending','invalid_kind',$3,$3)`,
+      [randomUUID(), replicaSuite.id, timestamp],
+      { code: "23514", constraint: "suite_tasks_origin_kind_check" },
+    );
+
+    const replicaConfig = { cloneLevel: "high", sceneType: "ecommerce", styleUnified: true, outputLanguage: "zh" };
+    const { run } = await pipelines.createRun({
+      ...runningPipeline(replicaSuite.id),
+      currentPhase: "replica_analyzing",
+      config: replicaConfig,
+    });
+    assert.equal(run.currentPhase, "replica_analyzing");
+    assert.deepEqual(run.config, replicaConfig);
+    await expectRejected(
+      `INSERT INTO suite_workbench.suite_pipeline_runs
+        (id, suite_id, idempotency_key, status, current_phase)
+       VALUES ($1,$2,'bad-phase','failed','invalid_phase')`,
+      [randomUUID(), replicaSuite.id],
+      { code: "23514", constraint: "suite_pipeline_runs_current_phase_check" },
+    );
+
+    // Replaying all migrations with live replica rows must succeed idempotently.
+    await runMigrations(pool);
+  });
+});

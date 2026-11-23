@@ -363,7 +363,7 @@ function projectComposeGraph(
 ) {
   const saved = new Map((layout?.nodes ?? []).map((node) => [node.nodeId, { x: node.x, y: node.y }]));
   const active = workbench.tasks
-    .filter((task) => task.status !== "archived" && (task.originKind === "reverse_import" || !workbench.planSnapshot || task.planSnapshotId === workbench.planSnapshot.id))
+    .filter((task) => task.status !== "archived" && task.originKind !== "replica" && (task.originKind === "reverse_import" || !workbench.planSnapshot || task.planSnapshotId === workbench.planSnapshot.id))
     .slice()
     .sort((left, right) => (left.imageType !== right.imageType ? (left.imageType === "main" ? -1 : 1) : left.ordinal - right.ordinal));
   const materialsByInputId = new Map(workbench.inputImages.map((image) => [image.id, {
@@ -1932,11 +1932,19 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     );
   }
 
+  if (workbench.suite.origin === "replica") {
+    return (
+      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "生图画布", to: "/create/canvas" }]} statusText="复刻批次暂不支持画布模式" statusTone="error">
+        <div className="flow-loading">复刻批次暂不支持在生图画布中打开。<button type="button" className="pa-topbar-btn" onClick={() => navigate("/create/canvas")}>返回画布列表</button></div>
+      </AppShell>
+    );
+  }
+
   const currentVersion = selectedTask?.versions.find((version) => version.isCurrent) ?? selectedTask?.versions[0];
   const isFreeCanvas = workbench.suite.origin === "canvas";
   const returnPath = isFreeCanvas ? "/create/canvas" : `/create/suite/${suiteId}`;
   const missingReference = Boolean(selectedTask && !selectedIsImageEditChild && !hasTaskReference(selectedTask));
-  const appliesStyleOverride = Boolean(styleOverride && selectedTask && !selectedIsImageEditChild && selectedTask.originKind !== "reverse_import");
+  const appliesStyleOverride = Boolean(styleOverride && selectedTask && !selectedIsImageEditChild && selectedTask.originKind !== "reverse_import" && selectedTask.originKind !== "replica");
   const effectiveInspectorPrompt = selectedTask
     ? (selectedIsImageEditChild
       ? (currentVersion ? versionGenerationPrompt(currentVersion, promptDraft) : promptDraft)

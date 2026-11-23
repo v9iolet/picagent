@@ -3,7 +3,7 @@ import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import type { PromptStage } from "./prompt-library.js";
 
 export type SuiteStatus = "draft" | "in_progress";
-export type SuiteOrigin = "suite_studio" | "canvas";
+export type SuiteOrigin = "suite_studio" | "canvas" | "replica";
 
 export interface Suite {
   id: string;
@@ -260,7 +260,7 @@ export interface PlanSnapshot {
 }
 
 export type SuitePipelineStatus = "running" | "waiting_base_refine_decision" | "waiting_human_input" | "completed" | "partial_failed" | "failed";
-export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "done";
+export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "replica_analyzing" | "done";
 export interface SuitePipelineRun {
   id: string;
   suiteId: string;
@@ -366,11 +366,13 @@ export interface SuiteTask {
   factRefs?: string[];
   globalStyleCard?: Record<string, unknown>;
   promptSha256?: string;
-  originKind?: "suite_plan" | "reverse_import";
+  originKind?: "suite_plan" | "reverse_import" | "replica";
   reversePlanId?: string | null;
   reverseReferenceId?: string | null;
   reversePromptVersionId?: string | null;
   reverseTaskGroupId?: string | null;
+  replicaReferenceId?: string | null;
+  replicaReferenceObjectKey?: string | null;
   sourceLibraryReferenceId?: string | null;
   sourceResourceVersionId?: string | null;
   sourceRevision?: number;
@@ -509,4 +511,38 @@ export interface ReverseRepository {
   getPlan(id: string): Promise<ReversePlan | null>;
   listPlans(): Promise<ReversePlan[]>;
   savePlan(plan: ReversePlan): Promise<ReversePlan>;
+}
+
+export interface ReplicaReference {
+  id: string;
+  suiteId: string;
+  ordinal: number;
+  filename: string;
+  mimeType: string;
+  sha256: string;
+  width: number;
+  height: number;
+  objectKey: string;
+  thumbnailObjectKey: string;
+  remark: string;
+  createdAt: string;
+}
+
+export type ReplicaProductImageSourceKind = "upload" | "library";
+
+export interface ReplicaProductImage {
+  id: string;
+  suiteId: string;
+  ordinal: number;
+  sourceKind: ReplicaProductImageSourceKind;
+  objectKey: string;
+  thumbnailObjectKey?: string | null;
+  filename?: string | null;
+  mimeType?: string | null;
+  sha256?: string | null;
+  width?: number | null;
+  height?: number | null;
+  libraryResourceId: string | null;
+  resourceVersionId: string | null;
+  createdAt: string;
 }

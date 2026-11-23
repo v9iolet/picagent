@@ -15,7 +15,7 @@ export function CanvasListPage({ navigate }: { navigate: (to: string) => void })
   useEffect(() => {
     let active = true;
     suiteApi.listCanvases()
-      .then((items) => { if (active) setCanvases(items); })
+      .then((items) => { if (active) setCanvases(items.filter((item) => item.origin !== "replica")); })
       .catch(() => { if (active) setLoadError(true); });
     return () => { active = false; };
   }, [loadVersion]);

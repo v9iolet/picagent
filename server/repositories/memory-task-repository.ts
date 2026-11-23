@@ -31,6 +31,8 @@ export class MemoryTaskRepository implements TaskRepository {
       createdAt: now,
       updatedAt: now,
       originKind: "suite_plan",
+      replicaReferenceId: null,
+      replicaReferenceObjectKey: null,
       referenceImageIds: input.sourceInputImageId ? [input.sourceInputImageId] : [],
       factRefs: [],
       promptSha256: taskPromptHash(input.promptDraft),
@@ -46,7 +48,7 @@ export class MemoryTaskRepository implements TaskRepository {
     const existing = [...this.tasks.values()].filter((task) => task.suiteId === suiteId); const created: SuiteTask[] = [];
     for (const item of snapshot.items) {
       if (existing.some((task) => task.planItemId === item.id)) continue;
-      const task: SuiteTask = { id: randomUUID(), suiteId, planSnapshotId: snapshot.id, planItemId: item.id, ordinal: item.ordinal, imageType: item.imageType, title: item.title, purpose: item.purpose, promptDraft: item.prompt, promptRevision: 1, sourceInputImageId: item.referenceImageIds?.[0] ?? inputImages[0]?.id ?? null, generationParams: { size: "1K", quality: "medium", ...(item.suggestedParams ?? {}), ...(item.aspectRatio ? { aspectRatio: item.aspectRatio } : {}) }, status: inputImages.length ? "pending" : "incomplete", archivedAt: null, createdAt: now, updatedAt: now, categoryCode: item.categoryCode, referenceImageIds: item.referenceImageIds ?? [], factRefs: item.factRefs ?? [], globalStyleCard: item.globalStyleCard, promptSha256: item.promptSha256 ?? taskPromptHash(item.prompt) };
+      const task: SuiteTask = { id: randomUUID(), suiteId, planSnapshotId: snapshot.id, planItemId: item.id, ordinal: item.ordinal, imageType: item.imageType, title: item.title, purpose: item.purpose, promptDraft: item.prompt, promptRevision: 1, sourceInputImageId: item.referenceImageIds?.[0] ?? inputImages[0]?.id ?? null, generationParams: { size: "1K", quality: "medium", ...(item.suggestedParams ?? {}), ...(item.aspectRatio ? { aspectRatio: item.aspectRatio } : {}) }, status: inputImages.length ? "pending" : "incomplete", archivedAt: null, createdAt: now, updatedAt: now, categoryCode: item.categoryCode, referenceImageIds: item.referenceImageIds ?? [], factRefs: item.factRefs ?? [], globalStyleCard: item.globalStyleCard, promptSha256: item.promptSha256 ?? taskPromptHash(item.prompt), originKind: "suite_plan", replicaReferenceId: null, replicaReferenceObjectKey: null };
       this.tasks.set(task.id, task); created.push(task);
     }
     return { tasks: [...this.tasks.values()].filter((task) => task.suiteId === suiteId).sort((a, b) => a.ordinal - b.ordinal), created };
@@ -56,7 +58,7 @@ export class MemoryTaskRepository implements TaskRepository {
     if (existing) return { tasks: await this.listTasks(input.suiteId), created: existing.map((id) => this.tasks.get(id)!).filter(Boolean), duplicate: true };
     const now = new Date().toISOString(); const offset = (await this.listTasks(input.suiteId)).reduce((max, task) => Math.max(max, task.ordinal), 0); const created: SuiteTask[] = [];
     for (const item of input.items) {
-      const task: SuiteTask = { id: randomUUID(), suiteId: input.suiteId, planSnapshotId: null, planItemId: null, ordinal: offset + item.ordinal, imageType: input.mode, title: item.filename, purpose: "爆品参考图反推生图", promptDraft: item.prompt, promptRevision: 1, sourceInputImageId: null, generationParams: { size: "1K", quality: "medium" }, status: "incomplete", archivedAt: null, createdAt: now, updatedAt: now, originKind: "reverse_import", reversePlanId: input.reversePlanId, reverseReferenceId: item.referenceId, reversePromptVersionId: item.promptVersionId, reverseTaskGroupId: input.taskGroupId, sourceLibraryReferenceId: null, sourceResourceVersionId: null, sourceRevision: 0, referenceImageIds: [item.referenceId], factRefs: [], promptSha256: taskPromptHash(item.prompt) };
+      const task: SuiteTask = { id: randomUUID(), suiteId: input.suiteId, planSnapshotId: null, planItemId: null, ordinal: offset + item.ordinal, imageType: input.mode, title: item.filename, purpose: "爆品参考图反推生图", promptDraft: item.prompt, promptRevision: 1, sourceInputImageId: null, generationParams: { size: "1K", quality: "medium" }, status: "incomplete", archivedAt: null, createdAt: now, updatedAt: now, originKind: "reverse_import", reversePlanId: input.reversePlanId, reverseReferenceId: item.referenceId, reversePromptVersionId: item.promptVersionId, reverseTaskGroupId: input.taskGroupId, replicaReferenceId: null, replicaReferenceObjectKey: null, sourceLibraryReferenceId: null, sourceResourceVersionId: null, sourceRevision: 0, referenceImageIds: [item.referenceId], factRefs: [], promptSha256: taskPromptHash(item.prompt) };
       this.tasks.set(task.id, task); created.push(task);
     }
     this.reverseKeys.set(key, created.map((task) => task.id)); return { tasks: await this.listTasks(input.suiteId), created, duplicate: false };
