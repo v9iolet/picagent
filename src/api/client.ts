@@ -27,7 +27,7 @@ export interface ApiPromptInputField {
 }
 export interface ApiPromptTemplate {
   templateId: string; templateVersionId: string; versionNo: number; code: string; name: string;
-  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy"; executionTarget: "llm" | "image_model";
+  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy" | "replica_prompt"; executionTarget: "llm" | "image_model";
   inputSchema: ApiPromptInputField[]; applicability: Record<string, unknown>;
 }
 export interface ApiPromptTemplateCopy extends ApiPromptTemplate { body: string; userPromptTemplate: string; outputSchema?: Record<string, unknown>; status?: "draft" | "published" | "retired" }

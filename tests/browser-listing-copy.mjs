@@ -182,7 +182,7 @@ test("创作栏仅显示三个入口，两个旧文案路由都重定向到商�
     await page.goto(url + path);
     await page.waitForURL(url + "create/suite");
     const tools = page.getByRole("navigation", { name: "创作功能" });
-    assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图反推"]);
+    assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图复刻"]);
   }
 });
 
