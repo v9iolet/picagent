@@ -407,7 +407,15 @@ function llmSource(client: LlmClient) {
   return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };
 }
 
-export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
+function safeDecodePathParam(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
+export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>; clearFinalVersions?(childTaskIds: string[]): Promise<void>; setOnVersionCompleted?(listener: (childTask: { id: string; sourceCardId: string }) => Promise<void>): void }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
   const imageGenerationConcurrency = Math.max(1, Math.floor(Number.isFinite(deps.imageGenerationConcurrency) ? deps.imageGenerationConcurrency! : 3));
   const imageRetryDelayMs = Math.max(0, Math.floor(Number.isFinite(deps.imageRetryDelayMs) ? deps.imageRetryDelayMs! : 1500));
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
@@ -835,6 +843,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const processed = await processGeneratedImage(generated.bytes);
       const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
       await deps.storage.put({ key: objectKey, bytes: processed.bytes, contentType: processed.mimeType });
+      if (task.originKind === "replica") {
+        await clearReplicaCardFinalLocks(task);
+      }
       await deps.taskRepository.completeAttempt({ attemptId: attempt.id, slotId: slot.id, taskId: task.id, objectKey, processObjectKeys: [], sha256: processed.sha256, width: processed.width, height: processed.height, mimeType: processed.mimeType, completedAt: new Date().toISOString() });
       const latestRun = await pipelineRepository.getLatestRun(task.suiteId);
       if (latestRun && (latestRun.status === "partial_failed" || latestRun.status === "failed")) {
@@ -879,6 +890,53 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
     return all.filter((child) => typeof child.task?.id === "string" && allowed.has(child.task.id));
   };
+
+  const clearReplicaCardFinalLocks = async (task: SuiteTask) => {
+    if (!deps.taskRepository || task.originKind !== "replica") return;
+    await deps.taskRepository.clearFinalVersion?.(task.id);
+    if (!deps.imageEditorApi?.clearFinalVersions) return;
+    const children = await loadSuiteImageEditChildren([task]);
+    const childIds = children
+      .map((child) => (typeof child.task?.id === "string" ? child.task.id : ""))
+      .filter(Boolean);
+    if (childIds.length) {
+      await deps.imageEditorApi.clearFinalVersions(childIds);
+    }
+  };
+
+  const resolveRootTaskForEditCard = async (sourceCardId: string): Promise<SuiteTask | null> => {
+    if (!deps.taskRepository || !sourceCardId) return null;
+    const direct = await deps.taskRepository.getTask(sourceCardId);
+    if (direct) return direct;
+    if (!deps.imageEditorApi) return null;
+    const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
+    const data = dataOf(response);
+    if (response.status !== 200 || !Array.isArray(data)) return null;
+    const childById = new Map<string, string>();
+    for (const entry of data as DeliveryEditChildLike[]) {
+      const id = typeof entry.task?.id === "string" ? entry.task.id : "";
+      const parent = typeof entry.task?.sourceCardId === "string" ? entry.task.sourceCardId : "";
+      if (id && parent) childById.set(id, parent);
+    }
+    const visited = new Set<string>();
+    let current = sourceCardId;
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      const next = childById.get(current);
+      if (!next) break;
+      const root = await deps.taskRepository.getTask(next);
+      if (root) return root;
+      current = next;
+    }
+    return null;
+  };
+
+  deps.imageEditorApi?.setOnVersionCompleted?.(async (childTask) => {
+    const rootTask = await resolveRootTaskForEditCard(childTask.sourceCardId);
+    if (rootTask?.originKind === "replica") {
+      await clearReplicaCardFinalLocks(rootTask);
+    }
+  });
   const pipeline = createSuitePipeline({
     repository: deps.repository, storage: deps.storage, platformRepository: deps.platformRepository,
     promptRepository: deps.promptRepository, planRepository: deps.planRepository, taskRepository: deps.taskRepository,
@@ -1042,13 +1100,17 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const libraryResourceMatch = path.match(/^\/api\/library\/resources\/([^/]+)$/);
     if (method === "GET" && libraryResourceMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const resource = await deps.libraryRepository.getResource(libraryResourceMatch[1]);
+      const resourceId = safeDecodePathParam(libraryResourceMatch[1]);
+      if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      const resource = await deps.libraryRepository.getResource(resourceId);
       return resource ? ok(resource) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     }
     const libraryPreviewMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     if (method === "GET" && libraryPreviewMatch) return await (async () => {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const resource = await deps.libraryRepository.getResource(libraryPreviewMatch[1]);
+      const resourceId = safeDecodePathParam(libraryPreviewMatch[1]);
+      if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      const resource = await deps.libraryRepository.getResource(resourceId);
       if (!resource) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       const target = await deps.libraryRepository.getPreviewObject(resource.id);
       return target ? previewObject(target.objectKey, deps.storage) : fail("OBJECT_NOT_FOUND", 404);
@@ -1066,10 +1128,12 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const reverseAssetStatusMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/status$/);
     if (method === "POST" && reverseAssetStatusMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const resourceId = safeDecodePathParam(reverseAssetStatusMatch[1]);
+      if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       const body = asRecord(options.body, { allowArrays: true });
       const status = body.status as import("./types.js").LibraryAssetStatus;
       if (!["draft", "published", "archived"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
-      const resource = await deps.libraryRepository.setResourceStatus(reverseAssetStatusMatch[1], status);
+      const resource = await deps.libraryRepository.setResourceStatus(resourceId, status);
       return resource ? ok(resource) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     }
     if (method === "POST" && path === "/api/library/reverse-reference-assets") {
@@ -1082,20 +1146,27 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const libraryReferencesMatch = path.match(/^\/api\/suites\/([^/]+)\/library\/references(?:\/([^/?]+))?(?:\?.*)?$/);
     if (libraryReferencesMatch && method === "GET") {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const suiteId = safeDecodePathParam(libraryReferencesMatch[1]);
+      if (!suiteId) return fail("INVALID_SUITE_ID", 404);
       const params = new URLSearchParams(path.split("?")[1] ?? "");
-      return ok(await deps.libraryRepository.listReferences(libraryReferencesMatch[1], (params.get("targetType") as "plan" | "task" | null) ?? undefined, params.get("targetId") ?? undefined));
+      return ok(await deps.libraryRepository.listReferences(suiteId, (params.get("targetType") as "plan" | "task" | null) ?? undefined, params.get("targetId") ?? undefined));
     }
     if (libraryReferencesMatch && method === "POST" && !libraryReferencesMatch[2]) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
+      const suiteId = safeDecodePathParam(libraryReferencesMatch[1]);
+      if (!suiteId) return fail("INVALID_SUITE_ID", 404);
       const body = asRecord(options.body, { allowArrays: true });
       if (typeof body.resourceId !== "string" || (body.targetType !== "plan" && body.targetType !== "task") || typeof body.targetId !== "string") return fail("LIBRARY_RESOURCE_NOT_FOUND");
-      try { const result = await deps.libraryRepository.createReference({ suiteId: libraryReferencesMatch[1], resourceId: body.resourceId, targetType: body.targetType, targetId: body.targetId, idempotencyKey, createdBy: typeof body.createdBy === "string" ? body.createdBy : null }); return ok(result.reference, result.duplicate ? 200 : 201); }
+      try { const result = await deps.libraryRepository.createReference({ suiteId, resourceId: body.resourceId, targetType: body.targetType, targetId: body.targetId, idempotencyKey, createdBy: typeof body.createdBy === "string" ? body.createdBy : null }); return ok(result.reference, result.duplicate ? 200 : 201); }
       catch (error) { const code = error instanceof Error ? error.message : "LIBRARY_RESOURCE_NOT_FOUND"; return fail(code, code === "LIBRARY_RESOURCE_FORBIDDEN" || code === "LIBRARY_TARGET_NOT_FOUND" ? 403 : code === "LIBRARY_RESOURCE_NOT_FOUND" ? 404 : 409); }
     }
     if (libraryReferencesMatch && method === "DELETE" && libraryReferencesMatch[2]) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const archived = await deps.libraryRepository.archiveReference(libraryReferencesMatch[1], libraryReferencesMatch[2]);
+      const suiteId = safeDecodePathParam(libraryReferencesMatch[1]);
+      const referenceId = safeDecodePathParam(libraryReferencesMatch[2]);
+      if (!suiteId || !referenceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      const archived = await deps.libraryRepository.archiveReference(suiteId, referenceId);
       return archived ? ok(archived) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     }
     const promptCopyMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/copy(?:\?.*)?$/);
@@ -1575,7 +1646,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return { ...taskView(task), versions: history.versions.map(taskVersionView), attempts: history.attempts.map(taskAttemptView), slots: [] };
       }));
       const imageEditChildren = await loadSuiteImageEditChildren(tasks);
-      const slots = resolveDeliverySlots(taskAggregates, imageEditChildren, { defaultTemplateVersionId: snapshot?.templateVersionId ?? null });
+      const slots = resolveDeliverySlots(taskAggregates, imageEditChildren, {
+        defaultTemplateVersionId: snapshot?.templateVersionId ?? null,
+        preferLatestByTime: suite.origin === "replica",
+      });
       const deliverable = slots.filter((slot) => slot.sourceRole !== "pending" && slot.exportPath && (!selectedTaskIds.size || selectedTaskIds.has(slot.parentTaskId)));
       if (!deliverable.length) return fail("DELIVERY_EMPTY", 400);
 
@@ -2013,6 +2087,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (typeof body.promptDraft === "string") await deps.taskRepository.updateTask(task.id, { promptDraft: body.promptDraft });
       const current = await deps.taskRepository.getTask(task.id);
       try {
+        if (current?.originKind === "replica") {
+          await clearReplicaCardFinalLocks(current);
+        }
         const history = await deps.taskRepository.listTaskVersions(task.id);
         const currentVersion = history.versions.find((version) => version.isCurrent);
         const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);
@@ -2301,7 +2378,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
 
   const previewLibraryResource = async (resourceId: string) => {
     if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-    const resource = await deps.libraryRepository.getResource(resourceId);
+    const decoded = safeDecodePathParam(resourceId);
+    if (!decoded) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+    const resource = await deps.libraryRepository.getResource(decoded);
     if (!resource) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     const target = await deps.libraryRepository.getPreviewObject(resource.id);
     return target ? previewObject(target.objectKey, deps.storage) : fail("OBJECT_NOT_FOUND", 404);

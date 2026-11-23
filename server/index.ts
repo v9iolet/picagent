@@ -218,6 +218,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     const libraryMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     const reverseMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
     const replicaMatch = requestUrl.pathname.match(/^\/api\/replicas\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
+    const safeDecode = (raw: string) => {
+      try { return decodeURIComponent(raw); } catch { return null; }
+    };
     response = inputMatch
       ? await app.preview(inputMatch[1], inputMatch[2], inputMatch[3] as "original" | "thumbnail")
       : baseMatch
@@ -227,7 +230,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       : taskMatch
         ? await app.previewTaskVersion(taskMatch[1], taskMatch[2])
         : libraryMatch
-          ? await app.previewLibraryResource(libraryMatch[1])
+          ? await app.previewLibraryResource(safeDecode(libraryMatch[1]) ?? libraryMatch[1])
         : reverseMatch
           ? await app.previewReverseReference(reverseMatch[1], reverseMatch[2], (reverseMatch[3] as "original" | "thumbnail" | undefined) ?? "thumbnail")
         : replicaMatch

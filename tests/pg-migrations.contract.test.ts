@@ -7,6 +7,7 @@ import { createSuiteStudioApp } from "../server/app.js";
 import { loadPostgresConfig } from "../server/config.js";
 import type { ListingImage, ListingJob, ListingVersion } from "../server/listing-copy.js";
 import { runMigrations } from "../server/migrations.js";
+import { PostgresImageEditorRepository } from "../server/repositories/postgres-image-editor-repository.js";
 import { PostgresLibraryRepository } from "../server/repositories/postgres-library-repository.js";
 import { PostgresTaskRepository } from "../server/repositories/postgres-task-repository.js";
 import { PostgresListingRepository } from "../server/repositories/postgres-listing-copy-repository.js";
@@ -1028,6 +1029,75 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
     });
     assert.equal(saved2.id, saved1.id);
     assert.equal(saved2.promptSnapshot?.prompt, "修订提示词");
+
+    // clearFinalVersion & PostgresImageEditorRepository.clearFinalVersions clear final locks cleanly
+    await tasks.selectVersion(task.id, version.id, "final");
+    const beforeClear = await tasks.listTaskVersions(task.id);
+    assert.equal(beforeClear.versions.some((v) => v.isFinal), true);
+    await tasks.clearFinalVersion(task.id);
+    const afterClear = await tasks.listTaskVersions(task.id);
+    assert.equal(afterClear.versions.some((v) => v.isFinal), false);
+
+    const editorRepo = new PostgresImageEditorRepository(pool);
+    const snapId = randomUUID();
+    const childId = randomUUID();
+    const editAttemptId = randomUUID();
+    await editorRepo.submit({
+      idempotencyKey: `pg-edit-clear-${childId}`,
+      snapshot: {
+        id: snapId,
+        sourceCardId: task.id,
+        sourceVersionId: version.id,
+        parentVersionId: version.id,
+        summary: "测试编辑",
+        sourcePrompt: "PG 复刻提示词",
+        operations: [],
+        provider: { name: "fake", version: "1", capabilitiesVersion: "1" },
+        createdAt: timestamp,
+        schemaVersion: "image-edit-snapshot-v1",
+      },
+      childTask: {
+        id: childId,
+        sourceCardId: task.id,
+        sourceVersionId: version.id,
+        parentVersionId: version.id,
+        snapshotId: snapId,
+        summary: "测试编辑",
+        status: "generating",
+        currentVersionId: null,
+        finalVersionId: null,
+        errorCode: null,
+        errorMessage: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      attempt: {
+        id: editAttemptId,
+        childTaskId: childId,
+        snapshotId: snapId,
+        attemptNo: 1,
+        status: "generating",
+        command: { type: "re_edit", sourceVersionId: version.id, prompt: "测试编辑", operations: [] },
+        provider: { name: "fake", version: "1", capabilitiesVersion: "1" },
+        errorCode: null,
+        errorMessage: null,
+        createdAt: timestamp,
+        completedAt: null,
+      },
+    });
+    const completedEdit = await editorRepo.completeAttempt({
+      attemptId: editAttemptId,
+      objectKey: `image-edits/${childId}/versions/v1.png`,
+      sha256: "d".repeat(64),
+      width: 512,
+      height: 512,
+      mimeType: "image/png",
+      completedAt: timestamp,
+    });
+    await editorRepo.selectVersion(childId, completedEdit.version.id, "final");
+    assert.equal((await editorRepo.getChildTask(childId))?.finalVersionId, completedEdit.version.id);
+    await editorRepo.clearFinalVersions([childId]);
+    assert.equal((await editorRepo.getChildTask(childId))?.finalVersionId, null);
 
     // Soft-archiving a task populates archived_at
     const archived = await tasks.updateTask(task.id, { status: "archived" });

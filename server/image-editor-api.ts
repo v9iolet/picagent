@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ok } from "./api-response.js";
-import { formatOcrErrorMessage, type ImageEditorService } from "./image-editor.js";
+import { formatOcrErrorMessage, type ImageEditChildTask, type ImageEditorService } from "./image-editor.js";
 import type { ErrorEnvelope, ResponseEnvelope } from "./types.js";
 
 export interface ImageEditorApiResponse { status: number; body: ResponseEnvelope<unknown> | ErrorEnvelope }
@@ -69,6 +69,12 @@ export function createImageEditorApi(service: ImageEditorService) {
       const selectMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/select$/);
       if (method === "POST" && selectMatch) { const selection = body.selection === "final" ? "final" : body.selection === "current" ? "current" : null; if (!selection) return fail("INVALID_VERSION_SELECTION"); try { const version = await service.selectVersion(selectMatch[1], selectMatch[2], selection); return version ? ok(version) : fail("INVALID_IMAGE_EDIT_VERSION", 404); } catch (error) { return fail(error instanceof Error ? error.message : "VERSION_NOT_ELIGIBLE_FOR_FINAL", 409); } }
       return fail("NOT_FOUND", 404);
+    },
+    clearFinalVersions(childTaskIds: string[]) {
+      return service.clearFinalVersions(childTaskIds);
+    },
+    setOnVersionCompleted(listener: (childTask: ImageEditChildTask) => Promise<void>) {
+      service.setOnVersionCompleted(listener);
     },
   };
 }

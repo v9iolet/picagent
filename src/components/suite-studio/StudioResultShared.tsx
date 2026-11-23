@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { suiteApi } from "../../api/client";
 import { ImageEditorModal } from "../../pages/WorkbenchBoardPage";
@@ -22,30 +22,54 @@ export function useResultJob(
   notify: (text: string) => void,
   failureMessage = "图片生成失败，请重试。",
 ) {
+  const handlersRef = useRef({
+    readStatus,
+    success,
+    refresh,
+    setJob,
+    notify,
+    failureMessage,
+  });
+  handlersRef.current = {
+    readStatus,
+    success,
+    refresh,
+    setJob,
+    notify,
+    failureMessage,
+  };
+
   useEffect(() => {
     if (!job) return;
     let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     async function poll() {
       try {
-        const status = await readStatus(job);
+        const status = await handlersRef.current.readStatus(job);
         if (!live) return;
         if (status === "running" || status === "generating") {
           timer = setTimeout(poll, 3000);
           return;
         }
-        await refresh(suiteId);
-        if (live) notify(success.includes(status) ? "图片已更新" : failureMessage);
+        await handlersRef.current.refresh(suiteId);
+        if (live) {
+          handlersRef.current.notify(
+            handlersRef.current.success.includes(status)
+              ? "图片已更新"
+              : handlersRef.current.failureMessage,
+          );
+        }
       } catch (error) {
-        if (live) notify(message(error));
+        if (live) handlersRef.current.notify(message(error));
       }
-      if (live) setJob("");
+      if (live) handlersRef.current.setJob("");
     }
-    let timer = setTimeout(poll, 1000);
+    timer = setTimeout(poll, 1000);
     return () => {
       live = false;
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     };
-  }, [job, readStatus, success, suiteId, refresh, setJob, notify, failureMessage]);
+  }, [job, suiteId]);
 }
 
 export function StudioImageEditorHost({

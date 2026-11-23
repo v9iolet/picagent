@@ -303,8 +303,8 @@ export function ReplicaBatchPreview({
     const target = confirmDeleteCard;
     void act(async () => {
       await suiteApi.updateTask(target.parentTaskId, { status: "archived" });
-      setConfirmDeleteCard(null);
       await refresh(id);
+      setConfirmDeleteCard(null);
       setNotice({ text: `已删除「${target.title}」。` });
     });
   };
@@ -525,9 +525,13 @@ export function ReplicaBatchPreview({
                       ? "生成中"
                       : cardFailed
                         ? "失败"
-                        : isFinal
-                          ? `终版 · v${card.versionNumber ?? 1}`
-                          : `v${card.versionNumber ?? 1}`}
+                        : card.isEditedDerived
+                          ? isFinal
+                            ? `终版 · 已编辑 · v${card.versionNumber ?? 1}`
+                            : `已编辑 · v${card.versionNumber ?? 1}`
+                          : isFinal
+                            ? `终版 · v${card.versionNumber ?? 1}`
+                            : `v${card.versionNumber ?? 1}`}
                   </small>
                 </div>
 

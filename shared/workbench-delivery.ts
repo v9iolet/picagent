@@ -191,7 +191,7 @@ function timestampOf(value: unknown): number {
 export function resolveDeliverySlots(
   tasks: DeliveryTaskLike[],
   imageEditChildren: DeliveryEditChildLike[] = [],
-  options: { defaultTemplateVersionId?: string | null } = {},
+  options: { defaultTemplateVersionId?: string | null; preferLatestByTime?: boolean } = {},
 ): ResolvedDeliverySlot[] {
   const activeTasks = tasks
     .filter((task) => task.status !== "archived")
@@ -255,15 +255,78 @@ export function resolveDeliverySlots(
 
     const parentFinal = task.versions.find((version) => version.isFinal) ?? null;
 
-    const editCurrentCandidate = children
+    const editCurrentCandidates = children
       .map((child) => {
         const currentId = typeof child.task.currentVersionId === "string" ? child.task.currentVersionId : null;
         const version = (currentId ? child.versions.find((item) => item.id === currentId) : null) ?? child.versions[child.versions.length - 1] ?? null;
         return version ? { child, version } : null;
       })
-      .find((entry): entry is { child: DeliveryEditChildLike; version: DeliveryEditChildLike["versions"][number] } => Boolean(entry));
+      .filter((entry): entry is { child: DeliveryEditChildLike; version: DeliveryEditChildLike["versions"][number] } => Boolean(entry));
+
+    const isChildDerivedFromChild = (descendant: DeliveryEditChildLike, ancestorId: string): boolean => {
+      const visited = new Set<string>();
+      let current: DeliveryEditChildLike | undefined = descendant;
+      while (current) {
+        const id = String(current.task.id ?? "");
+        if (visited.has(id)) return false;
+        visited.add(id);
+        const sourceCardId = String(current.task.sourceCardId ?? "");
+        if (!sourceCardId) return false;
+        if (sourceCardId === ancestorId) return true;
+        current = childById.get(sourceCardId);
+      }
+      return false;
+    };
+
+    const editCurrentCandidate = options.preferLatestByTime
+      ? editCurrentCandidates
+          .slice()
+          .sort((a, b) => {
+            const timeDiff =
+              timestampOf(b.version.createdAt ?? b.child.task.updatedAt ?? b.child.task.createdAt) -
+              timestampOf(a.version.createdAt ?? a.child.task.updatedAt ?? a.child.task.createdAt);
+            if (timeDiff !== 0) return timeDiff;
+            const aId = String(a.child.task.id ?? "");
+            const bId = String(b.child.task.id ?? "");
+            if (aId && isChildDerivedFromChild(b.child, aId)) return 1;
+            if (bId && isChildDerivedFromChild(a.child, bId)) return -1;
+            return bId.localeCompare(aId);
+          })[0] ?? undefined
+      : editCurrentCandidates[0];
 
     const parentCurrent = task.versions.find((version) => version.isCurrent) ?? task.versions[0] ?? null;
+
+    const editDerivedFromParentVersion = (
+      entry: { child: DeliveryEditChildLike; version: DeliveryEditChildLike["versions"][number] },
+      parentVersionId: string,
+    ): boolean => {
+      const visited = new Set<string>();
+      let current: DeliveryEditChildLike | undefined = entry.child;
+      while (current) {
+        const id = String(current.task.id ?? "");
+        if (visited.has(id)) return false;
+        visited.add(id);
+        const sourceVersionId = typeof current.task.sourceVersionId === "string" ? current.task.sourceVersionId : "";
+        const parentVersionRef = typeof current.task.parentVersionId === "string" ? current.task.parentVersionId : "";
+        if (sourceVersionId === parentVersionId || parentVersionRef === parentVersionId) return true;
+        const sourceCardId: string = String(current.task.sourceCardId ?? "");
+        current = sourceCardId ? childById.get(sourceCardId) : undefined;
+      }
+      return false;
+    };
+
+    const preferEditCurrentOverParentCurrent = (() => {
+      if (!editCurrentCandidate) return false;
+      if (!parentCurrent || !options.preferLatestByTime) return true;
+      const editTime = timestampOf(
+        editCurrentCandidate.version.createdAt ??
+          editCurrentCandidate.child.task.updatedAt ??
+          editCurrentCandidate.child.task.createdAt,
+      );
+      const parentTime = timestampOf(parentCurrent.createdAt);
+      if (editTime !== parentTime) return editTime > parentTime;
+      return editDerivedFromParentVersion(editCurrentCandidate, parentCurrent.id);
+    })();
 
     const buildExportPath = (mimeType: string) => {
       const ext = extensionForMime(mimeType);
@@ -281,7 +344,7 @@ export function resolveDeliverySlots(
       return { exportFilename: filename, exportPath: fullPath };
     };
 
-    if (editFinalCandidate || (!parentFinal && editCurrentCandidate)) {
+    if (editFinalCandidate || (!parentFinal && editCurrentCandidate && preferEditCurrentOverParentCurrent)) {
       const chosen = (editFinalCandidate ?? editCurrentCandidate)!;
       const sourceRole: DeliverySourceRole = editFinalCandidate ? "edit_final" : "edit_current";
       const childTaskId = String(chosen.child.task.id);

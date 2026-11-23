@@ -200,7 +200,7 @@ async function offlineReplicaStudio(t, gates = {}) {
               const editedPreview = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
               let result;
               if (libPreview) {
-                result = await api.previewLibraryResource(decodeURIComponent(libPreview[1]));
+                result = await api.previewLibraryResource(libPreview[1]);
               } else if (versionPreview) {
                 result = await api.previewTaskVersion(versionPreview[1], versionPreview[2]);
               } else if (editedPreview) {
@@ -418,12 +418,33 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await batch.getByRole("button", { name: "保存", exact: true }).click();
   await batch.getByRole("heading", { name: "桌面快充升级版", exact: true }).waitFor();
 
-  // 9. Edit prompt & regenerate card 1 -> creates v2 & promptRevision v2
+  // 9. Card 1: in-place Image Editor -> verify edited state + readonly analysis snapshot -> edit prompt & regenerate -> must show v2 (not swallowed by edit child)
   const firstCard = cards.first();
+  await firstCard.getByRole("button", { name: "编辑图片", exact: true }).click();
+  const editorDialog = page.getByRole("dialog", { name: "图片编辑器" });
+  await editorDialog.waitFor();
+  assert.equal(new URL(page.url()).pathname, "/create/replica");
+  assert.equal(new URL(page.url()).searchParams.get("suite"), suiteId);
+  await editorDialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
+  await editorDialog.getByRole("button", { name: /快充随行/ }).waitFor();
+  await editorDialog.getByLabel("新文字").fill("极速快充");
+  const editSubmitReq = page.waitForResponse(
+    (res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/submit"),
+  );
+  await editorDialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
+  await editSubmitReq;
+  await editorDialog.waitFor({ state: "hidden" });
+  await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
+  await firstCard.getByText("已编辑 · v1", { exact: true }).waitFor();
+
+  // Open prompt dialog on edited card -> verify readonly analysis snapshot (sharedStyle/copy/visualStructure) is still intact, then edit prompt & regenerate
   await firstCard.getByRole("button", { name: "提示词", exact: true }).click();
   const promptDialog = page.getByRole("dialog", { name: /提示词/ });
   await promptDialog.waitFor();
   await promptDialog.getByText("提示词修订 v1", { exact: true }).waitFor();
+  await promptDialog.getByText("查看分析快照信息（只读）", { exact: true }).click();
+  await promptDialog.getByText(/柔和棚拍暖白质感/).waitFor();
+  await promptDialog.getByText(/居中构图/).waitFor();
   const promptBox = promptDialog.getByLabel("复刻提示词", { exact: true });
   const editedPromptText = "暖木桌面高级棚拍桌面快充套装，突出折叠插脚与柔和侧光。";
   await promptBox.fill(editedPromptText);
@@ -461,25 +482,13 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   assert.equal([...zipEntries.keys()].filter((name) => /\.(png|jpe?g|webp)$/i.test(name)).length, 2);
   assert.ok(zipEntries.has("manifest.json"));
 
-  // 11. In-place Image Editor on card 1 (stays on /create/replica?suite=...)
-  await firstCard.getByRole("button", { name: "编辑图片", exact: true }).click();
-  const editorDialog = page.getByRole("dialog", { name: "图片编辑器" });
-  await editorDialog.waitFor();
-  assert.equal(new URL(page.url()).pathname, "/create/replica");
-  assert.equal(new URL(page.url()).searchParams.get("suite"), suiteId);
-  await editorDialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
-  await editorDialog.getByRole("button", { name: /快充随行/ }).waitFor();
-  await editorDialog.getByLabel("新文字").fill("极速快充");
-  const editSubmitReq = page.waitForResponse(
-    (res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/submit"),
-  );
-  await editorDialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
-  await editSubmitReq;
-  await editorDialog.waitFor({ state: "hidden" });
-  await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
-
-  // 12. Card 2: regenerate with original prompt, save to image library (mark final), save as reverse asset, then delete card 2
+  // 11. Card 2: save to image library (mark final) -> regenerate must clear final lock and show v2 -> save as reverse asset -> delete card 2
   const secondCard = cards.nth(1);
+  await secondCard.getByRole("button", { name: /更多操作/ }).click();
+  await secondCard.getByRole("menuitem", { name: "保存到图片资源库", exact: true }).click();
+  await batch.getByText(/已设为终版并确认归档到图片资源库/).waitFor();
+  await secondCard.getByText("终版 · v1", { exact: true }).waitFor();
+
   const origRegenReq = page.waitForResponse(
     (res) => res.request().method() === "POST" && res.url().includes("/api/suite-tasks/") && res.url().endsWith("/generation"),
   );
@@ -487,11 +496,6 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await origRegenReq;
   await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
   await secondCard.getByText("v2", { exact: true }).waitFor();
-
-  await secondCard.getByRole("button", { name: /更多操作/ }).click();
-  await secondCard.getByRole("menuitem", { name: "保存到图片资源库", exact: true }).click();
-  await batch.getByText(/已设为终版并确认归档到图片资源库/).waitFor();
-  await secondCard.getByText(/终版/).waitFor();
 
   await secondCard.getByRole("button", { name: /更多操作/ }).click();
   const saveReverseReq = page.waitForResponse(
@@ -510,7 +514,7 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await deleteCardDialog.waitFor({ state: "hidden" });
   assert.equal(await cards.count(), 1);
 
-  // 13. New replica clears current batch AND resets config panel back to defaults
+  // 12. New replica clears current batch AND resets dirty config panel back to defaults (without reload)
   await page.getByRole("button", { name: "＋ 新建复刻", exact: true }).click();
   await page.waitForURL(/\/create\/replica$/);
   await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
@@ -524,7 +528,7 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   assert.equal(await ratioSelect.inputValue(), "reference");
   assert.equal(await sizeSelect.inputValue(), "1K");
 
-  // 14. Generation history drawer switches back to the renamed batch, then delete batch removes it
+  // 13. Generation history drawer switches back to the renamed batch, then delete batch removes it
   await page.getByRole("button", { name: "生成记录", exact: true }).click();
   const drawer = page.getByRole("dialog", { name: "生成记录" });
   await drawer.waitFor();
@@ -540,6 +544,26 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await deleteBatchDialog.waitFor({ state: "hidden" });
   await page.waitForURL(/\/create\/replica$/);
   await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+
+  // 14. Verify saved reverse reference asset can be published on /assets (encoded reverse%3A<id> status & preview)
+  const savedReverseId = (await saveReverseRes.json()).data.id;
+  await page.goto(url + "assets");
+  await page.getByRole("radio", { name: "草稿", exact: true }).check();
+  await page.locator(".style-card", { hasText: "桌面快充升级版" }).first().click();
+  const publishReq = page.waitForResponse(
+    (res) =>
+      res.request().method() === "POST" &&
+      res.url().includes("/api/library/resources/reverse%3A") &&
+      res.url().endsWith("/status"),
+  );
+  await page.getByRole("button", { name: "发布", exact: true }).click();
+  const publishRes = await publishReq;
+  assert.equal(publishRes.status(), 200);
+  await page.getByText("资源已发布", { exact: true }).waitFor();
+  const previewCheck = await page.request.get(
+    url + `api/library/resources/${encodeURIComponent(savedReverseId)}/preview`,
+  );
+  assert.equal(previewCheck.status(), 200);
 
   // 15. Template library includes replica_prompt stage filter & label
   await page.goto(url + "templates");
