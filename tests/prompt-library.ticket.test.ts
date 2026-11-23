@@ -204,7 +204,16 @@ test("replica_prompt normalized templates parse applicability.cloneLevel, publis
     assert.match(record.body, /替换为/);
   }
   assert.match(composeRecord.body, /重新调整配色|重新调整色彩与场景/);
+  assert.doesNotMatch(composeRecord.body, /迁移配色逻辑/);
+  assert.match(composeRecord.body, /保留清单/);
+  assert.match(composeRecord.body, /必须改变清单/);
+  assert.match(composeRecord.body, /主体姿势\/动作/);
+  assert.match(composeRecord.body, /场景陈设与道具/);
+  assert.match(composeRecord.body, /光线方向与色温/);
+  assert.match(composeRecord.body, /背景材质/);
   assert.match(highRecord.body, /保持参考图的视觉结构|保持参考图视觉结构/);
+  assert.match(highRecord.body, /九宫格/);
+  assert.match(highRecord.body, /与参考图保持相同的构图与元素位置，只替换为目标商品和新文案/);
 
   const prompts = new MemoryPromptRepository();
   const imported = await prompts.importRecords([composeRecord, highRecord]);
@@ -230,6 +239,15 @@ test("replica_prompt normalized templates parse applicability.cloneLevel, publis
   assert.match(migrationSql, /'replica\.compose'/);
   assert.match(migrationSql, /'replica\.high'/);
   assert.match(migrationSql, /'cloneLevel'/);
+
+  const migrationV2Sql = await readFile("db/migrations/036_replica_prompt_templates_v2.sql", "utf8");
+  assert.match(migrationV2Sql, /'replica\.compose'/);
+  assert.match(migrationV2Sql, /'replica\.high'/);
+  assert.match(migrationV2Sql, /replica-v2:/);
+  assert.doesNotMatch(migrationV2Sql, /迁移配色逻辑/);
+  assert.match(migrationV2Sql, /保留清单/);
+  assert.match(migrationV2Sql, /必须改变清单/);
+  assert.match(migrationV2Sql, /与参考图保持相同的构图与元素位置，只替换为目标商品和新文案/);
 });
 
 test("re-importing unchanged replica markdown does not create a v2 draft when seeded sourceSha256 differs", async () => {

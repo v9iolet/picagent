@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { defaultImageOptions } from "../../shared/model-settings";
 import { ApiHttpError, modelSettingsApi, suiteApi } from "../api/client";
 import { AppShell } from "../components/AppShell";
@@ -13,22 +13,22 @@ import { ReplicaBatchPreview } from "../features/replica/ReplicaBatchPreview";
 import { ReplicaConfigPanel } from "../features/replica/ReplicaConfigPanel";
 import { ReplicaEmptyState } from "../features/replica/ReplicaEmptyState";
 import {
+  clearLastReplicaSuiteId,
+  readLastReplicaSuiteId,
+  replicaDraftStore,
+  saveLastReplicaSuiteId,
+} from "../features/replica/replica-draft-store";
+import {
   allowedReplicaSizes,
-  arrayBufferToBase64,
-  computeSha256Hex,
   defaultReplicaSize,
   getReplicaSubmitState,
   INITIAL_REPLICA_CONFIG,
   REPLICA_CLONE_LEVEL_LABELS,
-  REPLICA_MAX_PRODUCTS,
-  REPLICA_MAX_REFERENCES,
   REPLICA_SCENE_LABELS,
   replicaApi,
-  validateImageFile,
   type ReplicaCloneLevel,
   type ReplicaConfigDraft,
   type ReplicaProductDraft,
-  type ReplicaReferenceDraft,
   type ReplicaSceneType,
   type ReplicaStudioState,
 } from "../features/replica/replica-types";
@@ -37,28 +37,6 @@ import "../features/replica/replica-studio.css";
 
 const POLL_INTERVAL_MS = 2500;
 
-let localSeq = 0;
-function nextLocalId(prefix: string): string {
-  localSeq += 1;
-  return `${prefix}-${Date.now()}-${localSeq}`;
-}
-
-function reorderList<T>(items: readonly T[], fromIndex: number, toIndex: number): T[] {
-  if (
-    fromIndex < 0 ||
-    toIndex < 0 ||
-    fromIndex >= items.length ||
-    toIndex >= items.length ||
-    fromIndex === toIndex
-  ) {
-    return items.slice();
-  }
-  const next = items.slice();
-  const [moved] = next.splice(fromIndex, 1);
-  next.splice(toIndex, 0, moved);
-  return next;
-}
-
 export function ReplicaStudioPage({
   suiteId,
   navigate,
@@ -66,52 +44,35 @@ export function ReplicaStudioPage({
   suiteId?: string;
   navigate: (path: string, options?: { replace?: boolean }) => void;
 }) {
+  const draft = useSyncExternalStore(replicaDraftStore.subscribe, replicaDraftStore.getSnapshot);
+  const { references, products, config, refNotice, productNotice } = draft;
+
   const [imageOptions, setImageOptions] = useState(() => defaultImageOptions(""));
-  const [references, setReferences] = useState<ReplicaReferenceDraft[]>([]);
-  const [products, setProducts] = useState<ReplicaProductDraft[]>([]);
-  const [config, setConfig] = useState<ReplicaConfigDraft>(INITIAL_REPLICA_CONFIG);
-  const [refNotice, setRefNotice] = useState("");
-  const [productNotice, setProductNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [pageNotice, setPageNotice] = useState("");
 
   const [currentState, setCurrentState] = useState<ReplicaStudioState | null>(null);
-  const [loadingBatch, setLoadingBatch] = useState(Boolean(suiteId));
+  const [loadingBatch, setLoadingBatch] = useState(() => Boolean(suiteId || readLastReplicaSuiteId()));
   const [batchError, setBatchError] = useState("");
   const [reloadTick, setReloadTick] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const objectUrlsRef = useRef<Set<string>>(new Set());
   const requestSeqRef = useRef(0);
   const appliedSeqRef = useRef(0);
+  const loadedSuiteIdRef = useRef<string | undefined>(undefined);
+  const lastReloadTickRef = useRef(reloadTick);
   const currentSuiteIdRef = useRef<string | undefined>(suiteId);
-  const referencesRef = useRef(references);
-  const productsRef = useRef(products);
+  const mountedRef = useRef(true);
 
-  referencesRef.current = references;
-  productsRef.current = products;
   currentSuiteIdRef.current = suiteId;
 
-  const trackObjectUrl = useCallback((url: string) => {
-    if (url.startsWith("blob:")) objectUrlsRef.current.add(url);
-    return url;
-  }, []);
-
-  const revokeObjectUrl = useCallback((url: string) => {
-    if (!url || !url.startsWith("blob:")) return;
-    if (objectUrlsRef.current.has(url)) {
-      URL.revokeObjectURL(url);
-      objectUrlsRef.current.delete(url);
-    }
-  }, []);
-
   useEffect(() => {
+    mountedRef.current = true;
     const previous = document.title;
     document.title = "爆品图复刻 · PicAgent";
     return () => {
+      mountedRef.current = false;
       document.title = previous;
-      for (const url of objectUrlsRef.current) URL.revokeObjectURL(url);
-      objectUrlsRef.current.clear();
     };
   }, []);
 
@@ -154,10 +115,24 @@ export function ReplicaStudioPage({
   }, []);
 
   useEffect(() => {
-    if (!suiteId) {
+    const savedId = suiteId ? null : readLastReplicaSuiteId();
+    const targetId = suiteId ?? savedId ?? undefined;
+    const isExplicitReload = reloadTick !== lastReloadTickRef.current;
+    lastReloadTickRef.current = reloadTick;
+
+    if (!targetId) {
+      loadedSuiteIdRef.current = undefined;
       applyState(null);
       setLoadingBatch(false);
       setBatchError("");
+      return;
+    }
+
+    if (!isExplicitReload && targetId === loadedSuiteIdRef.current) {
+      if (!suiteId) {
+        navigate(`/create/replica?suite=${encodeURIComponent(targetId)}`, { replace: true });
+      }
+      setLoadingBatch(false);
       return;
     }
 
@@ -167,15 +142,37 @@ export function ReplicaStudioPage({
     const seq = ++requestSeqRef.current;
 
     void replicaApi
-      .state(suiteId)
+      .state(targetId)
       .then((state) => {
-        if (!live) return;
+        if (!live || seq < appliedSeqRef.current) return;
+        if (!suiteId && state.suite.origin !== "replica") {
+          clearLastReplicaSuiteId();
+          loadedSuiteIdRef.current = undefined;
+          applyState(null);
+          return;
+        }
+        loadedSuiteIdRef.current = state.suite.id;
         applyState(state, seq);
+        if (state.suite.origin === "replica") {
+          saveLastReplicaSuiteId(state.suite.id);
+        }
+        if (!suiteId) {
+          navigate(`/create/replica?suite=${encodeURIComponent(state.suite.id)}`, { replace: true });
+        }
       })
       .catch((error) => {
-        if (!live) return;
+        if (!live || seq < appliedSeqRef.current) return;
+        loadedSuiteIdRef.current = undefined;
         applyState(null);
-        setBatchError(message(error));
+        if (!suiteId) {
+          clearLastReplicaSuiteId();
+          setBatchError("");
+        } else {
+          if (readLastReplicaSuiteId() === suiteId) {
+            clearLastReplicaSuiteId();
+          }
+          setBatchError(message(error));
+        }
       })
       .finally(() => {
         if (live) setLoadingBatch(false);
@@ -184,7 +181,7 @@ export function ReplicaStudioPage({
     return () => {
       live = false;
     };
-  }, [suiteId, reloadTick, applyState]);
+  }, [suiteId, reloadTick, navigate, applyState]);
 
   const pollingSuiteId =
     currentState &&
@@ -221,282 +218,40 @@ export function ReplicaStudioPage({
     };
   }, [pollingSuiteId, applyState]);
 
-  const handleAddReferences = useCallback(
-    (files: File[]) => {
-      if (!files.length) return;
-      setRefNotice("");
+  const handleAddReferences = useCallback((files: File[]) => {
+    replicaDraftStore.addReferences(files);
+  }, []);
 
-      const currentCount = referencesRef.current.length;
-      const remaining = REPLICA_MAX_REFERENCES - currentCount;
-      if (remaining <= 0) {
-        setRefNotice(`最多上传 ${REPLICA_MAX_REFERENCES} 张参考图。`);
-        return;
-      }
-
-      const acceptedFiles = files.slice(0, remaining);
-      if (files.length > remaining) {
-        setRefNotice(`最多上传 ${REPLICA_MAX_REFERENCES} 张参考图，超出部分已忽略。`);
-      }
-
-      const pendingItems: Array<{ localId: string; file: File; previewUrl: string }> = [];
-      const newDrafts: ReplicaReferenceDraft[] = [];
-
-      for (const file of acceptedFiles) {
-        const localId = nextLocalId("ref");
-        const error = validateImageFile(file);
-        if (error) {
-          newDrafts.push({
-            localId,
-            filename: file.name,
-            mimeType: file.type,
-            previewUrl: "",
-            bytesBase64: "",
-            sha256: "",
-            remark: "",
-            status: "error",
-            error,
-          });
-          continue;
-        }
-        const previewUrl = trackObjectUrl(URL.createObjectURL(file));
-        newDrafts.push({
-          localId,
-          filename: file.name,
-          mimeType: file.type,
-          previewUrl,
-          bytesBase64: "",
-          sha256: "",
-          remark: "",
-          status: "reading",
-        });
-        pendingItems.push({ localId, file, previewUrl });
-      }
-
-      setReferences((prev) => [...prev, ...newDrafts]);
-
-      void (async () => {
-        const duplicateNames: string[] = [];
-        const batchHashes = new Set<string>();
-        for (const pending of pendingItems) {
-          try {
-            const buffer = await pending.file.arrayBuffer();
-            const [sha256, bytesBase64] = await Promise.all([
-              computeSha256Hex(buffer),
-              Promise.resolve(arrayBufferToBase64(buffer)),
-            ]);
-            const isDuplicate =
-              batchHashes.has(sha256) ||
-              referencesRef.current.some(
-                (item) => item.localId !== pending.localId && item.status === "ready" && item.sha256 === sha256,
-              );
-            if (isDuplicate) {
-              revokeObjectUrl(pending.previewUrl);
-              duplicateNames.push(pending.file.name);
-              setReferences((prev) => prev.filter((item) => item.localId !== pending.localId));
-            } else {
-              batchHashes.add(sha256);
-              setReferences((prev) =>
-                prev.map((item) =>
-                  item.localId === pending.localId
-                    ? { ...item, sha256, bytesBase64, status: "ready" }
-                    : item,
-                ),
-              );
-            }
-          } catch {
-            setReferences((prev) =>
-              prev.map((item) =>
-                item.localId === pending.localId
-                  ? { ...item, status: "error", error: "图片读取失败，请重新上传" }
-                  : item,
-              ),
-            );
-          }
-        }
-        if (duplicateNames.length > 0) {
-          setRefNotice(`已去重忽略重复参考图：${duplicateNames.join("、")}`);
-        }
-      })();
-    },
-    [trackObjectUrl, revokeObjectUrl],
-  );
-
-  const handleRemoveReference = useCallback(
-    (localId: string) => {
-      setReferences((prev) => {
-        const target = prev.find((item) => item.localId === localId);
-        if (target?.previewUrl) revokeObjectUrl(target.previewUrl);
-        return prev.filter((item) => item.localId !== localId);
-      });
-      setRefNotice("");
-    },
-    [revokeObjectUrl],
-  );
+  const handleRemoveReference = useCallback((localId: string) => {
+    replicaDraftStore.removeReference(localId);
+  }, []);
 
   const handleMoveReference = useCallback((fromIndex: number, toIndex: number) => {
-    setReferences((prev) => reorderList(prev, fromIndex, toIndex));
+    replicaDraftStore.moveReference(fromIndex, toIndex);
   }, []);
 
   const handleUpdateReferenceRemark = useCallback((localId: string, remark: string) => {
-    setReferences((prev) =>
-      prev.map((item) => (item.localId === localId ? { ...item, remark } : item)),
-    );
+    replicaDraftStore.updateReferenceRemark(localId, remark);
   }, []);
 
-  const handleAddProductFiles = useCallback(
-    (files: File[]) => {
-      if (!files.length) return;
-      setProductNotice("");
-
-      const remaining = REPLICA_MAX_PRODUCTS - productsRef.current.length;
-      if (remaining <= 0) {
-        setProductNotice(`最多添加 ${REPLICA_MAX_PRODUCTS} 张产品原图。`);
-        return;
-      }
-
-      const acceptedFiles = files.slice(0, remaining);
-      if (files.length > remaining) {
-        setProductNotice(`最多添加 ${REPLICA_MAX_PRODUCTS} 张产品原图，超出部分已忽略。`);
-      }
-
-      const pendingItems: Array<{ localId: string; file: File; previewUrl: string }> = [];
-      const newDrafts: ReplicaProductDraft[] = [];
-
-      for (const file of acceptedFiles) {
-        const localId = nextLocalId("prod");
-        const error = validateImageFile(file);
-        if (error) {
-          newDrafts.push({
-            localId,
-            sourceKind: "upload",
-            filename: file.name,
-            mimeType: file.type,
-            previewUrl: "",
-            bytesBase64: "",
-            sha256: "",
-            status: "error",
-            error,
-          });
-          continue;
-        }
-        const previewUrl = trackObjectUrl(URL.createObjectURL(file));
-        newDrafts.push({
-          localId,
-          sourceKind: "upload",
-          filename: file.name,
-          mimeType: file.type,
-          previewUrl,
-          bytesBase64: "",
-          sha256: "",
-          status: "reading",
-        });
-        pendingItems.push({ localId, file, previewUrl });
-      }
-
-      setProducts((prev) => [...prev, ...newDrafts]);
-
-      void (async () => {
-        const duplicateNames: string[] = [];
-        const batchHashes = new Set<string>();
-        for (const pending of pendingItems) {
-          try {
-            const buffer = await pending.file.arrayBuffer();
-            const [sha256, bytesBase64] = await Promise.all([
-              computeSha256Hex(buffer),
-              Promise.resolve(arrayBufferToBase64(buffer)),
-            ]);
-            const isDuplicate =
-              batchHashes.has(sha256) ||
-              productsRef.current.some(
-                (item) =>
-                  item.sourceKind === "upload" &&
-                  item.localId !== pending.localId &&
-                  item.status === "ready" &&
-                  item.sha256 === sha256,
-              );
-            if (isDuplicate) {
-              revokeObjectUrl(pending.previewUrl);
-              duplicateNames.push(pending.file.name);
-              setProducts((prev) => prev.filter((item) => item.localId !== pending.localId));
-            } else {
-              batchHashes.add(sha256);
-              setProducts((prev) =>
-                prev.map((item) =>
-                  item.localId === pending.localId && item.sourceKind === "upload"
-                    ? { ...item, sha256, bytesBase64, status: "ready" }
-                    : item,
-                ),
-              );
-            }
-          } catch {
-            setProducts((prev) =>
-              prev.map((item) =>
-                item.localId === pending.localId && item.sourceKind === "upload"
-                  ? { ...item, status: "error", error: "图片读取失败" }
-                  : item,
-              ),
-            );
-          }
-        }
-        if (duplicateNames.length > 0) {
-          setProductNotice(`已忽略重复上传的产品图：${duplicateNames.join("、")}`);
-        }
-      })();
-    },
-    [trackObjectUrl, revokeObjectUrl],
-  );
+  const handleAddProductFiles = useCallback((files: File[]) => {
+    replicaDraftStore.addProductFiles(files);
+  }, []);
 
   const handleApplyLibraryProducts = useCallback((selected: ProductResourceSelection[]) => {
-    setProductNotice("");
-    setProducts((prev) => {
-      const selectedById = new Map(selected.map((item) => [item.resourceId, item]));
-      const toDraft = (item: ProductResourceSelection): ReplicaProductDraft => ({
-        localId: `lib-${item.resourceId}`,
-        sourceKind: "library",
-        libraryResourceId: item.resourceId,
-        resourceVersionId: item.resourceVersionId,
-        title: item.title ?? item.resourceId.slice(0, 8),
-        previewUrl: item.previewUrl ?? `/api/library/resources/${encodeURIComponent(item.resourceId)}/preview`,
-        resourceType: item.resourceType,
-        status: "ready",
-      });
-
-      const kept: ReplicaProductDraft[] = [];
-      const keptLibraryIds = new Set<string>();
-      for (const item of prev) {
-        if (item.sourceKind === "upload") {
-          kept.push(item);
-        } else if (selectedById.has(item.libraryResourceId)) {
-          kept.push(toDraft(selectedById.get(item.libraryResourceId)!));
-          keptLibraryIds.add(item.libraryResourceId);
-        }
-      }
-
-      const added = selected
-        .filter((item) => !keptLibraryIds.has(item.resourceId))
-        .slice(0, Math.max(0, REPLICA_MAX_PRODUCTS - kept.length))
-        .map(toDraft);
-
-      return [...kept, ...added];
-    });
+    replicaDraftStore.applyLibraryProducts(selected);
   }, []);
 
-  const handleRemoveProduct = useCallback(
-    (localId: string) => {
-      setProducts((prev) => {
-        const target = prev.find((item) => item.localId === localId);
-        if (target?.sourceKind === "upload" && target.previewUrl) {
-          revokeObjectUrl(target.previewUrl);
-        }
-        return prev.filter((item) => item.localId !== localId);
-      });
-      setProductNotice("");
-    },
-    [revokeObjectUrl],
-  );
+  const handleRemoveProduct = useCallback((localId: string) => {
+    replicaDraftStore.removeProduct(localId);
+  }, []);
 
   const handleMoveProduct = useCallback((fromIndex: number, toIndex: number) => {
-    setProducts((prev) => reorderList(prev, fromIndex, toIndex));
+    replicaDraftStore.moveProduct(fromIndex, toIndex);
+  }, []);
+
+  const handleUpdateConfig = useCallback((patch: Partial<ReplicaConfigDraft>) => {
+    replicaDraftStore.updateConfig(patch);
   }, []);
 
   const refresh = useCallback(
@@ -510,13 +265,9 @@ export function ReplicaStudioPage({
   );
 
   const handleStartNew = useCallback(() => {
-    for (const url of objectUrlsRef.current) URL.revokeObjectURL(url);
-    objectUrlsRef.current.clear();
-    setReferences([]);
-    setProducts([]);
-    setConfig(INITIAL_REPLICA_CONFIG);
-    setRefNotice("");
-    setProductNotice("");
+    clearLastReplicaSuiteId();
+    replicaDraftStore.clearDraft();
+    loadedSuiteIdRef.current = undefined;
     applyState(null);
     setBatchError("");
     setPageNotice("");
@@ -528,6 +279,10 @@ export function ReplicaStudioPage({
 
   const handleBatchDeleted = useCallback(
     (deletedId: string) => {
+      if (readLastReplicaSuiteId() === deletedId || suiteId === deletedId) {
+        clearLastReplicaSuiteId();
+      }
+      loadedSuiteIdRef.current = undefined;
       applyState(null);
       setBatchError("");
       setLoadingBatch(false);
@@ -543,6 +298,7 @@ export function ReplicaStudioPage({
     (id: string) => {
       setHistoryOpen(false);
       setBatchError("");
+      saveLastReplicaSuiteId(id);
       if (id === suiteId) {
         setReloadTick((n) => n + 1);
         return;
@@ -574,16 +330,23 @@ export function ReplicaStudioPage({
       }),
     );
     if (removedIds.size > 0) {
-      setProducts((prev) =>
-        prev.filter((item) => item.sourceKind !== "library" || !removedIds.has(item.libraryResourceId)),
+      replicaDraftStore.removeDeletedLibraryProducts(
+        removedIds,
+        `已移除 ${removedIds.size} 张已删除的图片`,
       );
-      setProductNotice(`已移除 ${removedIds.size} 张已删除的图片`);
     }
     const remaining = candidates.filter(
       (item) => item.sourceKind !== "library" || !removedIds.has(item.libraryResourceId),
     );
     return { remaining, removedIds };
   }, []);
+
+  useEffect(() => {
+    const initialProducts = replicaDraftStore.getSnapshot().products;
+    if (initialProducts.some((item) => item.sourceKind === "library")) {
+      void pruneDeletedLibraryProducts(initialProducts);
+    }
+  }, [pruneDeletedLibraryProducts]);
 
   const handleSubmit = useCallback(async () => {
     const submitState = getReplicaSubmitState(references, products, effectiveConfig, submitting);
@@ -623,15 +386,23 @@ export function ReplicaStudioPage({
         size: effectiveConfig.size,
       });
 
+      replicaDraftStore.clearDraft();
+      saveLastReplicaSuiteId(result.suiteId);
+      loadedSuiteIdRef.current = undefined;
+
+      const stillOnReplicaPage =
+        mountedRef.current && /^\/create\/replica\/?$/.test(window.location.pathname);
+      if (!stillOnReplicaPage) return;
+
       if (result.suiteId === suiteId) {
         setReloadTick((n) => n + 1);
       } else {
         navigate(`/create/replica?suite=${encodeURIComponent(result.suiteId)}`);
       }
     } catch (error) {
-      setPageNotice(message(error));
+      if (mountedRef.current) setPageNotice(message(error));
     } finally {
-      setSubmitting(false);
+      if (mountedRef.current) setSubmitting(false);
     }
   }, [references, products, effectiveConfig, submitting, suiteId, navigate, pruneDeletedLibraryProducts]);
 
@@ -640,11 +411,11 @@ export function ReplicaStudioPage({
     const sceneCode = typeof cfg?.sceneType === "string" ? cfg.sceneType : "";
     const levelCode = typeof cfg?.cloneLevel === "string" ? cfg.cloneLevel : "";
     const sceneLabel =
-      sceneCode && sceneCode in REPLICA_SCENE_LABELS
+      sceneCode && Object.prototype.hasOwnProperty.call(REPLICA_SCENE_LABELS, sceneCode)
         ? REPLICA_SCENE_LABELS[sceneCode as ReplicaSceneType]
         : "";
     const levelLabel =
-      levelCode && levelCode in REPLICA_CLONE_LEVEL_LABELS
+      levelCode && Object.prototype.hasOwnProperty.call(REPLICA_CLONE_LEVEL_LABELS, levelCode)
         ? REPLICA_CLONE_LEVEL_LABELS[levelCode as ReplicaCloneLevel]
         : "";
     const text = [sceneLabel, levelLabel].filter(Boolean).join(" · ");
@@ -693,7 +464,7 @@ export function ReplicaStudioPage({
           onApplyLibraryProducts={handleApplyLibraryProducts}
           onRemoveProduct={handleRemoveProduct}
           onMoveProduct={handleMoveProduct}
-          onUpdateConfig={(patch) => setConfig((prev) => ({ ...prev, ...patch }))}
+          onUpdateConfig={handleUpdateConfig}
           onSubmit={() => void handleSubmit()}
         />
         <main className="ss-results">

@@ -11,6 +11,7 @@ import {
   ReplicaPromptError,
   resolveReplicaPromptTemplate,
 } from "../server/replica/replica-prompt.js";
+import { buildReplicaRolePrefix, resolveReplicaCloneLevel } from "../server/replica/replica-pipeline.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import type { LlmClient, ReplicaPromptLlmInput } from "../server/types.js";
 
@@ -374,4 +375,63 @@ test("resolveReplicaPromptTemplate selects published replica_prompt templates by
   assert.equal(resolvedCompose?.applicability.cloneLevel, "compose");
   assert.equal(resolvedHigh?.code, "replica.high");
   assert.equal(resolvedHigh?.applicability.cloneLevel, "high");
+
+  // compose template must not instruct copying palette logic and must include explicit keep/change checklists
+  assert.doesNotMatch(resolvedCompose!.body, /迁移配色逻辑/);
+  assert.match(resolvedCompose!.body, /保留清单/);
+  assert.match(resolvedCompose!.body, /主体姿势\/动作/);
+  assert.match(resolvedCompose!.body, /景别与机位/);
+  assert.match(resolvedCompose!.body, /大致位置与占比/);
+  assert.match(resolvedCompose!.body, /场景类型/);
+  assert.match(resolvedCompose!.body, /情绪氛围/);
+  assert.match(resolvedCompose!.body, /版式分区/);
+  assert.match(resolvedCompose!.body, /必须改变清单/);
+  assert.match(resolvedCompose!.body, /人物外貌\/发型\/服装/);
+  assert.match(resolvedCompose!.body, /场景陈设与道具/);
+  assert.match(resolvedCompose!.body, /主色调/);
+  assert.match(resolvedCompose!.body, /光线方向与色温/);
+  assert.match(resolvedCompose!.body, /背景材质/);
+  assert.match(resolvedCompose!.body, /脱离参考图独立生图/);
+
+  // high template must require element-by-element positioning and explicit layout-preservation statement
+  assert.match(resolvedHigh!.body, /九宫格/);
+  assert.match(resolvedHigh!.body, /百分比/);
+  assert.match(resolvedHigh!.body, /遮挡/);
+  assert.match(resolvedHigh!.body, /镜头焦段与视角/);
+  assert.match(resolvedHigh!.body, /字号层级/);
+  assert.match(resolvedHigh!.body, /对齐方式/);
+  assert.match(resolvedHigh!.body, /与参考图保持相同的构图与元素位置，只替换为目标商品和新文案/);
+});
+
+test("buildReplicaRolePrefix and resolveReplicaCloneLevel diverge by cloneLevel and product count", () => {
+  assert.equal(
+    buildReplicaRolePrefix(1, "high"),
+    "第1张图为产品外观唯一依据；第2张图为构图与版式基准：保持其构图、元素位置、镜头与光影，只替换为目标商品和新文案，不得复制其中的品牌、Logo、文字与真人肖像。",
+  );
+  assert.equal(
+    buildReplicaRolePrefix(3, "high"),
+    "第1–3张图为产品外观唯一依据；第4张图为构图与版式基准：保持其构图、元素位置、镜头与光影，只替换为目标商品和新文案，不得复制其中的品牌、Logo、文字与真人肖像。",
+  );
+  assert.equal(
+    buildReplicaRolePrefix(0, "high"),
+    "输入图仅作为版式与风格参考，保持构图与元素位置，不得复制其中的品牌、文字与人物，请生成同风格的通用示意商品，不得出现可识别品牌。",
+  );
+  assert.equal(
+    buildReplicaRolePrefix(1, "compose"),
+    "第1张图为产品外观唯一依据，按下方描述重新设计画面。",
+  );
+  assert.equal(
+    buildReplicaRolePrefix(2, "compose"),
+    "第1–2张图为产品外观唯一依据，按下方描述重新设计画面。",
+  );
+  assert.equal(
+    buildReplicaRolePrefix(0, "compose"),
+    "输入图仅用于理解姿势与构图类型，不得沿用其中的人物、服装、陈设、配色、光线、品牌与文字，按下方描述重新设计画面，生成同风格的通用示意商品，不得出现可识别品牌。",
+  );
+
+  assert.equal(resolveReplicaCloneLevel({ cloneLevel: "compose" }), "compose");
+  assert.equal(resolveReplicaCloneLevel({ cloneLevel: "high" }), "high");
+  assert.equal(resolveReplicaCloneLevel({ replicaPromptSnapshot: { cloneLevel: "compose" } }), "compose");
+  assert.equal(resolveReplicaCloneLevel({}), "high");
+  assert.equal(resolveReplicaCloneLevel(undefined), "high");
 });

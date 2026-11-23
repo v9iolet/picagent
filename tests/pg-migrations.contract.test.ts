@@ -715,7 +715,7 @@ test("PG replica repository normalizes null remark, creates replica tasks, recov
     assert.equal(recovered?.currentPhase, "replica_analyzing");
     assert.equal(recovered?.errorCode, "PIPELINE_INTERRUPTED");
 
-    // Importing unchanged replica markdown after 032 seed must NOT create duplicate v2 drafts
+    // Importing unchanged replica markdown after 036 v2 seed must match published v2 without creating duplicate v3 drafts
     const composeRecord = parseNormalizedPromptMarkdown(
       await readFile("prompt/normalized/replica-compose.md", "utf8"),
       "prompt/normalized/replica-compose.md",
@@ -727,14 +727,26 @@ test("PG replica repository normalizes null remark, creates replica tasks, recov
     const imported = await prompts.importRecords([composeRecord, highRecord]);
     assert.equal(imported.length, 2);
     for (const version of imported) {
-      assert.equal(version.versionNo, 1);
+      assert.equal(version.versionNo, 2);
       assert.equal(version.status, "published");
       const allVersions = await prompts.listVersions(version.templateId);
-      assert.equal(allVersions.length, 1);
+      assert.equal(allVersions.length, 2);
+      assert.equal(allVersions[0].versionNo, 1);
+      assert.equal(allVersions[0].status, "retired");
+      assert.equal(allVersions[1].versionNo, 2);
+      assert.equal(allVersions[1].status, "published");
     }
 
-    // Semantic match in PG excludes retired versions and prefers published over draft
+    // Verify v2 published bodies reflect compose/high split while v1 stays preserved for historical snapshots
     const publishedCompose = imported.find((v) => v.code === "replica.compose")!;
+    const publishedHigh = imported.find((v) => v.code === "replica.high")!;
+    assert.doesNotMatch(publishedCompose.body, /迁移配色逻辑/);
+    assert.match(publishedCompose.body, /保留清单/);
+    assert.match(publishedCompose.body, /必须改变清单/);
+    assert.match(publishedHigh.body, /九宫格/);
+    assert.match(publishedHigh.body, /与参考图保持相同的构图与元素位置，只替换为目标商品和新文案/);
+
+    // Semantic match in PG excludes retired versions and prefers published over draft
     const composeCopyDraft = await prompts.copyVersion(publishedCompose.templateVersionId);
     assert.ok(composeCopyDraft);
     const [preferredPgPublished] = await prompts.importRecords([
@@ -750,7 +762,7 @@ test("PG replica repository normalizes null remark, creates replica tasks, recov
     ]);
     assert.equal(freshDraftAfterRetire.status, "draft");
     assert.notEqual(freshDraftAfterRetire.templateVersionId, publishedCompose.templateVersionId);
-    assert.equal(freshDraftAfterRetire.versionNo, 3);
+    assert.equal(freshDraftAfterRetire.versionNo, 4);
   });
 });
 

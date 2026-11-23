@@ -531,7 +531,10 @@ test("replica end-to-end flow: card count, input order, role prefix, ratio=refer
     assert.equal(call.images![0].filename, "cup-front.png");
     // Library resource title ("保温杯白底图") has no extension; provider receives fallback filename with extension matching MIME
     assert.equal(call.images![1].filename, "product-2.png");
-    assert.match(call.prompt, /^第1–2张图为产品外观唯一依据，第3张图仅作为版式与风格参考，不得复制其中的品牌、文字与人物/);
+    assert.match(
+      call.prompt,
+      /^第1–2张图为产品外观唯一依据；第3张图为构图与版式基准：保持其构图、元素位置、镜头与光影，只替换为目标商品和新文案，不得复制其中的品牌、Logo、文字与真人肖像。/,
+    );
   }
 
   // Verify frozen size in attempts
@@ -561,6 +564,10 @@ test("replica end-to-end flow: card count, input order, role prefix, ratio=refer
   assert.deepEqual(
     regenCall.images?.map((img) => img.role),
     ["product_primary", "product_detail", "replica_reference"],
+  );
+  assert.match(
+    regenCall.prompt,
+    /^第1–2张图为产品外观唯一依据；第3张图为构图与版式基准：保持其构图、元素位置、镜头与光影，只替换为目标商品和新文案，不得复制其中的品牌、Logo、文字与真人肖像。/,
   );
   assert.match(regenCall.prompt, /编辑后的纯净棚拍提示词/);
   assert.doesNotMatch(regenCall.prompt, /暗黑赛博朋克覆盖风格/);
@@ -624,7 +631,237 @@ test("replica without product images ignores LLM taskName, falls back to scene �
   assert.equal(f.providerCalls[0].images?.length, 1);
   assert.equal(f.providerCalls[0].images?.[0].role, "replica_reference");
   assert.equal(f.providerCalls[0].size, "2048x2736");
-  assert.match(f.providerCalls[0].prompt, /^输入图仅作为版式与风格参考/);
+  assert.match(
+    f.providerCalls[0].prompt,
+    /^输入图仅用于理解姿势与构图类型，不得沿用其中的人物、服装、陈设、配色、光线、品牌与文字，按下方描述重新设计画面，生成同风格的通用示意商品，不得出现可识别品牌。/,
+  );
+  const composeNoProdTasks = await f.taskRepository.listTasks(suiteId);
+  const composeNoProdHistory = await f.taskRepository.listTaskVersions(composeNoProdTasks[0].id);
+  assert.deepEqual(composeNoProdHistory.attempts[0].requestSummary.inputRoles, ["replica_reference"]);
+  assert.equal((composeNoProdHistory.attempts[0].promptSnapshot.inputImages as Array<{ role: string }>).length, 1);
+  assert.equal((composeNoProdHistory.attempts[0].promptSnapshot.inputImages as Array<{ role: string }>)[0].role, "replica_reference");
+});
+
+test("replica compose with product images omits reference image on initial, single-card regen, edited regen, and retry; high zero-product keeps high sketch prefix", async () => {
+  const f = await replicaFixture();
+
+  const waitBatchDone = async (batchId: string) => {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const res = await f.app.request("GET", `/api/generation-batches/${batchId}`);
+      if ((res.body as any).data.batch.status !== "running") return (res.body as any).data;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error("batch timeout");
+  };
+
+  const refBytes = await makePng(100, 120, { r: 20, g: 40, b: 60 });
+  const prod1Bytes = await makePng(80, 80, { r: 210, g: 215, b: 220 });
+  const prod2Bytes = await makePng(80, 80, { r: 190, g: 195, b: 200 });
+
+  // 1. compose + 2 products: provider receives ONLY product images, no replica_reference, with compose prefix
+  const createdCompose = await f.app.request("POST", "/api/replicas", {
+    headers: { "Idempotency-Key": "compose-with-products-1" },
+    body: {
+      references: [{ filename: "ref-compose.png", mimeType: "image/png", bytesBase64: refBytes.toString("base64") }],
+      products: [
+        { filename: "prod-1.png", mimeType: "image/png", bytesBase64: prod1Bytes.toString("base64") },
+        { filename: "prod-2.png", mimeType: "image/png", bytesBase64: prod2Bytes.toString("base64") },
+      ],
+      sceneType: "ecommerce_product",
+      cloneLevel: "compose",
+      styleUnified: false,
+      language: "zh",
+      ratio: "1:1",
+      size: "1K",
+    },
+  });
+  assert.equal(createdCompose.status, 201);
+  const { suiteId: composeSuiteId } = (createdCompose.body as any).data;
+
+  const composeState = await waitStudioState(f.app, composeSuiteId, (data) => data.pipeline?.status === "completed");
+  assert.equal(composeState.cards.length, 1);
+  const composeTaskId = composeState.cards[0].parentTaskId;
+  // Reference thumbnail remains available on card metadata even though reference image is omitted from image-edit input
+  assert.ok(composeState.cards[0].replicaReferenceId);
+
+  const initialCall = f.providerCalls[0];
+  assert.equal(initialCall.images?.length, 2);
+  assert.deepEqual(
+    initialCall.images?.map((img) => img.role),
+    ["product_primary", "product_detail"],
+  );
+  assert.equal(Buffer.compare(initialCall.images![0].bytes, prod1Bytes), 0);
+  assert.equal(Buffer.compare(initialCall.images![1].bytes, prod2Bytes), 0);
+  assert.match(initialCall.prompt, /^第1–2张图为产品外观唯一依据，按下方描述重新设计画面。/);
+
+  const history1 = await f.taskRepository.listTaskVersions(composeTaskId);
+  assert.equal(history1.attempts[0].requestSummary.imageCount, 2);
+  assert.deepEqual(history1.attempts[0].requestSummary.inputRoles, ["product_primary", "product_detail"]);
+  assert.deepEqual(
+    (history1.attempts[0].promptSnapshot.inputImages as Array<{ role: string }>).map((item) => item.role),
+    ["product_primary", "product_detail"],
+  );
+  assert.deepEqual(
+    (history1.attempts[0].contextSnapshot.inputImages as Array<{ role: string }>).map((item) => item.role),
+    ["product_primary", "product_detail"],
+  );
+  assert.equal(history1.attempts[0].promptSnapshot.cloneLevel, "compose");
+  assert.ok(history1.attempts[0].sourceObjectKey.includes("/products/"));
+
+  // 2. Single-card regenerate (original prompt) follows the same compose rule
+  const regenOrig = await f.app.request("POST", `/api/suite-tasks/${composeTaskId}/generation`, {
+    headers: { "Idempotency-Key": "compose-regen-orig-1" },
+    body: {},
+  });
+  assert.equal(regenOrig.status, 202);
+  const regenOrigBatch = await waitBatchDone((regenOrig.body as any).data.batchId);
+  assert.equal(regenOrigBatch.batch.status, "completed");
+  const regenOrigCall = f.providerCalls[1];
+  assert.equal(regenOrigCall.images?.length, 2);
+  assert.deepEqual(
+    regenOrigCall.images?.map((img) => img.role),
+    ["product_primary", "product_detail"],
+  );
+  assert.match(regenOrigCall.prompt, /^第1–2张图为产品外观唯一依据，按下方描述重新设计画面。/);
+
+  // 3. Single-card regenerate with edited prompt follows the same compose rule & freezes actual inputs
+  const editedComposePrompt = "暖橡木桌面重新设计的自然光棚拍场景，主体居中展示，浅米色极简背景。";
+  const regenEdited = await f.app.request("POST", `/api/suite-tasks/${composeTaskId}/generation`, {
+    headers: { "Idempotency-Key": "compose-regen-edited-1" },
+    body: { promptDraft: editedComposePrompt },
+  });
+  assert.equal(regenEdited.status, 202);
+  const regenEditedBatch = await waitBatchDone((regenEdited.body as any).data.batchId);
+  assert.equal(regenEditedBatch.batch.status, "completed");
+  const regenEditedCall = f.providerCalls[2];
+  assert.equal(regenEditedCall.images?.length, 2);
+  assert.deepEqual(
+    regenEditedCall.images?.map((img) => img.role),
+    ["product_primary", "product_detail"],
+  );
+  assert.match(regenEditedCall.prompt, /^第1–2张图为产品外观唯一依据，按下方描述重新设计画面。/);
+  assert.ok(regenEditedCall.prompt.includes(editedComposePrompt));
+  assert.deepEqual(regenEditedBatch.attempts[0].requestSummary.inputRoles, ["product_primary", "product_detail"]);
+  assert.deepEqual(
+    (regenEditedBatch.attempts[0].promptSnapshot.inputImages as Array<{ role: string }>).map((item) => item.role),
+    ["product_primary", "product_detail"],
+  );
+
+  // 4. Failed attempt retry follows the same compose rule (both failed attempt and retried attempt omit reference image)
+  let failAllRetries = true;
+  const retryFixture = await replicaFixture({
+    providerEdit: async (_request, _call, defaultPng) => {
+      if (failAllRetries) throw new Error("IMAGE_PROVIDER_FAILED");
+      return { bytes: defaultPng, mimeType: "image/png" };
+    },
+  });
+  const createdFail = await retryFixture.app.request("POST", "/api/replicas", {
+    headers: { "Idempotency-Key": "compose-retry-1" },
+    body: {
+      references: [{ filename: "ref-retry.png", mimeType: "image/png", bytesBase64: refBytes.toString("base64") }],
+      products: [{ filename: "prod-only.png", mimeType: "image/png", bytesBase64: prod1Bytes.toString("base64") }],
+      sceneType: "ecommerce_product",
+      cloneLevel: "compose",
+      styleUnified: false,
+      language: "zh",
+      ratio: "1:1",
+      size: "1K",
+    },
+  });
+  assert.equal(createdFail.status, 201);
+  const { suiteId: retrySuiteId } = (createdFail.body as any).data;
+  await waitStudioState(retryFixture.app, retrySuiteId, (data) => data.pipeline?.status === "failed");
+
+  const retryTasks = await retryFixture.taskRepository.listTasks(retrySuiteId);
+  const failedHistory = await retryFixture.taskRepository.listTaskVersions(retryTasks[0].id);
+  const failedAttempt = failedHistory.attempts[0];
+  assert.equal(failedAttempt.status, "failed");
+  assert.deepEqual(failedAttempt.requestSummary.inputRoles, ["product_primary"]);
+  assert.deepEqual(
+    (failedAttempt.promptSnapshot.inputImages as Array<{ role: string }>).map((item) => item.role),
+    ["product_primary"],
+  );
+  assert.match(String(failedAttempt.promptSnapshot.finalPrompt), /^第1张图为产品外观唯一依据，按下方描述重新设计画面。/);
+
+  failAllRetries = false;
+  const callsBeforeRetry = retryFixture.providerCalls.length;
+  const retryRes = await retryFixture.app.request("POST", `/api/generation-attempts/${failedAttempt.id}/retry`, {
+    headers: { "Idempotency-Key": "retry-compose-attempt-1" },
+  });
+  assert.equal(retryRes.status, 202);
+  const retryBatchId = (retryRes.body as any).data.batchId;
+  const retryDeadline = Date.now() + 3_000;
+  let retryBatchData: any;
+  while (Date.now() < retryDeadline) {
+    const res = await retryFixture.app.request("GET", `/api/generation-batches/${retryBatchId}`);
+    retryBatchData = (res.body as any).data;
+    if (retryBatchData.batch.status !== "running") break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(retryBatchData.batch.status, "completed");
+  const retryProviderCall = retryFixture.providerCalls[callsBeforeRetry];
+  assert.ok(retryProviderCall);
+  assert.equal(retryProviderCall.images?.length, 1);
+  assert.deepEqual(
+    retryProviderCall.images?.map((img) => img.role),
+    ["product_primary"],
+  );
+  assert.match(retryProviderCall.prompt, /^第1张图为产品外观唯一依据，按下方描述重新设计画面。/);
+  assert.deepEqual(retryBatchData.attempts[0].requestSummary.inputRoles, ["product_primary"]);
+
+  // 5. Fallback cloneLevel from frozen replicaPromptSnapshot when top-level generationParams.cloneLevel is absent
+  const taskRecord = await retryFixture.taskRepository.getTask(retryTasks[0].id);
+  assert.ok(taskRecord);
+  delete taskRecord.generationParams.cloneLevel;
+  const callsBeforeSnapshotFallback = retryFixture.providerCalls.length;
+  const fallbackRegen = await retryFixture.app.request("POST", `/api/suite-tasks/${retryTasks[0].id}/generation`, {
+    headers: { "Idempotency-Key": "compose-snapshot-fallback-1" },
+    body: {},
+  });
+  assert.equal(fallbackRegen.status, 202);
+  const fbBatchId = (fallbackRegen.body as any).data.batchId;
+  const fbDeadline = Date.now() + 3_000;
+  while (Date.now() < fbDeadline) {
+    const res = await retryFixture.app.request("GET", `/api/generation-batches/${fbBatchId}`);
+    if ((res.body as any).data.batch.status !== "running") break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const fbCall = retryFixture.providerCalls[callsBeforeSnapshotFallback];
+  assert.equal(fbCall.images?.length, 1);
+  assert.deepEqual(
+    fbCall.images?.map((img) => img.role),
+    ["product_primary"],
+  );
+  assert.match(fbCall.prompt, /^第1张图为产品外观唯一依据，按下方描述重新设计画面。/);
+
+  // 6. high + zero product images retains reference image and uses high zero-product prefix
+  const highNoProdCreated = await f.app.request("POST", "/api/replicas", {
+    headers: { "Idempotency-Key": "high-zero-products-1" },
+    body: {
+      references: [{ filename: "ref-high-sketch.png", mimeType: "image/png", bytesBase64: refBytes.toString("base64") }],
+      products: [],
+      sceneType: "marketing_poster",
+      cloneLevel: "high",
+      styleUnified: false,
+      language: "zh",
+      ratio: "1:1",
+      size: "1K",
+    },
+  });
+  assert.equal(highNoProdCreated.status, 201);
+  const { suiteId: highSketchSuiteId } = (highNoProdCreated.body as any).data;
+  await waitStudioState(f.app, highSketchSuiteId, (data) => data.pipeline?.status === "completed");
+  const highSketchCall = f.providerCalls[3];
+  assert.equal(highSketchCall.images?.length, 1);
+  assert.deepEqual(
+    highSketchCall.images?.map((img) => img.role),
+    ["replica_reference"],
+  );
+  assert.match(
+    highSketchCall.prompt,
+    /^输入图仅作为版式与风格参考，保持构图与元素位置，不得复制其中的品牌、文字与人物，请生成同风格的通用示意商品，不得出现可识别品牌。/,
+  );
 });
 
 test("analysis failure can be resumed via POST /api/replicas/:suiteId/resume and succeeds", async () => {

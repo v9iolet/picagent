@@ -21,7 +21,7 @@ import { MemoryCategoryPromptRepository } from "./repositories/memory-category-p
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { MemoryPipelineRepository } from "./repositories/memory-pipeline-repository.js";
 import { MemoryReplicaRepository } from "./repositories/memory-replica-repository.js";
-import { buildReplicaRolePrefix, createReplicaPipeline } from "./replica/replica-pipeline.js";
+import { buildReplicaRolePrefix, createReplicaPipeline, resolveReplicaCloneLevel } from "./replica/replica-pipeline.js";
 import { buildProviderImagePrompt, materializeCategoryPlanItems } from "./suite-task-prompt.js";
 import {
   applyStyleOverrideToPrompt,
@@ -621,6 +621,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const inputImages: Array<{ bytes: Buffer; mimeType: string; filename: string; role: string; objectKey: string; resourceId?: string; resourceVersionId?: string; libraryReferenceId?: string }> = [];
       const currentTaskVersionId = sourceVersionIds[task.id];
       const isReplicaTask = task.originKind === "replica";
+      const replicaPromptMeta = isReplicaTask ? asRecord(generationParams.replicaPromptSnapshot) : null;
+      const replicaCloneLevel = isReplicaTask ? resolveReplicaCloneLevel(generationParams) : "high";
       let replicaProductCount = 0;
 
       if (isReplicaTask) {
@@ -697,8 +699,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }
 
       // Generalized reference image injection for both replica and reverse_import tasks.
+      // For replica compose with product images, omit the reference image so the image model
+      // redesigns the scene from text while anchoring strictly to the product images.
       let referenceInjection: { objectKey: string; filename: string; role: string; required: boolean } | null = null;
-      if (isReplicaTask) {
+      if (isReplicaTask && (replicaCloneLevel !== "compose" || replicaProductCount === 0)) {
         const refObjectKey =
           task.replicaReferenceObjectKey ||
           (task.replicaReferenceId
@@ -743,8 +747,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
 
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
       const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import" && task.originKind !== "replica";
-      const replicaPromptMeta = isReplicaTask ? asRecord(generationParams.replicaPromptSnapshot) : null;
-      const replicaRolePrefix = isReplicaTask ? buildReplicaRolePrefix(replicaProductCount) : null;
+      const replicaRolePrefix = isReplicaTask ? buildReplicaRolePrefix(replicaProductCount, replicaCloneLevel) : null;
       const finalPrompt = isReplicaTask
         ? (task.promptDraft.startsWith(replicaRolePrefix!) ? task.promptDraft : `${replicaRolePrefix}\n${task.promptDraft}`)
         : (shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft);
@@ -776,7 +779,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
               replicaPromptMeta?.visualStructure && typeof replicaPromptMeta.visualStructure === "object"
                 ? replicaPromptMeta.visualStructure
                 : {},
-            cloneLevel: replicaPromptMeta?.cloneLevel ?? generationParams.cloneLevel ?? null,
+            cloneLevel: replicaPromptMeta?.cloneLevel ?? generationParams.cloneLevel ?? replicaCloneLevel,
             sceneType: replicaPromptMeta?.sceneType ?? generationParams.sceneType ?? null,
             language: replicaPromptMeta?.language ?? generationParams.language ?? null,
             replicaReferenceId: task.replicaReferenceId ?? null,
