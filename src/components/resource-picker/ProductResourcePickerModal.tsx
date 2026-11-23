@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  ApiHttpError,
   suiteApi,
   type ApiLibraryResource,
   type ApiProductMaterialRef,
@@ -26,6 +27,13 @@ export interface ProductResourcePickerModalProps {
   allowEmpty?: boolean;
 }
 
+function isAvailableProductResource(resource: ApiLibraryResource): boolean {
+  return (
+    resource.status === "published" &&
+    (resource.resourceType === "base_image" || resource.resourceType === "input_image")
+  );
+}
+
 export function ProductResourcePickerModal({
   open,
   onClose,
@@ -41,34 +49,69 @@ export function ProductResourcePickerModal({
 }: ProductResourcePickerModalProps) {
   const [items, setItems] = useState<ApiLibraryResource[] | null>(null);
   const [selected, setSelected] = useState<ProductResourceSelection[]>([]);
+  const [removedNotice, setRemovedNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const limit = Math.max(0, Math.floor(max));
 
   useEffect(() => {
     if (!open) return;
-    setSelected(
-      initialSelected
-        .slice()
-        .sort((a, b) => a.order - b.order)
-        .slice(0, limit)
-        .map((item, idx) => ({ ...item, order: idx + 1 })),
-    );
+    const normalizedInitial = initialSelected
+      .slice()
+      .sort((a, b) => a.order - b.order)
+      .slice(0, limit)
+      .map((item, idx) => ({ ...item, order: idx + 1 }));
+    setSelected(normalizedInitial);
+    setRemovedNotice("");
     setItems(null);
     setLoadError(false);
 
     let active = true;
-    Promise.all(
-      (["base_image", "input_image"] as const).map((resourceType) =>
-        suiteApi.listLibraryResources({ resourceType, status: "published", pageSize: 100 }),
-      ),
-    )
-      .then((results) => {
-        if (active) setItems(results.flatMap((result) => result.items));
-      })
-      .catch(() => {
+    void (async () => {
+      try {
+        const results = await Promise.all(
+          (["base_image", "input_image"] as const).map((resourceType) =>
+            suiteApi.listLibraryResources({ resourceType, status: "published", pageSize: 100 }),
+          ),
+        );
+        if (!active) return;
+        const loadedItems = results.flatMap((result) => result.items);
+        const loadedIds = new Set(loadedItems.map((item) => item.id));
+        const missingFromPage = normalizedInitial.filter((ref) => !loadedIds.has(ref.resourceId));
+        const unavailableIds = new Set<string>();
+
+        if (missingFromPage.length > 0) {
+          await Promise.all(
+            missingFromPage.map(async (ref) => {
+              try {
+                const detail = await suiteApi.getLibraryResource(ref.resourceId);
+                if (!isAvailableProductResource(detail)) {
+                  unavailableIds.add(ref.resourceId);
+                }
+              } catch (error) {
+                if (error instanceof ApiHttpError && error.status === 404) {
+                  unavailableIds.add(ref.resourceId);
+                }
+              }
+            }),
+          );
+        }
+        if (!active) return;
+
+        setItems(loadedItems);
+        if (unavailableIds.size > 0) {
+          setSelected((current) =>
+            current
+              .filter((ref) => !unavailableIds.has(ref.resourceId))
+              .map((ref, idx) => ({ ...ref, order: idx + 1 })),
+          );
+          setRemovedNotice(`已移除 ${unavailableIds.size} 张已删除的图片`);
+        }
+      } catch {
         if (active) setLoadError(true);
-      });
+      }
+    })();
+
     return () => {
       active = false;
     };
@@ -108,6 +151,14 @@ export function ProductResourcePickerModal({
         },
       ];
     });
+  };
+
+  const removeSelected = (resourceId: string) => {
+    setSelected((current) =>
+      current
+        .filter((ref) => ref.resourceId !== resourceId)
+        .map((ref, idx) => ({ ...ref, order: idx + 1 })),
+    );
   };
 
   const move = (index: number, delta: number) => {
@@ -159,6 +210,12 @@ export function ProductResourcePickerModal({
             <Icon name="x" />
           </button>
         </div>
+
+        {removedNotice && (
+          <p className="rp-picker-notice" role="status">
+            {removedNotice}
+          </p>
+        )}
 
         {loadError ? (
           <p className="rp-picker-state is-error" role="alert">
@@ -212,6 +269,14 @@ export function ProductResourcePickerModal({
                   onClick={() => move(index, 1)}
                 >
                   下移
+                </button>
+                <button
+                  type="button"
+                  className="rp-picker-remove-btn"
+                  disabled={loading}
+                  onClick={() => removeSelected(item.resourceId)}
+                >
+                  移除
                 </button>
               </div>
             ))}

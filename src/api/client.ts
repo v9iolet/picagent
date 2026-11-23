@@ -92,10 +92,17 @@ export function createIdempotencyKey(cryptoApi: CryptoSource | undefined = globa
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${fallbackId.toString(36)}`;
 }
 
+export class ApiHttpError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+    this.name = "ApiHttpError";
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, cache: "no-store" });
-  const payload = await response.json().catch(() => null) as { data?: T; error?: { message?: string } } | null;
-  if (!response.ok) throw new Error(payload?.error?.message ?? "请求失败");
+  const payload = await response.json().catch(() => null) as { data?: T; error?: { code?: string; message?: string } } | null;
+  if (!response.ok) throw new ApiHttpError(payload?.error?.message ?? "请求失败", response.status, payload?.error?.code);
   return payload?.data as T;
 }
 
@@ -245,12 +252,14 @@ export const suiteApi = {
   selectImageEditVersion(taskId: string, versionId: string, selection: "current" | "final") { return request<Record<string, unknown>>(`/api/image-editor/tasks/${encodeURIComponent(taskId)}/versions/${encodeURIComponent(versionId)}/select`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ selection }) }); },
   getLayout(suiteId: string) { return request<ApiCanvasLayout | null>(`/api/suites/${encodeURIComponent(suiteId)}/workbench/layout`); },
   saveLayout(suiteId: string, layout: Pick<ApiCanvasLayout, "layoutVersion" | "viewport" | "nodes" | "groups">) { return request<ApiCanvasLayout>(`/api/suites/${encodeURIComponent(suiteId)}/workbench/layout`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(layout) }); },
-  listLibraryResources(params: { resourceType?: ApiLibraryResourceType; stage?: ApiPromptTemplate["stage"]; suiteId?: string; query?: string; page?: number; pageSize?: number; status?: "draft" | "published" | "archived" | "retired" } = {}) { const search = new URLSearchParams(); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') search.set(key, String(value)); }); return request<{ items: ApiLibraryResource[]; total: number; page: number; pageSize: number }>(`/api/library/resources?${search.toString()}`); },
+  listLibraryResources(params: { resourceType?: ApiLibraryResourceType; scope?: "image"; stage?: ApiPromptTemplate["stage"]; suiteId?: string; query?: string; page?: number; pageSize?: number; status?: "draft" | "published" | "archived" | "retired" } = {}) { const search = new URLSearchParams(); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') search.set(key, String(value)); }); return request<{ items: ApiLibraryResource[]; total: number; page: number; pageSize: number }>(`/api/library/resources?${search.toString()}`); },
   getLibraryResource(resourceId: string) { return request<ApiLibraryResource>(`/api/library/resources/${encodeURIComponent(resourceId)}`); },
   listLibraryReferences(suiteId: string, targetType?: "plan" | "task", targetId?: string) { const search = new URLSearchParams(); if (targetType) search.set("targetType", targetType); if (targetId) search.set("targetId", targetId); return request<ApiLibraryReference[]>(`/api/suites/${encodeURIComponent(suiteId)}/library/references?${search.toString()}`); },
   createLibraryReference(suiteId: string, body: { resourceId: string; targetType: "plan" | "task"; targetId: string }) { return request<ApiLibraryReference>(`/api/suites/${encodeURIComponent(suiteId)}/library/references`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   archiveLibraryReference(suiteId: string, referenceId: string) { return request<ApiLibraryReference>(`/api/suites/${encodeURIComponent(suiteId)}/library/references/${encodeURIComponent(referenceId)}`, { method: "DELETE" }); },
   setLibraryResourceStatus(resourceId: string, status: "draft" | "published" | "archived") { return request<ApiLibraryResource>(`/api/library/resources/${encodeURIComponent(resourceId)}/status`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ status }) }); },
+  deleteLibraryResource(resourceId: string) { return request<{ id: string; deletedAt: string; alreadyDeleted: boolean }>(`/api/library/resources/${encodeURIComponent(resourceId)}`, { method: "DELETE" }); },
+  batchDeleteLibraryResources(ids: string[]) { return request<{ deletedIds: string[]; alreadyDeletedIds: string[]; notFoundIds: string[]; deletedCount: number }>("/api/library/resources/batch-delete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids }) }); },
   createReverseReferenceAsset(body: { suiteId?: string | null; title: string; summary?: string; objectKey: string; mimeType: string; promptSnapshot: Record<string, unknown>; visualStructure?: Record<string, unknown>; source?: Record<string, unknown> }) { return request<ApiLibraryResource>("/api/library/reverse-reference-assets", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   importReversePlan(planId: string, body: { targetSuiteId?: string; name?: string } = {}) { return request<{ suiteId: string; taskGroupId: string; taskIds: string[]; duplicate: boolean }>(`/api/reverse-plans/${encodeURIComponent(planId)}/canvas-imports`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   bindWhiteResources(taskId: string, resourceIds: string[]) { return request<{ task: ApiSuiteTask; reference: ApiLibraryReference; references: ApiLibraryReference[]; duplicate: boolean }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/white-resource`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ resourceIds }) }); },

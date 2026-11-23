@@ -521,6 +521,7 @@ export interface LibraryReference {
 }
 export interface LibraryResourceQuery {
   resourceType?: LibraryResourceType;
+  scope?: "image";
   stage?: PromptStage;
   suiteId?: string;
   query?: string;
@@ -528,10 +529,24 @@ export interface LibraryResourceQuery {
   pageSize?: number;
   status?: LibraryAssetStatus;
 }
+export interface LibraryResourceDeletionResult {
+  id: string;
+  deletedAt: string;
+  alreadyDeleted: boolean;
+}
+export interface LibraryResourceBatchDeleteResult {
+  deletedIds: string[];
+  alreadyDeletedIds: string[];
+  notFoundIds: string[];
+  deletedCount: number;
+}
 export interface LibraryRepository {
   listResources(query: LibraryResourceQuery): Promise<{ items: LibraryResource[]; total: number; page: number; pageSize: number }>;
-  getResource(resourceId: string): Promise<LibraryResource | null>;
+  getResource(resourceId: string, options?: { includeDeleted?: boolean }): Promise<LibraryResource | null>;
   getPreviewObject(resourceId: string): Promise<{ objectKey: string } | null>;
+  deleteResource(resourceId: string): Promise<LibraryResourceDeletionResult | null>;
+  deleteResources(resourceIds: string[]): Promise<LibraryResourceBatchDeleteResult>;
+  restoreResource(resourceId: string): Promise<void>;
   createReference(input: { suiteId: string; resourceId: string; targetType: LibraryReferenceTargetType; targetId: string; idempotencyKey: string; createdBy?: string | null }): Promise<{ reference: LibraryReference; duplicate: boolean }>;
   listReferences(suiteId: string, targetType?: LibraryReferenceTargetType, targetId?: string): Promise<LibraryReference[]>;
   archiveReference(suiteId: string, referenceId: string): Promise<LibraryReference | null>;
