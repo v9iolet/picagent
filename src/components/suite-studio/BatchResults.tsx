@@ -5,7 +5,7 @@ import { pipelineErrorMessages } from "../../../shared/suite-pipeline-errors";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
-import { EditTextDialog, StudioDialog } from "./StudioDialog";
+import { StudioDialog } from "./StudioDialog";
 
 const phaseOrder: Record<string, number> = {
   base_refining: 0,
@@ -162,8 +162,6 @@ type Props = {
   onActivate: (id: string) => void;
   navigate: (path: string) => void;
 };
-const editStatus = async (job: string) =>
-  ((await suiteApi.getImageEditTask(job)).task as { status: string }).status;
 const retryStatus = async (job: string) => (await suiteApi.getBatch(job)).batch.status;
 
 // Each invocation owns the timer and completion state of a single job.
@@ -241,10 +239,8 @@ export function BatchResults({
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState(""),
     [supplement, setSupplement] = useState("");
-  const [preview, setPreview] = useState<{ url: string; title: string } | null>(null),
-    [edit, setEdit] = useState<ResolvedDeliverySlot | null>(null);
-  const [editJob, setEditJob] = useState(""),
-    [retryJob, setRetryJob] = useState(""),
+  const [preview, setPreview] = useState<{ url: string; title: string } | null>(null);
+  const [retryJob, setRetryJob] = useState(""),
     [retrySize, setRetrySize] = useState<Record<string, string>>({});
   const [showListingCopy, setShowListingCopy] = useState(false);
   const act = async (fn: () => Promise<void>) => {
@@ -260,7 +256,6 @@ export function BatchResults({
       setBusy(false);
     }
   };
-  useResultJob(editJob, editStatus, ["completed", "succeeded"], id, refresh, setEditJob, setNotice);
   useResultJob(retryJob, retryStatus, ["completed", "succeeded"], id, refresh, setRetryJob, setNotice);
   const resume = (action: string, fields?: object) =>
     void act(async () => {
@@ -528,17 +523,14 @@ export function BatchResults({
                       下载
                     </button>
                     <button
-                      disabled={busy || !!editJob}
+                      disabled={busy}
                       onClick={() =>
-                        void act(async () => {
-                          const { capabilities } = await suiteApi.imageEditorCapabilities();
-                          if (!capabilities.changeText || !capabilities.ocr)
-                            throw Error("当前渠道不支持识字或改字，请先在配置中选择支持的模型。");
-                          setEdit(card);
-                        })
+                        navigate(
+                          `/create/canvas/${id}?editTask=${encodeURIComponent(card.editChildTaskId ?? card.parentTaskId)}${card.versionId ? `&editVersion=${encodeURIComponent(card.versionId)}` : ""}`,
+                        )
                       }
                     >
-                      编辑文字
+                      编辑图片
                     </button>
                   </>
                 )}
@@ -587,17 +579,6 @@ export function BatchResults({
         <StudioDialog title={preview.title} close={() => setPreview(null)}>
           <img className="ss-zoom" src={preview.url} alt={preview.title} />
         </StudioDialog>
-      )}
-      {edit && (
-        <EditTextDialog
-          card={edit}
-          close={() => setEdit(null)}
-          submitted={(job) => {
-            setEdit(null);
-            setEditJob(job);
-            setNotice("已提交改字，正在生成图片。");
-          }}
-        />
       )}
     </section>
   );

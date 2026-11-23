@@ -1,7 +1,20 @@
+import sharp from "sharp";
 import { parseProviderJson } from "./provider-json.js";
 import type { ModelChannelSnapshot } from "../../shared/model-settings.js";
 import { randomUUID } from "node:crypto";
-import type { ImageSource, OcrProvider, OcrTextBlock } from "../image-editor.js";
+import { formatOcrErrorMessage, type ImageSource, type OcrProvider, type OcrTextBlock } from "../image-editor.js";
+
+async function prepareOcrImagePayload(source: ImageSource): Promise<{ bytes: Buffer; mimeType: string }> {
+  try {
+    const resized = await sharp(source.bytes, { failOn: "none" })
+      .resize({ width: 1280, height: 1280, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+    return { bytes: resized, mimeType: "image/jpeg" };
+  } catch {
+    return { bytes: source.bytes, mimeType: source.mimeType };
+  }
+}
 
 export class DashScopeOcrProvider implements OcrProvider {
   readonly name: string;
@@ -13,7 +26,8 @@ export class DashScopeOcrProvider implements OcrProvider {
   async recognize(source: ImageSource): Promise<{ blocks: OcrTextBlock[] }> {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), { method: "POST", redirect: "error", signal: controller.signal, headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: "识别图片中所有可读文字。只返回 JSON：{\"blocks\":[{\"id\":\"string\",\"text\":\"string\",\"confidence\":0到1,\"bounds\":{\"x\":0到1,\"y\":0到1,\"width\":0到1,\"height\":0到1},\"rotation\":数字}]}。坐标以图片左上角为原点并归一化。" }, { role: "user", content: [{ type: "text", text: "请进行 OCR，返回所有文字块。" }, { type: "image_url", image_url: { url: `data:${source.mimeType};base64,${source.bytes.toString("base64")}` } }] }] }) });
+      const prepared = await prepareOcrImagePayload(source);
+      const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), { method: "POST", redirect: "error", signal: controller.signal, headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: "识别图片中所有可读文字。只返回 JSON：{\"blocks\":[{\"id\":\"string\",\"text\":\"string\",\"confidence\":0到1,\"bounds\":{\"x\":0到1,\"y\":0到1,\"width\":0到1,\"height\":0到1},\"rotation\":数字}]}。坐标以图片左上角为原点并归一化。" }, { role: "user", content: [{ type: "text", text: "请进行 OCR，返回所有文字块。" }, { type: "image_url", image_url: { url: `data:${prepared.mimeType};base64,${prepared.bytes.toString("base64")}` } }] }] }) });
       if (!response.ok) throw new Error(`OCR_HTTP_${response.status}`);
       const payload = parseProviderJson(await response.text(), this.apiKey, "OCR_INVALID_HTTP_RESPONSE") as { choices?: Array<{ message?: { content?: string } }> };
       const content = payload.choices?.[0]?.message?.content;
@@ -28,7 +42,9 @@ export class DashScopeOcrProvider implements OcrProvider {
         return [{ id: typeof value.id === "string" ? value.id : `ocr-${index + 1}-${randomUUID()}`, text: value.text, confidence: Math.max(0, Math.min(1, Number(value.confidence) || 0)), bounds: { x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3] }, rotation: Number(value.rotation) || 0 }];
       }) : [];
       return { blocks };
-    } catch (error) { if (error instanceof DOMException && error.name === "AbortError") throw new Error("OCR_TIMEOUT"); throw error; }
+    } catch (error) {
+      throw new Error(formatOcrErrorMessage(error));
+    }
     finally { clearTimeout(timer); }
   }
 }

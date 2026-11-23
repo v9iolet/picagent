@@ -278,6 +278,7 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await help.waitFor({ state: "hidden" });
   await sellingPoints.fill("1. 产品名称：便携键盘\n2. 核心卖点：轻便");
   await page.getByRole("button", { name: "自定义配置", exact: true }).click();
+  assert.equal(await page.getByRole("checkbox", { name: /矢量排版/ }).count(), 0);
   for (const [name, n] of [
     ["白底主图", 1],
     ["卖点图", 3],
@@ -332,22 +333,29 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.waitForTimeout(3200);
   assert.equal(statePolls(), afterCompletion, "终态后不得继续轮询");
   const first = cards.first();
-  await page.route("**/api/image-editor/capabilities", (route) =>
-    route.fulfill({ json: { data: { provider: null, capabilities: { ocr: false, changeText: false } } } }),
-  );
-  await first.getByRole("button", { name: "编辑文字" }).click();
-  await page.getByText(/当前渠道不支持识字或改字/).waitFor();
-  assert.equal(await page.getByRole("dialog").count(), 0);
-  await page.unroute("**/api/image-editor/capabilities");
-  await first.getByRole("button", { name: "编辑文字" }).click();
-  const dialog = page.getByRole("dialog", { name: "编辑文字" });
-  await dialog.getByLabel("折叠插脚").fill("折叠设计");
-  await dialog.getByRole("button", { name: "确认改字" }).click();
-  await batch.getByText("图片已更新", { exact: true }).waitFor();
+  assert.equal(await first.getByRole("button", { name: "编辑文字" }).count(), 0);
+  await first.getByRole("button", { name: "编辑图片" }).click();
+  await page.waitForURL(new RegExp(`/create/canvas/${suiteId}`));
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  await dialog.waitFor();
+  await page.waitForFunction(() => !window.location.search.includes("editTask=") && !window.location.search.includes("editVersion="));
+  assert.equal(await dialog.isVisible(), true);
+  await dialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
+  await dialog.getByRole("button", { name: /折叠插脚/ }).waitFor();
+  await dialog.getByLabel("新文字").fill("折叠设计");
+  const opReq = page.waitForResponse((res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/operations"));
+  const submitReq = page.waitForResponse((res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/submit"));
+  await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
+  await Promise.all([opReq, submitReq]);
+  await dialog.waitFor({ state: "hidden" });
   assert.equal(
     fixture.calls.find((x) => x.path.endsWith("/operations")).body.operation.payload.newText,
     "折叠设计",
   );
+  assert.ok(fixture.calls.some((x) => x.path.endsWith("/submit")));
+  await page.getByRole("button", { name: "返回套图", exact: true }).click();
+  await page.waitForURL(`**/create/suite/${suiteId}`);
+  await batch.locator('[data-status="completed"]').waitFor();
   await first.getByRole("combobox").selectOption("4K");
   await first.getByRole("button", { name: "重新生成" }).click();
   await batch.getByText("图片已更新", { exact: true }).waitFor();

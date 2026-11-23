@@ -6,6 +6,8 @@ import { setTimeout } from "node:timers/promises";
 import { chromium } from "playwright";
 import { createServer } from "vite";
 import { createSuiteStudioApp } from "../server/app.js";
+import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
+import { createImageEditorApi } from "../server/image-editor-api.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
@@ -14,12 +16,28 @@ import { MemoryStorage } from "../server/storage/memory-storage.js";
 async function offlineCanvas(t, sizes = ["1K", "2K"]) {
   const sample = await readFile("public/assets/gan65-product.jpg");
   const libraryRepository = new MemoryLibraryRepository();
+  const storage = new MemoryStorage();
+  const taskRepository = new MemoryTaskRepository();
+  const editorRepository = new MemoryImageEditorRepository();
   const calls = [];
+  const editorService = new ImageEditorService(
+    editorRepository,
+    {
+      name: "offline-editor",
+      version: "gpt-image-2",
+      capabilitiesVersion: "1",
+      capabilities: () => ({ imageToImage: true, addText: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
+      edit: async () => ({ bytes: sample, mimeType: "image/jpeg", width: 64, height: 64 }),
+    },
+    storage,
+    async (versionId) => ({ bytes: sample, mimeType: "image/jpeg", width: 64, height: 64, generationPrompt: `source:${versionId}` }),
+  );
   const api = createSuiteStudioApp({
     repository: new MemorySuiteRepository(),
-    taskRepository: new MemoryTaskRepository(),
+    taskRepository,
     libraryRepository,
-    storage: new MemoryStorage(),
+    storage,
+    imageEditorApi: createImageEditorApi(editorService),
     provider: {
       async edit(request) {
         calls.push(request);
@@ -56,6 +74,7 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
             const upload = path.match(/^\/api\/suites\/([^/]+)\/input-images$/);
             const input = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/preview\/(original|thumbnail)$/);
             const version = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
+            const edited = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
             let result;
             if (upload && method === "POST") {
               const form = await new Response(payload, { headers: { "content-type": req.headers["content-type"] } }).formData();
@@ -74,7 +93,11 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
               });
             } else if (input) result = await api.preview(input[1], input[2], input[3]);
             else if (version) result = await api.previewTaskVersion(version[1], version[2]);
-            else if (path === "/api/model-settings") result = { status: 200, body: { data: settings } };
+            else if (edited) {
+              const found = (await editorRepository.listVersions(edited[1])).find((v) => v.id === edited[2]);
+              const obj = found ? await storage.get(found.objectKey) : null;
+              result = obj ? { status: 200, raw: obj.bytes, headers: { "content-type": obj.contentType } } : { status: 404, body: { error: { code: "NOT_FOUND", message: "not found" } } };
+            } else if (path === "/api/model-settings") result = { status: 200, body: { data: settings } };
             else result = await api.request(method, path, { headers: req.headers, body: payload.length ? JSON.parse(payload.toString()) : undefined });
             res.writeHead(result.status, result.raw ? result.headers : { "Content-Type": "application/json" });
             res.end(result.raw ?? JSON.stringify(result.body));
@@ -412,4 +435,33 @@ test("默认生图模型：套图配置、新建任务与检查器可选七种�
   await inspector.selectOption("9:16");
   const card = page.locator("article").filter({ has: page.getByRole("heading", { name: "比例样例" }) });
   await card.getByText("9:16", { exact: true }).waitFor();
+});
+
+test("创作画布：移除卖点排版入口，未配 OCR 时可手工框选改文字并一键开始生成编辑子卡", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId } = await seedGeneratedCanvas(api, 2);
+  await page.goto(url + `create/canvas/${suiteId}`);
+  await page.locator(".wb-task-card").first().waitFor();
+
+  assert.equal(await page.getByRole("button", { name: "卖点排版" }).count(), 0);
+  assert.equal(await page.locator(".wb-card-vector-overlay").count(), 0);
+
+  await page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit").first().click();
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  await dialog.waitFor();
+
+  const changeTextTool = dialog.locator(".wb-editor-tools button", { hasText: "改文字" });
+  assert.equal(await changeTextTool.isDisabled(), false);
+  await changeTextTool.click();
+
+  await dialog.getByText(/当前未配置多模态识字模型/).waitFor();
+  assert.doesNotMatch(await dialog.innerText(), /fetch failed/);
+
+  await dialog.getByLabel("原文字").fill("旧卖点标题");
+  await dialog.getByLabel("新文字").fill("65W 便携快充");
+  await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
+  await dialog.waitFor({ state: "hidden" });
+
+  await page.locator(".wb-edit-child-card").first().waitFor();
+  await page.locator(".wb-edit-child-card").first().locator(".wb-card-state").filter({ hasText: /^已生成$/ }).waitFor();
 });

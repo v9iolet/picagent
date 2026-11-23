@@ -236,6 +236,128 @@ export class MemoryImageEditorRepository implements ImageEditorRepository {
   }
 }
 
+export function formatOcrErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const trimmed = raw.trim();
+  const isAbort =
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError") ||
+    trimmed === "OCR_TIMEOUT" ||
+    /\b(timeout|timed out|abort(ed)?)\b/i.test(trimmed);
+  if (isAbort) {
+    return "文字识别请求超时，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  const isNetwork =
+    (error instanceof TypeError && /fetch/i.test(trimmed)) ||
+    /fetch failed|ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|network|socket/i.test(trimmed);
+  if (isNetwork) {
+    return "文字识别服务连接失败，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  if (trimmed === "OCR_PROVIDER_UNAVAILABLE") {
+    return "当前未配置多模态识字模型，请在图片上拖拽框选原文字区域并手动输入原文字与新文字";
+  }
+  if (trimmed === "SOURCE_VERSION_NOT_FOUND") {
+    return "未找到待识别的图片版本，请刷新画布后重试";
+  }
+  const httpMatch = trimmed.match(/^OCR_HTTP_(\d+)$/);
+  if (httpMatch) {
+    const code = Number(httpMatch[1]);
+    if (code === 401 || code === 403) {
+      return `文字识别服务鉴权失败（HTTP ${code}），请检查模型配置或手动框选改字`;
+    }
+    if (code === 413) {
+      return "识别图片体积过大（HTTP 413），请点击重新识别或手动框选改字";
+    }
+    if (code === 429) {
+      return "文字识别请求过于频繁（HTTP 429），请稍后重试或手动框选改字";
+    }
+    return `文字识别服务返回异常（HTTP ${code}），可点击重新识别或手动框选改字`;
+  }
+  if (trimmed === "OCR_EMPTY_RESPONSE") {
+    return "文字识别模型未返回内容，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  if (trimmed === "OCR_INVALID_HTTP_RESPONSE" || trimmed === "OCR_INVALID_JSON_RESPONSE") {
+    return "文字识别响应格式异常，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  if (/[\u4e00-\u9fa5]/.test(trimmed)) {
+    return trimmed;
+  }
+  return "文字识别失败，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+}
+
+function describeNormalizedRegion(region: unknown): string {
+  if (!region || typeof region !== "object") return "指定区域";
+  const r = region as Record<string, unknown>;
+  const x = Number(r.x);
+  const y = Number(r.y);
+  const width = Number(r.width);
+  const height = Number(r.height);
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return "指定区域";
+  const cx = x + width / 2;
+  const cy = y + height / 2;
+  const vertical = cy < 0.33 ? "顶部" : cy > 0.67 ? "底部" : "中部";
+  const horizontal = cx < 0.33 ? "左侧" : cx > 0.67 ? "右侧" : "居中";
+  const xStart = Math.round(x * 100);
+  const xEnd = Math.round((x + width) * 100);
+  const yStart = Math.round(y * 100);
+  const yEnd = Math.round((y + height) * 100);
+  return `${vertical}${horizontal}区域（横向约 ${xStart}%–${xEnd}%，纵向约 ${yStart}%–${yEnd}%）`;
+}
+
+const OUTPAINT_DIRECTION_LABELS: Record<string, string> = {
+  all: "向四周",
+  horizontal: "向左右",
+  vertical: "向上下",
+  left: "向左",
+  right: "向右",
+};
+
+const OUTPAINT_ANCHOR_LABELS: Record<string, string> = {
+  center: "居中",
+  left: "居左",
+  right: "居右",
+};
+
+export function buildImageEditPrompt(operations: ReadonlyArray<EditOperation>, sourcePrompt: string): string {
+  if (operations.length === 1 && operations[0].type === "re_edit") {
+    return String(operations[0].payload.prompt ?? sourcePrompt);
+  }
+  const header = "严格保持输入图片中的商品主体外观、结构比例、材质细节、光影色调、背景构图及未指定修改的文字与元素不变，仅执行以下局部修改：";
+  const instructions = operations.map((operation, index) => {
+    const prefix = operations.length > 1 ? `${index + 1}. ` : "";
+    const req = typeof operation.payload.prompt === "string" ? operation.payload.prompt.trim() : "";
+    switch (operation.type) {
+      case "change_text": {
+        const regionDesc = describeNormalizedRegion(operation.payload.region);
+        const orig = String(operation.payload.originalText ?? "").trim();
+        const next = String(operation.payload.newText ?? "").trim();
+        return `${prefix}将${regionDesc}的原文字“${orig}”替换为“${next}”，保持原有排版、字体风格、颜色与光影一致${req ? `（${req}）` : ""}。`;
+      }
+      case "add_text": {
+        const regionDesc = operation.payload.region ? describeNormalizedRegion(operation.payload.region) : "画面指定区域";
+        const text = String(operation.payload.text ?? "").trim();
+        return `${prefix}在${regionDesc}新增文字“${text}”${req ? `，排版与视觉要求：${req}` : ""}。`;
+      }
+      case "redraw":
+        return `${prefix}仅重绘蒙版白色选区${req ? `：${req}` : ""}，蒙版以外的商品与背景画面严格保持不变。`;
+      case "erase":
+        return `${prefix}仅消除蒙版白色选区中的目标并自然补全周围背景${req ? `（${req}）` : ""}，蒙版以外画面严格保持不变。`;
+      case "outpaint": {
+        const dir = OUTPAINT_DIRECTION_LABELS[String(operation.payload.direction ?? "all")] ?? "向四周";
+        const targetRatio = String(operation.payload.targetRatio ?? "original");
+        const tw = Number(operation.payload.targetWidth);
+        const th = Number(operation.payload.targetHeight);
+        const dims = Number.isFinite(tw) && Number.isFinite(th) && tw > 0 && th > 0 ? `，目标尺寸 ${tw}×${th}` : "";
+        const anchor = OUTPAINT_ANCHOR_LABELS[String(operation.payload.anchor ?? "center")] ?? "居中";
+        return `${prefix}${dir}扩展画面至比例 ${targetRatio}${dims}，原图主体锚点保持${anchor}并自然延续背景纹理与光影${req ? `（${req}）` : ""}。`;
+      }
+      case "re_edit":
+        return `${prefix}${req || operation.summary}`;
+    }
+  });
+  return [header, ...instructions].filter(Boolean).join("\n");
+}
+
 function editProviderSnapshot({ name, version, capabilitiesVersion, channel }: ImageEditProvider): EditProviderSnapshot {
   return { name, version, capabilitiesVersion, channel };
 }
@@ -276,7 +398,7 @@ export class ImageEditorService {
     try {
       snapshot = { sourceVersionId, provider, status: "succeeded", blocks: (await ocr.recognize(source)).blocks };
     } catch (error) {
-      snapshot = { sourceVersionId, provider, status: "failed", blocks: [], error: error instanceof Error ? error.message : "OCR_FAILED" };
+      snapshot = { sourceVersionId, provider, status: "failed", blocks: [], error: formatOcrErrorMessage(error) };
     }
     await this.repository.saveOcrSnapshot(sessionId, snapshot);
     return snapshot;
@@ -297,9 +419,9 @@ export class ImageEditorService {
       const payload = { ...operation.payload };
       if (operation.type === "change_text") {
         const ocr = await this.repository.getOcrSnapshot(input.sessionId, input.sourceVersionId);
-        if (!ocr) throw new Error("OCR_REQUIRED");
-        if (ocr.status === "failed" && (!payload.originalText || !payload.newText || !payload.region)) throw new Error("CHANGE_TEXT_MANUAL_FIELDS_REQUIRED");
-        payload.ocrSnapshot = structuredClone(ocr);
+        if (ocr) {
+          payload.ocrSnapshot = structuredClone(ocr);
+        }
       }
       return { ...operation, order: i + 1, sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId, parentVersionId: input.parentVersionId ?? input.sourceVersionId, payload };
     }));
@@ -333,13 +455,7 @@ export class ImageEditorService {
     }));
     const summary = input.summary ?? draft.summary;
     const orderedOperations = materialized.sort((a, b) => a.order - b.order);
-    const prompt = orderedOperations.length === 1 && orderedOperations[0].type === "re_edit"
-      ? String(orderedOperations[0].payload.prompt ?? sourcePrompt)
-      : [sourcePrompt, ...orderedOperations.map((operation) => {
-      const operationPrompt = typeof operation.payload.prompt === "string" ? operation.payload.prompt.trim() : "";
-      const details = [operation.payload.text, operation.payload.originalText, operation.payload.newText].filter((value) => typeof value === "string" && value.trim()).join(" → ");
-      return [operation.summary, details, operationPrompt].filter(Boolean).join("：");
-    })].filter(Boolean).join("\n");
+    const prompt = buildImageEditPrompt(orderedOperations, sourcePrompt);
     const snapshot: EditSnapshot = { id: randomUUID(), sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId, parentVersionId: input.parentVersionId ?? input.sourceVersionId, summary, sourcePrompt, operations: structuredClone(materialized), provider: editProviderSnapshot(provider), createdAt: new Date().toISOString(), schemaVersion: "image-edit-snapshot-v1" };
     const taskId = randomUUID(); const now = new Date().toISOString(); const childTask: ImageEditChildTask = { id: taskId, sourceCardId: input.sourceCardId, sourceVersionId: snapshot.sourceVersionId, parentVersionId: snapshot.parentVersionId, snapshotId: snapshot.id, summary: snapshot.summary, status: "generating", currentVersionId: null, finalVersionId: null, errorCode: null, errorMessage: null, createdAt: now, updatedAt: now };
     const attempt: ImageEditAttempt = { id: randomUUID(), childTaskId: taskId, snapshotId: snapshot.id, attemptNo: 1, status: "generating", command: { type: materialized[0].type, sourceVersionId: snapshot.sourceVersionId, prompt, operations: structuredClone(materialized) }, provider: snapshot.provider, errorCode: null, errorMessage: null, createdAt: now, completedAt: null };
@@ -418,7 +534,11 @@ export class ImageEditorService {
       }
       const mask = operation.payload.mask; if (mask && typeof mask === "object") { const value = mask as Record<string, unknown>; if (value.mimeType !== "image/png" || !Number.isInteger(value.width) || !Number.isInteger(value.height)) throw new Error("MASK_METADATA_INVALID"); }
     }
-    if (operation.type === "change_text" && (!operation.payload.originalText || !operation.payload.newText || !operation.payload.region)) throw new Error("CHANGE_TEXT_FIELDS_REQUIRED");
+    if (operation.type === "change_text") {
+      const originalText = typeof operation.payload.originalText === "string" ? operation.payload.originalText.trim() : "";
+      const newText = typeof operation.payload.newText === "string" ? operation.payload.newText.trim() : "";
+      if (!originalText || !newText || !operation.payload.region) throw new Error("CHANGE_TEXT_FIELDS_REQUIRED");
+    }
   }
   private async appendAttempt(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }) {
     if (this.repository.appendAttempt) return this.repository.appendAttempt(input);

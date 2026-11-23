@@ -38,22 +38,10 @@ function summarizeHumanSupplement(raw: string, textContent: CategoryPromptItem["
 /** Extracts a concise, positive image-generation prompt from a frozen audit finalPrompt. */
 export function buildProviderImagePrompt(
   finalPrompt: string,
-  options?: { categoryCode?: string | null; pureWhiteMain?: boolean; vectorSellingPointOverlay?: boolean },
+  options?: { categoryCode?: string | null; pureWhiteMain?: boolean },
 ): string {
   const normalized = finalPrompt.replace(/\r\n/g, "\n").trim();
   if (!normalized) return "";
-
-  const isSellingPointCategory =
-    options?.categoryCode === "feature_benefit" || options?.categoryCode === "material_detail";
-  const stripOverlayDirectives = Boolean(options?.vectorSellingPointOverlay && isSellingPointCategory);
-  const sanitizeBody = (text: string) => {
-    if (!stripOverlayDirectives) return text;
-    return text
-      .split("\n")
-      .filter((line) => !/^\s*上图渲染文案[（(]?/.test(line))
-      .join("\n")
-      .trim();
-  };
 
   const lines = normalized.split("\n");
   const hasStructuredSection = lines.some((line) => STRUCTURED_PROMPT_SECTION_RE.test(line.trimStart()));
@@ -64,14 +52,9 @@ export function buildProviderImagePrompt(
       normalized.includes(PURE_WHITE_MAIN_IMAGE_REQUIREMENTS));
 
   if (!hasStructuredSection) {
-    let result = sanitizeBody(normalized);
-    if (isPureWhiteMain && !result.includes(PURE_WHITE_MAIN_IMAGE_REQUIREMENTS)) {
-      result = `${PURE_WHITE_MAIN_IMAGE_REQUIREMENTS}\n${result}`;
-    }
-    if (stripOverlayDirectives) {
-      result = `${result}\n留出对应版式文案空白区，画面中不直接生成文字或图标`.trim();
-    }
-    return result;
+    return isPureWhiteMain && !normalized.includes(PURE_WHITE_MAIN_IMAGE_REQUIREMENTS)
+      ? `${PURE_WHITE_MAIN_IMAGE_REQUIREMENTS}\n${normalized}`
+      : normalized;
   }
 
   const hasCategorySection = lines.some((line) => /^\s*当前类别提示词：/.test(line));
@@ -101,7 +84,7 @@ export function buildProviderImagePrompt(
     output.push(PURE_WHITE_MAIN_IMAGE_REQUIREMENTS);
   }
   for (const section of sections) {
-    const body = sanitizeBody(section.lines.join("\n").trim());
+    const body = section.lines.join("\n").trim();
     if (!body) continue;
     switch (section.label) {
       case "系统安全约束":
@@ -121,9 +104,6 @@ export function buildProviderImagePrompt(
         output.push(body);
         break;
     }
-  }
-  if (stripOverlayDirectives) {
-    output.push("留出对应版式文案空白区，画面中不直接生成文字或图标");
   }
   return output.join("\n").trim() || normalized;
 }

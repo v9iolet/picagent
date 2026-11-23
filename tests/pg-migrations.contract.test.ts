@@ -15,8 +15,6 @@ import { PostgresPlatformRepository } from "../server/repositories/postgres-plat
 import { PostgresSuiteRepository } from "../server/repositories/postgres-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import type { SuitePipelineRun } from "../server/types.js";
-import { createVectorOverlayPreset } from "../shared/vector-overlay.js";
-import sharp from "sharp";
 
 const skip = process.env.PG_CONTRACT_TEST !== "1";
 const timestamp = "2026-01-01T00:00:00.000Z";
@@ -448,81 +446,5 @@ test("PG library binds a published input_image from another suite to a canvas ta
     assert.equal(reference.resourceVersionId, id);
     assert.equal(reference.snapshot.suiteId, source.id);
     assert.deepEqual(await library.listReferences(canvas.id, "task", task.id), [reference]);
-  });
-});
-
-test("PG task repository supports vector-overlay render versioning with cleanBaseVersionId", { skip }, async () => {
-  await withMigratedSchemas(async ({ pool }) => {
-    const suites = new PostgresSuiteRepository(pool);
-    const tasks = new PostgresTaskRepository(pool);
-    const storage = new MemoryStorage();
-    const baseBytes = await sharp({
-      create: { width: 120, height: 120, channels: 3, background: { r: 240, g: 244, b: 248 } },
-    }).png().toBuffer();
-
-    const app = createSuiteStudioApp({
-      repository: suites,
-      taskRepository: tasks,
-      storage,
-      provider: {
-        async edit() {
-          return { bytes: baseBytes, mimeType: "image/png" };
-        },
-      },
-    });
-
-    const suite = await suites.createSuite("PG 矢量排版测试", undefined, "canvas");
-    const upload = await app.upload(suite.id, { filename: "pg-item.png", mimeType: "image/png", bytes: baseBytes });
-    assert.equal(upload.status, 201);
-    const inputId = (upload.body as any).data.id;
-
-    const { task } = await tasks.createCustomTask({
-      suiteId: suite.id,
-      planSnapshotId: null,
-      imageType: "detail",
-      title: "PG 卖点卡",
-      purpose: "卖点测试",
-      promptDraft: "极简商业拍摄",
-      sourceInputImageId: inputId,
-      generationParams: {},
-    });
-
-    const genRes = await app.request("POST", `/api/suite-tasks/${task.id}/generation`, {
-      headers: { "idempotency-key": "pg-vo-gen-1" },
-    });
-    assert.equal(genRes.status, 202);
-    const batchId = (genRes.body as any).data.batchId;
-    for (let i = 0; i < 50; i += 1) {
-      const batch = await tasks.getBatch(batchId);
-      if (batch?.status === "completed") break;
-      await new Promise((r) => setTimeout(r, 15));
-    }
-    const initial = await tasks.listTaskVersions(task.id);
-    assert.equal(initial.versions.length, 1);
-    const v1 = initial.versions[0];
-
-    const overlay = createVectorOverlayPreset("ambient_three_icons", {
-      headline: "PG 无损合成",
-      points: ["约束兼容", "外键一致", "像素无损"],
-      themeId: "dark_tech",
-    });
-    const render1 = await app.request("POST", `/api/suite-tasks/${task.id}/vector-overlay/render`, {
-      headers: { "idempotency-key": "pg-vo-render-1" },
-      body: { overlay },
-    });
-    assert.equal(render1.status, 200);
-    const v2 = (render1.body as any).data.version;
-    assert.equal(v2.versionNumber, 2);
-    assert.equal(v2.promptSnapshot.cleanBaseVersionId, v1.id);
-    assert.deepEqual(v2.promptSnapshot.vectorOverlay, overlay);
-
-    const render2 = await app.request("POST", `/api/suite-tasks/${task.id}/vector-overlay/render`, {
-      headers: { "idempotency-key": "pg-vo-render-2" },
-      body: { overlay: { ...overlay, themeId: "minimal_light" } },
-    });
-    assert.equal(render2.status, 200);
-    const v3 = (render2.body as any).data.version;
-    assert.equal(v3.versionNumber, 3);
-    assert.equal(v3.promptSnapshot.cleanBaseVersionId, v1.id);
   });
 });
