@@ -1189,7 +1189,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
     const libAll = await library.listResources({ resourceType: "prompt_template", pageSize: 100 });
     assert.equal(libAll.items.length, 19);
 
-    // 3. Active template copy -> edit draft -> publish flow works end-to-end in PG
+    // 3. Active template copy -> edit draft -> draft filtering -> publish flow works end-to-end in PG
     const baseRefine = activeAfterImport.find((i) => i.code === "general.base_refine")!;
     const draftCopy = await prompts.copyVersion(baseRefine.templateVersionId);
     assert.ok(draftCopy);
@@ -1200,6 +1200,37 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
     });
     assert.ok(edited);
     assert.equal(edited.name, "产品图转干净产品底图（精修版）");
+
+    // status=draft returns latest draft even though template currently has a published version
+    const draftCopyLatest = await prompts.copyVersion(edited.templateVersionId);
+    assert.ok(draftCopyLatest);
+    const pgDraftTemplates = await prompts.listTemplates({ status: "draft" });
+    assert.equal(pgDraftTemplates.length, 1);
+    assert.equal(pgDraftTemplates[0].templateVersionId, draftCopyLatest.templateVersionId);
+    assert.equal(pgDraftTemplates[0].status, "draft");
+    const pgLibDrafts = await library.listResources({ resourceType: "prompt_template", status: "draft", pageSize: 100 });
+    assert.equal(pgLibDrafts.items.length, 1);
+    assert.equal(pgLibDrafts.items[0].templateVersionId, draftCopyLatest.templateVersionId);
+    assert.equal(pgLibDrafts.items[0].status, "draft");
+    await prompts.retireVersion(draftCopyLatest.templateVersionId);
+
+    // Non-UUID IDs on PostgresPromptRepository return null/[] and HTTP 404 (no PG 22P02 500)
+    assert.equal(await prompts.getVersion("demo-reverse-main-v1"), null);
+    assert.equal(await prompts.getPublishedVersion("demo-reverse-main-v1"), null);
+    assert.deepEqual(await prompts.listVersions("not-a-uuid"), []);
+    assert.equal(await prompts.publishVersion("not-a-uuid"), null);
+    assert.equal(await prompts.updateDraft("not-a-uuid", { name: "x" }), null);
+    assert.equal(await prompts.copyVersion("not-a-uuid"), null);
+    assert.equal(await prompts.retireVersion("not-a-uuid"), null);
+    const pgPromptApp = createSuiteStudioApp({
+      repository: new PostgresSuiteRepository(pool),
+      promptRepository: prompts,
+      storage: new MemoryStorage(),
+    });
+    const invalidIdRes = await pgPromptApp.request("GET", "/api/prompt-templates/demo-reverse-main-v1");
+    assert.equal(invalidIdRes.status, 404);
+    assert.equal((invalidIdRes.body as any).error.code, "PROMPT_TEMPLATE_NOT_FOUND");
+
     const republished = await prompts.publishVersion(edited.templateVersionId);
     assert.ok(republished);
     assert.equal(republished.status, "published");

@@ -111,6 +111,18 @@ export class MemoryPromptRepository {
   async listTemplates(options: { stage?: PromptStage; status?: PromptVersionStatus | "all" } = {}): Promise<PromptTemplatePublic[]> {
     const status = options.status ?? "published";
     if (status === "published") return this.listPublished(options.stage);
+    if (status === "draft") {
+      const representatives: PromptTemplateRuntime[] = [];
+      for (const template of this.templates.values()) {
+        const candidates = [...this.versions.values()]
+          .filter((version) => version.templateId === template.id && version.status === "draft" && (!options.stage || version.stage === options.stage))
+          .sort((a, b) => b.versionNo - a.versionNo);
+        if (candidates[0]) representatives.push(candidates[0]);
+      }
+      return representatives
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((version) => this.toPublic(version));
+    }
     const rank = (template: TemplateIdentity, version: PromptTemplateRuntime) => {
       if (version.templateVersionId === template.publishedVersionId && version.status === "published") return 0;
       if (version.status === "published") return 1;

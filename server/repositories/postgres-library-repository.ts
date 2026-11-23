@@ -344,7 +344,27 @@ export class PostgresLibraryRepository implements LibraryRepository {
     const suiteId = query.suiteId ?? null;
     const needle = query.query?.trim() ? `%${query.query.trim()}%` : null;
     if (query.scope !== "image" && (!query.resourceType || query.resourceType === "prompt_template")) {
-      const result = await this.pool.query<any>(`
+      const isDraftFilter = query.status === "draft";
+      const result = await this.pool.query<any>(isDraftFilter
+        ? `
+        SELECT * FROM (
+          SELECT DISTINCT ON (t.id)
+            'prompt:' || v.id::text AS id, 'prompt_template' AS "resourceType", v.name AS title,
+            left(regexp_replace(v.body, '\\s+', ' ', 'g'), 180) AS summary, NULL::text AS "mimeType", NULL::text AS "previewUrl",
+            NULL::uuid AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", NULL::uuid AS "baseVersionId",
+            v.id::text AS "templateVersionId", v.id::text AS "resourceVersionId", v.stage,
+            jsonb_build_object('templateId', t.id::text, 'code', t.code, 'versionNo', v.version_no, 'status', v.status, 'body', v.body, 'userPromptTemplate', v.user_prompt_template, 'inputSchema', v.input_schema, 'outputSchema', v.output_schema, 'applicability', v.applicability) AS source,
+            v.status AS status, v.created_at AS "createdAt", COALESCE(v.published_at, v.created_at) AS "updatedAt"
+          FROM prompt_library.prompt_templates t
+          JOIN prompt_library.prompt_template_versions v ON v.template_id = t.id
+          WHERE v.status = 'draft'
+            AND ($1::text IS NULL OR v.stage = $1)
+            AND ($2::text IS NULL OR v.name ILIKE $2 OR v.body ILIKE $2 OR t.code ILIKE $2)
+            AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'prompt:' || v.id::text)
+          ORDER BY t.id, v.version_no DESC
+        ) latest
+        ORDER BY latest."updatedAt" DESC`
+        : `
         SELECT * FROM (
           SELECT DISTINCT ON (t.id)
             'prompt:' || v.id::text AS id, 'prompt_template' AS "resourceType", v.name AS title,

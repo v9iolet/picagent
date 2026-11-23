@@ -22,6 +22,7 @@ import { CustomTaskModal } from "../components/CustomTaskModal";
 import { DeliveryGalleryView } from "../components/DeliveryGalleryView";
 import { ProductResourcePickerModal } from "../components/resource-picker";
 import { VersionCompareModal } from "../components/VersionCompareModal";
+import { stageLabel } from "../features/library/library-helpers";
 import { Icon, ImageWithState, ModelSettingsMessage } from "./shared";
 import { Circle as KonvaCircle, Layer, Line, Rect as KonvaRect, Stage, Text as KonvaText, Transformer } from "react-konva";
 import type Konva from "konva";
@@ -637,17 +638,21 @@ function PromptLibraryButton({ onNotify }: { onNotify: (message: string) => void
               }).catch(() => onNotify("阶段模板加载失败"));
             }}>
               <option value="">全部阶段</option>
+              <option value="structure_plan">结构规划</option>
+              <option value="category_prompt">类别提示词</option>
               <option value="base_refine">底图精修</option>
-              <option value="plan">计划生成</option>
-              <option value="task_image">单卡创作</option>
+              <option value="listing_copy">上架文案</option>
+              <option value="replica_prompt">爆品图复刻</option>
             </select>
             <div className="wb-prompt-list">
-              {templates.map((template) => (
+              {templates.length > 0 ? templates.map((template) => (
                 <button type="button" key={template.templateVersionId} className={selected?.templateVersionId === template.templateVersionId ? "is-selected" : ""} onClick={() => setSelected(template)}>
                   <strong>{template.name}</strong>
-                  <span>{template.stage} · v{template.versionNo}</span>
+                  <span>{template.usedBy?.length ? template.usedBy.join(" / ") : stageLabel(template.stage)} · v{template.versionNo}</span>
                 </button>
-              ))}
+              )) : (
+                <div className="wb-prompt-empty">当前阶段暂无在用提示词模板</div>
+              )}
             </div>
             {selected && (
               <div className="wb-prompt-detail">

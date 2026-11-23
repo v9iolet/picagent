@@ -217,14 +217,21 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
     `Last retired card must be visible inside 1280x720 viewport after scroll (box=${JSON.stringify(lastRetiredBox)})`,
   );
 
-  // 4. Switch back to "在用" and verify copy -> edit -> save -> publish flow still works
+  // 4. Switch back to "在用" and verify copy -> edit -> save -> draft filter -> publish flow still works
   await page.locator(".style-filter-panel label", { hasText: "在用" }).click();
   await page.waitForFunction(() => document.querySelectorAll(".template-card").length === 6);
   await page.locator(".template-card", { hasText: "套图·白底精修" }).click();
   await page.getByRole("button", { name: "复制新草稿" }).click();
   await page.getByRole("button", { name: "保存草稿" }).waitFor({ state: "visible" });
   await page.getByRole("button", { name: "保存草稿" }).click();
+  // Switching to "草稿" filter shows the newly created draft even though v1 is still published
+  await page.locator(".style-filter-panel label", { hasText: "草稿" }).click();
+  await page.waitForFunction(() => document.querySelectorAll(".template-card").length === 1);
+  assert.match(await page.locator(".template-card").first().innerText(), /v2/);
   await page.getByRole("button", { name: "发布此版本" }).click();
+  await page.locator(".style-filter-panel label", { hasText: "在用" }).click();
+  await page.waitForFunction(() => document.querySelectorAll(".template-card").length === 6);
+  await page.locator(".template-card", { hasText: "套图·白底精修" }).click();
   await page.waitForFunction(() =>
     Array.from(document.querySelectorAll(".style-version-row")).some((row) =>
       row.textContent?.includes("v2 · 在用"),

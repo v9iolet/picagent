@@ -395,4 +395,19 @@ test("prompt template usage mapping, retirement policy, read-by-id for retired v
 
   // Reverse prompt stage resolves empty usedBy
   assert.deepEqual(resolvePromptTemplateUsedBy({ code: "reverse.main.white", stage: "reverse_prompt" }), []);
+
+  // status=draft filters draft versions directly and picks latest draft even when template already has a published version
+  const baseRefine = publishedItems.find((item) => item.code === "general.base_refine")!;
+  const draftV2 = await prompts.copyVersion(baseRefine.templateVersionId);
+  assert.ok(draftV2);
+  const draftV3 = await prompts.copyVersion(baseRefine.templateVersionId);
+  assert.ok(draftV3);
+  const draftsRes = await api.request("GET", "/api/prompt-templates?status=draft");
+  assert.equal(draftsRes.status, 200);
+  const draftItems = draftsRes.body.data as Array<{ code: string; versionNo: number; status: string; templateVersionId: string }>;
+  assert.equal(draftItems.length, 1);
+  assert.equal(draftItems[0].code, "general.base_refine");
+  assert.equal(draftItems[0].templateVersionId, draftV3.templateVersionId);
+  assert.equal(draftItems[0].versionNo, draftV3.versionNo);
+  assert.equal(draftItems[0].status, "draft");
 });

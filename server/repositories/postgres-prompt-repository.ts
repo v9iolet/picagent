@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { samePromptTemplateContent, validatePromptTemplateContract, withPromptTemplateUsage, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime, type PromptVersionStatus } from "../prompt-library.js";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const runtimeColumns = `t.id AS "templateId", v.id AS "templateVersionId", v.version_no AS "versionNo",
   t.code, v.name, v.kind, v.stage, v.execution_target AS "executionTarget", v.input_schema AS "inputSchema",
   v.output_schema AS "outputSchema", v.applicability, v.body, v.user_prompt_template AS "userPromptTemplate", v.status, v.source_file AS "sourceFile",
@@ -120,6 +122,7 @@ export class PostgresPromptRepository {
   }
 
   async publishVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
+    if (!UUID_RE.test(versionId)) return null;
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -153,6 +156,18 @@ export class PostgresPromptRepository {
   async listTemplates(options: { stage?: PromptStage; status?: PromptVersionStatus | "all" } = {}): Promise<PromptTemplatePublic[]> {
     const status = options.status ?? "published";
     if (status === "published") return this.listPublished(options.stage);
+    if (status === "draft") {
+      const result = await this.pool.query<PromptTemplatePublic>(`
+        SELECT * FROM (
+          SELECT DISTINCT ON (t.id) ${publicColumns}
+          FROM prompt_library.prompt_templates t
+          JOIN prompt_library.prompt_template_versions v ON v.template_id = t.id
+          WHERE v.status = 'draft' AND ($1::text IS NULL OR v.stage = $1)
+          ORDER BY t.id, v.version_no DESC
+        ) latest
+        ORDER BY latest.name`, [options.stage ?? null]);
+      return result.rows.map((row) => withPromptTemplateUsage(row));
+    }
     const result = await this.pool.query<PromptTemplatePublic>(`
       SELECT * FROM (
         SELECT DISTINCT ON (t.id) ${publicColumns}
@@ -172,6 +187,7 @@ export class PostgresPromptRepository {
   }
 
   async getPublishedVersion(versionId: string, expectedStage?: PromptStage): Promise<PromptTemplateRuntime | null> {
+    if (!UUID_RE.test(versionId)) return null;
     const result = await this.pool.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
       FROM prompt_library.prompt_templates t JOIN prompt_library.prompt_template_versions v ON v.id = t.published_version_id
       WHERE v.id = $1 AND v.status = 'published' AND t.lifecycle_status = 'active' AND ($2::text IS NULL OR v.stage = $2)`, [versionId, expectedStage ?? null]);
@@ -179,6 +195,7 @@ export class PostgresPromptRepository {
   }
 
   async listVersions(templateId: string): Promise<PromptTemplateRuntime[]> {
+    if (!UUID_RE.test(templateId)) return [];
     const result = await this.pool.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
       FROM prompt_library.prompt_template_versions v JOIN prompt_library.prompt_templates t ON t.id = v.template_id
       WHERE t.id = $1 ORDER BY v.version_no`, [templateId]);
@@ -186,6 +203,7 @@ export class PostgresPromptRepository {
   }
 
   async getVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
+    if (!UUID_RE.test(versionId)) return null;
     const result = await this.pool.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
       FROM prompt_library.prompt_template_versions v JOIN prompt_library.prompt_templates t ON t.id = v.template_id
       WHERE v.id = $1`, [versionId]);
@@ -220,6 +238,7 @@ export class PostgresPromptRepository {
   }
 
   async retireVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
+    if (!UUID_RE.test(versionId)) return null;
     const result = await this.pool.query<PromptTemplateRuntime>(`UPDATE prompt_library.prompt_template_versions v SET status='retired'
       FROM prompt_library.prompt_templates t WHERE v.id=$1 AND v.template_id=t.id
       RETURNING ${runtimeColumns}`, [versionId]);
