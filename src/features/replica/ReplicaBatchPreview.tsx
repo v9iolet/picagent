@@ -144,11 +144,11 @@ export function ReplicaBatchPreview({ state }: { state: ReplicaStudioState }) {
                       </span>
                     )}
                     {card.replicaReferenceThumbnailUrl && (
-                      <span className="rp-ref-overlay" title="对应参考图">
+                      <div className="rp-ref-overlay" title="对应参考图">
                         <img src={card.replicaReferenceThumbnailUrl} alt={`${card.title} 参考图`} />
-                      </span>
+                      </div>
                     )}
-                    {cardSketch && <span className="rp-card-sketch-tag">风格示意</span>}
+                    {cardSketch && <div className="rp-card-sketch-tag">风格示意</div>}
                   </div>
                   <div className="rp-card-footer">
                     <span className="rp-card-title" title={card.title}>
@@ -166,9 +166,9 @@ export function ReplicaBatchPreview({ state }: { state: ReplicaStudioState }) {
               return (
                 <div key={ref?.id ?? index} className="ss-placeholder is-loading rp-skeleton-card" data-replica-skeleton>
                   {ref?.thumbnailPreviewUrl && (
-                    <span className="rp-ref-overlay" title="对应参考图">
+                    <div className="rp-ref-overlay" title="对应参考图">
                       <img src={ref.thumbnailPreviewUrl} alt={ref.filename} />
-                    </span>
+                    </div>
                   )}
                   <span className="ss-skeleton-label">
                     {running

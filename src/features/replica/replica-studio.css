@@ -472,12 +472,16 @@
   gap: 4px;
 }
 
+.ss-photo > .rp-ref-overlay,
+.rp-skeleton-card > .rp-ref-overlay,
 .rp-ref-overlay {
+  display: block;
   position: absolute;
   top: 7px;
   left: 7px;
   width: 44px;
   height: 44px;
+  z-index: 2;
   border-radius: 6px;
   overflow: hidden;
   border: 2px solid #fff;
@@ -493,16 +497,23 @@
   display: block;
 }
 
+.ss-photo > .rp-card-sketch-tag,
 .rp-card-sketch-tag {
+  display: inline-flex;
+  align-items: center;
   position: absolute;
   top: 7px;
   right: 7px;
+  width: auto;
+  height: auto;
+  z-index: 2;
   padding: 2px 6px;
   border-radius: 4px;
   background: rgba(15, 23, 42, 0.76);
   color: #fde68a;
   font-size: 10px;
   font-weight: 600;
+  line-height: 1.4;
   pointer-events: none;
 }
 

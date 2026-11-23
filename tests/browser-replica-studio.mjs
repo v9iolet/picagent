@@ -336,8 +336,28 @@ test("爆品图复刻：路由重定向、配置栏交互与校验、资源库�
   imageGate.resolve();
   await batch.locator('[data-status="completed"]').waitFor({ timeout: 10000 });
   await batch.getByRole("heading", { name: "桌面快充套装", exact: true }).waitFor();
-  assert.equal(await batch.locator("[data-replica-card]").count(), 2);
+  const cards = batch.locator("[data-replica-card]");
+  assert.equal(await cards.count(), 2);
   assert.equal(await batch.locator("[data-replica-card] .rp-ref-overlay img").count(), 2);
+
+  // Verify reference overlay boundingBox is 44x44 (±2px) and inside top-left of .ss-photo
+  for (let i = 0; i < 2; i += 1) {
+    const card = cards.nth(i);
+    const photoBox = await card.locator(".ss-photo").boundingBox();
+    const overlayBox = await card.locator(".rp-ref-overlay").boundingBox();
+    assert.ok(photoBox && overlayBox, `card ${i} photo and overlay boxes must exist`);
+    assert.ok(
+      Math.abs(overlayBox.width - 44) <= 2 && Math.abs(overlayBox.height - 44) <= 2,
+      `expected 44x44 (±2px) ref overlay, got ${overlayBox.width}x${overlayBox.height}`,
+    );
+    assert.ok(
+      overlayBox.x >= photoBox.x &&
+        overlayBox.y >= photoBox.y &&
+        overlayBox.x + overlayBox.width <= photoBox.x + photoBox.width / 2 &&
+        overlayBox.y + overlayBox.height <= photoBox.y + photoBox.height / 2,
+      `ref overlay must sit inside top-left of .ss-photo`,
+    );
+  }
 
   // Verify polling stops after completion
   const pollsAtCompletion = calls.filter((c) => c.path === `/api/suites/${suiteId}/studio-state`).length;
@@ -365,4 +385,52 @@ test("爆品图复刻：路由重定向、配置栏交互与校验、资源库�
   await page.getByRole("radio", { name: "爆品图复刻", exact: true }).check();
   await page.locator(".template-card").first().waitFor();
   assert.equal(await page.locator(".template-card .badge", { hasText: "爆品图复刻" }).count() >= 2, true);
+});
+
+test("爆品图复刻：无产品图风格示意角标尺寸正常且 /reverse/:id 只读页仍可访问", async (t) => {
+  const { url, page } = await offlineReplicaStudio(t);
+
+  await page.goto(url + "create/replica");
+  await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+  await page.getByText("未上传产品图，结果仅作风格示意", { exact: true }).waitFor({ state: "visible" });
+
+  await page.getByRole("button", { name: "一键复刻（1张）", exact: true }).click();
+  await page.waitForURL(/\/create\/replica\?suite=[^&]+/);
+
+  const batch = page.getByRole("region", { name: "复刻批次" });
+  await batch.locator('[data-status="completed"]').waitFor({ timeout: 10000 });
+
+  const sketchPill = batch.locator(".rp-sketch-pill");
+  await sketchPill.waitFor({ state: "visible" });
+  assert.equal(await sketchPill.textContent(), "风格示意");
+
+  const card = batch.locator("[data-replica-card]").first();
+  const photoBox = await card.locator(".ss-photo").boundingBox();
+  const overlayBox = await card.locator(".rp-ref-overlay").boundingBox();
+  const tag = card.locator(".rp-card-sketch-tag");
+  await tag.waitFor({ state: "visible" });
+  assert.equal(await tag.textContent(), "风格示意");
+  const tagBox = await tag.boundingBox();
+
+  assert.ok(photoBox && overlayBox && tagBox, "photo, overlay, and sketch tag boxes must exist");
+  assert.ok(
+    Math.abs(overlayBox.width - 44) <= 2 && Math.abs(overlayBox.height - 44) <= 2,
+    `expected 44x44 (±2px) ref overlay, got ${overlayBox.width}x${overlayBox.height}`,
+  );
+  assert.ok(
+    tagBox.width < photoBox.width * 0.5 && tagBox.height < photoBox.height * 0.25,
+    `sketch tag should be compact inside .ss-photo, got ${tagBox.width}x${tagBox.height} in ${photoBox.width}x${photoBox.height}`,
+  );
+  assert.ok(
+    tagBox.x >= photoBox.x &&
+      tagBox.y >= photoBox.y &&
+      tagBox.x + tagBox.width <= photoBox.x + photoBox.width &&
+      tagBox.y + tagBox.height <= photoBox.y + photoBox.height,
+    `sketch tag must stay inside .ss-photo`,
+  );
+
+  // Verify /reverse/:id remains routed to the read-only reverse page (not redirected to /create/replica)
+  await page.goto(url + "reverse/missing-plan-id");
+  assert.equal(new URL(page.url()).pathname, "/reverse/missing-plan-id");
+  await page.getByRole("heading", { name: "旧反推方案（只读）", exact: true }).waitFor();
 });

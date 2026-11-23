@@ -52,7 +52,7 @@
   font-size: 12px;
 }
 
-.rp-picker-head > button {
+.rp-picker-modal .rp-picker-head > button {
   display: inline-grid;
   place-items: center;
   width: 32px;
@@ -65,7 +65,7 @@
   cursor: pointer;
 }
 
-.rp-picker-head > button svg {
+.rp-picker-modal .rp-picker-head > button svg {
   width: 16px;
   height: 16px;
 }

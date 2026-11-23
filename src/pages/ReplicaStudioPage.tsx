@@ -449,9 +449,8 @@ export function ReplicaStudioPage({
   const handleApplyLibraryProducts = useCallback((selected: ProductResourceSelection[]) => {
     setProductNotice("");
     setProducts((prev) => {
-      const localItems = prev.filter((item) => item.sourceKind === "upload");
-      const maxLibrary = Math.max(0, REPLICA_MAX_PRODUCTS - localItems.length);
-      const libraryItems: ReplicaProductDraft[] = selected.slice(0, maxLibrary).map((item) => ({
+      const selectedById = new Map(selected.map((item) => [item.resourceId, item]));
+      const toDraft = (item: ProductResourceSelection): ReplicaProductDraft => ({
         localId: `lib-${item.resourceId}`,
         sourceKind: "library",
         libraryResourceId: item.resourceId,
@@ -460,8 +459,25 @@ export function ReplicaStudioPage({
         previewUrl: item.previewUrl ?? `/api/library/resources/${encodeURIComponent(item.resourceId)}/preview`,
         resourceType: item.resourceType,
         status: "ready",
-      }));
-      return [...localItems, ...libraryItems];
+      });
+
+      const kept: ReplicaProductDraft[] = [];
+      const keptLibraryIds = new Set<string>();
+      for (const item of prev) {
+        if (item.sourceKind === "upload") {
+          kept.push(item);
+        } else if (selectedById.has(item.libraryResourceId)) {
+          kept.push(toDraft(selectedById.get(item.libraryResourceId)!));
+          keptLibraryIds.add(item.libraryResourceId);
+        }
+      }
+
+      const added = selected
+        .filter((item) => !keptLibraryIds.has(item.resourceId))
+        .slice(0, Math.max(0, REPLICA_MAX_PRODUCTS - kept.length))
+        .map(toDraft);
+
+      return [...kept, ...added];
     });
   }, []);
 
@@ -543,16 +559,17 @@ export function ReplicaStudioPage({
         size: effectiveConfig.size,
       });
 
-      navigate(`/create/replica?suite=${encodeURIComponent(result.suiteId)}`);
-      const seq = ++requestSeqRef.current;
-      const latest = await replicaApi.state(result.suiteId);
-      applyState(latest, seq);
+      if (result.suiteId === suiteId) {
+        setReloadTick((n) => n + 1);
+      } else {
+        navigate(`/create/replica?suite=${encodeURIComponent(result.suiteId)}`);
+      }
     } catch (error) {
       setPageNotice(message(error));
     } finally {
       setSubmitting(false);
     }
-  }, [references, products, effectiveConfig, submitting, navigate, applyState]);
+  }, [references, products, effectiveConfig, submitting, suiteId, navigate]);
 
   const renderHistoryMeta = useCallback((item: GenerationHistoryFeedItem) => {
     const cfg = item.pipeline?.config;
