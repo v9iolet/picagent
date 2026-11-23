@@ -2,7 +2,14 @@ import { strict as assert } from "node:assert";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { createSuiteStudioApp } from "../server/app.js";
-import { isNormalizedPromptMarkdown, parseNormalizedPromptMarkdown, parsePromptMarkdown, validateDynamicInput } from "../server/prompt-library.js";
+import {
+  importPromptRecordsWithPolicy,
+  isNormalizedPromptMarkdown,
+  parseNormalizedPromptMarkdown,
+  parsePromptMarkdown,
+  resolvePromptTemplateUsedBy,
+  validateDynamicInput,
+} from "../server/prompt-library.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
@@ -286,4 +293,121 @@ test("re-importing unchanged replica markdown does not create a v2 draft when se
   assert.equal(v4.status, "draft");
   assert.notEqual(v4.templateVersionId, seeded.templateVersionId);
   assert.equal(v4.versionNo, 4);
+});
+
+test("prompt template usage mapping, retirement policy, read-by-id for retired versions, and re-import idempotency", async () => {
+  const files = [
+    "prompt/normalized/general-base-refine.md",
+    "prompt/normalized/general-structure-plan-groups.md",
+    "prompt/normalized/general-category-prompt-groups.md",
+    "prompt/normalized/general-listing-copy.md",
+    "prompt/normalized/replica-compose.md",
+    "prompt/normalized/replica-high.md",
+    "prompt/normalized/general-plan-combined.md",
+    "prompt/normalized/apparel-plan-detail.md",
+    "prompt/normalized/general-repair-design.md",
+    "prompt/normalized/general-repair-text.md",
+  ];
+  const records = await Promise.all(
+    files.map(async (file) => parseNormalizedPromptMarkdown(await readFile(file, "utf8"), file)),
+  );
+  const prompts = new MemoryPromptRepository();
+  const firstRun = await importPromptRecordsWithPolicy(prompts, records, { publish: true });
+  assert.equal(firstRun.length, files.length);
+
+  const api = createSuiteStudioApp({
+    repository: new MemorySuiteRepository(),
+    storage: new MemoryStorage(),
+    promptRepository: prompts,
+  });
+
+  // Default published list returns ONLY the 6 active templates, each annotated with usedBy and no body
+  const publishedRes = await api.request("GET", "/api/prompt-templates");
+  assert.equal(publishedRes.status, 200);
+  const publishedItems = publishedRes.body.data as Array<{
+    code: string;
+    stage: string;
+    usedBy: string[];
+    templateVersionId: string;
+  }>;
+  assert.deepEqual(
+    publishedItems.map((item) => item.code).sort(),
+    [
+      "general.base_refine",
+      "general.category-prompt",
+      "general.listing-copy",
+      "general.structure-plan",
+      "replica.compose",
+      "replica.high",
+    ],
+  );
+  for (const item of publishedItems) {
+    assert.equal("body" in item, false);
+    assert.ok(Array.isArray(item.usedBy) && item.usedBy.length > 0, `${item.code} must have usedBy`);
+  }
+  assert.deepEqual(publishedItems.find((i) => i.code === "general.structure-plan")?.usedBy, ["套图·结构规划"]);
+  assert.deepEqual(publishedItems.find((i) => i.code === "general.category-prompt")?.usedBy, ["套图·品类提示词"]);
+  assert.deepEqual(publishedItems.find((i) => i.code === "general.base_refine")?.usedBy, ["套图·白底精修"]);
+  assert.deepEqual(publishedItems.find((i) => i.code === "general.listing-copy")?.usedBy, ["上架文案"]);
+  assert.deepEqual(publishedItems.find((i) => i.code === "replica.compose")?.usedBy, ["爆品图复刻·参考风格"]);
+  assert.deepEqual(publishedItems.find((i) => i.code === "replica.high")?.usedBy, ["爆品图复刻·高度复刻"]);
+
+  // Unused templates are retired and excluded from default published list, but visible with status=retired / status=all
+  const retiredRes = await api.request("GET", "/api/prompt-templates?status=retired");
+  assert.equal(retiredRes.status, 200);
+  const retiredItems = retiredRes.body.data as Array<{ code: string; status: string; usedBy: string[]; templateVersionId: string }>;
+  assert.deepEqual(
+    retiredItems.map((item) => item.code).sort(),
+    ["apparel.plan.detail", "general.plan.combined", "general.repair.design", "general.repair.text"],
+  );
+  for (const item of retiredItems) {
+    assert.equal(item.status, "retired");
+    assert.deepEqual(item.usedBy, []);
+    assert.equal("body" in item, false);
+  }
+
+  // Reading a retired version by ID remains available for historical snapshots and read-only views
+  const retiredPlan = retiredItems.find((item) => item.code === "general.plan.combined")!;
+  const byId = await api.request("GET", `/api/prompt-templates/${retiredPlan.templateVersionId}`);
+  assert.equal(byId.status, 200);
+  assert.equal(byId.body.data.templateVersionId, retiredPlan.templateVersionId);
+  assert.equal(byId.body.data.status, "retired");
+  assert.deepEqual(byId.body.data.usedBy, []);
+  assert.ok(typeof byId.body.data.body === "string" && byId.body.data.body.length > 0);
+
+  // Invalid status returns 400 INVALID_PROMPT_STATUS
+  const invalidStatus = await api.request("GET", "/api/prompt-templates?status=bogus");
+  assert.equal(invalidStatus.status, 400);
+  assert.equal((invalidStatus.body as any).error.code, "INVALID_PROMPT_STATUS");
+
+  // Re-running seed import with publish=true does NOT revert retired templates back to published or add duplicate versions
+  const secondRun = await importPromptRecordsWithPolicy(prompts, records, { publish: true });
+  assert.equal(secondRun.length, files.length);
+  const publishedAfter = await api.request("GET", "/api/prompt-templates");
+  assert.equal((publishedAfter.body.data as unknown[]).length, 6);
+  for (const item of retiredItems) {
+    const versions = await prompts.listVersions(
+      firstRun.find((v) => v.code === item.code)!.templateId,
+    );
+    assert.equal(versions.length, 1);
+    assert.equal(versions[0].status, "retired");
+  }
+
+  // Reverse prompt stage resolves empty usedBy
+  assert.deepEqual(resolvePromptTemplateUsedBy({ code: "reverse.main.white", stage: "reverse_prompt" }), []);
+
+  // status=draft filters draft versions directly and picks latest draft even when template already has a published version
+  const baseRefine = publishedItems.find((item) => item.code === "general.base_refine")!;
+  const draftV2 = await prompts.copyVersion(baseRefine.templateVersionId);
+  assert.ok(draftV2);
+  const draftV3 = await prompts.copyVersion(baseRefine.templateVersionId);
+  assert.ok(draftV3);
+  const draftsRes = await api.request("GET", "/api/prompt-templates?status=draft");
+  assert.equal(draftsRes.status, 200);
+  const draftItems = draftsRes.body.data as Array<{ code: string; versionNo: number; status: string; templateVersionId: string }>;
+  assert.equal(draftItems.length, 1);
+  assert.equal(draftItems[0].code, "general.base_refine");
+  assert.equal(draftItems[0].templateVersionId, draftV3.templateVersionId);
+  assert.equal(draftItems[0].versionNo, draftV3.versionNo);
+  assert.equal(draftItems[0].status, "draft");
 });

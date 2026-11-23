@@ -4,6 +4,72 @@ export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category
 export type PromptStage = (typeof PROMPT_STAGES)[number];
 export type PromptVersionStatus = "draft" | "published" | "retired";
 
+export const PROMPT_TEMPLATE_USAGE_BY_CODE = {
+  "general.structure-plan": ["套图·结构规划"],
+  "general.category-prompt": ["套图·品类提示词"],
+  "general.base_refine": ["套图·白底精修"],
+  "general.listing-copy": ["上架文案"],
+  "replica.compose": ["爆品图复刻·参考风格"],
+  "replica.high": ["爆品图复刻·高度复刻"],
+} as const satisfies Record<string, readonly string[]>;
+
+export const IN_USE_PROMPT_STAGES: readonly PromptStage[] = [
+  "base_refine",
+  "structure_plan",
+  "category_prompt",
+  "listing_copy",
+  "replica_prompt",
+];
+
+export const UNUSED_PROMPT_STAGES: readonly PromptStage[] = [
+  "plan",
+  "task_image",
+  "reverse_prompt",
+];
+
+export function resolvePromptTemplateUsedBy(template: {
+  code?: string | null;
+  stage?: PromptStage | string | null;
+  applicability?: Record<string, unknown> | null;
+}): string[] {
+  const code = typeof template.code === "string" ? template.code.trim() : "";
+  if (code && code in PROMPT_TEMPLATE_USAGE_BY_CODE) {
+    return [...PROMPT_TEMPLATE_USAGE_BY_CODE[code as keyof typeof PROMPT_TEMPLATE_USAGE_BY_CODE]];
+  }
+  switch (template.stage) {
+    case "structure_plan":
+      return ["套图·结构规划"];
+    case "category_prompt":
+      return ["套图·品类提示词"];
+    case "base_refine":
+      return ["套图·白底精修"];
+    case "listing_copy":
+      return ["上架文案"];
+    case "replica_prompt": {
+      const cloneLevel = template.applicability?.cloneLevel;
+      if (cloneLevel === "compose") return ["爆品图复刻·参考风格"];
+      if (cloneLevel === "high") return ["爆品图复刻·高度复刻"];
+      return ["爆品图复刻"];
+    }
+    default:
+      return [];
+  }
+}
+
+export function isPromptTemplateInUse(template: {
+  code?: string | null;
+  stage?: PromptStage | string | null;
+  applicability?: Record<string, unknown> | null;
+}): boolean {
+  return resolvePromptTemplateUsedBy(template).length > 0;
+}
+
+export function withPromptTemplateUsage<
+  T extends { code?: string | null; stage?: PromptStage | string | null; applicability?: Record<string, unknown> | null },
+>(item: T): T & { usedBy: string[] } {
+  return { ...item, usedBy: resolvePromptTemplateUsedBy(item) };
+}
+
 export interface PromptInputField {
   key: string;
   label: string;
@@ -43,6 +109,8 @@ export interface PromptTemplatePublic {
   executionTarget: "llm" | "image_model";
   inputSchema: PromptInputField[];
   applicability: Record<string, unknown>;
+  usedBy?: string[];
+  status?: PromptVersionStatus;
 }
 
 export interface PromptTemplateRuntime extends PromptTemplatePublic {
@@ -453,4 +521,51 @@ export function samePromptTemplateContent(
     JSON.stringify(stableJsonValue(existing.outputSchema)) === JSON.stringify(stableJsonValue(record.outputSchema)) &&
     JSON.stringify(stableJsonValue(existing.applicability)) === JSON.stringify(stableJsonValue(record.applicability))
   );
+}
+
+export async function importPromptRecordsWithPolicy(
+  repository: {
+    importRecords(records: PromptTemplateRecord[]): Promise<PromptTemplateRuntime[]>;
+    publishVersion(versionId: string): Promise<PromptTemplateRuntime | null>;
+    retireVersion(versionId: string): Promise<PromptTemplateRuntime | null>;
+    listVersions(templateId: string): Promise<PromptTemplateRuntime[]>;
+  },
+  records: PromptTemplateRecord[],
+  options: { publish?: boolean } = {},
+): Promise<PromptTemplateRuntime[]> {
+  const results: PromptTemplateRuntime[] = [];
+  for (const record of records) {
+    const inUse = isPromptTemplateInUse(record);
+    if (!inUse) {
+      const existingVersions = await repository.listVersions(record.templateId);
+      const matched = existingVersions.find(
+        (version) =>
+          (version.sourceSha256 === record.sourceSha256 && version.sourceHeading === record.sourceHeading) ||
+          samePromptTemplateContent(version, record),
+      );
+      if (matched) {
+        if (matched.status !== "retired") {
+          const retired = await repository.retireVersion(matched.templateVersionId);
+          results.push(retired ?? matched);
+        } else {
+          results.push(matched);
+        }
+        continue;
+      }
+    }
+    const [imported] = await repository.importRecords([record]);
+    if (!inUse) {
+      const retired =
+        imported.status === "retired"
+          ? imported
+          : (await repository.retireVersion(imported.templateVersionId)) ?? imported;
+      results.push(retired);
+    } else if (options.publish && imported.status !== "published") {
+      const published = (await repository.publishVersion(imported.templateVersionId)) ?? imported;
+      results.push(published);
+    } else {
+      results.push(imported);
+    }
+  }
+  return results;
 }

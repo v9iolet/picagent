@@ -9,7 +9,10 @@
 .style-library-nav .nav-item:hover { background:#f5f7f9; color:var(--suite-ink); }
 .style-library-nav .nav-item svg { width:18px; height:18px; }
 .style-library-workarea { inset:68px 0 0 82px; background:#f8fafb; }
-.pa-shell .style-library-workarea { position: static; flex: 1; height: 100%; min-height: 0; }
+.pa-shell .style-library-workarea { position: static; flex: 1; height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+.style-library-workarea > .panel, .style-library-workarea > .styles-center { height: 100%; min-height: 0; overflow: hidden; }
+.style-library-workarea .style-filter-panel .panel-scroll,
+.style-library-workarea .style-inspector .inspector-body { height: calc(100% - 58px); overflow-y: auto; }
 .style-template-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
 .style-template-head h3 { margin:0; }
 .style-version-row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 8px; border:1px solid var(--suite-line, #dfe5ed); border-radius:8px; margin-bottom:6px; background:#fbfcfd; }
@@ -85,12 +88,15 @@
 .style-library-prompt-modal header p { margin-top:4px; color:var(--suite-muted); font-size:11px; }
 .style-library-modal-body { display:grid; grid-template-columns:minmax(320px,.95fr) minmax(0,1.05fr); min-height:430px; }
 .style-library-modal-body.is-template-only { grid-template-columns:1fr; }
-.template-list-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:12px; padding:16px 18px 22px; background:#fff; align-content:start; }
+.template-list-grid { height:100%; overflow-y:auto; display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:12px; padding:16px 18px 22px; background:#fff; align-content:start; }
 .template-card { display:flex; flex-direction:column; gap:8px; padding:14px 16px; border:1px solid var(--suite-line, #dfe5ed); border-radius:11px; background:#fff; box-shadow:0 4px 12px rgba(39,54,73,.04); cursor:pointer; transition:border-color 140ms ease, box-shadow 140ms ease; }
 .template-card:hover { border-color:#9eb9e8; box-shadow:0 8px 18px rgba(39,54,73,.09); }
 .template-card.active { border:2px solid #356fd2; padding:13px 15px; box-shadow:0 0 0 3px rgba(53,111,210,.12); background:#fafcff; }
 .template-card-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .template-card-title { margin:0; font-size:13px; font-weight:650; color:var(--suite-ink, #142033); line-height:1.35; }
+.template-card-usage, .template-usage-list { display:flex; flex-wrap:wrap; gap:5px; }
+.template-usage-badge { color:#2353a6; border-color:#c6d8f7; background:#eff5ff; font-weight:600; }
+.template-usage-badge.is-unused { color:var(--suite-muted, #667387); border-color:var(--suite-line, #dfe5ed); background:#f5f7fa; font-weight:500; }
 .template-card-snippet { margin:0; font-size:11px; line-height:1.55; color:var(--suite-muted, #667387); display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; min-height:50px; }
 .template-card-meta { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:8px; border-top:1px solid var(--suite-line, #eaedf2); font-size:11px; color:var(--suite-muted, #667387); }
 .style-library-modal-image { min-height:430px; display:grid; place-items:center; overflow:hidden; background:#f4f6f8; border-right:1px solid var(--suite-line); }
@@ -161,6 +167,7 @@
   .style-library-workarea .style-boundary > span:nth-child(2) { flex:1 1 100%; white-space:normal; }
   .style-library-workarea .style-boundary .badge { margin-left:0; }
   .style-library-workarea .style-grid { grid-template-columns:1fr; padding:12px; }
+  .style-library-workarea .template-list-grid { height:auto; overflow:visible; grid-template-columns:1fr; padding:12px; }
   .style-library-workarea .style-card { width:100%; }
   .style-library-action-wrap { width:100%; align-items:flex-start; flex-direction:column; gap:4px; }
   .style-library-action-wrap > span { white-space:normal; }

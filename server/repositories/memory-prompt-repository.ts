@@ -1,4 +1,4 @@
-import { samePromptTemplateContent, validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
+import { samePromptTemplateContent, validatePromptTemplateContract, withPromptTemplateUsage, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime, type PromptVersionStatus } from "../prompt-library.js";
 
 interface TemplateIdentity {
   id: string;
@@ -67,7 +67,7 @@ export class MemoryPromptRepository {
         sourceSha256: record.sourceSha256,
       };
       this.versions.set(version.templateVersionId, version);
-      imported.push(version);
+      imported.push(withPromptTemplateUsage(version));
     }
     return imported;
   }
@@ -83,7 +83,20 @@ export class MemoryPromptRepository {
     }
     version.status = "published";
     template.publishedVersionId = versionId;
-    return version;
+    return withPromptTemplateUsage(version);
+  }
+
+  private toPublic(version: PromptTemplateRuntime): PromptTemplatePublic {
+    const {
+      body: _body,
+      userPromptTemplate: _userPromptTemplate,
+      outputSchema: _outputSchema,
+      sourceFile: _sourceFile,
+      sourceHeading: _sourceHeading,
+      sourceSha256: _sourceSha256,
+      ...publicVersion
+    } = version;
+    return withPromptTemplateUsage(publicVersion);
   }
 
   async listPublished(stage?: PromptStage): Promise<PromptTemplatePublic[]> {
@@ -92,28 +105,68 @@ export class MemoryPromptRepository {
       .map((template) => this.versions.get(template.publishedVersionId!)!)
       .filter((version) => version.status === "published" && (!stage || version.stage === stage))
       .sort((a, b) => a.name.localeCompare(b.name))
-      .map(({ body: _body, outputSchema: _outputSchema, status: _status, sourceFile: _sourceFile, sourceHeading: _sourceHeading, sourceSha256: _sourceSha256, ...publicVersion }) => publicVersion);
+      .map((version) => this.toPublic(version));
+  }
+
+  async listTemplates(options: { stage?: PromptStage; status?: PromptVersionStatus | "all" } = {}): Promise<PromptTemplatePublic[]> {
+    const status = options.status ?? "published";
+    if (status === "published") return this.listPublished(options.stage);
+    if (status === "draft") {
+      const representatives: PromptTemplateRuntime[] = [];
+      for (const template of this.templates.values()) {
+        const candidates = [...this.versions.values()]
+          .filter((version) => version.templateId === template.id && version.status === "draft" && (!options.stage || version.stage === options.stage))
+          .sort((a, b) => b.versionNo - a.versionNo);
+        if (candidates[0]) representatives.push(candidates[0]);
+      }
+      return representatives
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((version) => this.toPublic(version));
+    }
+    const rank = (template: TemplateIdentity, version: PromptTemplateRuntime) => {
+      if (version.templateVersionId === template.publishedVersionId && version.status === "published") return 0;
+      if (version.status === "published") return 1;
+      if (version.status === "draft") return 2;
+      return 3;
+    };
+    const representatives: PromptTemplateRuntime[] = [];
+    for (const template of this.templates.values()) {
+      const candidates = [...this.versions.values()]
+        .filter((version) => version.templateId === template.id && (!options.stage || version.stage === options.stage))
+        .sort((a, b) => rank(template, a) - rank(template, b) || b.versionNo - a.versionNo);
+      if (candidates[0]) representatives.push(candidates[0]);
+    }
+    return representatives
+      .filter((version) => status === "all" || version.status === status)
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((version) => this.toPublic(version));
   }
 
   async getPublishedVersion(versionId: string, expectedStage?: PromptStage): Promise<PromptTemplateRuntime | null> {
     const version = this.versions.get(versionId);
     const template = version ? this.templates.get(version.templateId) : undefined;
-    return version && template?.publishedVersionId === versionId && version.status === "published" && (!expectedStage || version.stage === expectedStage) ? version : null;
+    return version && template?.publishedVersionId === versionId && version.status === "published" && (!expectedStage || version.stage === expectedStage)
+      ? withPromptTemplateUsage(version)
+      : null;
   }
 
   async listVersions(templateId: string): Promise<PromptTemplateRuntime[]> {
-    return [...this.versions.values()].filter((version) => version.templateId === templateId).sort((a, b) => a.versionNo - b.versionNo);
+    return [...this.versions.values()]
+      .filter((version) => version.templateId === templateId)
+      .sort((a, b) => a.versionNo - b.versionNo)
+      .map((version) => withPromptTemplateUsage(version));
   }
 
   async getVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
-    return this.versions.get(versionId) ?? null;
+    const version = this.versions.get(versionId);
+    return version ? withPromptTemplateUsage(version) : null;
   }
 
   async updateDraft(versionId: string, patch: Partial<Pick<PromptTemplateRuntime, "name" | "body" | "userPromptTemplate" | "inputSchema" | "outputSchema" | "applicability">>): Promise<PromptTemplateRuntime | null> {
     const version = this.versions.get(versionId);
     if (!version || version.status !== "draft") return null;
     Object.assign(version, patch);
-    return version;
+    return withPromptTemplateUsage(version);
   }
 
   async copyVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
@@ -122,7 +175,7 @@ export class MemoryPromptRepository {
     const nextVersion = Math.max(0, ...[...this.versions.values()].filter((version) => version.templateId === source.templateId).map((version) => version.versionNo)) + 1;
     const copy: PromptTemplateRuntime = { ...source, templateVersionId: `${source.templateVersionId}-v${nextVersion}`, versionNo: nextVersion, status: "draft", sourceFile: "manual", sourceHeading: source.name, sourceSha256: `${source.sourceSha256}:${nextVersion}` };
     this.versions.set(copy.templateVersionId, copy);
-    return copy;
+    return withPromptTemplateUsage(copy);
   }
 
   async retireVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
@@ -131,6 +184,6 @@ export class MemoryPromptRepository {
     version.status = "retired";
     const template = this.templates.get(version.templateId);
     if (template?.publishedVersionId === versionId) template.publishedVersionId = null;
-    return version;
+    return withPromptTemplateUsage(version);
   }
 }

@@ -29,6 +29,7 @@ export interface ApiPromptTemplate {
   templateId: string; templateVersionId: string; versionNo: number; code: string; name: string;
   kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy" | "replica_prompt"; executionTarget: "llm" | "image_model";
   inputSchema: ApiPromptInputField[]; applicability: Record<string, unknown>;
+  usedBy?: string[]; status?: "draft" | "published" | "retired";
 }
 export interface ApiPromptTemplateCopy extends ApiPromptTemplate { body: string; userPromptTemplate: string; outputSchema?: Record<string, unknown>; status?: "draft" | "published" | "retired" }
 export interface ApiPlatformProfile {
@@ -68,7 +69,7 @@ export interface ApiTaskBatch { id: string; suiteId: string; kind: "batch" | "si
 export interface ApiCanvasLayout { id: string; suiteId: string; layoutVersion: number; viewport: { x: number; y: number; zoom: number }; nodes: Array<{ nodeId: string; x: number; y: number; width?: number; height?: number; groupKey?: string; hidden?: boolean }>; groups: Array<{ groupKey: string; x: number; y: number; width: number; height: number; collapsed?: boolean }>; updatedAt: string }
 export interface ApiWorkbench { suite: ApiSuite; inputImages: ApiImage[]; planSnapshot: ApiPlanSnapshot | null; tasks: ApiSuiteTask[]; batches: ApiTaskBatch[]; imageEditChildren?: Array<{ task: Record<string, unknown>; snapshot: Record<string, unknown> | null; attempts: Array<Record<string, unknown> & { provider?: { name: string; version: string; channel?: ModelChannelSnapshot } }>; versions: Array<{ id: string; previewUrl?: string; versionNumber: number; width?: number; height?: number; mimeType?: string; objectKey?: string; attemptId?: string; createdAt?: string }> }>; layout: ApiCanvasLayout | null; planStyleGuide?: string; styleOverride?: string | null; effectiveStyleGuide?: string }
 export type ApiLibraryResourceType = "prompt_template" | "input_image" | "base_image" | "task_image_version" | "process_image" | "reverse_reference_asset";
-export interface ApiLibraryResource { id: string; resourceType: ApiLibraryResourceType; title: string; summary: string; mimeType: string | null; previewUrl: string | null; suiteId: string | null; taskId: string | null; imageVersionId: string | null; baseVersionId: string | null; templateVersionId: string | null; resourceVersionId: string; stage: ApiPromptTemplate["stage"] | null; source: Record<string, unknown>; status?: "draft" | "published" | "archived"; promptSnapshot?: Record<string, unknown> | null; createdAt: string; updatedAt: string }
+export interface ApiLibraryResource { id: string; resourceType: ApiLibraryResourceType; title: string; summary: string; mimeType: string | null; previewUrl: string | null; suiteId: string | null; taskId: string | null; imageVersionId: string | null; baseVersionId: string | null; templateVersionId: string | null; resourceVersionId: string; stage: ApiPromptTemplate["stage"] | null; source: Record<string, unknown>; status?: "draft" | "published" | "archived" | "retired"; usedBy?: string[]; promptSnapshot?: Record<string, unknown> | null; createdAt: string; updatedAt: string }
 export interface ApiLibraryReference { id: string; suiteId: string; resourceId: string; resourceType: ApiLibraryResourceType; targetType: "plan" | "task"; targetId: string; resourceVersionId: string; snapshot: Record<string, unknown>; createdAt: string; createdBy: string | null; archivedAt: string | null }
 
 type CryptoSource = {
@@ -169,8 +170,15 @@ export const suiteApi = {
   getBaseVersions(suiteId: string, inputImageId: string) {
     return request<ApiBaseHistory>(`/api/suites/${encodeURIComponent(suiteId)}/input-images/${encodeURIComponent(inputImageId)}/base-versions`);
   },
-  listPromptTemplates(stage?: ApiPromptTemplate["stage"]) {
-    return request<ApiPromptTemplate[]>(stage ? `/api/prompt-templates?stage=${encodeURIComponent(stage)}` : "/api/prompt-templates");
+  listPromptTemplates(stage?: ApiPromptTemplate["stage"], status?: "published" | "draft" | "retired" | "all") {
+    const search = new URLSearchParams();
+    if (stage) search.set("stage", stage);
+    if (status) search.set("status", status);
+    const qs = search.toString();
+    return request<ApiPromptTemplate[]>(qs ? `/api/prompt-templates?${qs}` : "/api/prompt-templates");
+  },
+  getPromptTemplateVersion(versionId: string) {
+    return request<ApiPromptTemplateCopy>(`/api/prompt-templates/${encodeURIComponent(versionId)}`);
   },
   copyPromptTemplate(templateVersionId: string, stage?: ApiPromptTemplate["stage"]) { return request<ApiPromptTemplateCopy>(`/api/prompt-templates/${encodeURIComponent(templateVersionId)}/copy${stage ? `?stage=${encodeURIComponent(stage)}` : ""}`); },
   listPromptTemplateVersions(templateId: string) { return request<ApiPromptTemplateCopy[]>(`/api/prompt-templates/${encodeURIComponent(templateId)}/versions`); },
@@ -244,7 +252,7 @@ export const suiteApi = {
   selectImageEditVersion(taskId: string, versionId: string, selection: "current" | "final") { return request<Record<string, unknown>>(`/api/image-editor/tasks/${encodeURIComponent(taskId)}/versions/${encodeURIComponent(versionId)}/select`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ selection }) }); },
   getLayout(suiteId: string) { return request<ApiCanvasLayout | null>(`/api/suites/${encodeURIComponent(suiteId)}/workbench/layout`); },
   saveLayout(suiteId: string, layout: Pick<ApiCanvasLayout, "layoutVersion" | "viewport" | "nodes" | "groups">) { return request<ApiCanvasLayout>(`/api/suites/${encodeURIComponent(suiteId)}/workbench/layout`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(layout) }); },
-  listLibraryResources(params: { resourceType?: ApiLibraryResourceType; scope?: "image"; stage?: ApiPromptTemplate["stage"]; suiteId?: string; query?: string; page?: number; pageSize?: number; status?: "draft" | "published" | "archived" } = {}) { const search = new URLSearchParams(); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') search.set(key, String(value)); }); return request<{ items: ApiLibraryResource[]; total: number; page: number; pageSize: number }>(`/api/library/resources?${search.toString()}`); },
+  listLibraryResources(params: { resourceType?: ApiLibraryResourceType; scope?: "image"; stage?: ApiPromptTemplate["stage"]; suiteId?: string; query?: string; page?: number; pageSize?: number; status?: "draft" | "published" | "archived" | "retired" } = {}) { const search = new URLSearchParams(); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') search.set(key, String(value)); }); return request<{ items: ApiLibraryResource[]; total: number; page: number; pageSize: number }>(`/api/library/resources?${search.toString()}`); },
   getLibraryResource(resourceId: string) { return request<ApiLibraryResource>(`/api/library/resources/${encodeURIComponent(resourceId)}`); },
   listLibraryReferences(suiteId: string, targetType?: "plan" | "task", targetId?: string) { const search = new URLSearchParams(); if (targetType) search.set("targetType", targetType); if (targetId) search.set("targetId", targetId); return request<ApiLibraryReference[]>(`/api/suites/${encodeURIComponent(suiteId)}/library/references?${search.toString()}`); },
   createLibraryReference(suiteId: string, body: { resourceId: string; targetType: "plan" | "task"; targetId: string }) { return request<ApiLibraryReference>(`/api/suites/${encodeURIComponent(suiteId)}/library/references`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
