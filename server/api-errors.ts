@@ -5,6 +5,7 @@ import type { AppResponse } from "./api-response.js";
 export const errorMessages: Record<string, string> = {
   ...pipelineErrorMessages,
   INVALID_SUITE_ID: "方案不存在",
+  INVALID_SUITE_ORIGIN: "方案来源无效",
   INVALID_STYLE_OVERRIDE: "画布风格覆盖必须为文本或空值",
   DELIVERY_EMPTY: "当前方案尚无可交付的图片版本",
   INVALID_EXPORT_OPTIONS: "导出规格或图片格式参数无效",

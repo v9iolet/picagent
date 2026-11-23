@@ -709,25 +709,41 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
 
   async function getFeed(queryString?: string) {
     const query = new URLSearchParams(queryString ?? "");
-    const limit = Math.min(100, Math.max(1, Number(query.get("limit") ?? 10)));
-    const offset = Math.max(0, Number(query.get("offset") ?? 0));
+    const rawLimit = query.get("limit");
+    const parsedLimit = rawLimit !== null && rawLimit.trim() !== "" ? Number(rawLimit) : 10;
+    const limit = Math.min(100, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 10));
+    const rawOffset = query.get("offset");
+    const parsedOffset = rawOffset !== null && rawOffset.trim() !== "" ? Number(rawOffset) : 0;
+    const offset = Math.max(0, Number.isFinite(parsedOffset) ? parsedOffset : 0);
+    const rawOrigin = query.get("origin")?.trim();
+    const originFilter = rawOrigin || "suite_studio";
+    if (originFilter !== "suite_studio" && originFilter !== "canvas" && originFilter !== "replica") {
+      return fail("INVALID_SUITE_ORIGIN", 400);
+    }
+    const keyword = (query.get("keyword") ?? "").trim().toLowerCase();
     const suites = await deps.repository.listSuites();
     const eligible = [];
     for (const suite of suites) {
-      if (suite.origin === "canvas") continue;
+      if ((suite.origin ?? "suite_studio") !== originFilter) continue;
       const [pipeline, tasks] = await Promise.all([
         pipelineRepository.getLatestRun(suite.id),
         deps.taskRepository?.listTasks(suite.id) ?? Promise.resolve([]),
       ]);
       const active = tasks.filter((task) => task.status !== "archived");
       if (!pipeline && !active.length) continue;
-      const first = active.sort((a, b) => a.ordinal - b.ordinal)[0];
+      if (
+        keyword &&
+        !suite.name.toLowerCase().includes(keyword) &&
+        !active.some((task) => task.title.toLowerCase().includes(keyword))
+      ) {
+        continue;
+      }
+      const first = [...active].sort((a, b) => a.ordinal - b.ordinal)[0];
       let thumbnail = null;
-      if (first && deps.taskRepository)
-        thumbnail =
-          (await deps.taskRepository.listTaskVersions(first.id)).versions.find((version) => version.isFinal) ??
-          (await deps.taskRepository.listTaskVersions(first.id)).versions[0] ??
-          null;
+      if (first && deps.taskRepository) {
+        const versions = (await deps.taskRepository.listTaskVersions(first.id)).versions;
+        thumbnail = versions.find((version) => version.isFinal) ?? versions[0] ?? null;
+      }
       eligible.push({
         suite,
         pipeline,

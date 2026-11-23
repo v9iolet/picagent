@@ -660,7 +660,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         if (stored) inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: "explosive-reference.png", role: "explosive_reference", objectKey: ref?.objectKey ?? "" });
       }
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
-      const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import";
+      const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import" && task.originKind !== "replica";
       const finalPrompt = shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft;
       const pureWhiteMain =
         task.categoryCode === "main" &&
@@ -967,6 +967,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const body = asRecord(options.body, { allowArrays: true });
       const name = "name" in body ? String(body.name).trim() : "";
       if (!name) return fail("EMPTY_NAME");
+      if (body.origin !== undefined && body.origin !== "suite_studio" && body.origin !== "canvas") {
+        return fail("INVALID_SUITE_ORIGIN", 400);
+      }
       const origin = body.origin === "canvas" ? "canvas" : "suite_studio";
       return ok(await deps.repository.createSuite(name, idempotencyKey, origin), 201);
     }
@@ -1006,7 +1009,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           isDemo: suite.name.includes("演示") || suite.name.includes("Demo"),
         };
       }));
-      return ok(canvasOnly ? enriched.filter((suite) => suite.origin === "canvas" || suite.taskCount > 0) : enriched);
+      return ok(canvasOnly ? enriched.filter((suite) => suite.origin !== "replica" && (suite.origin === "canvas" || suite.taskCount > 0)) : enriched);
     }
     const libraryResourceMatch = path.match(/^\/api\/library\/resources\/([^/]+)$/);
     if (method === "GET" && libraryResourceMatch) {
