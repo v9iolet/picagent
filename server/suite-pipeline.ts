@@ -2,12 +2,7 @@ import { randomUUID } from "node:crypto";
 import { requiresPureWhiteMainImage } from "../shared/platform-main-background.js";
 import { productNameFor } from "../shared/product-name.js";
 import { SUITE_CATEGORY_GROUPS, SMART_SUITE_STRUCTURE_PRESET } from "../shared/suite-categories.js";
-import { SELLING_POINT_LAYOUTS, allocateSellingPointLayouts, resolveSellingPointLayouts, resolveVisualStyle } from "../shared/selling-point-layouts.js";
-import {
-  createVectorOverlayPreset,
-  extractOverlaySeedFromText,
-  resolveThemeIdForVisualStyle,
-} from "../shared/vector-overlay.js";
+import { resolveSellingPointLayouts, resolveVisualStyle } from "../shared/selling-point-layouts.js";
 import { resolveDeliverySlots, type DeliveryEditChildLike } from "../shared/workbench-delivery.js";
 import { errorMessages, fail } from "./api-errors.js";
 import { ok, asRecord, dataOf, now, type AppResponse } from "./api-response.js";
@@ -133,7 +128,6 @@ function normalizeVisualConfig(config: SuitePipelineRun["config"]): SuitePipelin
     ...config,
     visualStyle: resolveVisualStyle(config.visualStyle).id,
     sellingPointLayouts: smart ? [] : resolveSellingPointLayouts(config.sellingPointLayouts, count).map(({ id }) => id),
-    vectorSellingPointOverlay: smart ? false : Boolean(config.vectorSellingPointOverlay),
   };
 }
 
@@ -247,7 +241,6 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           aspect_ratio: config.aspectRatio ?? "1:1",
           visual_style: visualStyle,
           ...(layouts.length > 0 && { selling_point_layouts: JSON.stringify(layouts) }),
-          ...(config.mode === "custom" && config.vectorSellingPointOverlay === true && { vector_selling_point_overlay: true }),
           main_image_background: requiresPureWhiteMainImage(platform) ? "pure_white_required" : "flexible",
           main_image_count: smart ? SMART_SUITE_STRUCTURE_PRESET.main_image_count : groups.main.count,
           detail_image_count_min: 0,
@@ -313,9 +306,6 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
               ...(!allowed.has("visual_style") && { visualStyle }),
               ...(!allowed.has("selling_point_layouts") && layouts.length > 0 && {
                 sellingPointLayoutIds: layouts.map(({ id }) => id),
-              }),
-              ...(config.mode === "custom" && config.vectorSellingPointOverlay === true && {
-                vectorSellingPointOverlay: true,
               }),
             },
             confirmedAt: now(),
@@ -413,47 +403,6 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
             (batch) => batch !== null && batch.status !== "running",
             600_000,
           );
-        }
-      }
-      if (config.mode === "custom" && config.vectorSellingPointOverlay === true) {
-        const latestSnapshot = deps.planRepository
-          ? await deps.planRepository.getLatestSnapshot(suiteId)
-          : rawSnapshot;
-        const planItemsById = new Map((latestSnapshot?.items ?? []).map((item) => [item.id, item]));
-        const sellingPointTasks = taskRows
-          .filter((task) => task.categoryCode === "feature_benefit" || task.categoryCode === "material_detail")
-          .sort((a, b) => a.ordinal - b.ordinal);
-        const fbTasks = sellingPointTasks.filter((task) => task.categoryCode === "feature_benefit");
-        const mdTasks = sellingPointTasks.filter((task) => task.categoryCode === "material_detail");
-        const configuredLayouts = resolveSellingPointLayouts(config.sellingPointLayouts, sellingPointTasks.length);
-        const allocated = allocateSellingPointLayouts(configuredLayouts, {
-          feature_benefit: fbTasks.length,
-          material_detail: mdTasks.length,
-        });
-        const themeId = resolveThemeIdForVisualStyle(typeof config.visualStyle === "string" ? config.visualStyle : undefined);
-        const orderedTargets = [
-          ...fbTasks.map((task, idx) => ({ task, layout: allocated.feature_benefit[idx], fallbackIndex: idx })),
-          ...mdTasks.map((task, idx) => ({ task, layout: allocated.material_detail[idx], fallbackIndex: fbTasks.length + idx })),
-        ];
-        for (const { task, layout, fallbackIndex } of orderedTargets) {
-          const history = await taskRepository.listTaskVersions(task.id);
-          const currentVersion = history.versions.find((version) => version.isCurrent);
-          if (!currentVersion || currentVersion.promptSnapshot?.vectorOverlay) continue;
-          const planItem = task.planItemId ? planItemsById.get(task.planItemId) : undefined;
-          const layoutId = (layout ?? SELLING_POINT_LAYOUTS[fallbackIndex % SELLING_POINT_LAYOUTS.length]).id;
-          const seed = extractOverlaySeedFromText({
-            title: task.title,
-            purpose: task.purpose,
-            promptDraft: task.promptDraft,
-            textContent: planItem?.textContent,
-            themeId,
-          });
-          const overlay = createVectorOverlayPreset(layoutId, seed);
-          const renderResponse = await request("POST", `/api/suite-tasks/${task.id}/vector-overlay/render`, {
-            headers: { "idempotency-key": `${executionKey}:vector-overlay:${task.id}` },
-            body: { baseVersionId: currentVersion.id, overlay },
-          });
-          checkResponse(renderResponse, "IMAGE_GENERATION_FAILED");
         }
       }
       const histories = await Promise.all(taskRows.map((task) => taskRepository.listTaskVersions(task.id)));

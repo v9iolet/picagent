@@ -66,14 +66,6 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
       currentVersionInput: process.env.IMAGE_EDITOR_CURRENT_VERSION !== "false",
     }),
     edit: async (command, source) => {
-      const structuredInstructions = command.operations.map((operation) => {
-        if (operation.type === "add_text") return `新增文字“${String(operation.payload.text ?? "")}”，区域与样式参数：${JSON.stringify(operation.payload)}`;
-        if (operation.type === "change_text") return `将区域 ${JSON.stringify(operation.payload.region)} 内的原文字“${String(operation.payload.originalText ?? "")}”替换为“${String(operation.payload.newText ?? "")}”，保留原有排版。`;
-        if (operation.type === "outpaint") return `按方向 ${String(operation.payload.direction ?? "all")} 扩展到目标比例 ${String(operation.payload.targetRatio ?? "original")}，保持主体位置与风格。`;
-        if (operation.type === "redraw") return `仅重绘蒙版白色区域，蒙版外保持不变。操作参数：${JSON.stringify(operation.payload)}`;
-        if (operation.type === "erase") return `仅消除蒙版白色区域并修复背景，蒙版外保持不变。操作参数：${JSON.stringify(operation.payload)}`;
-        return String(operation.payload.instruction ?? operation.summary);
-      }).join("\n");
       const maskedOperations = command.operations.filter((operation) => operation.type === "redraw" || operation.type === "erase");
       if (maskedOperations.length > 1) throw new Error("MULTIPLE_MASK_OPERATIONS_UNSUPPORTED");
       const masked = maskedOperations[0];
@@ -105,7 +97,7 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
       const size = original?.size || (original && selected.imageOptions
         ? resolveImageSize(typeof params.size === "string" ? params.size : "1K", typeof params.ratio === "string" ? params.ratio : original.imageType === "main" ? "1:1" : "3:4", selected.imageOptions.sizeMode)
         : "1K");
-      const result = await imageProvider.edit({ requestId: randomUUID(), flow: "image-editor", endpoint: "/v1/images/edits", image: source.bytes, imageMimeType: source.mimeType, imageFilename: "source.png", model: selected.model, prompt: `${command.prompt}\n\n结构化编辑指令：\n${structuredInstructions}`, size, quality: "medium", n: 1, responseFormat: "b64_json", mask, maskMimeType: mask ? "image/png" : undefined, maskFilename: mask ? "mask.png" : undefined });
+      const result = await imageProvider.edit({ requestId: randomUUID(), flow: "image-editor", endpoint: "/v1/images/edits", image: source.bytes, imageMimeType: source.mimeType, imageFilename: "source.png", model: selected.model, prompt: command.prompt, size, quality: "medium", n: 1, responseFormat: "b64_json", mask, maskMimeType: mask ? "image/png" : undefined, maskFilename: mask ? "mask.png" : undefined });
       const metadata = await sharp(result.bytes).metadata();
       return { bytes: result.bytes, mimeType: result.mimeType, width: metadata.width ?? source.width, height: metadata.height ?? source.height };
     },

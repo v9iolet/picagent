@@ -40,7 +40,7 @@ export function App() {
   if (path === "/settings" || path === "/settings/preferences") return <ModelSettingsPage preferences={path.endsWith("/preferences")} navigate={navigate} />;
   if (/^\/create\/canvas\/?$/.test(canonical)) return <CanvasListPage navigate={navigate} />;
   const canvasId = canonical.match(/^\/create\/canvas\/([^/]+)\/?$/)?.[1];
-  if (canvasId) return <BoardPage key={`${canvasId}${search}`} suiteId={canvasId} search={search} navigate={navigate} />;
+  if (canvasId) return <BoardPage key={canvasId} suiteId={canvasId} search={search} navigate={navigate} />;
   if (path === "/assets") return <ImageAssetsPage navigate={navigate} />;
   if (path === "/templates") return <PromptTemplatesPage navigate={navigate} />;
   if (path === "/style-library") {

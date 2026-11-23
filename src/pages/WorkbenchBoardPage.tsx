@@ -21,7 +21,6 @@ import { BeforeAfterLightbox, type LightboxPreview } from "../components/BeforeA
 import { CustomTaskModal } from "../components/CustomTaskModal";
 import { DeliveryGalleryView } from "../components/DeliveryGalleryView";
 import { VersionCompareModal } from "../components/VersionCompareModal";
-import { VectorOverlayEditorModal } from "../components/canvas/VectorOverlayEditorModal";
 import { Icon, ImageWithState, ModelSettingsMessage } from "./shared";
 import { Circle as KonvaCircle, Layer, Line, Rect as KonvaRect, Stage, Text as KonvaText, Transformer } from "react-konva";
 import type Konva from "konva";
@@ -54,7 +53,6 @@ type BoardData = {
   onCopy?: (task: ApiSuiteTask) => void;
   onRegenerate?: (task: ApiSuiteTask) => void;
   onEdit?: (task: ApiSuiteTask, version?: ApiTaskVersion) => void;
-  onVectorOverlay?: (task: ApiSuiteTask, version?: ApiTaskVersion) => void;
   onCompareVersions?: (task: ApiSuiteTask) => void;
   onEditStyle?: () => void;
   onSelectVersion?: (task: ApiSuiteTask, versionId: string, selection: "current" | "final") => void;
@@ -110,7 +108,6 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
   const onGenerate = data.onGenerate ?? (() => undefined);
   const onRegenerate = data.onRegenerate ?? (() => undefined);
   const onEdit = data.onEdit ?? (() => undefined);
-  const onVectorOverlay = data.onVectorOverlay ?? (() => undefined);
   const onCompareVersions = data.onCompareVersions ?? (() => undefined);
   const onEditStyle = data.onEditStyle ?? (() => undefined);
   const onSelectVersion = data.onSelectVersion ?? (() => undefined);
@@ -241,11 +238,6 @@ function BoardCard({ id, data }: NodeProps<BoardNode>) {
         <button type="button" className="wb-card-edit" disabled={!version} onClick={(event) => { event.stopPropagation(); onEdit(task, version); }}>
           <Icon name="edit" />编辑图片
         </button>
-        {!data.isEditChild && (
-          <button type="button" className="wb-card-vector-overlay" disabled={!version} onClick={(event) => { event.stopPropagation(); onVectorOverlay(task, version); }}>
-            卖点排版
-          </button>
-        )}
       </div>
       {missingReference && <small>{missingReferenceHint}</small>}
       {version && (
@@ -367,7 +359,7 @@ function projectComposeGraph(
   selectedNodeId: string | null,
   canvasFilter: CanvasFilter,
   layoutOptions: LaneLayoutOptions,
-  handlers: Pick<BoardData, "onPreview" | "onSelect" | "onGenerate" | "onCopy" | "onRegenerate" | "onEdit" | "onVectorOverlay" | "onCompareVersions" | "onEditStyle" | "onSelectVersion">,
+  handlers: Pick<BoardData, "onPreview" | "onSelect" | "onGenerate" | "onCopy" | "onRegenerate" | "onEdit" | "onCompareVersions" | "onEditStyle" | "onSelectVersion">,
 ) {
   const saved = new Map((layout?.nodes ?? []).map((node) => [node.nodeId, { x: node.x, y: node.y }]));
   const active = workbench.tasks
@@ -768,6 +760,23 @@ function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; 
   );
 }
 
+function formatClientOcrError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const trimmed = raw.trim();
+  if (!trimmed) return "文字识别失败，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  if (/timeout|timed out|abort|OCR_TIMEOUT/i.test(trimmed)) {
+    return "文字识别请求超时，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  if (/fetch failed|ECONNREFUSED|ENOTFOUND|network|socket/i.test(trimmed)) {
+    return "文字识别服务连接失败，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  if (/^OCR_HTTP_\d+$/.test(trimmed) || trimmed.startsWith("OCR_")) {
+    return "文字识别服务返回异常，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+  }
+  if (/[\u4e00-\u9fa5]/.test(trimmed)) return trimmed;
+  return "文字识别失败，可点击重新识别，或直接在图片上框选并手动输入原文字与新文字";
+}
+
 function ImageEditorModal({
   task,
   version,
@@ -809,6 +818,8 @@ function ImageEditorModal({
   const [editorError, setEditorError] = useState("");
   const [ocrBlocks, setOcrBlocks] = useState<Array<{ id: string; text: string; confidence: number; bounds: { x: number; y: number; width: number; height: number }; rotation: number }>>([]);
   const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrError, setOcrError] = useState("");
+  const ocrAutoTriggeredRef = useRef(false);
   const [translateLang, setTranslateLang] = useState("英文");
   const [translating, setTranslating] = useState(false);
   const [translatedMap, setTranslatedMap] = useState<Record<string, string>>({});
@@ -829,17 +840,24 @@ function ImageEditorModal({
 
   const runOcr = useCallback(async () => {
     setOcrLoading(true);
+    setOcrError("");
     try {
       const result = await suiteApi.recognizeImageEditText(task.id, version.id);
-      setOcrBlocks(result.blocks ?? []);
+      if (result.status === "failed") {
+        setOcrBlocks([]);
+        setOcrError(formatClientOcrError(result.error));
+        return;
+      }
+      const blocks = result.blocks ?? [];
+      setOcrBlocks(blocks);
       setTranslatedMap({});
-      if (result.blocks?.[0]) {
-        setOriginalText(result.blocks[0].text);
-        setTextRegion({ ...result.blocks[0].bounds, rotation: result.blocks[0].rotation });
+      if (blocks[0]) {
+        setOriginalText(blocks[0].text);
+        setTextRegion({ ...blocks[0].bounds, rotation: blocks[0].rotation });
       }
     } catch (error) {
       setOcrBlocks([]);
-      setEditorError(error instanceof Error ? error.message : "文字识别失败，可重新识别");
+      setOcrError(formatClientOcrError(error));
     } finally {
       setOcrLoading(false);
     }
@@ -904,6 +922,8 @@ function ImageEditorModal({
         const createdIds = new Set(created.map((item) => item.operationId));
         return [...current.filter((item) => !createdIds.has(item.operationId)), ...created];
       });
+      setOriginalText("");
+      setNewText("");
     } catch (errorValue) {
       setEditorError(errorValue instanceof Error ? errorValue.message : "批量写入翻译操作失败");
     } finally {
@@ -946,7 +966,17 @@ function ImageEditorModal({
     return () => observer.disconnect();
   }, [updateFrame, zoom]);
 
-  useEffect(() => { if (tool === "change_text" && !ocrBlocks.length) void runOcr(); }, [runOcr, tool, ocrBlocks.length]);
+  useEffect(() => {
+    ocrAutoTriggeredRef.current = false;
+  }, [version.id]);
+
+  useEffect(() => {
+    if (tool !== "change_text") return;
+    if (!capabilities || capabilities.ocr === false) return;
+    if (ocrBlocks.length > 0 || ocrAutoTriggeredRef.current) return;
+    ocrAutoTriggeredRef.current = true;
+    void runOcr();
+  }, [capabilities, tool, ocrBlocks.length, runOcr]);
   useEffect(() => {
     const transformer = transformerRef.current;
     if (!transformer) return;
@@ -1088,10 +1118,47 @@ function ImageEditorModal({
   }, [tool, text, originalText, newText, textRegion, strokes, feather, expand, ratio, instruction, addTextPrompt, changeTextPrompt, redrawPrompt, erasePrompt, textOperationId, operations]);
 
   const submit = async () => {
+    let finalOperations = operations;
+    const currentError = tool === "regenerate" ? "" : validationError();
+    if (!currentError && tool !== "regenerate") {
+      const next = operationFor();
+      const existing = operations.find((item) => item.operationId === next.operationId);
+      const needsSync =
+        !existing ||
+        !committedOperationIds.current.has(next.operationId) ||
+        existing.summary !== next.summary ||
+        JSON.stringify(existing.payload) !== JSON.stringify(next.payload);
+      if (needsSync) {
+        setSaving(true);
+        setEditorError("");
+        try {
+          await onOperationAdded?.(next, next.summary);
+          committedOperationIds.current.add(next.operationId);
+          finalOperations = [...operations.filter((item) => item.operationId !== next.operationId), next];
+          setOperations(finalOperations);
+        } catch (errorValue) {
+          setEditorError(errorValue instanceof Error ? errorValue.message : "操作保存失败");
+          setSaving(false);
+          return;
+        }
+      }
+    } else if (currentError && operations.length === 0) {
+      setEditorError(currentError);
+      return;
+    }
+
+    if (finalOperations.length === 0) {
+      setEditorError("请先添加或填写至少一项编辑操作");
+      return;
+    }
+
     setSaving(true);
     setEditorError("");
     try {
-      await onSubmit({ schemaVersion: "image-edit-v1", sourceVersionId: version.id, operations }, operations.map((item) => item.summary).join("；"));
+      await onSubmit(
+        { schemaVersion: "image-edit-v1", sourceVersionId: version.id, operations: finalOperations },
+        finalOperations.map((item) => item.summary).join("；"),
+      );
     } catch (errorValue) {
       setEditorError(errorValue instanceof Error ? errorValue.message : "生成提交失败");
     } finally {
@@ -1137,7 +1204,7 @@ function ImageEditorModal({
     ["expand", "扩图", "outpaint"],
   ];
   const activeCapability = toolList.find(([value]) => value === tool)?.[2];
-  const capabilityAvailable = (value: EditTool, capability: string) => capabilities?.[capability] !== false && (value !== "change_text" || capabilities?.ocr !== false);
+  const capabilityAvailable = (_value: EditTool, capability: string) => capabilities?.[capability] !== false;
   const capabilityReady = tool === "regenerate" ? capabilities?.currentVersionInput !== false : !capabilities || capabilityAvailable(tool, activeCapability ?? "");
   const outpaintBox = useMemo(
     () => computeOutpaintPreviewBox(version.width || 1024, version.height || 1024, expand as "all" | "horizontal" | "vertical" | "left" | "right", ratio as "original" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9"),
@@ -1178,14 +1245,20 @@ function ImageEditorModal({
           {tool === "change_text" && (
             <div className="wb-ocr-blocks" role="status">
               <strong>识别文字</strong>
-              {ocrLoading ? <span>识别中…</span> : (
+              {capabilities?.ocr === false ? (
+                <span>当前未配置多模态识字模型，请在图片上拖拽框选原文字区域并手动填写原文字与新文字</span>
+              ) : ocrLoading ? <span>识别中…</span> : (
                 <>
                   <button type="button" onClick={() => void runOcr()}>重新识别</button>
                   {ocrBlocks.length ? ocrBlocks.map((block) => (
                     <button type="button" key={block.id} onClick={() => { setOriginalText(block.text); setTextRegion({ ...block.bounds, rotation: block.rotation }); }}>
                       {block.text} · {Math.round(block.confidence * 100)}%
                     </button>
-                  )) : <span>未识别到文字，请在图片上拖拽框选原文字区域</span>}
+                  )) : ocrError ? (
+                    <span>{ocrError}</span>
+                  ) : (
+                    <span>未识别到文字，请在图片上拖拽框选原文字区域</span>
+                  )}
                 </>
               )}
             </div>
@@ -1426,7 +1499,7 @@ function ImageEditorModal({
             {tool === "regenerate" ? (
               <button type="button" className="wb-primary-action" disabled={saving || !capabilityReady} onClick={() => { setSaving(true); onRegenerate().then(onClose).catch((errorValue) => setEditorError(errorValue instanceof Error ? errorValue.message : "再次生成失败")).finally(() => setSaving(false)); }}>{saving ? "提交中…" : "再次生成当前版本"}</button>
             ) : (
-              <button type="button" className="wb-primary-action" disabled={saving || !operations.length || !capabilityReady} onClick={() => void submit()}>{saving ? "提交中…" : "冻结并生成子卡片"}</button>
+              <button type="button" className="wb-primary-action" disabled={saving || !capabilityReady} onClick={() => void submit()}>{saving ? "提交中…" : "开始生成（新建编辑子卡）"}</button>
             )}
           </footer>
         </div>
@@ -1452,7 +1525,6 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
   const [edges, setEdges] = useState<Edge[]>([]);
   const [preview, setPreview] = useState<LightboxPreview | null>(null);
   const [editor, setEditor] = useState<{ task: ApiSuiteTask; version: ApiTaskVersion } | null>(null);
-  const [vectorEditor, setVectorEditor] = useState<{ task: ApiSuiteTask; version: ApiTaskVersion } | null>(null);
   const [compareTaskId, setCompareTaskId] = useState<string | null>(null);
   const [customTaskOpen, setCustomTaskOpen] = useState(false);
   const uploadInput = useRef<HTMLInputElement>(null);
@@ -1557,7 +1629,6 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
       onCopy: (task) => copyPrompt(task).catch(() => notify("复制失败")),
       onRegenerate: (task) => regenerateTask(task).catch((error) => notify(error instanceof Error ? error.message : "重新生成提交失败")),
       onEdit: (task, version) => { if (version) setEditor({ task, version }); },
-      onVectorOverlay: (task, version) => { if (version) setVectorEditor({ task, version }); },
       onCompareVersions: (task) => setCompareTaskId(task.id),
       onEditStyle: openStyleDrawer,
       onSelectVersion: (task, versionId, selection) => selectVersion(task, versionId, selection).catch(() => notify("版本选择失败")),
@@ -1583,6 +1654,56 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
   }, [fitView, rebuildGraph, selectedNodeId, canvasFilter, suiteId]);
 
   useEffect(() => { reload().catch(() => notify("工作台加载失败，请重试")); }, [suiteId]);
+
+  useEffect(() => {
+    setMode(new URLSearchParams(search).get("view") === "gallery" ? "gallery" : "compose");
+  }, [search]);
+
+  const consumedEditQueryRef = useRef("");
+  useEffect(() => {
+    if (!workbench || workbench.suite.id !== suiteId) return;
+    const params = new URLSearchParams(search ?? "");
+    const editTaskId = params.get("editTask")?.trim() || "";
+    if (!editTaskId) return;
+    const editVersionId = params.get("editVersion")?.trim() || "";
+    const signature = `${suiteId}:${editTaskId}:${editVersionId}`;
+    if (consumedEditQueryRef.current === signature) return;
+    consumedEditQueryRef.current = signature;
+
+    let targetTask = workbench.tasks.find((task) => task.id === editTaskId) ?? null;
+    let targetNodeId = targetTask ? `task:${targetTask.id}` : "";
+    if (!targetTask) {
+      const childIndex = (workbench.imageEditChildren ?? []).findIndex((child) => String(child.task.id) === editTaskId);
+      if (childIndex >= 0) {
+        targetTask = imageEditChildTask(workbench, workbench.imageEditChildren![childIndex], childIndex);
+        targetNodeId = `edit-child:${targetTask.id}`;
+      }
+    }
+    if (!targetTask && editVersionId) {
+      const fallbackParent = workbench.tasks.find((task) => task.versions.some((v) => v.id === editVersionId)) ?? null;
+      if (fallbackParent) {
+        targetTask = fallbackParent;
+        targetNodeId = `task:${fallbackParent.id}`;
+      }
+    }
+    if (targetTask) {
+      setSelectedTaskId(targetTask.id);
+      if (targetNodeId) setSelectedNodeId(targetNodeId);
+      const targetVersion =
+        (editVersionId ? targetTask.versions.find((v) => v.id === editVersionId) : undefined) ??
+        targetTask.versions.find((v) => v.isCurrent) ??
+        targetTask.versions[0];
+      if (targetVersion) {
+        setEditor({ task: targetTask, version: targetVersion });
+      }
+    }
+
+    params.delete("editTask");
+    params.delete("editVersion");
+    const remaining = params.toString();
+    const nextUrl = `${window.location.pathname}${remaining ? `?${remaining}` : ""}${window.location.hash}`;
+    window.history.replaceState({}, "", nextUrl);
+  }, [workbench, suiteId, search]);
 
   // Re-highlight lineage immediately when selectedNodeId or filter changes without refetching
   useEffect(() => {
@@ -2024,11 +2145,6 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
                     </button>
                     <button type="button" onClick={() => copyPrompt({ ...selectedTask, promptDraft }).catch(() => notify("复制失败"))}><Icon name="copy" />复制提示词</button>
                     {currentVersion && <button type="button" onClick={() => setEditor({ task: selectedTask, version: currentVersion })}><Icon name="edit" />编辑图片</button>}
-                    {!selectedIsImageEditChild && currentVersion && (
-                      <button type="button" onClick={() => setVectorEditor({ task: selectedTask, version: currentVersion })}>
-                        卖点排版
-                      </button>
-                    )}
                     {selectedTask.versions.length > 0 && (
                       <button type="button" onClick={() => setCompareTaskId(selectedTask.id)}>
                         <Icon name="columns" />版本对比 ({selectedTask.versions.length})
@@ -2096,16 +2212,6 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
           onOperationAdded={(operation, instruction) => persistEditOperation(editor.task, operation, instruction)}
           onRegenerate={() => regenerateTask(editor.task)}
           onSubmit={(spec, instruction) => submitEdit(editor.task, spec, instruction)}
-        />
-      )}
-
-      {vectorEditor && (
-        <VectorOverlayEditorModal
-          task={vectorEditor.task}
-          version={vectorEditor.version}
-          onClose={() => setVectorEditor(null)}
-          onSaved={reload}
-          onNotify={notify}
         />
       )}
 

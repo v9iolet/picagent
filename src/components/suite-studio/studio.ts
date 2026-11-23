@@ -23,7 +23,6 @@ export interface Config extends ListingConfig {
   counts: Counts;
   visualStyle: string;
   sellingPointLayouts: string[];
-  vectorSellingPointOverlay?: boolean;
   listingCopy: boolean;
 }
 export const initialConfig: Config = {
@@ -42,7 +41,6 @@ export const initialConfig: Config = {
   },
   visualStyle: "auto",
   sellingPointLayouts: [],
-  vectorSellingPointOverlay: false,
   listingCopy: false,
 };
 export function totalImages(c: Config) {
@@ -122,7 +120,6 @@ export function fromRun(run: Pipeline | null): Config {
     sellingPointLayouts: config.mode === "smart"
       ? []
       : resolveSellingPointLayouts(config.sellingPointLayouts, counts.selling_points).map(({ id }) => id),
-    vectorSellingPointOverlay: config.mode === "smart" ? false : Boolean(config.vectorSellingPointOverlay),
   };
 }
 export async function download(url: string, name: string) {
