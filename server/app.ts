@@ -81,6 +81,13 @@ export interface SuiteStudioApp {
   previewReplicaReference(suiteId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
 }
 
+function extensionForImageMime(mimeType: string): string {
+  const lower = mimeType.toLowerCase();
+  if (lower.includes("jpeg") || lower.includes("jpg")) return "jpg";
+  if (lower.includes("webp")) return "webp";
+  return "png";
+}
+
 function platformForPlanning(profile: PlatformProfile | null, background: unknown): PlatformProfile | undefined {
   if (!profile) return undefined;
   if (background === "pure_white_required")
@@ -625,10 +632,15 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         for (const [productIndex, product] of replicaProducts.entries()) {
           const stored = await deps.storage.get(product.objectKey);
           if (!stored) throw new Error("TASK_INVALID_SOURCE");
+          const fallbackFilename = `product-${productIndex + 1}.${extensionForImageMime(stored.contentType)}`;
+          const resolvedFilename =
+            product.sourceKind === "upload" && product.filename && /\.(png|jpe?g|webp)$/i.test(product.filename)
+              ? product.filename
+              : fallbackFilename;
           inputImages.push({
             bytes: stored.bytes,
             mimeType: stored.contentType,
-            filename: product.filename || `product-${productIndex + 1}.png`,
+            filename: resolvedFilename,
             role: productIndex === 0 ? "product_primary" : "product_detail",
             objectKey: product.objectKey,
             resourceId: product.libraryResourceId ?? undefined,

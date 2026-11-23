@@ -52,6 +52,9 @@ export const REPLICA_MAX_REFERENCES = 6;
 export const REPLICA_MAX_PRODUCTS = 6;
 export const REPLICA_REMARK_MAX_LENGTH = 200;
 export const REPLICA_UNIFIED_REQUIREMENT_MAX_LENGTH = 1000;
+// 单张原图上限 12 MiB（与 server/image.ts 一致），Base64 编码长度为 ceil(12 MiB / 3) * 4 = 16 MiB 字符。
+export const REPLICA_MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+export const REPLICA_MAX_BASE64_CHARS = Math.ceil(REPLICA_MAX_IMAGE_BYTES / 3) * 4;
 
 export interface ReplicaBatchConfig {
   sceneType: ReplicaSceneType;
@@ -191,11 +194,13 @@ export interface ReplicaPipelineDependencies {
   ): Promise<AppResponse>;
 }
 
+type RetainedProcessedImage = Omit<ProcessedImage, "generationInput">;
+
 interface ValidatedReferenceUpload {
   filename: string;
   remark: string;
   rawBytes: Buffer;
-  processed: ProcessedImage;
+  processed: RetainedProcessedImage;
 }
 
 type ValidatedProductInput =
@@ -203,7 +208,7 @@ type ValidatedProductInput =
       sourceKind: "upload";
       filename: string;
       rawBytes: Buffer;
-      processed: ProcessedImage;
+      processed: RetainedProcessedImage;
     }
   | {
       sourceKind: "library";
@@ -478,10 +483,14 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
         }
       }
 
+      if (bytesBase64.length > REPLICA_MAX_BASE64_CHARS) {
+        return fail("IMAGE_TOO_LARGE", 400);
+      }
       const rawBytes = Buffer.from(bytesBase64, "base64");
-      let processed: ProcessedImage;
+      let processed: RetainedProcessedImage;
       try {
-        processed = await processImage(rawBytes, mimeType);
+        const { generationInput: _unused, ...retained } = await processImage(rawBytes, mimeType);
+        processed = retained;
       } catch (error) {
         return fail(error instanceof Error ? error.message : "INVALID_IMAGE", 400);
       }
@@ -533,10 +542,14 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
         const mimeType = typeof entry.mimeType === "string" ? entry.mimeType.trim() : "";
         const bytesBase64 = typeof entry.bytesBase64 === "string" ? entry.bytesBase64.trim() : "";
         if (!filename || !mimeType || !bytesBase64) return fail("REPLICA_INVALID_PRODUCTS", 400);
+        if (bytesBase64.length > REPLICA_MAX_BASE64_CHARS) {
+          return fail("IMAGE_TOO_LARGE", 400);
+        }
         const rawBytes = Buffer.from(bytesBase64, "base64");
-        let processed: ProcessedImage;
+        let processed: RetainedProcessedImage;
         try {
-          processed = await processImage(rawBytes, mimeType);
+          const { generationInput: _unused, ...retained } = await processImage(rawBytes, mimeType);
+          processed = retained;
         } catch (error) {
           return fail(error instanceof Error ? error.message : "INVALID_IMAGE", 400);
         }
@@ -597,8 +610,10 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
     }
     const ratio = rawRatio;
 
-    const rawSize = body.size === undefined ? (imageOptions.sizes[0] ?? "1K") : body.size;
-    if (typeof rawSize !== "string" || !imageOptions.sizes.includes(rawSize)) {
+    const allowedSizes = imageOptions.sizes.filter((item) => item !== "4K");
+    const defaultSize = allowedSizes.includes("1K") ? "1K" : (allowedSizes[0] ?? "1K");
+    const rawSize = body.size === undefined ? defaultSize : body.size;
+    if (typeof rawSize !== "string" || rawSize === "4K" || !allowedSizes.includes(rawSize)) {
       return fail("IMAGE_SIZE_UNSUPPORTED", 400);
     }
     const size = rawSize;

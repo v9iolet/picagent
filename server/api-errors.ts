@@ -23,6 +23,7 @@ export const errorMessages: Record<string, string> = {
   INVALID_IMAGE: "文件不是有效图片",
   MIME_MISMATCH: "图片真实类型与声明类型不一致",
   IMAGE_TOO_LARGE: "图片文件超过 12MB 限制",
+  PAYLOAD_TOO_LARGE: "请求体超过大小限制",
   IMAGE_SIZE_UNSUPPORTED: "当前账号分组不支持该分辨率",
   IMAGE_DIMENSIONS_TOO_LARGE: "图片尺寸超过限制",
   MISSING_IDEMPOTENCY_KEY: "生成请求缺少幂等键",

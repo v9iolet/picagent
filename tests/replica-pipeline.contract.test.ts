@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import sharp from "sharp";
 import { createSuiteStudioApp, type AppResponse, type SuiteStudioApp } from "../server/app.js";
+import { REPLICA_MAX_BASE64_CHARS } from "../server/replica/replica-pipeline.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
@@ -275,6 +276,39 @@ test("POST /api/replicas validates parameters, duplicates, and library product r
     400,
     "IMAGE_SIZE_UNSUPPORTED",
   );
+  // 4K is explicitly rejected in phase 1 even when model imageOptions includes 4K
+  expectError(
+    await f.app.request("POST", "/api/replicas", {
+      headers: { "Idempotency-Key": "val-size-4k" },
+      body: { ...basePayload, size: "4K" },
+    }),
+    400,
+    "IMAGE_SIZE_UNSUPPORTED",
+  );
+  // Oversized base64 rejected before Buffer.from decoding for both reference and product uploads
+  const oversizedBase64 = "A".repeat(REPLICA_MAX_BASE64_CHARS + 4);
+  expectError(
+    await f.app.request("POST", "/api/replicas", {
+      headers: { "Idempotency-Key": "val-oversized-ref-b64" },
+      body: {
+        ...basePayload,
+        references: [{ filename: "huge.png", mimeType: "image/png", bytesBase64: oversizedBase64 }],
+      },
+    }),
+    400,
+    "IMAGE_TOO_LARGE",
+  );
+  expectError(
+    await f.app.request("POST", "/api/replicas", {
+      headers: { "Idempotency-Key": "val-oversized-prod-b64" },
+      body: {
+        ...basePayload,
+        products: [{ filename: "huge-prod.png", mimeType: "image/png", bytesBase64: oversizedBase64 }],
+      },
+    }),
+    400,
+    "IMAGE_TOO_LARGE",
+  );
   expectError(
     await f.app.request("POST", "/api/replicas", {
       headers: { "Idempotency-Key": "val-req-long" },
@@ -473,6 +507,9 @@ test("replica end-to-end flow: card count, input order, role prefix, ratio=refer
     );
     assert.equal(Buffer.compare(call.images![0].bytes, prodUploadBytes), 0);
     assert.equal(Buffer.compare(call.images![1].bytes, prodLibraryBytes), 0);
+    assert.equal(call.images![0].filename, "cup-front.png");
+    // Library resource title ("保温杯白底图") has no extension; provider receives fallback filename with extension matching MIME
+    assert.equal(call.images![1].filename, "product-2.png");
     assert.match(call.prompt, /^第1–2张图为产品外观唯一依据，第3张图仅作为版式与风格参考，不得复制其中的品牌、文字与人物/);
   }
 
@@ -612,6 +649,13 @@ test("analysis failure can be resumed via POST /api/replicas/:suiteId/resume and
   assert.equal(failedState.pipeline.currentPhase, "replica_analyzing");
   assert.equal(failedState.pipeline.errorCode, "REPLICA_OUTPUT_INVALID");
   assert.equal(failedState.cards.length, 0);
+
+  // Feed taskCount falls back to configured referenceCount before tasks are materialized
+  const preTaskFeed = await f.app.request("GET", "/api/suites/feed?origin=replica");
+  assert.equal(preTaskFeed.status, 200);
+  const feedEntry = (preTaskFeed.body as any).data.items.find((item: { suite: { id: string } }) => item.suite.id === suiteId);
+  assert.ok(feedEntry);
+  assert.equal(feedEntry.taskCount, 1);
 
   failAnalysis = false;
   const resumed = await f.app.request("POST", `/api/replicas/${suiteId}/resume`, {

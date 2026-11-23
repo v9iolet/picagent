@@ -36,10 +36,12 @@ export class MemoryPromptRepository {
         imported.push(existing);
         continue;
       }
-      const sameContent = [...this.versions.values()]
-        .filter((version) => version.templateId === template!.id)
-        .sort((a, b) => b.versionNo - a.versionNo)
-        .find((version) => samePromptTemplateContent(version, record));
+      const sameContentCandidates = [...this.versions.values()].filter(
+        (version) => version.templateId === template!.id && version.status !== "retired" && samePromptTemplateContent(version, record),
+      );
+      const sameContent =
+        sameContentCandidates.find((version) => version.status === "published") ??
+        sameContentCandidates.sort((a, b) => b.versionNo - a.versionNo)[0];
       if (sameContent) {
         imported.push(sameContent);
         continue;

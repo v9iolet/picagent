@@ -828,12 +828,17 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         }
         if (thumbnails.length >= 4) break;
       }
+      const rawRefCount = Number(pipeline?.config?.referenceCount ?? 0);
+      const fallbackReplicaCount =
+        (suite.origin ?? "suite_studio") === "replica" && Number.isFinite(rawRefCount) && rawRefCount > 0
+          ? Math.trunc(rawRefCount)
+          : 0;
       return {
         suite,
         pipeline,
         card,
         thumbnails,
-        taskCount: activeTasks.length,
+        taskCount: activeTasks.length || fallbackReplicaCount,
       };
     });
     return ok({ items, total: eligible.length, limit, offset });

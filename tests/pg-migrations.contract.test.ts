@@ -731,6 +731,25 @@ test("PG replica repository normalizes null remark, creates replica tasks, recov
       const allVersions = await prompts.listVersions(version.templateId);
       assert.equal(allVersions.length, 1);
     }
+
+    // Semantic match in PG excludes retired versions and prefers published over draft
+    const publishedCompose = imported.find((v) => v.code === "replica.compose")!;
+    const composeCopyDraft = await prompts.copyVersion(publishedCompose.templateVersionId);
+    assert.ok(composeCopyDraft);
+    const [preferredPgPublished] = await prompts.importRecords([
+      { ...composeRecord, sourceSha256: "b".repeat(64), templateVersionId: randomUUID() },
+    ]);
+    assert.equal(preferredPgPublished.templateVersionId, publishedCompose.templateVersionId);
+    assert.equal(preferredPgPublished.status, "published");
+
+    await prompts.retireVersion(publishedCompose.templateVersionId);
+    await prompts.retireVersion(composeCopyDraft.templateVersionId);
+    const [freshDraftAfterRetire] = await prompts.importRecords([
+      { ...composeRecord, sourceSha256: "c".repeat(64), templateVersionId: randomUUID() },
+    ]);
+    assert.equal(freshDraftAfterRetire.status, "draft");
+    assert.notEqual(freshDraftAfterRetire.templateVersionId, publishedCompose.templateVersionId);
+    assert.equal(freshDraftAfterRetire.versionNo, 3);
   });
 });
 
