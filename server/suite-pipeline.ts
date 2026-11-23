@@ -637,11 +637,12 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         };
       }),
     );
+    const isReplica = suite.origin === "replica";
     const imageEditChildren = await loadSuiteImageEditChildren(activeTasks);
     const resolvedCards = resolveDeliverySlots(taskAggregates, imageEditChildren, {
       defaultTemplateVersionId: snapshot?.templateVersionId ?? null,
+      preferLatestByTime: isReplica,
     });
-    const isReplica = suite.origin === "replica";
     const [replicaReferences, replicaProducts] = isReplica && deps.replicaRepository
       ? await Promise.all([
           deps.replicaRepository.listReferences(suite.id),
@@ -649,11 +650,13 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         ])
       : [[], []];
     const styleSketch = isReplica ? replicaProducts.length === 0 : false;
-    const taskById = new Map(activeTasks.map((task) => [task.id, task]));
+    const taskAggregateById = new Map(taskAggregates.map((task) => [task.id, task]));
+    const replicaRefById = new Map(replicaReferences.map((ref) => [ref.id, ref]));
     const cards = isReplica
       ? resolvedCards.map((card) => {
-          const task = taskById.get(card.parentTaskId);
+          const task = taskAggregateById.get(card.parentTaskId);
           const replicaReferenceId = task?.replicaReferenceId ?? null;
+          const replicaRef = replicaReferenceId ? replicaRefById.get(replicaReferenceId) ?? null : null;
           const replicaReferenceThumbnailUrl = replicaReferenceId
             ? buildReplicaReferencePreviewUrl(suite.id, replicaReferenceId, "thumbnail")
             : null;
@@ -662,16 +665,31 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
               ? (task.generationParams.replicaPromptSnapshot as Record<string, unknown>)
               : null;
           const hasSnapshot = Object.keys(card.promptSnapshot ?? {}).length > 0;
-          const promptSnapshot = hasSnapshot ? card.promptSnapshot : (taskReplicaSnapshot ?? card.promptSnapshot);
+          const promptSnapshot = card.isEditedDerived
+            ? {
+                ...(taskReplicaSnapshot ?? {}),
+                ...(card.promptSnapshot ?? {}),
+              }
+            : hasSnapshot
+              ? card.promptSnapshot
+              : (taskReplicaSnapshot ?? card.promptSnapshot);
           const templateVersionId =
             card.templateVersionId ??
             (typeof taskReplicaSnapshot?.templateVersionId === "string" ? taskReplicaSnapshot.templateVersionId : null);
+          const latestAttempt = task?.attempts.at(-1) ?? null;
+          const isLatestFailed = latestAttempt?.status === "failed";
           return {
             ...card,
             templateVersionId,
             promptSnapshot,
+            taskStatus: task?.status ?? "pending",
+            promptDraft: task?.promptDraft ?? card.promptText,
+            promptRevision: task?.promptRevision ?? 1,
+            errorCode: isLatestFailed ? (latestAttempt?.errorCode ?? null) : null,
+            errorMessage: isLatestFailed ? (latestAttempt?.errorMessage ?? null) : null,
             replicaReferenceId,
             replicaReferenceThumbnailUrl,
+            replicaReferenceFilename: replicaRef?.filename ?? null,
             ...(styleSketch ? { styleSketch: true as const } : { styleSketch: false as const }),
           };
         })
@@ -729,7 +747,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
                 : [],
           }
         : { snapshot: snapshot ? planSnapshotView(snapshot) : null, notGeneratedReasons: [] };
-    const total = cards.length || (isReplica ? replicaReferences.length : 0);
+    const total = cards.length || (isReplica && tasks.length === 0 ? replicaReferences.length : 0);
     const done = cards.filter((card) => card.sourceRole !== "pending").length;
     const listingCopy = (pipeline && await listingRepository.summary(pipeline.id))
       ?? await listingRepository.findLatestBySuiteId(suite.id);
@@ -775,6 +793,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       suite: (typeof suites)[number];
       pipeline: SuitePipelineRun | null;
       activeTasks: SuiteTask[];
+      totalTasks: number;
     }> = [];
     for (const suite of suites) {
       if ((suite.origin ?? "suite_studio") !== originFilter) continue;
@@ -791,14 +810,15 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       ) {
         continue;
       }
-      eligible.push({ suite, pipeline, activeTasks: active });
+      eligible.push({ suite, pipeline, activeTasks: active, totalTasks: tasks.length });
     }
     const toIso = (v: unknown) => (v instanceof Date ? v.toISOString() : String(v ?? ""));
     eligible.sort((a, b) => toIso(b.suite.createdAt).localeCompare(toIso(a.suite.createdAt)));
-    const page = eligible.slice(offset, offset + limit).map(({ suite, pipeline, activeTasks }) => ({
+    const page = eligible.slice(offset, offset + limit).map(({ suite, pipeline, activeTasks, totalTasks }) => ({
       suite,
       pipeline,
       activeTasks,
+      totalTasks,
       ordered: [...activeTasks].sort((a, b) => a.ordinal - b.ordinal),
     }));
     const candidateTaskIds: string[] = [];
@@ -813,7 +833,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         ? await deps.taskRepository.listPreviewVersionsByTaskIds(candidateTaskIds)
         : new Map<string, { taskId: string; versionId: string; previewUrl: string }>();
 
-    const items = page.map(({ suite, pipeline, activeTasks, ordered }) => {
+    const items = page.map(({ suite, pipeline, activeTasks, totalTasks, ordered }) => {
       const thumbnails: string[] = [];
       let card: { taskId: string; previewUrl: string; title: string } | null = null;
       for (const [index, task] of ordered.entries()) {
@@ -830,7 +850,10 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       }
       const rawRefCount = Number(pipeline?.config?.referenceCount ?? 0);
       const fallbackReplicaCount =
-        (suite.origin ?? "suite_studio") === "replica" && Number.isFinite(rawRefCount) && rawRefCount > 0
+        (suite.origin ?? "suite_studio") === "replica" &&
+        totalTasks === 0 &&
+        Number.isFinite(rawRefCount) &&
+        rawRefCount > 0
           ? Math.trunc(rawRefCount)
           : 0;
       return {

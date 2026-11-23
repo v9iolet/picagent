@@ -7,6 +7,7 @@ import {
   promptTextFor,
   ratioFor,
   resourceLabel,
+  sourceOriginLabel,
   stageLabel,
   statusClass,
   statusLabel,
@@ -220,7 +221,10 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
                 <dl className="definition-list">
                   <dt>资源 ID</dt><dd className="mono">{selected.id}</dd>
                   <dt>版本</dt><dd>{selected.resourceVersionId}</dd>
-                  <dt>来源</dt><dd className="mono">{String(selected.source?.objectKey ?? selected.source?.code ?? "工作台业务对象")}</dd>
+                  <dt>来源</dt>
+                  <dd className="mono">
+                    {[sourceOriginLabel(selected), selected.source?.objectKey ?? selected.source?.code].filter(Boolean).join(" · ") || "工作台业务对象"}
+                  </dd>
                   <dt>更新时间</dt><dd>{new Date(selected.updatedAt).toLocaleString("zh-CN")}</dd>
                 </dl>
               </section>

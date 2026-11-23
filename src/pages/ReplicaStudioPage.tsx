@@ -499,7 +499,24 @@ export function ReplicaStudioPage({
     setProducts((prev) => reorderList(prev, fromIndex, toIndex));
   }, []);
 
+  const refresh = useCallback(
+    async (id: string) => {
+      const seq = ++requestSeqRef.current;
+      const next = await replicaApi.state(id);
+      if (currentSuiteIdRef.current && currentSuiteIdRef.current !== id) return;
+      applyState(next, seq);
+    },
+    [applyState],
+  );
+
   const handleStartNew = useCallback(() => {
+    for (const url of objectUrlsRef.current) URL.revokeObjectURL(url);
+    objectUrlsRef.current.clear();
+    setReferences([]);
+    setProducts([]);
+    setConfig(INITIAL_REPLICA_CONFIG);
+    setRefNotice("");
+    setProductNotice("");
     applyState(null);
     setBatchError("");
     setPageNotice("");
@@ -508,6 +525,19 @@ export function ReplicaStudioPage({
       navigate("/create/replica");
     }
   }, [applyState, navigate, suiteId]);
+
+  const handleBatchDeleted = useCallback(
+    (deletedId: string) => {
+      applyState(null);
+      setBatchError("");
+      setLoadingBatch(false);
+      setPageNotice("已删除复刻批次。");
+      if (suiteId === deletedId || window.location.search) {
+        navigate("/create/replica");
+      }
+    },
+    [applyState, navigate, suiteId],
+  );
 
   const handleSelectHistory = useCallback(
     (id: string) => {
@@ -589,6 +619,17 @@ export function ReplicaStudioPage({
 
   const displayedSuiteId = currentState?.suite.id ?? suiteId;
   const isRunning = submitting || currentState?.pipeline?.status === "running";
+  const configDirty =
+    references.length > 0 ||
+    products.length > 0 ||
+    config.sceneType !== INITIAL_REPLICA_CONFIG.sceneType ||
+    config.cloneLevel !== INITIAL_REPLICA_CONFIG.cloneLevel ||
+    config.unifiedRequirement !== INITIAL_REPLICA_CONFIG.unifiedRequirement ||
+    config.productInfo !== INITIAL_REPLICA_CONFIG.productInfo ||
+    config.styleUnified !== INITIAL_REPLICA_CONFIG.styleUnified ||
+    config.language !== INITIAL_REPLICA_CONFIG.language ||
+    config.ratio !== INITIAL_REPLICA_CONFIG.ratio ||
+    config.size !== INITIAL_REPLICA_CONFIG.size;
 
   return (
     <AppShell
@@ -631,7 +672,7 @@ export function ReplicaStudioPage({
               <button type="button" onClick={() => setHistoryOpen(true)}>
                 生成记录
               </button>
-              {(suiteId || currentState) && (
+              {(suiteId || currentState || configDirty) && (
                 <button type="button" disabled={submitting} onClick={handleStartNew}>
                   ＋ 新建复刻
                 </button>
@@ -668,7 +709,15 @@ export function ReplicaStudioPage({
               <ReplicaEmptyState />
             ))}
 
-          {currentState && <ReplicaBatchPreview state={currentState} />}
+          {currentState && (
+            <ReplicaBatchPreview
+              key={currentState.suite.id}
+              state={currentState}
+              refresh={refresh}
+              onDelete={handleBatchDeleted}
+              navigate={navigate}
+            />
+          )}
         </main>
       </div>
 

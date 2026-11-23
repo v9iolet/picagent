@@ -1,6 +1,6 @@
 import type { ImageOptions } from "../../../shared/model-settings";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
-import { createIdempotencyKey, type ApiImage, type ApiSuite } from "../../api/client";
+import { createIdempotencyKey, type ApiImage, type ApiLibraryResource, type ApiSuite, type ApiTaskStatus } from "../../api/client";
 
 export type ReplicaSceneType =
   | "ecommerce_product"
@@ -170,8 +170,14 @@ export interface ReplicaBatchConfigView {
 }
 
 export interface ReplicaResultCard extends ResolvedDeliverySlot {
+  taskStatus?: ApiTaskStatus;
+  promptDraft?: string;
+  promptRevision?: number;
+  errorCode?: string | null;
+  errorMessage?: string | null;
   replicaReferenceId?: string | null;
   replicaReferenceThumbnailUrl?: string | null;
+  replicaReferenceFilename?: string | null;
   styleSketch?: boolean;
 }
 
@@ -398,5 +404,31 @@ export const replicaApi = {
   },
   state(suiteId: string) {
     return fetchJson<ReplicaStudioState>(`/api/suites/${encodeURIComponent(suiteId)}/studio-state`);
+  },
+  resume(suiteId: string) {
+    return fetchJson<{ suiteId: string; runId: string }>(
+      `/api/replicas/${encodeURIComponent(suiteId)}/resume`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": createIdempotencyKey(),
+        },
+        body: JSON.stringify({}),
+      },
+    );
+  },
+  saveReverseAsset(suiteId: string, taskId: string, title?: string) {
+    return fetchJson<ApiLibraryResource>(
+      `/api/replicas/${encodeURIComponent(suiteId)}/tasks/${encodeURIComponent(taskId)}/reverse-asset`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": createIdempotencyKey(),
+        },
+        body: JSON.stringify(title ? { title } : {}),
+      },
+    );
   },
 };

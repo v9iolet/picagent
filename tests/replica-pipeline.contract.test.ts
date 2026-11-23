@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import sharp from "sharp";
 import { createSuiteStudioApp, type AppResponse, type SuiteStudioApp } from "../server/app.js";
+import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
+import { createImageEditorApi } from "../server/image-editor-api.js";
 import { REPLICA_MAX_BASE64_CHARS } from "../server/replica/replica-pipeline.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
@@ -12,7 +14,9 @@ import { MemoryPromptRepository } from "../server/repositories/memory-prompt-rep
 import { MemoryReplicaRepository } from "../server/repositories/memory-replica-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
+import { PostgresLibraryRepository } from "../server/repositories/postgres-library-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
+import { readZipEntries } from "../server/zip.js";
 import type { ImageEditRequest, LlmClient, ReplicaPromptLlmInput } from "../server/types.js";
 
 async function makePng(width: number, height: number, color: { r: number; g: number; b: number }): Promise<Buffer> {
@@ -46,6 +50,20 @@ async function replicaFixture(options: FixtureOptions = {}) {
   }
 
   const defaultResultPng = await makePng(32, 32, { r: 220, g: 230, b: 240 });
+  const defaultEditedPng = await makePng(32, 32, { r: 40, g: 180, b: 120 });
+  const editorRepository = new MemoryImageEditorRepository();
+  const editorService = new ImageEditorService(
+    editorRepository,
+    {
+      name: "fake-editor",
+      version: "1",
+      capabilitiesVersion: "1",
+      capabilities: () => ({ imageToImage: true, changeText: true, currentVersionInput: true }),
+      edit: async () => ({ bytes: defaultEditedPng, mimeType: "image/png", width: 32, height: 32 }),
+    },
+    storage,
+    async () => ({ bytes: defaultResultPng, mimeType: "image/png", width: 32, height: 32 }),
+  );
   const llmCalls: ReplicaPromptLlmInput[] = [];
   const providerCalls: ImageEditRequest[] = [];
 
@@ -80,6 +98,7 @@ async function replicaFixture(options: FixtureOptions = {}) {
   };
 
   const app = createSuiteStudioApp({
+    imageEditorApi: createImageEditorApi(editorService),
     repository,
     storage,
     promptRepository,
@@ -113,6 +132,8 @@ async function replicaFixture(options: FixtureOptions = {}) {
     llmCalls,
     providerCalls,
     defaultResultPng,
+    defaultEditedPng,
+    editorRepository,
   };
 }
 
@@ -736,4 +757,525 @@ test("interrupted image generation resumes via POST /api/replicas/:suiteId/resum
   // Only card 2 was generated after resume; card 1 was skipped
   const callsAfterResume = generatedCardTitles.slice(callsBeforeResume);
   assert.deepEqual(callsAfterResume, ["card-2"]);
+});
+
+test("editing replica card prompt and regenerating creates a new version with frozen snapshots", async () => {
+  const f = await replicaFixture();
+  const ref1 = await makePng(80, 80, { r: 25, g: 45, b: 65 });
+  const prod1 = await makePng(64, 64, { r: 210, g: 215, b: 220 });
+
+  const created = await f.app.request("POST", "/api/replicas", {
+    headers: { "Idempotency-Key": "edit-prompt-regen-1" },
+    body: {
+      references: [{ filename: "ref-edit.png", mimeType: "image/png", bytesBase64: ref1.toString("base64") }],
+      products: [{ filename: "prod-edit.png", mimeType: "image/png", bytesBase64: prod1.toString("base64") }],
+      sceneType: "ecommerce_product",
+      cloneLevel: "high",
+      language: "zh",
+      ratio: "1:1",
+      size: "1K",
+    },
+  });
+  assert.equal(created.status, 201);
+  const { suiteId } = (created.body as any).data;
+
+  const initialState = await waitStudioState(f.app, suiteId, (data) => data.pipeline?.status === "completed");
+  assert.equal(initialState.cards.length, 1);
+  const card = initialState.cards[0];
+  assert.equal(card.versionNumber, 1);
+  assert.equal(card.promptRevision, 1);
+  const originalDraft = card.promptDraft;
+  assert.ok(typeof originalDraft === "string" && originalDraft.includes("钛合金保温杯"));
+
+  // Regenerate with edited promptDraft
+  const editedPrompt = "暖木桌面近景特写钛合金保温杯，柔和晨光勾勒金属拉丝质感，顶部简洁留白。";
+  const regen = await f.app.request("POST", `/api/suite-tasks/${card.parentTaskId}/generation`, {
+    headers: { "Idempotency-Key": "regen-edited-prompt-1" },
+    body: { promptDraft: editedPrompt },
+  });
+  assert.equal(regen.status, 202);
+  const { batchId } = (regen.body as any).data;
+
+  // Wait for batch completion
+  const deadline = Date.now() + 3_000;
+  let batchStatus = "running";
+  while (Date.now() < deadline && batchStatus === "running") {
+    const res = await f.app.request("GET", `/api/generation-batches/${batchId}`);
+    batchStatus = (res.body as any).data.batch.status;
+    if (batchStatus === "running") await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(batchStatus, "completed");
+
+  const versionsRes = await f.app.request("GET", `/api/suite-tasks/${card.parentTaskId}/versions`);
+  assert.equal(versionsRes.status, 200);
+  const versions = (versionsRes.body as any).data.versions;
+  assert.equal(versions.length, 2);
+
+  const v2 = versions.find((v: any) => v.versionNumber === 2);
+  const v1 = versions.find((v: any) => v.versionNumber === 1);
+  assert.ok(v1 && v2);
+  assert.equal(v2.isCurrent, true);
+  assert.equal(v1.isCurrent, false);
+
+  // Historical v1 snapshot MUST remain frozen with revision 1 & original prompt
+  assert.equal(v1.promptSnapshot.prompt, originalDraft);
+  assert.equal(v1.promptSnapshot.promptRevision, 1);
+  assert.match(v1.promptSnapshot.finalPrompt, /第1张图为产品外观唯一依据/);
+  assert.ok(v1.promptSnapshot.finalPrompt.includes(originalDraft));
+
+  // New v2 snapshot records revision 2 & edited prompt with role prefix
+  assert.equal(v2.promptSnapshot.prompt, editedPrompt);
+  assert.equal(v2.promptSnapshot.promptRevision, 2);
+  assert.match(v2.promptSnapshot.finalPrompt, /第1张图为产品外观唯一依据/);
+  assert.ok(v2.promptSnapshot.finalPrompt.includes(editedPrompt));
+  assert.equal(v2.promptSnapshot.cloneLevel, "high");
+  assert.equal(v2.promptSnapshot.sceneType, "ecommerce_product");
+  assert.equal(v2.promptSnapshot.replicaReferenceId, card.replicaReferenceId);
+
+  // studio-state reflects the new current version & promptRevision
+  const updatedState = await waitStudioState(f.app, suiteId, (data) => data.cards[0]?.versionNumber === 2);
+  assert.equal(updatedState.cards[0].promptRevision, 2);
+  assert.equal(updatedState.cards[0].promptDraft, editedPrompt);
+  assert.equal(updatedState.cards[0].versionId, v2.id);
+});
+
+test("saving replica card as reverse reference asset records replica source provenance and updates on re-save", async () => {
+  const f = await replicaFixture();
+  const refBytes = await makePng(90, 90, { r: 70, g: 80, b: 90 });
+  const prodBytes = await makePng(64, 64, { r: 220, g: 220, b: 220 });
+
+  const created = await f.app.request("POST", "/api/replicas", {
+    headers: { "Idempotency-Key": "save-reverse-asset-1" },
+    body: {
+      references: [{ filename: "hero-ref.png", mimeType: "image/png", bytesBase64: refBytes.toString("base64") }],
+      products: [{ filename: "prod.png", mimeType: "image/png", bytesBase64: prodBytes.toString("base64") }],
+      sceneType: "apparel",
+      cloneLevel: "compose",
+      language: "zh",
+      ratio: "3:4",
+      size: "1K",
+    },
+  });
+  assert.equal(created.status, 201);
+  const { suiteId } = (created.body as any).data;
+
+  const state = await waitStudioState(f.app, suiteId, (data) => data.pipeline?.status === "completed");
+  const card = state.cards[0];
+  const ref = state.replicaReferences[0];
+
+  const saved = await f.app.request("POST", `/api/replicas/${suiteId}/tasks/${card.parentTaskId}/reverse-asset`, {
+    headers: { "Idempotency-Key": "replica-reverse-1" },
+    body: {},
+  });
+  assert.equal(saved.status, 201);
+  const asset = (saved.body as any).data;
+  assert.equal(asset.resourceType, "reverse_reference_asset");
+  assert.equal(asset.status, "draft");
+  assert.equal(asset.stage, "replica_prompt");
+  assert.equal(asset.suiteId, suiteId);
+  assert.equal(asset.source.origin, "replica");
+  assert.equal(asset.source.replicaSuiteId, suiteId);
+  assert.equal(asset.source.suiteId, suiteId);
+  assert.equal(asset.source.taskId, card.parentTaskId);
+  assert.equal(asset.source.replicaReferenceId, ref.id);
+  assert.equal(asset.source.objectKey, ref.objectKey);
+  assert.equal(asset.promptSnapshot.prompt, card.promptDraft);
+  assert.equal(asset.promptSnapshot.promptRevision, 1);
+
+  // Preview resolves reference image bytes through library proxy
+  const preview = await f.app.previewLibraryResource(asset.id);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.headers?.["content-type"], "image/png");
+  assert.ok(preview.raw && preview.raw.length > 0);
+
+  // Updating prompt and saving again upserts the same reference objectKey asset cleanly
+  await f.app.request("PATCH", `/api/suite-tasks/${card.parentTaskId}`, {
+    body: { promptDraft: "修订后的服饰复刻反推提示词" },
+  });
+  const resaved = await f.app.request("POST", `/api/replicas/${suiteId}/tasks/${card.parentTaskId}/reverse-asset`, {
+    headers: { "Idempotency-Key": "replica-reverse-2" },
+    body: {},
+  });
+  assert.equal(resaved.status, 201);
+  const updatedAsset = (resaved.body as any).data;
+  assert.equal(updatedAsset.id, asset.id);
+  assert.equal(updatedAsset.promptSnapshot.prompt, "修订后的服饰复刻反推提示词");
+  assert.equal(updatedAsset.promptSnapshot.promptRevision, 2);
+
+  // Rejects non-replica suite
+  const studioSuite = await f.repository.createSuite("普通套图", undefined, "suite_studio");
+  expectError(
+    await f.app.request("POST", `/api/replicas/${studioSuite.id}/tasks/${card.parentTaskId}/reverse-asset`, {
+      body: {},
+    }),
+    400,
+    "INVALID_SUITE_ORIGIN",
+  );
+});
+
+test("replica single-card final selection, archive soft-delete, ZIP export, and failed card error reporting", async () => {
+  let failCard2 = true;
+  const f = await replicaFixture({
+    providerEdit: async (request, _call, defaultPng) => {
+      if (failCard2 && request.prompt.includes("卡 2")) {
+        throw new Error("IMAGE_PROVIDER_FAILED");
+      }
+      return { bytes: defaultPng, mimeType: "image/png" };
+    },
+  });
+
+  const ref1 = await makePng(64, 64, { r: 10, g: 20, b: 30 });
+  const ref2 = await makePng(64, 64, { r: 30, g: 40, b: 50 });
+  const prod = await makePng(64, 64, { r: 230, g: 230, b: 230 });
+
+  const created = await f.app.request("POST", "/api/replicas", {
+    headers: { "Idempotency-Key": "replica-ops-1" },
+    body: {
+      references: [
+        { filename: "r1.png", mimeType: "image/png", bytesBase64: ref1.toString("base64") },
+        { filename: "r2.png", mimeType: "image/png", bytesBase64: ref2.toString("base64") },
+      ],
+      products: [{ filename: "p.png", mimeType: "image/png", bytesBase64: prod.toString("base64") }],
+      sceneType: "ecommerce_product",
+      cloneLevel: "high",
+      language: "zh",
+      ratio: "1:1",
+      size: "1K",
+    },
+  });
+  assert.equal(created.status, 201);
+  const { suiteId } = (created.body as any).data;
+
+  const partial = await waitStudioState(f.app, suiteId, (data) => data.pipeline?.status === "partial_failed");
+  assert.equal(partial.cards.length, 2);
+  const card1 = partial.cards[0];
+  const card2 = partial.cards[1];
+  assert.equal(card1.taskStatus, "generated");
+  assert.equal(card2.taskStatus, "failed");
+  assert.equal(card2.errorCode, "TASK_IMAGE_PROVIDER_FAILED");
+  assert.ok(typeof card2.errorMessage === "string" && card2.errorMessage.length > 0);
+
+  // Mark card1 current version as final (save to library action)
+  const finalRes = await f.app.request(
+    "POST",
+    `/api/suite-tasks/${card1.parentTaskId}/versions/${card1.versionId}/select`,
+    {
+      headers: { "Idempotency-Key": "select-final-1" },
+      body: { selection: "final" },
+    },
+  );
+  assert.equal(finalRes.status, 200);
+  assert.equal((finalRes.body as any).data.isFinal, true);
+
+  // Soft-archive card2 via PATCH /api/suite-tasks/:id { status: "archived" }
+  const archivedRes = await f.app.request("PATCH", `/api/suite-tasks/${card2.parentTaskId}`, {
+    body: { status: "archived" },
+  });
+  assert.equal(archivedRes.status, 200);
+  assert.equal((archivedRes.body as any).data.status, "archived");
+  assert.ok((archivedRes.body as any).data.archivedAt, "archivedAt must be populated on soft-archive");
+
+  const afterArchive = await waitStudioState(f.app, suiteId, (data) => data.cards.length === 1);
+  assert.equal(afterArchive.cards[0].parentTaskId, card1.parentTaskId);
+  assert.equal(afterArchive.cards[0].sourceRole, "parent_final");
+  assert.equal(afterArchive.progress.total, 1);
+
+  // ZIP export succeeds for replica batch and includes only the remaining card + manifest.json
+  const zipRes = await f.app.request(
+    "GET",
+    `/api/suites/${suiteId}/delivery/export?taskIds=${encodeURIComponent(card1.parentTaskId)}`,
+  );
+  assert.equal(zipRes.status, 200);
+  assert.ok(zipRes.raw);
+  const entries = readZipEntries(zipRes.raw);
+  assert.equal([...entries.keys()].filter((name) => /\.(png|jpe?g|webp)$/i.test(name)).length, 1);
+  assert.ok(entries.has("manifest.json"));
+});
+
+test("PostgresLibraryRepository includes replica task_image_version without filtering by origin and tags origin as replica_prompt", async () => {
+  const executedSql: string[] = [];
+  const fakePool = {
+    query: async (sql: string) => {
+      executedSql.push(sql);
+      if (sql.includes("FROM suite_workbench.task_image_versions")) {
+        return {
+          rows: [
+            {
+              version_id: "ver-replica-1",
+              task_id: "task-replica-1",
+              object_key: "suites/s1/tasks/task-replica-1/versions/v1/final.png",
+              process_object_keys_json: [],
+              prompt_snapshot_json: { prompt: "复刻提示词", cloneLevel: "high" },
+              model: "gpt-image-2",
+              channel: null,
+              mime_type: "image/png",
+              width: 1024,
+              height: 1024,
+              version_number: 1,
+              created_at: "2026-11-23T08:00:00.000Z",
+              suite_id: "suite-replica-1",
+              task_title: "复刻图 1",
+              image_type: "main",
+              prompt_draft: "复刻提示词",
+              origin_kind: "replica",
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    },
+  };
+
+  const repo = new PostgresLibraryRepository(fakePool as never);
+  const listed = await repo.listResources({ resourceType: "task_image_version", status: "published" });
+  assert.equal(listed.total, 1);
+  const item = listed.items[0];
+  assert.equal(item.id, "task-version:ver-replica-1");
+  assert.equal(item.stage, "replica_prompt");
+  assert.equal(item.status, "published");
+  assert.equal(item.source.origin, "replica");
+  assert.equal(item.source.originKind, "replica");
+  assert.match(item.summary, /爆品图复刻/);
+  assert.equal(
+    executedSql.some((sql) => /origin\s*(=|<>|!=|IN)/i.test(sql)),
+    false,
+    "listResources must not filter out suites by origin",
+  );
+});
+
+test("replica card image edit and final lock never swallow subsequent regeneration or edits, and edited cards keep replica analysis snapshot", async () => {
+  let genCount = 0;
+  let failNextGen = false;
+  const v1Png = await makePng(32, 32, { r: 10, g: 20, b: 30 });
+  const v2Png = await makePng(32, 32, { r: 200, g: 50, b: 50 });
+  const v3Png = await makePng(32, 32, { r: 50, g: 50, b: 200 });
+  const f = await replicaFixture({
+    providerEdit: async () => {
+      if (failNextGen) throw new Error("IMAGE_PROVIDER_FAILED");
+      genCount += 1;
+      return { bytes: genCount === 1 ? v1Png : genCount === 2 ? v2Png : v3Png, mimeType: "image/png" };
+    },
+  });
+
+  const refBytes = await makePng(64, 64, { r: 80, g: 90, b: 100 });
+  const prodBytes = await makePng(64, 64, { r: 220, g: 220, b: 220 });
+  const created = await f.app.request("POST", "/api/replicas", {
+    headers: { "Idempotency-Key": "replica-edit-regen-flow-1" },
+    body: {
+      references: [{ filename: "r1.png", mimeType: "image/png", bytesBase64: refBytes.toString("base64") }],
+      products: [{ filename: "p1.png", mimeType: "image/png", bytesBase64: prodBytes.toString("base64") }],
+      sceneType: "ecommerce_product",
+      cloneLevel: "high",
+      styleUnified: true,
+      language: "zh",
+      ratio: "1:1",
+      size: "1K",
+    },
+  });
+  assert.equal(created.status, 201);
+  const { suiteId } = (created.body as any).data;
+
+  const waitBatchDone = async (batchId: string) => {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const res = await f.app.request("GET", `/api/generation-batches/${batchId}`);
+      if ((res.body as any).data.batch.status !== "running") return (res.body as any).data.batch.status;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error("batch timeout");
+  };
+
+  const waitEditDone = async (childTaskId: string) => {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const res = await f.app.request("GET", `/api/image-editor/tasks/${childTaskId}`);
+      if ((res.body as any).data.task.status !== "generating") return (res.body as any).data;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error("edit timeout");
+  };
+
+  const s1 = await waitStudioState(f.app, suiteId, (data) => data.pipeline?.status === "completed");
+  const taskId = s1.cards[0].parentTaskId;
+  const v1Id = s1.cards[0].versionId;
+  assert.equal(s1.cards[0].isEditedDerived, false);
+  assert.equal(s1.cards[0].versionNumber, 1);
+
+  // 1. Mark v1 as final (save to image library), then submit image edit on v1
+  const markV1Final = await f.app.request("POST", `/api/suite-tasks/${taskId}/versions/${v1Id}/select`, {
+    headers: { "Idempotency-Key": "mark-v1-final" },
+    body: { selection: "final" },
+  });
+  assert.equal(markV1Final.status, 200);
+
+  await f.app.request("POST", `/api/image-editor/sessions/${taskId}/operations`, {
+    headers: { "Idempotency-Key": "edit-op-1" },
+    body: {
+      operation: {
+        operationId: "op-1",
+        type: "re_edit",
+        order: 1,
+        sourceCardId: taskId,
+        sourceVersionId: v1Id,
+        parentVersionId: v1Id,
+        payload: { prompt: "提亮主体质感" },
+      },
+      summary: "提亮主体质感",
+    },
+  });
+  const editSubmit1 = await f.app.request("POST", `/api/image-editor/sessions/${taskId}/submit`, {
+    headers: { "Idempotency-Key": "edit-submit-1" },
+    body: { sourceCardId: taskId, sourceVersionId: v1Id, parentVersionId: v1Id, summary: "提亮主体质感" },
+  });
+  assert.equal(editSubmit1.status, 202);
+  const child1Id = (editSubmit1.body as any).data.childTask.id;
+  await waitEditDone(child1Id);
+
+  // After edit succeeds: v1 final lock cleared, studio-state & ZIP show edited child1, AND replica snapshot metadata preserved
+  const sAfterEdit1 = await waitStudioState(f.app, suiteId, (data) => data.cards[0]?.isEditedDerived === true);
+  assert.equal(sAfterEdit1.cards[0].editChildTaskId, child1Id);
+  assert.equal(sAfterEdit1.cards[0].sourceRole, "edit_current");
+  assert.equal(sAfterEdit1.cards[0].promptSnapshot.sharedStyle, "清冷高级棚拍调性，银灰石纹台面配柔和侧逆光");
+  assert.ok(Array.isArray(sAfterEdit1.cards[0].promptSnapshot.copy) && sAfterEdit1.cards[0].promptSnapshot.copy.length > 0);
+  assert.ok(sAfterEdit1.cards[0].promptSnapshot.visualStructure?.composition);
+
+  const zipAfterEdit1 = await f.app.request("GET", `/api/suites/${suiteId}/delivery/export?taskIds=${encodeURIComponent(taskId)}`);
+  assert.equal(zipAfterEdit1.status, 200);
+  const manifestAfterEdit1 = JSON.parse(readZipEntries(zipAfterEdit1.raw!).get("manifest.json")!.toString("utf8"));
+  assert.equal(manifestAfterEdit1.items[0].isEditedDerived, true);
+  assert.equal(manifestAfterEdit1.items[0].editChildTaskId, child1Id);
+
+  // 2. Mark edited child1 as final, then regenerate parent with edited prompt -> must show parent v2 (NOT swallowed by edit child1!)
+  const markEditFinal = await f.app.request(
+    "POST",
+    `/api/image-editor/tasks/${child1Id}/versions/${sAfterEdit1.cards[0].versionId}/select`,
+    { headers: { "Idempotency-Key": "mark-edit-final" }, body: { selection: "final" } },
+  );
+  assert.equal(markEditFinal.status, 200);
+
+  const regenV2 = await f.app.request("POST", `/api/suite-tasks/${taskId}/generation`, {
+    headers: { "Idempotency-Key": "regen-after-edit-v2" },
+    body: { promptDraft: "编辑后再改提示词重生成 v2" },
+  });
+  assert.equal(regenV2.status, 202);
+  assert.equal(await waitBatchDone((regenV2.body as any).data.batchId), "completed");
+
+  const sAfterV2 = await waitStudioState(f.app, suiteId, (data) => data.cards[0]?.isEditedDerived === false && data.cards[0]?.versionNumber === 2);
+  assert.equal(sAfterV2.cards[0].sourceRole, "parent_current");
+  assert.equal(sAfterV2.cards[0].promptRevision, 2);
+  assert.equal(sAfterV2.cards[0].promptDraft, "编辑后再改提示词重生成 v2");
+
+  const zipAfterV2 = await f.app.request("GET", `/api/suites/${suiteId}/delivery/export?taskIds=${encodeURIComponent(taskId)}`);
+  assert.equal(zipAfterV2.status, 200);
+  const manifestAfterV2 = JSON.parse(readZipEntries(zipAfterV2.raw!).get("manifest.json")!.toString("utf8"));
+  assert.equal(manifestAfterV2.items[0].isEditedDerived, false);
+  assert.equal(manifestAfterV2.items[0].versionNumber, 2);
+
+  // 3. Mark v2 as final; if a subsequent regeneration fails, v2 final lock is preserved; once regeneration succeeds, v2 final lock is cleared and v3 is shown
+  const v2Id = sAfterV2.cards[0].versionId;
+  await f.app.request("POST", `/api/suite-tasks/${taskId}/versions/${v2Id}/select`, {
+    headers: { "Idempotency-Key": "mark-v2-final" },
+    body: { selection: "final" },
+  });
+
+  failNextGen = true;
+  const failedRegen = await f.app.request("POST", `/api/suite-tasks/${taskId}/generation`, {
+    headers: { "Idempotency-Key": "regen-after-final-fail" },
+    body: {},
+  });
+  assert.equal(failedRegen.status, 202);
+  assert.equal(await waitBatchDone((failedRegen.body as any).data.batchId), "failed");
+  const versionsAfterFail = await f.app.request("GET", `/api/suite-tasks/${taskId}/versions`);
+  assert.equal(
+    (versionsAfterFail.body as any).data.versions.find((v: any) => v.id === v2Id)?.isFinal,
+    true,
+    "failed regeneration must preserve existing final lock",
+  );
+
+  failNextGen = false;
+  const regenV3 = await f.app.request("POST", `/api/suite-tasks/${taskId}/generation`, {
+    headers: { "Idempotency-Key": "regen-after-final-v3" },
+    body: {},
+  });
+  assert.equal(regenV3.status, 202);
+  assert.equal(await waitBatchDone((regenV3.body as any).data.batchId), "completed");
+
+  const sAfterV3 = await waitStudioState(f.app, suiteId, (data) => data.cards[0]?.versionNumber === 3);
+  assert.equal(sAfterV3.cards[0].isEditedDerived, false);
+  assert.equal(sAfterV3.cards[0].sourceRole, "parent_current");
+
+  const versionsRes = await f.app.request("GET", `/api/suite-tasks/${taskId}/versions`);
+  assert.equal((versionsRes.body as any).data.versions.length, 3);
+  assert.equal((versionsRes.body as any).data.versions.some((v: any) => v.id === v2Id), true);
+  assert.equal((versionsRes.body as any).data.versions.some((v: any) => v.isFinal), false);
+});
+
+test("encoded library resourceId paths (reverse%3A<id>) decode safely on detail, preview, and status endpoints, and archived replica batch reports taskCount=0 in feed", async () => {
+  const f = await replicaFixture();
+  const refBytes = await makePng(64, 64, { r: 60, g: 100, b: 140 });
+  const created = await f.app.request("POST", "/api/replicas", {
+    headers: { "Idempotency-Key": "encoded-lib-and-feed-1" },
+    body: {
+      references: [{ filename: "enc-ref.png", mimeType: "image/png", bytesBase64: refBytes.toString("base64") }],
+      products: [],
+      sceneType: "marketing_poster",
+      cloneLevel: "compose",
+      language: "zh",
+      ratio: "1:1",
+      size: "1K",
+    },
+  });
+  assert.equal(created.status, 201);
+  const { suiteId } = (created.body as any).data;
+  const state = await waitStudioState(f.app, suiteId, (data) => data.pipeline?.status === "completed");
+  const taskId = state.cards[0].parentTaskId;
+
+  const saved = await f.app.request("POST", `/api/replicas/${suiteId}/tasks/${taskId}/reverse-asset`, {
+    headers: { "Idempotency-Key": "save-enc-reverse-1" },
+    body: {},
+  });
+  assert.equal(saved.status, 201);
+  const assetId = (saved.body as any).data.id as string;
+  assert.match(assetId, /^reverse:/);
+  const encodedId = encodeURIComponent(assetId);
+  assert.ok(encodedId.includes("%3A"));
+
+  const detail = await f.app.request("GET", `/api/library/resources/${encodedId}`);
+  assert.equal(detail.status, 200);
+  assert.equal((detail.body as any).data.id, assetId);
+
+  const preview = await f.app.request("GET", `/api/library/resources/${encodedId}/preview`);
+  assert.equal(preview.status, 200);
+  assert.ok(preview.raw && preview.raw.length > 0);
+
+  const published = await f.app.request("POST", `/api/library/resources/${encodedId}/status`, {
+    headers: { "Idempotency-Key": "publish-enc-1" },
+    body: { status: "published" },
+  });
+  assert.equal(published.status, 200);
+  assert.equal((published.body as any).data.status, "published");
+
+  const archivedAsset = await f.app.request("POST", `/api/library/resources/${encodedId}/status`, {
+    headers: { "Idempotency-Key": "archive-enc-1" },
+    body: { status: "archived" },
+  });
+  assert.equal(archivedAsset.status, 200);
+  assert.equal((archivedAsset.body as any).data.status, "archived");
+
+  // Malformed URI encoding returns 404 safely without throwing
+  expectError(await f.app.request("GET", "/api/library/resources/%E0%A4%A"), 404, "LIBRARY_RESOURCE_NOT_FOUND");
+  expectError(
+    await f.app.request("POST", "/api/library/resources/%E0%A4%A/status", { body: { status: "published" } }),
+    404,
+    "LIBRARY_RESOURCE_NOT_FOUND",
+  );
+
+  // Soft-archiving all tasks in a replica batch makes feed taskCount = 0 (not referenceCount = 1)
+  const archTask = await f.app.request("PATCH", `/api/suite-tasks/${taskId}`, { body: { status: "archived" } });
+  assert.equal(archTask.status, 200);
+  const feedRes = await f.app.request("GET", "/api/suites/feed?origin=replica");
+  assert.equal(feedRes.status, 200);
+  const item = (feedRes.body as any).data.items.find((entry: any) => entry.suite.id === suiteId);
+  assert.ok(item);
+  assert.equal(item.taskCount, 0);
 });

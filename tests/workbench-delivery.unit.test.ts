@@ -262,3 +262,102 @@ test("computeOutpaintPreviewBox computes target dimensions and anchor box for as
   assert.equal(tall.anchor, "center");
   assert.ok(tall.innerY > 0 && tall.innerHeight < 1);
 });
+
+test("resolveDeliverySlots compares real Date timestamps (node-postgres timestamptz) instead of falling back to UUID order", () => {
+  const parentV1Date = new Date("2026-11-23T10:00:00.000Z") as unknown as string;
+  const oldEditDate = new Date("2026-11-23T10:00:01.000Z") as unknown as string;
+  const newEditDate = new Date("2026-11-23T10:00:05.000Z") as unknown as string;
+  const parentV2Date = new Date("2026-11-23T10:00:10.000Z") as unknown as string;
+
+  const task: DeliveryTaskLike = {
+    id: "replica-task-1",
+    ordinal: 1,
+    imageType: "main",
+    title: "复刻图 1",
+    purpose: "爆品图复刻",
+    promptDraft: "测试复刻",
+    status: "generated",
+    originKind: "replica",
+    versions: [
+      {
+        id: "ver-parent-1",
+        versionNumber: 1,
+        isCurrent: true,
+        isFinal: false,
+        previewUrl: "/v1.png",
+        createdAt: parentV1Date,
+      },
+    ],
+  };
+
+  // Older edit child has lexicographically larger UUID than newer edit child
+  const editChildren: DeliveryEditChildLike[] = [
+    {
+      task: {
+        id: "ffffffff-0000-0000-0000-000000000001",
+        sourceCardId: "replica-task-1",
+        sourceVersionId: "ver-parent-1",
+        currentVersionId: "ver-edit-old",
+        finalVersionId: null,
+        createdAt: oldEditDate,
+        updatedAt: oldEditDate,
+      },
+      versions: [
+        {
+          id: "ver-edit-old",
+          versionNumber: 1,
+          previewUrl: "/edit-old.png",
+          createdAt: oldEditDate,
+        },
+      ],
+    },
+    {
+      task: {
+        id: "11111111-0000-0000-0000-000000000002",
+        sourceCardId: "replica-task-1",
+        sourceVersionId: "ver-parent-1",
+        currentVersionId: "ver-edit-new",
+        finalVersionId: null,
+        createdAt: newEditDate,
+        updatedAt: newEditDate,
+      },
+      versions: [
+        {
+          id: "ver-edit-new",
+          versionNumber: 1,
+          previewUrl: "/edit-new.png",
+          createdAt: newEditDate,
+        },
+      ],
+    },
+  ];
+
+  const [pickedLatestEdit] = resolveDeliverySlots([task], editChildren, { preferLatestByTime: true });
+  assert.equal(pickedLatestEdit.isEditedDerived, true);
+  assert.equal(pickedLatestEdit.editChildTaskId, "11111111-0000-0000-0000-000000000002");
+  assert.equal(pickedLatestEdit.versionId, "ver-edit-new");
+
+  // Default mode also sorts children by Date timestamp rather than UUID order
+  const [pickedDefault] = resolveDeliverySlots([task], editChildren);
+  assert.equal(pickedDefault.editChildTaskId, "11111111-0000-0000-0000-000000000002");
+
+  // When a newer parent version is generated after both edits, preferLatestByTime selects parent v2
+  const taskWithV2: DeliveryTaskLike = {
+    ...task,
+    versions: [
+      { ...task.versions[0], isCurrent: false },
+      {
+        id: "ver-parent-2",
+        versionNumber: 2,
+        isCurrent: true,
+        isFinal: false,
+        previewUrl: "/v2.png",
+        createdAt: parentV2Date,
+      },
+    ],
+  };
+  const [pickedParentV2] = resolveDeliverySlots([taskWithV2], editChildren, { preferLatestByTime: true });
+  assert.equal(pickedParentV2.isEditedDerived, false);
+  assert.equal(pickedParentV2.versionId, "ver-parent-2");
+  assert.equal(pickedParentV2.versionNumber, 2);
+});

@@ -537,6 +537,301 @@
   flex-shrink: 0;
 }
 
+.rp-card-state[data-card-state="failed"] {
+  color: var(--pa-danger);
+  font-weight: 600;
+}
+
+.rp-card-state[data-card-state="generating"] {
+  color: var(--pa-accent);
+  font-weight: 600;
+}
+
+.rp-batch-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ss-layout .rp-rename-trigger {
+  padding: 2px 7px;
+  font-size: 11px;
+  color: var(--pa-muted);
+}
+
+.rp-rename-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.rp-rename-form input {
+  min-width: 180px;
+  max-width: 320px;
+  padding: 4px 8px;
+  border: 1px solid var(--pa-accent);
+  border-radius: 6px;
+  background: var(--pa-surface);
+  color: var(--pa-ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.rp-batch-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ss-layout .rp-danger-btn {
+  color: var(--pa-danger);
+  border-color: color-mix(in oklch, var(--pa-danger) 35%, var(--pa-border));
+}
+
+.ss-layout .rp-danger-btn:hover:not(:disabled) {
+  border-color: var(--pa-danger);
+  background: var(--pa-danger-soft);
+  color: var(--pa-danger);
+}
+
+.rp-resume-bar {
+  justify-content: space-between;
+}
+
+.rp-batch-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.rp-batch-notice-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ss-layout .rp-batch-notice button {
+  float: none;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.rp-card-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 100%;
+  width: 100%;
+  padding: 54px 10px 12px;
+  text-align: center;
+  background: var(--pa-danger-soft);
+  color: var(--pa-danger);
+}
+
+.rp-card-failed strong {
+  position: static !important;
+  background: transparent !important;
+  color: var(--pa-danger) !important;
+  padding: 0 !important;
+  font-size: 12px !important;
+}
+
+.rp-card-failed p {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--pa-ink);
+  word-break: break-word;
+}
+
+.ss-photo > .rp-card-busy-tag,
+.rp-card-busy-tag {
+  position: absolute;
+  left: 7px;
+  bottom: 7px;
+  z-index: 2;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.rp-card-error-inline {
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: var(--pa-danger-soft);
+  color: var(--pa-danger);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.rp-card-actions {
+  align-items: center;
+}
+
+.rp-card-menu {
+  margin-left: auto;
+}
+
+.rp-card-menu-list {
+  min-width: 150px;
+  z-index: 12;
+}
+
+.ss-layout .rp-danger-menuitem {
+  color: var(--pa-danger);
+}
+
+.rp-batch-empty {
+  padding: 28px 16px;
+  border: 1px dashed var(--pa-border-strong);
+  border-radius: 10px;
+  text-align: center;
+  color: var(--pa-muted);
+  font-size: 13px;
+}
+
+.ss-dialog.rp-prompt-dialog {
+  width: min(640px, 92vw);
+}
+
+.rp-prompt-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--pa-muted);
+}
+
+.rp-prompt-meta span {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--pa-bg);
+}
+
+.rp-prompt-editor-label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--pa-muted);
+}
+
+.rp-prompt-editor-label textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--pa-border-strong);
+  border-radius: 8px;
+  background: var(--pa-surface);
+  color: var(--pa-ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.rp-prompt-snapshot-details {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--pa-border);
+  border-radius: 8px;
+  background: var(--pa-surface-soft);
+  font-size: 12px;
+}
+
+.rp-prompt-snapshot-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--pa-ink);
+}
+
+.rp-prompt-snapshot-body {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--pa-ink);
+}
+
+.rp-prompt-snapshot-body strong {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 12px;
+  color: var(--pa-muted);
+}
+
+.rp-prompt-snapshot-body ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.rp-structure-kv {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.rp-structure-kv > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.rp-structure-kv dt {
+  color: var(--pa-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.rp-structure-kv dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.rp-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.rp-dialog-actions-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ss-dialog .rp-dialog-actions-right .ss-primary {
+  width: auto;
+  padding: 6px 14px;
+}
+
+.ss-dialog .rp-danger-solid-btn {
+  background: var(--pa-danger);
+  border-color: var(--pa-danger);
+  color: #fff;
+  padding: 6px 14px;
+}
+
+.ss-dialog .rp-danger-solid-btn:hover:not(:disabled) {
+  color: #fff;
+  filter: brightness(0.95);
+}
+
 @media (max-width: 820px) {
   .rp-showcase-grid {
     grid-template-columns: 1fr;

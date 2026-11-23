@@ -20,6 +20,16 @@ export const stageLabel = (stage: ApiLibraryResource["stage"]) => ({
   replica_prompt: "爆品图复刻",
 } as Record<string, string>)[stage ?? ""] ?? "工作台资源";
 
+export const sourceOriginLabel = (resource: ApiLibraryResource) => {
+  if (resource.source?.origin === "replica" || resource.source?.originKind === "replica" || resource.stage === "replica_prompt") {
+    return "爆品图复刻";
+  }
+  if (resource.source?.reversePlanId) {
+    return "爆品图反推";
+  }
+  return null;
+};
+
 export const statusLabel = (status: ApiLibraryResource["status"]) =>
   ({ draft: "草稿", published: "已发布", archived: "已归档" }[status ?? "published"] ?? "已发布");
 

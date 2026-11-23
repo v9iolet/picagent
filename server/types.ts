@@ -474,6 +474,7 @@ export interface TaskRepository {
   completeAttempt(input: { attemptId: string; slotId: string; taskId: string; objectKey: string; processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string; completedAt: string }): Promise<{ attempt: TaskGenerationAttempt; version: TaskImageVersion }>;
   failAttempt(attemptId: string, code: string, message: string, completedAt: string): Promise<TaskGenerationAttempt>;
   selectVersion(taskId: string, versionId: string, selection: "current" | "final"): Promise<TaskImageVersion | null>;
+  clearFinalVersion?(taskId: string): Promise<void>;
   listTaskVersions(taskId: string): Promise<{ versions: TaskImageVersion[]; attempts: TaskGenerationAttempt[] }>;
   listPreviewVersionsByTaskIds(taskIds: string[]): Promise<Map<string, TaskPreviewVersion>>;
   getLayout(suiteId: string): Promise<CanvasLayout | null>;
