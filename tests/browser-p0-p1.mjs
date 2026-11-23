@@ -257,12 +257,21 @@ async function run() {
     const zipEntries = readZipEntries(await zipResponse.body());
     assert.ok(zipEntries.has("manifest.json"), "Exported ZIP must include manifest.json");
 
-    // 5. ReversePage: Unified AppShell, dynamic 4-step status, structure summary pills
+    // 5. ReversePage: Unified AppShell, read-only archive banner, prompt viewer, no write entry points
     await page.goto(`${baseUrl}/reverse/${seeded.reversePlanId}`, { waitUntil: "networkidle" });
     await page.waitForSelector(".reverse-layout");
+    await page.waitForSelector(".reverse-summary-pills");
     assert.equal(await page.locator(".pa-rail-item").count(), 4, "ReversePage must share AppShell rail");
-    assert.ok((await page.locator(".reverse-step.done").count()) >= 3, "Completed reverse steps must be marked done dynamically");
+    const upgradeBanner = page.locator(".reverse-upgrade-banner");
+    assert.ok(await upgradeBanner.isVisible(), "ReversePage must display read-only upgrade banner");
+    assert.ok(await upgradeBanner.locator('a[href="/create/replica"]').isVisible(), "Upgrade banner must link to /create/replica");
     assert.ok(await page.locator(".reverse-summary-pills").isVisible(), "ReversePage must show summary pills");
+    const promptTextarea = page.locator("textarea[readonly]");
+    assert.ok(await promptTextarea.isVisible(), "Read-only prompt textarea must be visible");
+    assert.ok((await promptTextarea.inputValue()).trim().length > 0, "Read-only prompt textarea must be non-empty");
+    assert.equal(await page.locator('input[type="file"]').count(), 0, "Read-only ReversePage must not render file upload input");
+    assert.equal(await page.getByRole("button", { name: /重新反推/ }).count(), 0, "Read-only ReversePage must not render re-reverse button");
+    assert.equal(await page.getByRole("button", { name: /保存提示词/ }).count(), 0, "Read-only ReversePage must not render save prompt button");
 
     // 6a. ImageAssetsPage (/assets): Unified AppShell, image-only gallery, single click updates inspector
     await page.goto(`${baseUrl}/assets`, { waitUntil: "networkidle" });

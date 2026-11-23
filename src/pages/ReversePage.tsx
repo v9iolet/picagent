@@ -56,18 +56,26 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
   );
   const closePreview = () => { setPreviewId(null); setPreviewActual(false); };
 
-  const loadPlan = useCallback(async (id: string) => {
+  const loadPlan = useCallback(async (id: string, isCancelled?: () => boolean) => {
     setLoading(true);
     setLoadError("");
+    setMessage("");
+    setPreviewId(null);
+    setPreviewActual(false);
     try {
       const next = await api<Plan>(`/api/reverse-plans/${encodeURIComponent(id)}`);
+      if (isCancelled?.()) return;
       setPlan(next);
       setSelectedId((current) => current && next.references.some((item) => item.id === current) ? current : next.references[0]?.id ?? null);
     } catch (error) {
+      if (isCancelled?.()) return;
       setPlan(null);
+      setSelectedId(null);
       setLoadError(error instanceof Error ? error.message : "加载旧反推方案失败");
     } finally {
-      setLoading(false);
+      if (!isCancelled?.()) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -78,13 +86,21 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     if (planId) {
-      loadPlan(planId).catch(() => undefined);
+      loadPlan(planId, () => cancelled).catch(() => undefined);
     } else {
       setPlan(null);
+      setSelectedId(null);
+      setMessage("");
+      setPreviewId(null);
+      setPreviewActual(false);
       setLoading(false);
       setLoadError("");
     }
+    return () => {
+      cancelled = true;
+    };
   }, [planId, loadPlan]);
 
   useEffect(() => {
@@ -295,7 +311,7 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
                               }}
                               aria-label={`查看原图 ${item.filename}`}
                             >
-                              <img src={`/api/reverse-plans/${plan.id}/references/${item.id}/preview`} alt={item.filename} />
+                              <img src={`/api/reverse-plans/${encodeURIComponent(plan.id)}/references/${encodeURIComponent(item.id)}/preview`} alt={item.filename} />
                               <span className="reverse-image-zoom"><Icon name="zoom-in" />查看原图</span>
                             </button>
                             <span className="reverse-image-index">{item.ordinal}</span>
@@ -350,7 +366,7 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
                       onClick={() => { setPreviewId(selected.id); setPreviewActual(false); }}
                       aria-label={`查看原图 ${selected.filename}`}
                     >
-                      <img src={`/api/reverse-plans/${plan.id}/references/${selected.id}/preview`} alt={selected.filename} />
+                      <img src={`/api/reverse-plans/${encodeURIComponent(plan.id)}/references/${encodeURIComponent(selected.id)}/preview`} alt={selected.filename} />
                     </button>
                     <div>
                       <strong>参考图 {selected.ordinal}</strong>
@@ -428,7 +444,7 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
               </div>
             </header>
             <div className={`reverse-lightbox-stage ${previewActual ? "actual" : "fit"}`}>
-              <img src={`/api/reverse-plans/${plan.id}/references/${preview.id}/preview/original`} alt={preview.filename} />
+              <img src={`/api/reverse-plans/${encodeURIComponent(plan.id)}/references/${encodeURIComponent(preview.id)}/preview/original`} alt={preview.filename} />
             </div>
           </div>
         </div>
