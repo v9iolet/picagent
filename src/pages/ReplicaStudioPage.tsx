@@ -61,13 +61,16 @@ export function ReplicaStudioPage({
   const loadedSuiteIdRef = useRef<string | undefined>(undefined);
   const lastReloadTickRef = useRef(reloadTick);
   const currentSuiteIdRef = useRef<string | undefined>(suiteId);
+  const mountedRef = useRef(true);
 
   currentSuiteIdRef.current = suiteId;
 
   useEffect(() => {
+    mountedRef.current = true;
     const previous = document.title;
     document.title = "爆品图复刻 · PicAgent";
     return () => {
+      mountedRef.current = false;
       document.title = previous;
     };
   }, []);
@@ -125,7 +128,6 @@ export function ReplicaStudioPage({
     }
 
     if (!isExplicitReload && targetId === loadedSuiteIdRef.current) {
-      saveLastReplicaSuiteId(targetId);
       if (!suiteId) {
         navigate(`/create/replica?suite=${encodeURIComponent(targetId)}`, { replace: true });
       }
@@ -142,9 +144,17 @@ export function ReplicaStudioPage({
       .state(targetId)
       .then((state) => {
         if (!live || seq < appliedSeqRef.current) return;
+        if (!suiteId && state.suite.origin !== "replica") {
+          clearLastReplicaSuiteId();
+          loadedSuiteIdRef.current = undefined;
+          applyState(null);
+          return;
+        }
         loadedSuiteIdRef.current = state.suite.id;
         applyState(state, seq);
-        saveLastReplicaSuiteId(state.suite.id);
+        if (state.suite.origin === "replica") {
+          saveLastReplicaSuiteId(state.suite.id);
+        }
         if (!suiteId) {
           navigate(`/create/replica?suite=${encodeURIComponent(state.suite.id)}`, { replace: true });
         }
@@ -338,15 +348,19 @@ export function ReplicaStudioPage({
       saveLastReplicaSuiteId(result.suiteId);
       loadedSuiteIdRef.current = undefined;
 
+      const stillOnReplicaPage =
+        mountedRef.current && /^\/create\/replica\/?$/.test(window.location.pathname);
+      if (!stillOnReplicaPage) return;
+
       if (result.suiteId === suiteId) {
         setReloadTick((n) => n + 1);
       } else {
         navigate(`/create/replica?suite=${encodeURIComponent(result.suiteId)}`);
       }
     } catch (error) {
-      setPageNotice(message(error));
+      if (mountedRef.current) setPageNotice(message(error));
     } finally {
-      setSubmitting(false);
+      if (mountedRef.current) setSubmitting(false);
     }
   }, [references, products, effectiveConfig, submitting, suiteId, navigate]);
 
@@ -355,11 +369,11 @@ export function ReplicaStudioPage({
     const sceneCode = typeof cfg?.sceneType === "string" ? cfg.sceneType : "";
     const levelCode = typeof cfg?.cloneLevel === "string" ? cfg.cloneLevel : "";
     const sceneLabel =
-      sceneCode && sceneCode in REPLICA_SCENE_LABELS
+      sceneCode && Object.prototype.hasOwnProperty.call(REPLICA_SCENE_LABELS, sceneCode)
         ? REPLICA_SCENE_LABELS[sceneCode as ReplicaSceneType]
         : "";
     const levelLabel =
-      levelCode && levelCode in REPLICA_CLONE_LEVEL_LABELS
+      levelCode && Object.prototype.hasOwnProperty.call(REPLICA_CLONE_LEVEL_LABELS, levelCode)
         ? REPLICA_CLONE_LEVEL_LABELS[levelCode as ReplicaCloneLevel]
         : "";
     const text = [sceneLabel, levelLabel].filter(Boolean).join(" · ");

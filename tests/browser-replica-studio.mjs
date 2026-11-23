@@ -214,6 +214,9 @@ async function offlineReplicaStudio(t, gates = {}) {
               } else {
                 const body = payload.length ? JSON.parse(payload.toString()) : undefined;
                 calls.push({ method: req.method, path, body });
+                if (req.method === "POST" && path === "/api/replicas" && gates.beforeCreateDone) {
+                  await gates.beforeCreateDone;
+                }
                 if (req.method === "POST" && path === "/api/replicas" && gates.shouldFailCreate?.(body)) {
                   result = { status: 500, body: { error: { code: "REPLICA_CREATE_FAILED", message: "模拟提交失败" } } };
                 } else {
@@ -964,5 +967,54 @@ test("爆品图复刻：配置栏最小宽度下参考图条目与产品图条�
     const sourceBox = await item.locator(".rp-product-source").boundingBox();
     assertInside(itemBox, controlsBox, `product[${i}] .rp-product-controls`);
     assertInside(itemBox, sourceBox, `product[${i}] .rp-product-source`);
+  }
+});
+
+test("爆品图复刻：提交请求在途时切到套图页，返回后不抢跳，再切回复刻页自动打开新批次", async (t) => {
+  const createGate = Promise.withResolvers();
+  const { url, page } = await offlineReplicaStudio(t, {
+    beforeCreateDone: createGate.promise,
+  });
+
+  try {
+    await page.goto(url + "create/replica");
+    await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+    await page.getByLabel("统一复刻要求", { exact: true }).fill("在途提交应清空草稿");
+
+    const createResponsePromise = page.waitForResponse(
+      (res) => res.request().method() === "POST" && new URL(res.url()).pathname === "/api/replicas",
+    );
+    await page.getByRole("button", { name: "一键复刻（1张）", exact: true }).click();
+    await page.getByRole("button", { name: "提交中…", exact: true }).waitFor();
+
+    // Immediately switch to /create/suite while POST /api/replicas is still in flight
+    const tools = page.getByRole("navigation", { name: "创作功能" });
+    await tools.getByRole("link", { name: "商品套图", exact: true }).click();
+    await page.waitForURL("**/create/suite");
+    await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
+
+    // Release POST /api/replicas -> must stay on /create/suite, NOT hijack navigation back to /create/replica
+    createGate.resolve();
+    const createRes = await createResponsePromise;
+    assert.equal(createRes.status(), 201);
+    const createdSuiteId = (await createRes.json()).data.suiteId;
+    assert.ok(createdSuiteId);
+
+    // Wait briefly to confirm no delayed redirect occurs and sessionStorage captured the new suiteId
+    await page.waitForFunction(
+      (expectedId) => window.sessionStorage.getItem("picagent:replica-studio:last-suite-id") === expectedId,
+      createdSuiteId,
+    );
+    assert.equal(new URL(page.url()).pathname, "/create/suite");
+
+    // Switching back to /create/replica automatically opens the newly created batch with cleared draft
+    await tools.getByRole("link", { name: "爆品图复刻", exact: true }).click();
+    await page.waitForURL(`**/create/replica?suite=${createdSuiteId}`);
+    assert.equal(await page.locator("[data-ref-item]").count(), 0);
+    assert.equal(await page.getByLabel("统一复刻要求", { exact: true }).inputValue(), "");
+    const batch = page.getByRole("region", { name: "复刻批次" });
+    await batch.locator('[data-status="completed"]').waitFor({ timeout: 10000 });
+  } finally {
+    createGate.resolve();
   }
 });

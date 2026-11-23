@@ -64,11 +64,12 @@ function sanitizeConfigDraft(raw: unknown): ReplicaConfigDraft {
   }
   const data = raw as Record<string, unknown>;
   const sceneType: ReplicaSceneType =
-    typeof data.sceneType === "string" && data.sceneType in REPLICA_SCENE_LABELS
+    typeof data.sceneType === "string" && Object.prototype.hasOwnProperty.call(REPLICA_SCENE_LABELS, data.sceneType)
       ? (data.sceneType as ReplicaSceneType)
       : INITIAL_REPLICA_CONFIG.sceneType;
   const cloneLevel: ReplicaCloneLevel =
-    typeof data.cloneLevel === "string" && data.cloneLevel in REPLICA_CLONE_LEVEL_LABELS
+    typeof data.cloneLevel === "string" &&
+    Object.prototype.hasOwnProperty.call(REPLICA_CLONE_LEVEL_LABELS, data.cloneLevel)
       ? (data.cloneLevel as ReplicaCloneLevel)
       : INITIAL_REPLICA_CONFIG.cloneLevel;
   const language: ReplicaLanguage =
