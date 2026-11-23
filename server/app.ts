@@ -24,6 +24,7 @@ import { buildProviderImagePrompt, materializeCategoryPlanItems } from "./suite-
 import {
   applyStyleOverrideToPrompt,
   DELIVERY_EXPORT_PRESETS,
+  formatListingCopyMarkdown,
   resolveDeliverySlots,
   sanitizeDeliveryName,
   type DeliveryEditChildLike,
@@ -1673,10 +1674,51 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         entries.push({ name: stitchedDetailPath, data: stitchedBytes });
       }
 
+      const latestPipeline = await pipelineRepository.getLatestRun(suite.id);
+      const listingSummary =
+        (latestPipeline && (await listingRepository.summary(latestPipeline.id))) ??
+        (await listingRepository.findLatestBySuiteId(suite.id));
+      const listingJob = listingSummary ? await listingRepository.get(listingSummary.id) : null;
+      const latestListingVersion =
+        listingJob && listingJob.versions.length > 0
+          ? listingJob.versions[listingJob.versions.length - 1]
+          : null;
+      const exportedAt = new Date().toISOString();
+      let listingCopyPath: string | null = null;
+      let listingCopyManifest: Record<string, unknown> | null = null;
+
+      if (listingJob && latestListingVersion) {
+        const platformProfile = deps.platformRepository
+          ? await deps.platformRepository.find(listingJob.platform)
+          : null;
+        const markdown = formatListingCopyMarkdown({
+          suiteName: suite.name,
+          platformName: platformProfile?.name,
+          marketScope: platformProfile?.marketScope,
+          job: listingJob,
+          version: latestListingVersion,
+          rules: platformProfile?.listingCopyRules,
+          exportedAt,
+        });
+        listingCopyPath = "listing-copy.md";
+        entries.push({ name: listingCopyPath, data: Buffer.from(markdown, "utf8") });
+        listingCopyManifest = {
+          jobId: listingJob.id,
+          status: listingJob.status,
+          platform: listingJob.platform,
+          targetMarket: listingJob.targetMarket,
+          outputLanguage: listingJob.outputLanguage,
+          versionId: latestListingVersion.id,
+          versionNumber: latestListingVersion.versionNumber,
+          createdAt: latestListingVersion.createdAt,
+          content: latestListingVersion.content,
+        };
+      }
+
       const planStyleGuide = resolvePlanStyleGuide(snapshot);
       const manifest = {
         schemaVersion: "picagent-delivery-manifest-v1",
-        exportedAt: new Date().toISOString(),
+        exportedAt,
         exportOptions: {
           preset: preset.id,
           presetLabel: preset.label,
@@ -1700,7 +1742,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           mainCount: manifestItems.filter((item) => item.imageType === "main").length,
           detailCount: manifestItems.filter((item) => item.imageType === "detail").length,
           stitchedDetailIncluded: Boolean(stitchedDetailPath),
+          listingCopyIncluded: Boolean(listingCopyPath),
+          listingCopyPath,
         },
+        listingCopy: listingCopyManifest,
         items: manifestItems,
       };
       entries.push({ name: "manifest.json", data: Buffer.from(JSON.stringify(manifest, null, 2), "utf8") });

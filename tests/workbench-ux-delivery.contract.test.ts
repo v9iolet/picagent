@@ -9,6 +9,7 @@ import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import { MemoryReverseRepository } from "../server/repositories/memory-reverse-repository.js";
+import { MemoryListingRepository } from "../server/listing-copy.js";
 import { seedDemoShowcase } from "../server/seed-demo.js";
 import { readZipEntries } from "../server/zip.js";
 
@@ -539,4 +540,167 @@ test("a tier-only image model dispatches the selected tier without pixel convers
   await settle();
   assert.deepEqual(sizes, ["2K"]);
   assert.equal((await taskRepository.listTaskVersions(task.id)).attempts[0].requestSummary.size, "2K");
+});
+
+test("delivery ZIP export includes listing-copy.md with latest edited version when present and omits it otherwise", async () => {
+  const repository = new MemorySuiteRepository();
+  const planRepository = new MemoryPlanRepository();
+  const taskRepository = new MemoryTaskRepository();
+  const listingRepository = new MemoryListingRepository();
+  const storage = new MemoryStorage();
+  const png = await tinyPng({ r: 60, g: 120, b: 180 });
+
+  const amazonProfile = {
+    code: "amazon",
+    name: "Amazon",
+    marketScope: "overseas" as const,
+    mainImageBackground: "pure_white_required" as const,
+    mainImageStrategy: "",
+    galleryStrategy: "",
+    textStrategy: "",
+    modelStrategy: "",
+    sourceNote: "",
+    sortOrder: 1,
+    listingCopyRules: {
+      titleMaxLength: 75,
+      maxBulletPoints: 5,
+      supportsSearchTerms: true,
+      itemHighlightsMaxLength: 125,
+      searchTermsMaxBytes: 250,
+      forbiddenWords: [],
+    },
+  };
+
+  const app = createSuiteStudioApp({
+    repository,
+    planRepository,
+    taskRepository,
+    listingRepository,
+    storage,
+    platformRepository: {
+      listEnabled: async () => [amazonProfile],
+      find: async (code) => (code === "amazon" ? amazonProfile : undefined),
+    },
+    provider: { async edit() { return { bytes: png, mimeType: "image/png" }; } },
+  });
+
+  // 1. Suite with listing copy v1 -> v2 (edited)
+  const createdWithCopy = await app.request("POST", "/api/suites", { body: { name: "65W 氮化镓充电器" } });
+  const suiteWithCopyId = (createdWithCopy.body as { data: { id: string } }).data.id;
+  await app.upload(suiteWithCopyId, { filename: "charger.png", mimeType: "image/png", bytes: png });
+  const taskWithCopy = (await app.request("POST", `/api/suites/${suiteWithCopyId}/tasks/custom`, {
+    headers: { "idempotency-key": "lc-task-1" },
+    body: { imageType: "main", title: "白底主图", promptDraft: "白底主图" },
+  })).body.data as { id: string };
+  await app.request("POST", `/api/suite-tasks/${taskWithCopy.id}/generation`, { headers: { "idempotency-key": "lc-gen-1" } });
+  await settle();
+
+  const listingJobId = "job-with-v2";
+  await listingRepository.save({
+    id: listingJobId,
+    sourceSuiteId: suiteWithCopyId,
+    platform: "amazon",
+    targetMarket: "美国",
+    outputLanguage: "英文",
+    input: { sellingPoints: "65W GaN fast charger" },
+    status: "succeeded",
+    errorCode: null,
+    revision: 2,
+    createdAt: "2026-11-23T00:00:00.000Z",
+    updatedAt: "2026-11-23T00:01:00.000Z",
+    inputImages: [],
+    versions: [
+      {
+        id: "ver-1",
+        versionNumber: 1,
+        createdAt: "2026-11-23T00:00:10.000Z",
+        content: {
+          schemaVersion: "listing-copy-v1",
+          title: "Old v1 Title",
+          itemHighlights: "Old highlight",
+          bulletPoints: ["Old bullet"],
+          description: "Old description",
+          searchTerms: ["old term"],
+          missingFacts: [],
+        },
+        promptSnapshot: {
+          templateVersionId: "tpl-lc",
+          templateCode: "general.listing-copy",
+          templateVersionNo: 1,
+          input: {},
+          model: { name: "fake", model: "fake", isFake: true },
+        },
+      },
+      {
+        id: "ver-2",
+        versionNumber: 2,
+        createdAt: "2026-11-23T00:01:00.000Z",
+        content: {
+          schemaVersion: "listing-copy-v1",
+          title: "65W GaN Foldable USB-C Charger v2",
+          itemHighlights: "Compact GaN power with foldable plug",
+          bulletPoints: ["65W PD fast charging", "Foldable prongs for travel"],
+          description: "Updated v2 product description for Amazon.",
+          searchTerms: ["gan charger", "65w usb c"],
+          missingFacts: [],
+        },
+        promptSnapshot: {
+          templateVersionId: "tpl-lc",
+          templateCode: "general.listing-copy",
+          templateVersionNo: 1,
+          input: {},
+          model: { name: "fake", model: "fake", isFake: true },
+          editedFromVersionId: "ver-1",
+        },
+      },
+    ],
+  }, null);
+
+  const exportWithCopy = await app.request("GET", `/api/suites/${suiteWithCopyId}/delivery/export`);
+  assert.equal(exportWithCopy.status, 200);
+  const entriesWithCopy = readZipEntries(exportWithCopy.raw!);
+  assert.ok(entriesWithCopy.has("main/01_白底主图.png"));
+  assert.ok(entriesWithCopy.has("listing-copy.md"));
+  assert.ok(entriesWithCopy.has("manifest.json"));
+
+  const markdown = entriesWithCopy.get("listing-copy.md")!.toString("utf8");
+  assert.match(markdown, /# 65W 氮化镓充电器 — 商品上架文案/);
+  assert.match(markdown, /版本号：v2/);
+  assert.match(markdown, /## 标题[\s\S]*65W GaN Foldable USB-C Charger v2/);
+  assert.match(markdown, /## 商品亮点 \(Item Highlights\)[\s\S]*Compact GaN power with foldable plug/);
+  assert.match(markdown, /## 五点描述[\s\S]*1\. 65W PD fast charging[\s\S]*2\. Foldable prongs for travel/);
+  assert.match(markdown, /## 后台搜索词[\s\S]*gan charger 65w usb c/);
+  assert.doesNotMatch(markdown, /Old v1 Title/);
+
+  const manifestWithCopy = JSON.parse(entriesWithCopy.get("manifest.json")!.toString("utf8")) as {
+    summary: { listingCopyIncluded: boolean; listingCopyPath: string | null };
+    listingCopy: { versionNumber: number; content: { title: string } } | null;
+  };
+  assert.equal(manifestWithCopy.summary.listingCopyIncluded, true);
+  assert.equal(manifestWithCopy.summary.listingCopyPath, "listing-copy.md");
+  assert.equal(manifestWithCopy.listingCopy?.versionNumber, 2);
+  assert.equal(manifestWithCopy.listingCopy?.content.title, "65W GaN Foldable USB-C Charger v2");
+
+  // 2. Suite without listing copy omits listing-copy.md
+  const createdWithoutCopy = await app.request("POST", "/api/suites", { body: { name: "无文案套图" } });
+  const suiteWithoutCopyId = (createdWithoutCopy.body as { data: { id: string } }).data.id;
+  await app.upload(suiteWithoutCopyId, { filename: "plain.png", mimeType: "image/png", bytes: png });
+  const taskWithoutCopy = (await app.request("POST", `/api/suites/${suiteWithoutCopyId}/tasks/custom`, {
+    headers: { "idempotency-key": "lc-task-2" },
+    body: { imageType: "main", title: "纯图主图", promptDraft: "白底主图" },
+  })).body.data as { id: string };
+  await app.request("POST", `/api/suite-tasks/${taskWithoutCopy.id}/generation`, { headers: { "idempotency-key": "lc-gen-2" } });
+  await settle();
+
+  const exportWithoutCopy = await app.request("GET", `/api/suites/${suiteWithoutCopyId}/delivery/export`);
+  assert.equal(exportWithoutCopy.status, 200);
+  const entriesWithoutCopy = readZipEntries(exportWithoutCopy.raw!);
+  assert.equal(entriesWithoutCopy.has("listing-copy.md"), false);
+  const manifestWithoutCopy = JSON.parse(entriesWithoutCopy.get("manifest.json")!.toString("utf8")) as {
+    summary: { listingCopyIncluded: boolean; listingCopyPath: string | null };
+    listingCopy: unknown;
+  };
+  assert.equal(manifestWithoutCopy.summary.listingCopyIncluded, false);
+  assert.equal(manifestWithoutCopy.summary.listingCopyPath, null);
+  assert.equal(manifestWithoutCopy.listingCopy, null);
 });

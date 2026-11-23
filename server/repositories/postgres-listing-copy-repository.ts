@@ -5,6 +5,31 @@ const summary = `j.id, j.source_suite_id AS "sourceSuiteId", j.platform, j.targe
 const jobs = "suite_workbench.listing_copy_jobs",
   images = "suite_workbench.listing_copy_input_images",
   versions = "suite_workbench.listing_copy_versions";
+
+function toIsoString(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function normalizeListingSummary(row: ListingSummary): ListingSummary {
+  return {
+    ...row,
+    createdAt: toIsoString(row.createdAt),
+    updatedAt: toIsoString(row.updatedAt),
+  };
+}
+
+function normalizeListingJob(row: ListingJob): ListingJob {
+  return {
+    ...row,
+    createdAt: toIsoString(row.createdAt),
+    updatedAt: toIsoString(row.updatedAt),
+    versions: (row.versions ?? []).map((version) => ({
+      ...version,
+      createdAt: toIsoString(version.createdAt),
+    })),
+  };
+}
+
 export class PostgresListingRepository implements ListingRepository {
   constructor(private readonly pool: Pool) {}
   async get(id: string) {
@@ -17,17 +42,18 @@ export class PostgresListingRepository implements ListingRepository {
       FROM ${jobs} j WHERE j.id=$1`,
       [id],
     );
-    return result.rows[0] ?? null;
+    return result.rows[0] ? normalizeListingJob(result.rows[0]) : null;
   }
   async summary(id: string) {
-    return (await this.pool.query<ListingSummary>(`SELECT ${summary} FROM ${jobs} j WHERE j.id=$1`, [id])).rows[0] ?? null;
+    const row = (await this.pool.query<ListingSummary>(`SELECT ${summary} FROM ${jobs} j WHERE j.id=$1`, [id])).rows[0];
+    return row ? normalizeListingSummary(row) : null;
   }
   async findLatestBySuiteId(suiteId: string) {
     const result = await this.pool.query<ListingSummary>(
       `SELECT ${summary} FROM ${jobs} j WHERE source_suite_id=$1 AND status <> 'draft' ORDER BY updated_at DESC,id LIMIT 1`,
       [suiteId],
     );
-    return result.rows[0] ?? null;
+    return result.rows[0] ? normalizeListingSummary(result.rows[0]) : null;
   }
   async list(limit: number, offset: number) {
     return (
@@ -35,7 +61,7 @@ export class PostgresListingRepository implements ListingRepository {
         `SELECT ${summary} FROM ${jobs} j WHERE status <> 'draft' ORDER BY updated_at DESC,id LIMIT $1 OFFSET $2`,
         [limit, offset],
       )
-    ).rows;
+    ).rows.map(normalizeListingSummary);
   }
   async save(job: ListingJob, previous: ListingJob | null) {
     const client = await this.pool.connect();

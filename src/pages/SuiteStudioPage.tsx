@@ -372,9 +372,10 @@ export function SuiteStudioPage({
       setBusy(false);
     }
   };
+  const toIso = (v: unknown) => (v instanceof Date ? v.toISOString() : String(v ?? ""));
   const batches = Object.values(states)
     .filter((s) => s.cards.length || s.pipeline)
-    .sort((a, b) => b.suite.createdAt.localeCompare(a.suite.createdAt));
+    .sort((a, b) => toIso(b.suite.createdAt).localeCompare(toIso(a.suite.createdAt)));
   return (
     <AppShell
       activeNav="create"

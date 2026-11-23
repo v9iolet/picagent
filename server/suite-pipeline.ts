@@ -734,7 +734,8 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         card: thumbnail ? { taskId: first!.id, previewUrl: thumbnail.previewUrl, title: first!.title } : null,
       });
     }
-    eligible.sort((a, b) => b.suite.createdAt.localeCompare(a.suite.createdAt));
+    const toIso = (v: unknown) => (v instanceof Date ? v.toISOString() : String(v ?? ""));
+    eligible.sort((a, b) => toIso(b.suite.createdAt).localeCompare(toIso(a.suite.createdAt)));
     return ok({ items: eligible.slice(offset, offset + limit), total: eligible.length, limit, offset });
   }
 

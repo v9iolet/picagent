@@ -3,6 +3,24 @@ import type { PipelineRepository, SuitePipelinePhase, SuitePipelineRun } from ".
 
 const cols = `id,suite_id AS "suiteId",idempotency_key AS "idempotencyKey",status,current_phase AS "currentPhase",resume_count AS "resumeCount",last_resume_key AS "lastResumeKey",resume_keys_json AS "resumeKeys",structure_snapshot_id AS "structureSnapshotId",task_ids_json AS "taskIds",config_json AS config,error_code AS "errorCode",error_message AS "errorMessage",created_at AS "createdAt",updated_at AS "updatedAt",completed_at AS "completedAt"`;
 
+function toIsoString(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function toNullableIsoString(value: Date | string | null | undefined): string | null {
+  if (value == null) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function normalizeRun(run: SuitePipelineRun): SuitePipelineRun {
+  return {
+    ...run,
+    createdAt: toIsoString(run.createdAt),
+    updatedAt: toIsoString(run.updatedAt),
+    completedAt: toNullableIsoString(run.completedAt),
+  };
+}
+
 export class PostgresPipelineRepository implements PipelineRepository {
   constructor(private readonly pool: Pool) {}
   async createRun(run: SuitePipelineRun) {
@@ -14,9 +32,9 @@ export class PostgresPipelineRepository implements PipelineRepository {
       [run.id, run.suiteId, run.idempotencyKey, run.status, run.currentPhase, run.resumeCount ?? 0, run.lastResumeKey ?? null,
         run.structureSnapshotId ?? null, JSON.stringify(run.taskIds ?? []), JSON.stringify(run.config), run.errorCode, run.errorMessage, run.createdAt, run.updatedAt, run.completedAt],
     );
-    if (result.rows[0]) return { run: result.rows[0], duplicate: false };
+    if (result.rows[0]) return { run: normalizeRun(result.rows[0]), duplicate: false };
     const found = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 AND idempotency_key=$2`, [run.suiteId, run.idempotencyKey]);
-    if (found.rows[0]) return { run: found.rows[0], duplicate: true };
+    if (found.rows[0]) return { run: normalizeRun(found.rows[0]), duplicate: true };
     throw new Error("PIPELINE_ALREADY_RUNNING");
   }
   async resumeRun(previous: SuitePipelineRun, key: string, phase: SuitePipelinePhase, config: SuitePipelineRun["config"]) {
@@ -30,15 +48,15 @@ export class PostgresPipelineRepository implements PipelineRepository {
          RETURNING ${cols}`,
         [previous.id, phase, JSON.stringify(config), key, previous.status, previous.resumeCount ?? 0],
       );
-      return result.rows[0] ?? null;
+      return result.rows[0] ? normalizeRun(result.rows[0]) : null;
     } catch (error) {
       if (error instanceof Error && "constraint" in error && error.constraint === "suite_pipeline_runs_one_running") return null;
       throw error;
     }
   }
-  async getRun(id: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE id=$1`, [id]); return result.rows[0] ?? null; }
-  async getLatestRun(suiteId: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 ORDER BY created_at DESC LIMIT 1`, [suiteId]); return result.rows[0] ?? null; }
-  async listRuns(suiteId: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 ORDER BY created_at DESC`, [suiteId]); return result.rows; }
+  async getRun(id: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE id=$1`, [id]); return result.rows[0] ? normalizeRun(result.rows[0]) : null; }
+  async getLatestRun(suiteId: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 ORDER BY created_at DESC LIMIT 1`, [suiteId]); return result.rows[0] ? normalizeRun(result.rows[0]) : null; }
+  async listRuns(suiteId: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 ORDER BY created_at DESC`, [suiteId]); return result.rows.map(normalizeRun); }
   async updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>) {
     const fields: string[] = []; const values: unknown[] = []; let n = 1;
     const add = (column: string, value: unknown) => { fields.push(`${column}=$${n++}`); values.push(value); };
@@ -55,6 +73,6 @@ export class PostgresPipelineRepository implements PipelineRepository {
     if (patch.completedAt !== undefined) add("completed_at", patch.completedAt);
     values.push(id);
     const result = await this.pool.query<SuitePipelineRun>(`UPDATE suite_workbench.suite_pipeline_runs SET ${fields.join(",")} WHERE id=$${n} RETURNING ${cols}`, values);
-    return result.rows[0] ?? null;
+    return result.rows[0] ? normalizeRun(result.rows[0]) : null;
   }
 }
