@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { errorMessages } from "../server/api-errors.js";
 import { parseNormalizedPromptMarkdown, type PromptTemplateRuntime } from "../server/prompt-library.js";
 import { buildReplicaPromptUserContent, DashScopeLlmClient } from "../server/providers/dashscope-llm-client.js";
 import {
@@ -118,13 +119,76 @@ test("analyzeReplicaPrompts truncates taskName to 20 characters and clears share
     language: "中文",
     styleUnified: false,
     references: [sampleRefs()[1]],
-    productImages: [],
+    productImages: [sampleProducts()[0]],
   });
 
   assert.equal(Array.from(output.taskName).length, 20);
   assert.equal(output.taskName, "超长商品名称一二三四五六七八九十甲乙丙丁");
   assert.equal(output.sharedStyle, null);
   assert.deepEqual(output.items[0].copy, [{ text: "极简生活美学" }]);
+});
+
+test("analyzeReplicaPrompts ignores model taskName when no product images are provided", async () => {
+  const template = await loadTemplate("compose");
+  const llm = fakeLlm(() => ({
+    schemaVersion: "replica-prompt-v1",
+    taskName: "不应采纳的商品名",
+    sharedStyle: null,
+    items: [
+      {
+        referenceId: "ref-1",
+        visualStructure: { composition: "中心构图" },
+        copy: [],
+        prompt: "极简风格通用示意商品静物图。",
+      },
+    ],
+  }));
+
+  const { output } = await analyzeReplicaPrompts({
+    llm,
+    template,
+    cloneLevel: "compose",
+    sceneType: "社媒图文",
+    language: "中文",
+    styleUnified: false,
+    references: [sampleRefs()[1]],
+    productImages: [],
+  });
+
+  assert.equal(output.taskName, "");
+});
+
+test("normalizeVisualStructure narrows inner fields and REPLICA_LLM_NOT_SUPPORTED is registered in errorMessages", () => {
+  const parsed = parseAndValidateReplicaPromptOutput(
+    {
+      schemaVersion: "replica-prompt-v1",
+      taskName: "测试商品",
+      sharedStyle: null,
+      items: [
+        {
+          referenceId: "ref-1",
+          visualStructure: {
+            composition: ["对称构图", "中心聚焦"],
+            lighting: 123,
+            palette: "  银灰+白色  ",
+            layout: { ignored: true },
+            textBlocks: ["主标题", { text: "副标题" }, 42, null, "   "],
+          },
+          copy: [],
+          prompt: "极简商业静物摄影。",
+        },
+      ],
+    },
+    { expectedReferenceIds: ["ref-1"], styleUnified: false, hasProductImages: true },
+  );
+
+  assert.equal(parsed.items[0].visualStructure.composition, "对称构图；中心聚焦");
+  assert.equal(parsed.items[0].visualStructure.lighting, "123");
+  assert.equal(parsed.items[0].visualStructure.palette, "银灰+白色");
+  assert.equal(parsed.items[0].visualStructure.layout, undefined);
+  assert.deepEqual(parsed.items[0].visualStructure.textBlocks, ["主标题", "副标题", "42"]);
+  assert.equal(typeof errorMessages.REPLICA_LLM_NOT_SUPPORTED, "string");
+  assert.ok(errorMessages.REPLICA_LLM_NOT_SUPPORTED.length > 0);
 });
 
 test("rejects missing item, extra item, mismatched referenceId, duplicate referenceId, empty prompt, and bad schemaVersion with REPLICA_OUTPUT_INVALID", async () => {

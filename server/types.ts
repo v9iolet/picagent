@@ -444,6 +444,19 @@ export interface TaskRepository {
   createTasksFromSnapshot(suiteId: string, snapshot: PlanSnapshot, inputImages: InputImage[]): Promise<{ tasks: SuiteTask[]; created: SuiteTask[] }>;
   createCustomTask?(input: { suiteId: string; planSnapshotId: string | null; imageType: TaskImageType; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }): Promise<{ task: SuiteTask; duplicate: boolean }>;
   createReverseTasks(input: { suiteId: string; reversePlanId: string; taskGroupId: string; mode: ReverseMode; idempotencyKey: string; items: Array<{ referenceId: string; ordinal: number; filename: string; promptVersionId: string; prompt: string }> }): Promise<{ tasks: SuiteTask[]; created: SuiteTask[]; duplicate: boolean }>;
+  createReplicaTasks(input: {
+    suiteId: string;
+    globalStyleCard?: Record<string, unknown>;
+    items: Array<{
+      referenceId: string;
+      referenceObjectKey: string;
+      ordinal: number;
+      title: string;
+      purpose: string;
+      prompt: string;
+      generationParams: Record<string, unknown>;
+    }>;
+  }): Promise<{ tasks: SuiteTask[]; created: SuiteTask[] }>;
   getTask(taskId: string): Promise<SuiteTask | null>;
   listTasks(suiteId: string): Promise<SuiteTask[]>;
   updateTask(taskId: string, patch: Partial<Pick<SuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status" | "sourceLibraryReferenceId" | "sourceResourceVersionId" | "sourceRevision">>): Promise<SuiteTask | null>;
@@ -544,6 +557,9 @@ export interface ReverseRepository {
   savePlan(plan: ReversePlan): Promise<ReversePlan>;
 }
 
+export type ReplicaSceneType = "ecommerce_product" | "apparel" | "marketing_poster" | "social_post" | "other";
+export type ReplicaLanguage = "zh" | "en";
+
 export interface ReplicaReference {
   id: string;
   suiteId: string;
@@ -576,4 +592,12 @@ export interface ReplicaProductImage {
   libraryResourceId: string | null;
   resourceVersionId: string | null;
   createdAt: string;
+}
+
+export interface ReplicaRepository {
+  saveReferences(suiteId: string, references: ReplicaReference[]): Promise<ReplicaReference[]>;
+  listReferences(suiteId: string): Promise<ReplicaReference[]>;
+  getReference(suiteId: string, referenceId: string): Promise<ReplicaReference | null>;
+  saveProductImages(suiteId: string, products: ReplicaProductImage[]): Promise<ReplicaProductImage[]>;
+  listProductImages(suiteId: string): Promise<ReplicaProductImage[]>;
 }

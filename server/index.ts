@@ -22,6 +22,7 @@ import { PostgresPromptRepository } from "./repositories/postgres-prompt-reposit
 import { PostgresLibraryRepository } from "./repositories/postgres-library-repository.js";
 import { PostgresReverseRepository } from "./repositories/postgres-reverse-repository.js";
 import { PostgresPipelineRepository } from "./repositories/postgres-pipeline-repository.js";
+import { PostgresReplicaRepository } from "./repositories/postgres-replica-repository.js";
 import { MinioStorage } from "./storage/minio-storage.js";
 import { ImageEditorService, type ImageEditProvider, type ImageSource } from "./image-editor.js";
 import { createImageEditorApi } from "./image-editor-api.js";
@@ -142,6 +143,7 @@ const app = createSuiteStudioApp({
   taskRepository,
   listingRepository: new PostgresListingRepository(pool),
   pipelineRepository: new PostgresPipelineRepository(pool),
+  replicaRepository: new PostgresReplicaRepository(pool),
   imageEditorApi,
   libraryRepository: new PostgresLibraryRepository(pool),
   reverseRepository: new PostgresReverseRepository(pool),
@@ -192,6 +194,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     const editTaskMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
     const libraryMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     const reverseMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
+    const replicaMatch = requestUrl.pathname.match(/^\/api\/replicas\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
     response = inputMatch
       ? await app.preview(inputMatch[1], inputMatch[2], inputMatch[3] as "original" | "thumbnail")
       : baseMatch
@@ -204,6 +207,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
           ? await app.previewLibraryResource(libraryMatch[1])
         : reverseMatch
           ? await app.previewReverseReference(reverseMatch[1], reverseMatch[2], (reverseMatch[3] as "original" | "thumbnail" | undefined) ?? "thumbnail")
+        : replicaMatch
+          ? await app.previewReplicaReference(replicaMatch[1], replicaMatch[2], ((replicaMatch[3] ?? requestUrl.searchParams.get("kind")) === "original" ? "original" : "thumbnail"))
         : { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } };
     if ((response.headers as Record<string, string> | undefined)?.location) { res.statusCode = response.status; res.setHeader("location", (response.headers as Record<string, string>).location); res.end(); return; }
     if (response.raw) { const rawHeaders = response.headers as Record<string, string> | undefined; res.statusCode = response.status; for (const [name, value] of Object.entries(rawHeaders ?? {})) res.setHeader(name, value); res.setHeader("content-type", rawHeaders?.["content-type"] ?? "application/octet-stream"); res.setHeader("cache-control", rawHeaders?.["cache-control"] ?? "private, max-age=60"); res.end(response.raw); return; }

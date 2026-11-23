@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
+import { samePromptTemplateContent, validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
 
 const runtimeColumns = `t.id AS "templateId", v.id AS "templateVersionId", v.version_no AS "versionNo",
   t.code, v.name, v.kind, v.stage, v.execution_target AS "executionTarget", v.input_schema AS "inputSchema",
@@ -99,6 +99,11 @@ export class PostgresPromptRepository {
       }
       return existing.rows[0];
     }
+    const existingVersions = await client.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
+      FROM prompt_library.prompt_template_versions v JOIN prompt_library.prompt_templates t ON t.id = v.template_id
+      WHERE v.template_id = $1 ORDER BY v.version_no DESC`, [templateId]);
+    const sameContent = existingVersions.rows.find((version) => samePromptTemplateContent(version, record));
+    if (sameContent) return sameContent;
     const next = await client.query<{ version_no: number }>("SELECT COALESCE(MAX(version_no), 0) + 1 AS version_no FROM prompt_library.prompt_template_versions WHERE template_id = $1", [templateId]);
     const inserted = await client.query<PromptTemplateRuntime>(`INSERT INTO prompt_library.prompt_template_versions
       (id, template_id, version_no, name, kind, stage, execution_target, input_schema, output_schema, applicability, body, user_prompt_template, status, source_file, source_heading, source_sha256)

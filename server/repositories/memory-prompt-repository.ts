@@ -1,4 +1,4 @@
-import { validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
+import { samePromptTemplateContent, validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
 
 interface TemplateIdentity {
   id: string;
@@ -34,6 +34,14 @@ export class MemoryPromptRepository {
           sourceFile: record.sourceFile,
         });
         imported.push(existing);
+        continue;
+      }
+      const sameContent = [...this.versions.values()]
+        .filter((version) => version.templateId === template!.id)
+        .sort((a, b) => b.versionNo - a.versionNo)
+        .find((version) => samePromptTemplateContent(version, record));
+      if (sameContent) {
+        imported.push(sameContent);
         continue;
       }
       const versionNo = Math.max(0, ...[...this.versions.values()].filter((version) => version.templateId === template!.id).map((version) => version.versionNo)) + 1;
