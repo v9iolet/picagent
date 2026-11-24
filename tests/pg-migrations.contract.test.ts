@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { Client, escapeIdentifier, type Pool, type QueryResultRow } from "pg";
+import { Client, Pool, escapeIdentifier, type PoolClient, type QueryResultRow } from "pg";
 import { createSuiteStudioApp } from "../server/app.js";
 import { loadPostgresConfig } from "../server/config.js";
 import { ImageEditorService } from "../server/image-editor.js";
@@ -1512,6 +1512,309 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
     // Re-running migrations preserves deletion rows cleanly
     await runMigrations(pool);
     assert.equal(await library.getResource(inputResourceId), null);
+  });
+});
+
+async function withConcurrentMigratedSchemas<T>(run: (db: { pool: Pool; schemas: string[] }) => Promise<T>) {
+  const realPool = new Pool({ ...loadPostgresConfig(), max: 12, connectionTimeoutMillis: 10_000 });
+  const suffix = randomUUID().replaceAll("-", "");
+  const suiteSchema = `contract_suite_conc_${suffix}`;
+  const promptSchema = `contract_prompt_conc_${suffix}`;
+  let createdSchemas = false;
+
+  try {
+    const extension = await realPool.query<{ schema: string }>(
+      `SELECT n.nspname AS schema FROM pg_catalog.pg_extension e
+       JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace WHERE e.extname=$1`,
+      ["pgcrypto"],
+    );
+    const cryptoSchema = escapeIdentifier(extension.rows[0]?.schema ?? suiteSchema);
+
+    const rewriteSql = (sql: string) =>
+      sql
+        .replace(/\bsuite_workbench\b/g, suiteSchema)
+        .replace(/\bprompt_library\b/g, promptSchema)
+        .replace(/\bFROM pg_constraint WHERE conname\b/gi, `FROM pg_catalog.pg_constraint
+          WHERE connamespace IN (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = ANY(pg_catalog.current_schemas(false))) AND conname`)
+        .replace(/\bCREATE EXTENSION IF NOT EXISTS pgcrypto\s*;/i, `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA ${suiteSchema};`)
+        .replace(/\b(digest|gen_random_uuid)\(/g, (_match, fn: string) => `${cryptoSchema}.${fn}(`);
+
+    const setupClient = await realPool.connect();
+    try {
+      await setupClient.query(`CREATE SCHEMA ${suiteSchema}`);
+      await setupClient.query(`CREATE SCHEMA ${promptSchema}`);
+      createdSchemas = true;
+      await setupClient.query(`SET search_path TO ${suiteSchema}, ${promptSchema}`);
+      const setupPool = {
+        query<Row extends QueryResultRow>(sql: string, values?: unknown[]) {
+          return setupClient.query<Row>(rewriteSql(sql), values);
+        },
+      } as unknown as Pool;
+      await runMigrations(setupPool);
+      await setupClient.query("SET search_path TO DEFAULT");
+    } finally {
+      setupClient.release();
+    }
+
+    const scopedPool = {
+      query<Row extends QueryResultRow>(sql: string, values?: unknown[]) {
+        return realPool.query<Row>(rewriteSql(sql), values);
+      },
+      async connect() {
+        const client: PoolClient = await realPool.connect();
+        return {
+          query<Row extends QueryResultRow>(sql: string, values?: unknown[]) {
+            return client.query<Row>(rewriteSql(sql), values);
+          },
+          release(err?: Error | boolean) {
+            return client.release(err);
+          },
+        };
+      },
+    } as unknown as Pool;
+
+    return await run({ pool: scopedPool, schemas: [suiteSchema, promptSchema] });
+  } finally {
+    try {
+      if (createdSchemas) {
+        await realPool.query(`DROP SCHEMA IF EXISTS ${suiteSchema} CASCADE`);
+        await realPool.query(`DROP SCHEMA IF EXISTS ${promptSchema} CASCADE`);
+      }
+    } finally {
+      await realPool.end();
+    }
+  }
+}
+
+test("PG task batch status converges under concurrent completeAttempt and failAttempt calls without leaving batch running", { skip }, async () => {
+  await withConcurrentMigratedSchemas(async ({ pool }) => {
+    const suites = new PostgresSuiteRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const suite = await suites.createSuite("PG 并发收敛测试", undefined, "replica");
+
+    const inputId = randomUUID();
+    await suites.createInputImage({
+      id: inputId,
+      suiteId: suite.id,
+      ordinal: 1,
+      originalObjectKey: `suites/${suite.id}/inputs/${inputId}/original`,
+      thumbnailObjectKey: `suites/${suite.id}/inputs/${inputId}/thumbnail`,
+      sha256: "a".repeat(64),
+      width: 512,
+      height: 512,
+      mimeType: "image/png",
+      originalFilename: "product.png",
+      currentBaseVersionId: null,
+      createdAt: timestamp,
+    });
+
+    const createdTasks = [];
+    for (let i = 1; i <= 4; i += 1) {
+      const { task } = await tasks.createCustomTask({
+        suiteId: suite.id,
+        planSnapshotId: null,
+        imageType: "main",
+        title: `并发卡 ${i}`,
+        purpose: "主图",
+        promptDraft: `提示词 ${i}`,
+        sourceInputImageId: inputId,
+        generationParams: { size: "1K", ratio: "1:1" },
+      });
+      createdTasks.push(task);
+    }
+
+    const scenarios: Array<{ outcomes: Array<"complete" | "fail">; expectedStatus: "completed" | "partial" | "failed" }> = [
+      { outcomes: ["complete", "fail"], expectedStatus: "partial" },
+      { outcomes: ["complete", "complete", "complete"], expectedStatus: "completed" },
+      { outcomes: ["fail", "fail", "fail"], expectedStatus: "failed" },
+      { outcomes: ["complete", "fail", "complete", "fail"], expectedStatus: "partial" },
+    ];
+
+    for (let round = 0; round < 20; round += 1) {
+      const scenario = scenarios[round % scenarios.length];
+      const batchId = randomUUID();
+      const roundTasks = createdTasks.slice(0, scenario.outcomes.length);
+      const slots = roundTasks.map((task, idx) => ({
+        id: randomUUID(),
+        batchId,
+        taskId: task.id,
+        slotOrdinal: idx + 1,
+        retryOfSlotId: null,
+        status: "generating" as const,
+        selectedVersionId: null,
+        createdAt: timestamp,
+        completedAt: null,
+      }));
+      const attempts = slots.map((slot, idx) => ({
+        id: randomUUID(),
+        slotId: slot.id,
+        attemptNo: 1,
+        provider: "fake",
+        model: "gpt-image-2",
+        endpoint: "/v1/images/edits" as const,
+        requestSummary: {},
+        promptSnapshot: { prompt: `round-${round}-${idx}` },
+        promptSha256: `${round.toString(16).padStart(2, "0")}${idx}`.padEnd(64, "b"),
+        contextSnapshot: {},
+        sourceKind: "original" as const,
+        sourceObjectKey: `suites/${suite.id}/inputs/${inputId}/original`,
+        sourceInputImageId: inputId,
+        sourceBaseVersionId: null,
+        status: "running" as const,
+        errorCode: null,
+        errorMessage: null,
+        externalRequestId: null,
+        startedAt: timestamp,
+        finishedAt: null,
+      }));
+
+      await tasks.beginBatch({
+        batch: {
+          id: batchId,
+          suiteId: suite.id,
+          kind: "batch",
+          requestedCount: slots.length,
+          taskIds: roundTasks.map((t) => t.id),
+          status: "running",
+          idempotencyKey: `conc-round-${round}`,
+          createdAt: timestamp,
+          startedAt: timestamp,
+          finishedAt: null,
+        },
+        slots,
+        attempts,
+      });
+
+      const finishedAt = new Date(Date.parse(timestamp) + (round + 1) * 1000).toISOString();
+      await Promise.all(
+        scenario.outcomes.map((outcome, idx) => {
+          const slot = slots[idx];
+          const attempt = attempts[idx];
+          const task = roundTasks[idx];
+          if (outcome === "complete") {
+            return tasks.completeAttempt({
+              attemptId: attempt.id,
+              slotId: slot.id,
+              taskId: task.id,
+              objectKey: `suites/${suite.id}/tasks/${task.id}/versions/conc-${round}-${idx}.png`,
+              processObjectKeys: [],
+              sha256: `${round.toString(16).padStart(2, "0")}${idx}`.padEnd(64, "c"),
+              width: 512,
+              height: 512,
+              mimeType: "image/png",
+              completedAt: finishedAt,
+            });
+          }
+          return tasks.failAttempt(attempt.id, "TASK_IMAGE_PROVIDER_FAILED", "模拟失败", finishedAt);
+        }),
+      );
+
+      const batch = await tasks.getBatch(batchId);
+      assert.ok(batch, `round ${round}: batch must exist`);
+      assert.equal(
+        batch.status,
+        scenario.expectedStatus,
+        `round ${round} (${scenario.outcomes.join(",")}): expected batch status ${scenario.expectedStatus}, got ${batch.status}`,
+      );
+      assert.ok(batch.finishedAt, `round ${round}: finished_at must be non-null`);
+    }
+
+    // Competing completeAttempt vs failAttempt on the same running attempt:
+    // exactly one wins, the loser rejects with INVALID_TASK_ATTEMPT, and batch converges cleanly.
+    for (let raceRound = 0; raceRound < 6; raceRound += 1) {
+      const batchId = randomUUID();
+      const slotId = randomUUID();
+      const attemptId = randomUUID();
+      const task = createdTasks[0];
+      await tasks.beginBatch({
+        batch: {
+          id: batchId,
+          suiteId: suite.id,
+          kind: "single",
+          requestedCount: 1,
+          taskIds: [task.id],
+          status: "running",
+          idempotencyKey: `same-attempt-race-${raceRound}`,
+          createdAt: timestamp,
+          startedAt: timestamp,
+          finishedAt: null,
+        },
+        slots: [{
+          id: slotId,
+          batchId,
+          taskId: task.id,
+          slotOrdinal: 1,
+          retryOfSlotId: null,
+          status: "generating",
+          selectedVersionId: null,
+          createdAt: timestamp,
+          completedAt: null,
+        }],
+        attempts: [{
+          id: attemptId,
+          slotId,
+          attemptNo: 1,
+          provider: "fake",
+          model: "gpt-image-2",
+          endpoint: "/v1/images/edits",
+          requestSummary: {},
+          promptSnapshot: { prompt: `race-${raceRound}` },
+          promptSha256: `${raceRound}`.padEnd(64, "d"),
+          contextSnapshot: {},
+          sourceKind: "original",
+          sourceObjectKey: `suites/${suite.id}/inputs/${inputId}/original`,
+          sourceInputImageId: inputId,
+          sourceBaseVersionId: null,
+          status: "running",
+          errorCode: null,
+          errorMessage: null,
+          externalRequestId: null,
+          startedAt: timestamp,
+          finishedAt: null,
+        }],
+      });
+
+      const finishedAt = new Date(Date.parse(timestamp) + 60_000 + raceRound * 1000).toISOString();
+      const settled = await Promise.allSettled([
+        tasks.completeAttempt({
+          attemptId,
+          slotId,
+          taskId: task.id,
+          objectKey: `suites/${suite.id}/tasks/${task.id}/versions/race-${raceRound}.png`,
+          processObjectKeys: [],
+          sha256: `${raceRound}`.padEnd(64, "e"),
+          width: 512,
+          height: 512,
+          mimeType: "image/png",
+          completedAt: finishedAt,
+        }),
+        tasks.failAttempt(attemptId, "TASK_IMAGE_PROVIDER_FAILED", "并发失败", finishedAt),
+      ]);
+
+      const fulfilled = settled.filter((r) => r.status === "fulfilled");
+      const rejected = settled.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+      assert.equal(fulfilled.length, 1, `raceRound ${raceRound}: exactly one of complete/fail must succeed`);
+      assert.equal(rejected.length, 1, `raceRound ${raceRound}: the losing call must reject`);
+      assert.match(String(rejected[0].reason), /INVALID_TASK_ATTEMPT/);
+
+      const attempt = await tasks.getAttempt(attemptId);
+      const batch = await tasks.getBatch(batchId);
+      assert.ok(attempt && batch);
+      assert.ok(batch.finishedAt, `raceRound ${raceRound}: batch finished_at must be non-null`);
+      if (settled[0].status === "fulfilled") {
+        assert.equal(attempt.status, "succeeded");
+        assert.equal(batch.status, "completed");
+      } else {
+        assert.equal(attempt.status, "failed");
+        assert.equal(batch.status, "failed");
+      }
+
+      // Calling failAttempt again on a settled attempt must reject with INVALID_TASK_ATTEMPT.
+      await assert.rejects(
+        tasks.failAttempt(attemptId, "LATE_ERROR", "迟到失败", finishedAt),
+        /INVALID_TASK_ATTEMPT/,
+      );
+    }
   });
 });
 
