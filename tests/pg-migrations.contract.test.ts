@@ -5,6 +5,8 @@ import test from "node:test";
 import { Client, Pool, escapeIdentifier, type PoolClient, type QueryResultRow } from "pg";
 import { createSuiteStudioApp } from "../server/app.js";
 import { loadPostgresConfig } from "../server/config.js";
+import { ImageEditorService } from "../server/image-editor.js";
+import { createImageEditorApi } from "../server/image-editor-api.js";
 import type { ListingImage, ListingJob, ListingVersion } from "../server/listing-copy.js";
 import { runMigrations } from "../server/migrations.js";
 import { PostgresImageEditorRepository } from "../server/repositories/postgres-image-editor-repository.js";
@@ -1813,5 +1815,301 @@ test("PG task batch status converges under concurrent completeAttempt and failAt
         /INVALID_TASK_ATTEMPT/,
       );
     }
+  });
+});
+
+test("037 adds source_card_id index and drops created_at index idempotently; PG library excludes archived tasks' images & exposes editor-derived images with search, soft-delete, total, preview, and references", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool, schemas }) => {
+    const idxCheck = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = $1 AND indexname IN ('image_edit_child_tasks_source_card_id_idx', 'image_edit_versions_created_at_idx')
+       ORDER BY indexname`,
+      [schemas[0]],
+    );
+    assert.deepEqual(
+      idxCheck.rows.map((r) => r.indexname),
+      ["image_edit_child_tasks_source_card_id_idx"],
+    );
+    // Simulate a dev DB where the legacy image_edit_versions_created_at_idx existed, then replay migrations -> must drop it cleanly
+    await pool.query(`CREATE INDEX IF NOT EXISTS image_edit_versions_created_at_idx ON suite_workbench.image_edit_versions (created_at DESC)`);
+    await runMigrations(pool);
+    const idxAfterReplay = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = $1 AND indexname IN ('image_edit_child_tasks_source_card_id_idx', 'image_edit_versions_created_at_idx')
+       ORDER BY indexname`,
+      [schemas[0]],
+    );
+    assert.deepEqual(
+      idxAfterReplay.rows.map((r) => r.indexname),
+      ["image_edit_child_tasks_source_card_id_idx"],
+    );
+
+    const suites = new PostgresSuiteRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const library = new PostgresLibraryRepository(pool);
+    const editorRepo = new PostgresImageEditorRepository(pool);
+    const storage = new MemoryStorage();
+
+    const suite = await suites.createSuite("PG 归档与编辑派生资源库测试", undefined, "canvas");
+    const { task: task1 } = await tasks.createCustomTask({
+      suiteId: suite.id,
+      planSnapshotId: null,
+      imageType: "main",
+      title: "PG 主图卡 1",
+      purpose: "主图",
+      promptDraft: "展示主图商品",
+      sourceInputImageId: null,
+      generationParams: { size: "1K", ratio: "1:1" },
+    });
+    const { task: task2 } = await tasks.createCustomTask({
+      suiteId: suite.id,
+      planSnapshotId: null,
+      imageType: "detail",
+      title: "PG 详情卡 2",
+      purpose: "详情",
+      promptDraft: "展示详情卖点",
+      sourceInputImageId: null,
+      generationParams: { size: "1K", ratio: "3:4" },
+    });
+
+    const seedTaskVersion = async (taskId: string, key: string, procKeys: string[] = []) => {
+      const batchId = randomUUID();
+      const slotId = randomUUID();
+      const attemptId = randomUUID();
+      await tasks.beginBatch({
+        batch: {
+          id: batchId,
+          suiteId: suite.id,
+          kind: "single",
+          requestedCount: 1,
+          taskIds: [taskId],
+          status: "running",
+          idempotencyKey: `pg-t14-${key}`,
+          createdAt: timestamp,
+          startedAt: timestamp,
+          finishedAt: null,
+        },
+        slots: [{
+          id: slotId,
+          batchId,
+          taskId,
+          slotOrdinal: 1,
+          retryOfSlotId: null,
+          status: "generating",
+          selectedVersionId: null,
+          createdAt: timestamp,
+          completedAt: null,
+        }],
+        attempts: [{
+          id: attemptId,
+          slotId,
+          attemptNo: 1,
+          provider: "fake",
+          model: "gpt-image-2",
+          endpoint: "/v1/images/edits",
+          requestSummary: {},
+          promptSnapshot: { prompt: `提示词 ${key}` },
+          promptSha256: "a".repeat(64),
+          contextSnapshot: {},
+          sourceKind: "original",
+          sourceObjectKey: `orig/${key}.png`,
+          sourceInputImageId: null,
+          sourceBaseVersionId: null,
+          status: "running",
+          errorCode: null,
+          errorMessage: null,
+          externalRequestId: null,
+          startedAt: timestamp,
+          finishedAt: null,
+        }],
+      });
+      const objectKey = `suites/${suite.id}/tasks/${taskId}/versions/${key}.png`;
+      await storage.put({ key: objectKey, bytes: Buffer.from(`png-${key}`), contentType: "image/png" });
+      return (await tasks.completeAttempt({
+        attemptId,
+        slotId,
+        taskId,
+        objectKey,
+        processObjectKeys: procKeys,
+        sha256: "b".repeat(64),
+        width: 512,
+        height: 512,
+        mimeType: "image/png",
+        completedAt: timestamp,
+      })).version;
+    };
+
+    const v1 = await seedTaskVersion(task1.id, "v1", [`suites/${suite.id}/tasks/${task1.id}/proc0.png`]);
+    const v2 = await seedTaskVersion(task2.id, "v2");
+
+    // Create a 2-level editor chain under task1: task1 -> child1 -> child2
+    const seedEditVersion = async (sourceCardId: string, sourceVersionId: string, label: string, completedAt: string) => {
+      const snapId = randomUUID();
+      const childId = randomUUID();
+      const editAttemptId = randomUUID();
+      await editorRepo.submit({
+        idempotencyKey: `pg-t14-edit-${childId}`,
+        snapshot: {
+          id: snapId,
+          sourceCardId,
+          sourceVersionId,
+          parentVersionId: sourceVersionId,
+          summary: label,
+          sourcePrompt: "原始提示词",
+          operations: [{
+            operationId: `op-${childId}`,
+            type: "add_text",
+            order: 1,
+            sourceCardId,
+            sourceVersionId,
+            parentVersionId: sourceVersionId,
+            summary: label,
+            payload: { text: label, prompt: `添加文字 ${label}` },
+          }],
+          provider: { name: "openai-compatible-image", version: "gpt-image-2", capabilitiesVersion: "v1" },
+          createdAt: completedAt,
+          schemaVersion: "image-edit-snapshot-v1",
+        },
+        childTask: {
+          id: childId,
+          sourceCardId,
+          sourceVersionId,
+          parentVersionId: sourceVersionId,
+          snapshotId: snapId,
+          summary: label,
+          status: "generating",
+          currentVersionId: null,
+          finalVersionId: null,
+          errorCode: null,
+          errorMessage: null,
+          createdAt: completedAt,
+          updatedAt: completedAt,
+        },
+        attempt: {
+          id: editAttemptId,
+          childTaskId: childId,
+          snapshotId: snapId,
+          attemptNo: 1,
+          status: "generating",
+          command: { type: "add_text", sourceVersionId, prompt: `编辑指令：${label}`, operations: [] },
+          provider: { name: "openai-compatible-image", version: "gpt-image-2", capabilitiesVersion: "v1" },
+          errorCode: null,
+          errorMessage: null,
+          createdAt: completedAt,
+          completedAt: null,
+        },
+      });
+      const objectKey = `image-edits/${childId}/versions/${label}.png`;
+      await storage.put({ key: objectKey, bytes: Buffer.from(`edit-${label}`), contentType: "image/png" });
+      const completed = await editorRepo.completeAttempt({
+        attemptId: editAttemptId,
+        objectKey,
+        sha256: "c".repeat(64),
+        width: 512,
+        height: 512,
+        mimeType: "image/png",
+        completedAt,
+      });
+      return { childId, version: completed.version, objectKey };
+    };
+
+    const edit1 = await seedEditVersion(task1.id, v1.id, "限时优惠", "2026-01-01T00:01:00.000Z");
+    const edit2 = await seedEditVersion(edit1.childId, edit1.version.id, "加粗标题", "2026-01-01T00:02:00.000Z");
+
+    const tv1Id = `task-version:${v1.id}`;
+    const proc1Id = `process:${v1.id}:0`;
+    const tv2Id = `task-version:${v2.id}`;
+    const edit1Id = `edit-version:${edit1.version.id}`;
+    const edit2Id = `edit-version:${edit2.version.id}`;
+
+    // 1. Both task versions and both edit versions appear in task_image_version list (total=4) with status=published
+    const listedAll = await library.listResources({ scope: "image", resourceType: "task_image_version", status: "published", suiteId: suite.id });
+    assert.equal(listedAll.total, 4);
+    assert.deepEqual(new Set(listedAll.items.map((item) => item.id)), new Set([tv1Id, tv2Id, edit1Id, edit2Id]));
+    const edit1Res = listedAll.items.find((item) => item.id === edit1Id)!;
+    assert.equal(edit1Res.status, "published");
+    assert.equal(edit1Res.resourceType, "task_image_version");
+    assert.equal(edit1Res.source.generatedBy, "image_editor");
+    assert.equal(edit1Res.source.rootTaskId, task1.id);
+    assert.equal(edit1Res.suiteId, suite.id);
+    assert.match(edit1Res.summary, /编辑生成/);
+
+    // 1b. PG search matches synthesized title ("编辑版本 1") and summary ("编辑生成") consistent with Memory
+    const byOriginSearch = await library.listResources({ scope: "image", query: "编辑生成", suiteId: suite.id });
+    assert.equal(byOriginSearch.total, 2);
+    assert.deepEqual(new Set(byOriginSearch.items.map((item) => item.id)), new Set([edit1Id, edit2Id]));
+    const byVersionTitleSearch = await library.listResources({ scope: "image", query: "编辑版本 1", suiteId: suite.id });
+    assert.equal(byVersionTitleSearch.total, 2);
+    assert.deepEqual(new Set(byVersionTitleSearch.items.map((item) => item.id)), new Set([edit1Id, edit2Id]));
+
+    // 2. edit-version can be referenced (bound) to task2 in the same suite
+    const bound = await library.createReference({
+      suiteId: suite.id,
+      resourceId: edit1Id,
+      targetType: "task",
+      targetId: task2.id,
+      idempotencyKey: "pg-bind-edit-1",
+    });
+    assert.equal(bound.reference.resourceId, edit1Id);
+    assert.equal(bound.reference.resourceType, "task_image_version");
+
+    // 3. Soft-delete edit2 BEFORE archiving task1 to verify explicit soft-delete survives archive/unarchive cycle
+    const delEdit2 = await library.deleteResource(edit2Id);
+    assert.equal(delEdit2?.alreadyDeleted, false);
+    assert.equal((await library.listResources({ scope: "image", resourceType: "task_image_version", suiteId: suite.id })).total, 3);
+    assert.deepEqual(await library.getPreviewObject(edit2Id), { objectKey: edit2.objectKey });
+
+    // 4. Archive task1 -> hides task1's task-version, process_image, and edit1 from list/total/getResource/createReference
+    await tasks.updateTask(task1.id, { status: "archived" });
+    const afterArchiveImg = await library.listResources({ scope: "image", suiteId: suite.id });
+    assert.equal(afterArchiveImg.total, 1);
+    assert.deepEqual(afterArchiveImg.items.map((item) => item.id), [tv2Id]);
+    assert.equal(await library.getResource(tv1Id), null);
+    assert.equal(await library.getResource(proc1Id), null);
+    assert.equal(await library.getResource(edit1Id), null);
+    await assert.rejects(
+      library.createReference({ suiteId: suite.id, resourceId: edit1Id, targetType: "task", targetId: task2.id, idempotencyKey: "pg-bind-after-archive" }),
+      /LIBRARY_RESOURCE_NOT_FOUND/,
+    );
+
+    // Preview & includeDeleted & frozen references still work for archived task's images
+    assert.ok(await library.getResource(tv1Id, { includeDeleted: true }));
+    assert.ok(await library.getResource(edit1Id, { includeDeleted: true }));
+    assert.deepEqual(await library.getPreviewObject(edit1Id), { objectKey: edit1.objectKey });
+    assert.equal((await library.listReferences(suite.id, "task", task2.id)).length, 1);
+
+    // 5. Unarchiving task1 restores tv1, proc1, edit1 while keeping explicitly soft-deleted edit2 hidden
+    await tasks.updateTask(task1.id, { status: "generated" });
+    const afterUnarchive = await library.listResources({ scope: "image", resourceType: "task_image_version", suiteId: suite.id });
+    assert.equal(afterUnarchive.total, 3);
+    assert.deepEqual(new Set(afterUnarchive.items.map((item) => item.id)), new Set([tv1Id, tv2Id, edit1Id]));
+    assert.equal(await library.getResource(edit2Id), null);
+
+    // 6. Batch soft-delete + selecting edit2 as final via app restores edit2
+    const batchDel = await library.deleteResources([edit1Id, edit2Id]);
+    assert.deepEqual(batchDel.deletedIds, [edit1Id]);
+    assert.deepEqual(batchDel.alreadyDeletedIds, [edit2Id]);
+
+    const pgApp = createSuiteStudioApp({
+      repository: suites,
+      taskRepository: tasks,
+      libraryRepository: library,
+      storage,
+      imageEditorApi: createImageEditorApi(
+        new ImageEditorService(
+          editorRepo,
+          async () => null,
+          storage,
+          async () => null,
+        ),
+      ),
+    });
+    const previewDeleted = await pgApp.request("GET", `/api/library/resources/${encodeURIComponent(edit1Id)}/preview`);
+    assert.equal(previewDeleted.status, 200);
+    const selectFinalEdit = await pgApp.request("POST", `/api/image-editor/tasks/${edit2.childId}/versions/${edit2.version.id}/select`, {
+      body: { selection: "final" },
+    });
+    assert.equal(selectFinalEdit.status, 200);
+    assert.ok(await library.getResource(edit2Id));
   });
 });

@@ -105,6 +105,16 @@ export class MemoryTaskRepository implements TaskRepository {
   }
   async getTask(id: string) { return this.tasks.get(id) ?? null; }
   async listTasks(suiteId: string) { return [...this.tasks.values()].filter((task) => task.suiteId === suiteId).sort((a, b) => a.ordinal - b.ordinal); }
+  listAllTasks(): SuiteTask[] { return [...this.tasks.values()]; }
+  listAllVersions(): Array<{ task: SuiteTask; version: TaskImageVersion; attempt?: TaskGenerationAttempt }> {
+    const entries: Array<{ task: SuiteTask; version: TaskImageVersion; attempt?: TaskGenerationAttempt }> = [];
+    for (const version of this.versions.values()) {
+      const task = this.tasks.get(version.taskId);
+      if (!task) continue;
+      entries.push({ task, version, attempt: this.attempts.get(version.attemptId) });
+    }
+    return entries;
+  }
   async updateTask(id: string, patch: Partial<Pick<SuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status" | "sourceLibraryReferenceId" | "sourceResourceVersionId" | "sourceRevision">>) { const current = this.tasks.get(id); if (!current) return null; const now = new Date().toISOString(); const changed = patch.promptDraft !== undefined && patch.promptDraft !== current.promptDraft; const archivedAt = patch.status === "archived" ? (current.archivedAt ?? now) : current.archivedAt; const next = { ...current, ...patch, archivedAt, promptRevision: changed ? current.promptRevision + 1 : current.promptRevision, updatedAt: now }; this.tasks.set(id, next); return next; }
   async beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }) { const scope = input.batch.suiteId + ":" + input.batch.idempotencyKey; const old = this.batchKeys.get(scope); if (old) return { batch: this.batches.get(old)!, slots: [...this.slots.values()].filter((slot) => slot.batchId === old), attempts: [...this.attempts.values()].filter((attempt) => input.slots.some((slot) => slot.id === attempt.slotId)), duplicate: true }; this.batches.set(input.batch.id, input.batch); this.batchKeys.set(scope, input.batch.id); input.slots.forEach((slot) => this.slots.set(slot.id, slot)); input.attempts.forEach((attempt) => this.attempts.set(attempt.id, attempt)); input.batch.taskIds.forEach((id) => { const task = this.tasks.get(id); if (task) this.tasks.set(id, { ...task, status: "generating", updatedAt: input.batch.createdAt }); }); return { ...input, duplicate: false }; }
   async getBatch(id: string) { return this.batches.get(id) ?? null; }

@@ -273,7 +273,7 @@ export function ReplicaBatchPreview({
         await suiteApi.selectImageEditVersion(card.editChildTaskId, card.versionId, "final");
         await refresh(id);
         setNotice({
-          text: "已将当前编辑版本设为终版；图片资源库当前仅自动收录原任务生成图（AI 生成结果），编辑派生图保留在本批次中。",
+          text: "已将当前编辑版本设为终版并确认归档到图片资源库（AI 生成结果 · 编辑生成）。",
           linkLabel: "前往图片库",
           linkTo: "/assets",
         });

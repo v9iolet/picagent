@@ -21,7 +21,15 @@ export const stageLabel = (stage: ApiLibraryResource["stage"]) => ({
 } as Record<string, string>)[stage ?? ""] ?? "工作台资源";
 
 export const sourceOriginLabel = (resource: ApiLibraryResource) => {
-  if (resource.source?.origin === "replica" || resource.source?.originKind === "replica" || resource.stage === "replica_prompt") {
+  const isEditorDerived = resource.source?.generatedBy === "image_editor";
+  const isReplica =
+    resource.source?.origin === "replica" ||
+    resource.source?.originKind === "replica" ||
+    resource.stage === "replica_prompt";
+  if (isEditorDerived) {
+    return isReplica ? "编辑生成 · 爆品图复刻" : "编辑生成";
+  }
+  if (isReplica) {
     return "爆品图复刻";
   }
   if (resource.source?.reversePlanId) {
