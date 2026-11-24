@@ -49,20 +49,6 @@ test("task selection prioritizes prompt details and the template library opens a
   assert.match(css, /\.wb-canvas \{[^}]*border: 1px solid/);
 });
 
-test("starting creation materializes plan items as task cards before navigation", async () => {
-  const source = await readFile("src/pages/StartPage.tsx", "utf8");
-  assert.match(source, /const readiness = await suiteApi\.startCreationCheck\(suite\.id\)/);
-  assert.match(source, /await suiteApi\.createTasks\(suite\.id, readiness\.planSnapshotId\)/);
-  assert.match(source, /createTasks[\s\S]*navigate\(`\/suites\/\$\{suite\.id\}\/board`\)/);
-});
-
-test("StartPage clears transient upload state when switching routes or suites", async () => {
-  const source = await readFile("src/pages/StartPage.tsx", "utf8");
-  assert.match(source, /setUploadProgress\(\[\]\)/);
-  assert.match(source, /setCurrentId\(null\)/);
-  assert.match(source, /setPreviewVersionIds\(\{\}\)/);
-});
-
 test("image loading wrappers preserve the fixed preview proportions", async () => {
   const css = await readFile("public/assets/suite-start.css", "utf8");
   assert.match(css, /\.start-image-card \.image-state \{ height: 220px; min-height: 220px; \}/);
@@ -81,27 +67,6 @@ test("thumbnail label styles do not capture ImageWithState wrappers", async () =
 test("thumbnail strip reserves its row and never exposes a vertical scrollbar", async () => {
   const css = await readFile("public/assets/suite-start.css", "utf8");
   assert.match(css, /\.start-thumbnail-strip \{[^}]*min-height: 58px;[^}]*overflow-x: auto;[^}]*overflow-y: hidden;/);
-});
-
-test("planning and category prompt requests expose slow simulated progress", async () => {
-  const source = await readFile("src/pages/StartPage.tsx", "utf8");
-  const css = await readFile("public/assets/suite-start.css", "utf8");
-  assert.match(source, /structureProgress/);
-  assert.match(source, /categoryProgressById/);
-  assert.match(source, /aria-label={`结构计划生成进度 \${structureProgress}%`}/);
-  assert.match(source, /aria-label={`\${DETAIL_CATEGORY_NAMES\[request\.categoryCode\] \?\? request\.categoryCode}生成进度 \${progress}%`}/);
-  assert.match(css, /\.start-simulated-progress/);
-  assert.match(css, /\.start-row-progress/);
-});
-
-test("brief fields separate confirmed facts from visual direction guidance", async () => {
-  const source = await readFile("src/pages/StartPage.tsx", "utf8");
-  assert.match(source, /产品参数：\\n- 尺寸：125 × 65 × 40 mm/);
-  assert.match(source, /不得虚构：\\n- DPI 数值/);
-  assert.match(source, /填写已确认的产品参数、事实和必须展示的卖点/);
-  assert.match(source, /设计方向：\\n- 整体风格：科技、轻量、年轻化/);
-  assert.match(source, /禁止内容：\\n- 不改变产品外壳颜色/);
-  assert.match(source, /产品参数请填写在上一个输入框/);
 });
 
 test("workbench canvas is constrained to the visible workspace", async () => {

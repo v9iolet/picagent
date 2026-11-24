@@ -200,26 +200,6 @@ export class DashScopeLlmClient implements LlmClient {
     });
   }
 
-  async generateReversePrompt(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; referenceMimeType?: string; baselineImage?: Buffer; baselineMimeType?: string; mode: "main" | "detail" }): Promise<unknown> {
-    const visionImages = [{ id: input.referenceImageId, sourceKind: "reference", mimeType: input.referenceMimeType ?? "image/jpeg", bytes: input.referenceImage }, ...(input.baselineImage ? [{ id: "series-color-baseline", sourceKind: "series_color_baseline", mimeType: input.baselineMimeType ?? "image/jpeg", bytes: input.baselineImage }] : [])];
-    const prompt = (input.template.userPromptTemplate || "请根据当前参考图输出结构化反推提示词。模式：{{mode}}。参考图 ID：{{referenceImageId}}。")
-      .replaceAll("{{mode}}", input.mode).replaceAll("{{referenceImageId}}", input.referenceImageId);
-    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    const startedAt = Date.now();
-    const observation = startGeneration("llm.reverse-prompt", { system: input.template.body, user: prompt, images: visionImages.map(({ id, sourceKind, mimeType, bytes }) => ({ id, sourceKind, mimeType, byteLength: bytes.length })) }, { flow: "reverse-prompt", provider: this.provider, model: this.model, template_version_id: input.template.templateVersionId });
-    try {
-      const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), { method: "POST", redirect: "error", signal: controller.signal, headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: input.template.body }, { role: "user", content: [{ type: "text", text: prompt }, ...visionImages.map((image) => ({ type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}` } }))] }] }) });
-      const body = await response.text(); if (!response.ok) throw new Error(`LLM_HTTP_${response.status}`);
-      const payload = parseProviderJson(body, this.apiKey, "LLM_INVALID_HTTP_RESPONSE") as { choices?: Array<{ message?: { content?: string } }> }; const content = payload.choices?.[0]?.message?.content;
-      if (!content) throw new Error("LLM_EMPTY_RESPONSE");
-      const parsed = parseProviderJson(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""), this.apiKey, "LLM_INVALID_JSON_RESPONSE");
-      const usage = (payload as unknown as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
-      finishObservation(observation, { content: captureText(content), status: "succeeded" }, { http_status: response.status });
-      recordModelSuccess("reverse-prompt", this.provider, this.model, Date.now() - startedAt, { input: usage?.prompt_tokens, output: usage?.completion_tokens });
-      return parsed;
-    } catch (error) { const normalized = error instanceof DOMException && error.name === "AbortError" ? new Error("LLM_TIMEOUT") : error; failObservation(observation, normalized); recordModelFailure("reverse-prompt", this.provider, this.model, Date.now() - startedAt, normalized instanceof Error ? normalized.message : "LLM_FAILED"); throw normalized; } finally { clearTimeout(timer); }
-  }
-
   async generateReplicaPrompts(input: ReplicaPromptLlmInput): Promise<unknown> {
     const startedAt = Date.now();
     const flow = "replica-prompt";

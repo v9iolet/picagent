@@ -228,7 +228,6 @@ export interface LlmClient {
   provider: string; model: string; isFake: boolean;
   generatePlan(input: PlanLlmInput): Promise<unknown>;
   generateCategoryPrompt?(input: CategoryPromptLlmInput): Promise<unknown>;
-  generateReversePrompt?(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; referenceMimeType?: string; baselineImage?: Buffer; baselineMimeType?: string; mode: "main" | "detail" }): Promise<unknown>;
   generateReplicaPrompts?(input: ReplicaPromptLlmInput): Promise<unknown>;
   translateTexts?(input: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }): Promise<Array<{ id: string; originalText: string; translatedText: string }>>;
 }

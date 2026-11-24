@@ -9,6 +9,7 @@ import { createSuiteStudioApp } from "./app.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { dispatchInputImageUpload } from "./multipart.js";
+import { readBoundedRequestBody } from "./request-body-limit.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
 import { resolveImageSize } from "../shared/model-settings.js";
@@ -169,39 +170,10 @@ async function serveStatic(pathname: string): Promise<{ bytes: Buffer; contentTy
   } catch { return null; }
 }
 
-// 单张图片最大 12 MiB，Base64 编码后约 16 MiB；复刻接口单次最多携带 6 张参考图 + 6 张产品图 = 12 张（192 MiB），预留 8 MiB JSON 元数据与字段余量，总上限 200 MiB。
-const MAX_REQUEST_BODY_BYTES = (12 * 16 + 8) * 1024 * 1024;
-
-async function readRequestBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer | null> {
-  const declaredLength = Number(req.headers["content-length"]);
-  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-    req.resume();
-    return null;
-  }
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    totalBytes += buf.length;
-    if (totalBytes > maxBytes) {
-      chunks.length = 0;
-      req.resume();
-      return null;
-    }
-    chunks.push(buf);
-  }
-  return Buffer.concat(chunks);
-}
-
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-  const body = await readRequestBody(req, MAX_REQUEST_BODY_BYTES);
-  if (body === null) {
-    res.statusCode = 413;
-    res.setHeader("content-type", "application/json; charset=utf-8");
-    res.end(JSON.stringify({ error: { code: "PAYLOAD_TOO_LARGE", message: "请求体超过大小限制" }, requestId: randomUUID() }));
-    return;
-  }
   const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+  const body = await readBoundedRequestBody(req, res, requestUrl.pathname);
+  if (body === null) return;
   const path = requestUrl.pathname + requestUrl.search;
   const headers = req.headers as Record<string, string | undefined>;
   let response;
