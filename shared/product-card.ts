@@ -373,3 +373,50 @@ export function formatProductCardFacts(snapshot: ProductCardFields | ProductCard
 
   return lines.join("\n");
 }
+
+export function readProductCardSnapshot(value: unknown): ProductCardSnapshot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.cardId !== "string" ||
+    !row.cardId.trim() ||
+    typeof row.name !== "string" ||
+    !row.name.trim() ||
+    typeof row.revision !== "number" ||
+    !Number.isFinite(row.revision)
+  ) {
+    return null;
+  }
+  return {
+    cardId: row.cardId,
+    revision: row.revision,
+    name: row.name,
+    category: typeof row.category === "string" ? row.category : "",
+    sellingPoints: Array.isArray(row.sellingPoints)
+      ? row.sellingPoints.filter((item): item is string => typeof item === "string")
+      : [],
+    specifications: typeof row.specifications === "string" ? row.specifications : "",
+    materialsCraft: typeof row.materialsCraft === "string" ? row.materialsCraft : "",
+    audienceScenarios: typeof row.audienceScenarios === "string" ? row.audienceScenarios : "",
+    packageContents: typeof row.packageContents === "string" ? row.packageContents : "",
+    skuCode: typeof row.skuCode === "string" ? row.skuCode : "",
+    painPointsComparison: typeof row.painPointsComparison === "string" ? row.painPointsComparison : "",
+    usageDemoHighlights: typeof row.usageDemoHighlights === "string" ? row.usageDemoHighlights : "",
+    certificationsProhibitions:
+      typeof row.certificationsProhibitions === "string" ? row.certificationsProhibitions : "",
+    coverThumbnailUrl: typeof row.coverThumbnailUrl === "string" ? row.coverThumbnailUrl : null,
+    snapshotAt: typeof row.snapshotAt === "string" ? row.snapshotAt : "",
+  };
+}
+
+export function mergeProductCardFacts(
+  snapshot: ProductCardFields | ProductCardSnapshot,
+  extraText?: string | null,
+): string {
+  const facts = formatProductCardFacts(snapshot).trim();
+  const extra = typeof extraText === "string" ? extraText.trim() : "";
+  if (!extra) return facts;
+  if (!facts) return extra;
+  if (extra === facts || extra.startsWith(`${facts}\n`)) return extra;
+  return `${facts}\n\n【本次补充说明】\n${extra}`;
+}

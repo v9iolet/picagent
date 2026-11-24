@@ -1,14 +1,17 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import type { ImageOptions } from "../../shared/model-settings.js";
+import { readProductCardSnapshot, type ProductCardSnapshot } from "../../shared/product-card.js";
 import { errorMessages, fail } from "../api-errors.js";
 import { asRecord, dataOf, now, ok, type AppResponse } from "../api-response.js";
 import { processImage, type ProcessedImage } from "../image.js";
+import { resolvePublishedProductCardSnapshot } from "../product-cards-api.js";
 import { waitUntil } from "../suite-pipeline.js";
 import type {
   LibraryRepository,
   LlmClient,
   PipelineRepository,
+  ProductCardRepository,
   PromptRepository,
   ReplicaCloneLevel,
   ReplicaLanguage,
@@ -60,6 +63,8 @@ export interface ReplicaBatchConfig {
   cloneLevel: ReplicaCloneLevel;
   unifiedRequirement: string;
   productInfo: string;
+  productCardId?: string | null;
+  productCardSnapshot?: ProductCardSnapshot | null;
   styleUnified: boolean;
   language: ReplicaLanguage;
   ratio: string;
@@ -206,6 +211,7 @@ export interface ReplicaPipelineDependencies {
   storage: StorageAdapter;
   replicaRepository: ReplicaRepository;
   pipelineRepository: PipelineRepository;
+  productCardRepository?: ProductCardRepository;
   taskRepository?: TaskRepository;
   promptRepository?: PromptRepository;
   libraryRepository?: LibraryRepository;
@@ -308,6 +314,7 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
           }),
         );
 
+        const productCardSnapshot = readProductCardSnapshot(config.productCardSnapshot);
         const analysis = await analyzeReplicaPrompts({
           requestId: run.id,
           llm,
@@ -318,12 +325,14 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
           styleUnified: Boolean(config.styleUnified),
           unifiedRequirement: config.unifiedRequirement,
           productInfo: config.productInfo,
+          productCardSnapshot,
           references: visionRefs,
           productImages: visionProducts,
         });
 
         const hasProductImages = products.length > 0;
-        const resolvedTaskName = hasProductImages ? analysis.output.taskName.trim() : "";
+        const modelTaskName = hasProductImages ? analysis.output.taskName.trim() : "";
+        const resolvedTaskName = modelTaskName || productCardSnapshot?.name?.trim() || "";
         if (resolvedTaskName && deps.repository.renameSuite) {
           await deps.repository.renameSuite(suiteId, resolvedTaskName);
         }
@@ -610,9 +619,19 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
     }
     const size = rawSize;
 
-    // 4. Create (or idempotently retrieve) replica suite
     const createdAt = now();
-    const fallbackName = formatReplicaFallbackName(typedSceneType, new Date(createdAt));
+    const cardResult = await resolvePublishedProductCardSnapshot(
+      body.productCardId,
+      deps.productCardRepository,
+      createdAt,
+    );
+    if (!cardResult.ok) return cardResult.response;
+    const productCardSnapshot = cardResult.snapshot;
+
+    // 4. Create (or idempotently retrieve) replica suite
+    const fallbackName =
+      productCardSnapshot?.name?.trim() ||
+      formatReplicaFallbackName(typedSceneType, new Date(createdAt));
     const suite = await deps.repository.createSuite(fallbackName, `replica:${idempotencyKey}:suite`, "replica");
 
     const existingRun = (await pipelineRepository.listRuns(suite.id)).find(
@@ -685,6 +704,12 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
       cloneLevel: typedCloneLevel,
       unifiedRequirement,
       productInfo,
+      ...(productCardSnapshot
+        ? {
+            productCardId: productCardSnapshot.cardId,
+            productCardSnapshot,
+          }
+        : {}),
       styleUnified,
       language,
       ratio,

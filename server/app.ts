@@ -178,7 +178,7 @@ function designerFactsText(input: Record<string, unknown>): string {
   const supplement = typeof input.human_supplement === "string" ? input.human_supplement.trim() : "";
   const emphasis = typeof input.emphasis_requirements === "string" ? input.emphasis_requirements.trim() : "";
   if (!supplement) return emphasis;
-  if (!emphasis || supplement === emphasis) return supplement;
+  if (!emphasis || supplement === emphasis || supplement.endsWith(`【本次补充说明】\n${emphasis}`)) return supplement;
   return `${supplement}\n${emphasis}`;
 }
 
@@ -906,7 +906,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const pipeline = createSuitePipeline({
     repository: deps.repository, storage: deps.storage, platformRepository: deps.platformRepository,
     promptRepository: deps.promptRepository, planRepository: deps.planRepository, taskRepository: deps.taskRepository,
-    replicaRepository,
+    replicaRepository, productCardRepository,
     hasPlanningModel: () => Boolean(deps.llmClient || deps.modelSettings), pipelineRepository, listingRepository,
     startListingCopy: listing.startPipeline, appendConfirmedSnapshot, loadSuiteImageEditChildren, request,
   });
@@ -915,6 +915,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     storage: deps.storage,
     replicaRepository,
     pipelineRepository,
+    productCardRepository,
     taskRepository: deps.taskRepository,
     promptRepository: deps.promptRepository,
     libraryRepository: deps.libraryRepository,
@@ -983,6 +984,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
 
     if (method === "POST" && path === "/api/replicas") return replicaPipeline.createReplica(idempotencyKey, options.body);
+    const replicaStudioStateMatch = path.match(/^\/api\/replicas\/([^/]+)\/studio-state$/);
+    if (method === "GET" && replicaStudioStateMatch) {
+      const suite = await deps.repository.getSuite(replicaStudioStateMatch[1]);
+      if (!suite) return fail("INVALID_SUITE_ID", 404);
+      if (suite.origin !== "replica") return fail("INVALID_SUITE_ORIGIN", 400);
+      return pipeline.getStudioState(replicaStudioStateMatch[1]);
+    }
     const replicaResumeMatch = path.match(/^\/api\/replicas\/([^/]+)\/resume$/);
     if (method === "POST" && replicaResumeMatch) return replicaPipeline.resumeReplica(replicaResumeMatch[1], idempotencyKey);
     const replicaReverseAssetMatch = path.match(/^\/api\/replicas\/([^/]+)\/tasks\/([^/]+)\/reverse-asset$/);
@@ -995,6 +1003,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
 
     if (method === "POST" && path === "/api/suites/one-click-generate") return pipeline.startRun(idempotencyKey, options.body);
+    const suitePipelineMatch = path.match(/^\/api\/suites\/([^/]+)\/pipeline$/);
+    if (method === "POST" && suitePipelineMatch) {
+      return pipeline.startRun(idempotencyKey, {
+        ...asRecord(options.body),
+        suiteId: suitePipelineMatch[1],
+      });
+    }
     const resumeMatch = path.match(/^\/api\/suites\/([^/]+)\/one-click-generate\/resume$/);
     if (method === "POST" && resumeMatch) return pipeline.resumeRun(resumeMatch[1], idempotencyKey, options.body);
     const studioStateMatch = path.match(/^\/api\/suites\/([^/]+)\/studio-state$/);
