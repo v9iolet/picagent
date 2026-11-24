@@ -1,6 +1,8 @@
 import type { ImageOptions } from "../../../shared/model-settings";
+import type { ProductCardSnapshot } from "../../../shared/product-card";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { createIdempotencyKey, type ApiImage, type ApiLibraryResource, type ApiSuite, type ApiTaskStatus } from "../../api/client";
+import type { SelectedProductCardSummary } from "../../components/product-card-picker/types";
 
 export type ReplicaSceneType =
   | "ecommerce_product"
@@ -106,6 +108,8 @@ export interface ReplicaConfigDraft {
   cloneLevel: ReplicaCloneLevel;
   unifiedRequirement: string;
   productInfo: string;
+  productCardId: string | null;
+  productCardSummary: SelectedProductCardSummary | null;
   styleUnified: boolean;
   language: ReplicaLanguage;
   ratio: string;
@@ -117,6 +121,8 @@ export const INITIAL_REPLICA_CONFIG: ReplicaConfigDraft = {
   cloneLevel: "high",
   unifiedRequirement: "",
   productInfo: "",
+  productCardId: null,
+  productCardSummary: null,
   styleUnified: true,
   language: "zh",
   ratio: "reference",
@@ -135,6 +141,7 @@ export interface ReplicaCreatePayload {
   cloneLevel: ReplicaCloneLevel;
   unifiedRequirement: string;
   productInfo: string;
+  productCardId?: string | null;
   styleUnified: boolean;
   language: ReplicaLanguage;
   ratio: string;
@@ -146,6 +153,8 @@ export interface ReplicaBatchConfigView {
   cloneLevel?: ReplicaCloneLevel;
   unifiedRequirement?: string;
   productInfo?: string;
+  productCardId?: string | null;
+  productCardSnapshot?: ProductCardSnapshot | null;
   styleUnified?: boolean;
   language?: ReplicaLanguage;
   ratio?: string;
@@ -193,6 +202,7 @@ export interface ReplicaStudioState {
   cards: ReplicaResultCard[];
   progress: { total: number; completed: number; percent: number };
   styleSketch?: boolean;
+  productCardSnapshot?: ProductCardSnapshot | null;
   replicaReferences?: ReplicaReferenceView[];
   replicaProducts?: Array<Record<string, unknown>>;
 }

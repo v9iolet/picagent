@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { defaultImageOptions } from "../../shared/model-settings";
-import { modelSettingsApi } from "../api/client";
+import { modelSettingsApi, productCardsApi } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import {
   GenerationHistoryDrawer,
   type GenerationHistoryFeedItem,
 } from "../components/generation-history/GenerationHistoryDrawer";
+import { toSelectedProductCardSummary } from "../components/product-card-picker/types";
 import { currentImageOptions, message } from "../components/suite-studio/studio";
 import { CreateToolsNav } from "../features/create/CreateToolsNav";
 import { ReplicaBatchPreview } from "../features/replica/ReplicaBatchPreview";
@@ -37,9 +38,11 @@ const POLL_INTERVAL_MS = 2500;
 
 export function ReplicaStudioPage({
   suiteId,
+  initialProductCardId,
   navigate,
 }: {
   suiteId?: string;
+  initialProductCardId?: string;
   navigate: (path: string, options?: { replace?: boolean }) => void;
 }) {
   const draft = useSyncExternalStore(replicaDraftStore.subscribe, replicaDraftStore.getSnapshot);
@@ -50,13 +53,16 @@ export function ReplicaStudioPage({
   const [pageNotice, setPageNotice] = useState("");
 
   const [currentState, setCurrentState] = useState<ReplicaStudioState | null>(null);
-  const [loadingBatch, setLoadingBatch] = useState(() => Boolean(suiteId || readLastReplicaSuiteId()));
+  const [loadingBatch, setLoadingBatch] = useState(() =>
+    Boolean(suiteId || (!initialProductCardId && readLastReplicaSuiteId())),
+  );
   const [batchError, setBatchError] = useState("");
   const [reloadTick, setReloadTick] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const requestSeqRef = useRef(0);
   const appliedSeqRef = useRef(0);
+  const cardLoadSeqRef = useRef(0);
   const loadedSuiteIdRef = useRef<string | undefined>(undefined);
   const lastReloadTickRef = useRef(reloadTick);
   const currentSuiteIdRef = useRef<string | undefined>(suiteId);
@@ -112,7 +118,81 @@ export function ReplicaStudioPage({
     setCurrentState(state);
   }, []);
 
+  // Hydrate missing productCardSummary if localStorage only preserved productCardId.
   useEffect(() => {
+    if (!config.productCardId || config.productCardSummary) return;
+    let live = true;
+    const targetCardId = config.productCardId;
+    const seq = ++cardLoadSeqRef.current;
+    void productCardsApi
+      .get(targetCardId)
+      .then((card) => {
+        if (!live || seq !== cardLoadSeqRef.current) return;
+        if (replicaDraftStore.getSnapshot().config.productCardId !== targetCardId) return;
+        if (card.status !== "published") {
+          replicaDraftStore.updateConfig({ productCardId: null, productCardSummary: null });
+          setPageNotice(
+            `已选商品信息卡「${card.name}」已归档，已自动清除绑定，请重新选择或手动填写。`,
+          );
+          return;
+        }
+        replicaDraftStore.updateConfig({
+          productCardId: card.id,
+          productCardSummary: toSelectedProductCardSummary(card),
+        });
+      })
+      .catch(() => {
+        if (!live || seq !== cardLoadSeqRef.current) return;
+        if (replicaDraftStore.getSnapshot().config.productCardId !== targetCardId) return;
+        replicaDraftStore.updateConfig({ productCardId: null, productCardSummary: null });
+      });
+    return () => {
+      live = false;
+    };
+  }, [config.productCardId, config.productCardSummary]);
+
+  useEffect(() => {
+    // URL ?productCardId=<id> opens a blank replica view pre-bound to the published product card.
+    if (!suiteId && initialProductCardId) {
+      let live = true;
+      const seq = ++cardLoadSeqRef.current;
+      loadedSuiteIdRef.current = undefined;
+      applyState(null);
+      setLoadingBatch(false);
+      setBatchError("");
+      setPageNotice("");
+
+      void productCardsApi
+        .get(initialProductCardId)
+        .then((card) => {
+          if (!live || seq !== cardLoadSeqRef.current) return;
+          if (card.status !== "published") {
+            if (replicaDraftStore.getSnapshot().config.productCardId === initialProductCardId) {
+              replicaDraftStore.updateConfig({ productCardId: null, productCardSummary: null });
+            }
+            setPageNotice(
+              `商品信息卡「${card.name}」已归档，无法用于新建复刻，请重新选择或手动填写。`,
+            );
+            return;
+          }
+          replicaDraftStore.updateConfig({
+            productCardId: card.id,
+            productCardSummary: toSelectedProductCardSummary(card),
+          });
+        })
+        .catch(() => {
+          if (!live || seq !== cardLoadSeqRef.current) return;
+          if (replicaDraftStore.getSnapshot().config.productCardId === initialProductCardId) {
+            replicaDraftStore.updateConfig({ productCardId: null, productCardSummary: null });
+          }
+          setPageNotice("未找到指定的商品信息卡，请重新选择或手动填写。");
+        });
+
+      return () => {
+        live = false;
+      };
+    }
+
     const savedId = suiteId ? null : readLastReplicaSuiteId();
     const targetId = suiteId ?? savedId ?? undefined;
     const isExplicitReload = reloadTick !== lastReloadTickRef.current;
@@ -179,7 +259,7 @@ export function ReplicaStudioPage({
     return () => {
       live = false;
     };
-  }, [suiteId, reloadTick, navigate, applyState]);
+  }, [suiteId, initialProductCardId, reloadTick, navigate, applyState]);
 
   const pollingSuiteId =
     currentState &&
@@ -245,6 +325,9 @@ export function ReplicaStudioPage({
   }, []);
 
   const handleUpdateConfig = useCallback((patch: Partial<ReplicaConfigDraft>) => {
+    if ("productCardId" in patch) {
+      cardLoadSeqRef.current += 1;
+    }
     replicaDraftStore.updateConfig(patch);
   }, []);
 
@@ -260,16 +343,17 @@ export function ReplicaStudioPage({
 
   const handleStartNew = useCallback(() => {
     clearLastReplicaSuiteId();
+    cardLoadSeqRef.current += 1;
     replicaDraftStore.clearDraft();
     loadedSuiteIdRef.current = undefined;
     applyState(null);
     setBatchError("");
     setPageNotice("");
     setLoadingBatch(false);
-    if (suiteId || window.location.search) {
+    if (suiteId || initialProductCardId || window.location.search) {
       navigate("/create/replica");
     }
-  }, [applyState, navigate, suiteId]);
+  }, [applyState, initialProductCardId, navigate, suiteId]);
 
   const handleBatchDeleted = useCallback(
     (deletedId: string) => {
@@ -329,6 +413,7 @@ export function ReplicaStudioPage({
         cloneLevel: effectiveConfig.cloneLevel,
         unifiedRequirement: effectiveConfig.unifiedRequirement.trim(),
         productInfo: effectiveConfig.productInfo.trim(),
+        ...(effectiveConfig.productCardId ? { productCardId: effectiveConfig.productCardId } : {}),
         styleUnified: validRefs.length >= 2 ? effectiveConfig.styleUnified : false,
         language: effectiveConfig.language,
         ratio: effectiveConfig.ratio,
@@ -380,6 +465,7 @@ export function ReplicaStudioPage({
     config.cloneLevel !== INITIAL_REPLICA_CONFIG.cloneLevel ||
     config.unifiedRequirement !== INITIAL_REPLICA_CONFIG.unifiedRequirement ||
     config.productInfo !== INITIAL_REPLICA_CONFIG.productInfo ||
+    config.productCardId !== INITIAL_REPLICA_CONFIG.productCardId ||
     config.styleUnified !== INITIAL_REPLICA_CONFIG.styleUnified ||
     config.language !== INITIAL_REPLICA_CONFIG.language ||
     config.ratio !== INITIAL_REPLICA_CONFIG.ratio ||

@@ -1,3 +1,4 @@
+import { sanitizeSelectedProductCardSummary } from "../../components/product-card-picker/types";
 import {
   replicaDraftBlobStorage,
   type ReplicaDraftBlobStorage,
@@ -116,6 +117,16 @@ function sanitizeConfigDraft(raw: unknown): ReplicaConfigDraft {
       ? (data.language as ReplicaLanguage)
       : INITIAL_REPLICA_CONFIG.language;
 
+  const productCardId =
+    typeof data.productCardId === "string" && data.productCardId.trim()
+      ? data.productCardId.trim()
+      : null;
+  const rawSummary = productCardId
+    ? sanitizeSelectedProductCardSummary(data.productCardSummary)
+    : null;
+  const productCardSummary =
+    rawSummary && rawSummary.cardId === productCardId ? rawSummary : null;
+
   return {
     sceneType,
     cloneLevel,
@@ -125,6 +136,8 @@ function sanitizeConfigDraft(raw: unknown): ReplicaConfigDraft {
         : INITIAL_REPLICA_CONFIG.unifiedRequirement,
     productInfo:
       typeof data.productInfo === "string" ? data.productInfo : INITIAL_REPLICA_CONFIG.productInfo,
+    productCardId,
+    productCardSummary,
     styleUnified:
       typeof data.styleUnified === "boolean"
         ? data.styleUnified
@@ -147,6 +160,8 @@ function isDefaultConfig(config: ReplicaConfigDraft): boolean {
     config.cloneLevel === INITIAL_REPLICA_CONFIG.cloneLevel &&
     config.unifiedRequirement === INITIAL_REPLICA_CONFIG.unifiedRequirement &&
     config.productInfo === INITIAL_REPLICA_CONFIG.productInfo &&
+    config.productCardId === INITIAL_REPLICA_CONFIG.productCardId &&
+    config.productCardSummary === INITIAL_REPLICA_CONFIG.productCardSummary &&
     config.styleUnified === INITIAL_REPLICA_CONFIG.styleUnified &&
     config.language === INITIAL_REPLICA_CONFIG.language &&
     config.ratio === INITIAL_REPLICA_CONFIG.ratio &&

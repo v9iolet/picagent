@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { modelSettingsApi, suiteApi, type ApiImage, type ApiPlatformProfile } from "../api/client";
+import {
+  modelSettingsApi,
+  productCardsApi,
+  suiteApi,
+  type ApiImage,
+  type ApiPlatformProfile,
+} from "../api/client";
 import { defaultImageOptions } from "../../shared/model-settings";
 import { productNameFor } from "../../shared/product-name";
 import { AppShell } from "../components/AppShell";
@@ -7,6 +13,7 @@ import {
   GenerationHistoryDrawer,
   type GenerationHistoryFeedItem,
 } from "../components/generation-history/GenerationHistoryDrawer";
+import { toSelectedProductCardSummary } from "../components/product-card-picker/types";
 import { CreateToolsNav } from "../features/create/CreateToolsNav";
 import { ConfigPanel } from "../components/suite-studio/ConfigPanel";
 import { BatchResults } from "../components/suite-studio/BatchResults";
@@ -79,9 +86,11 @@ function isBatchPolling(state: StudioState): boolean {
 
 export function SuiteStudioPage({
   suiteId,
+  initialProductCardId,
   navigate,
 }: {
   suiteId?: string;
+  initialProductCardId?: string;
   navigate: (path: string, options?: { replace?: boolean }) => void;
 }) {
   const [config, setConfig] = useState<Config>(initialConfig),
@@ -92,16 +101,19 @@ export function SuiteStudioPage({
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState("");
   const [currentState, setCurrentState] = useState<StudioState | null>(null),
-    [loadingBatch, setLoadingBatch] = useState(true),
+    [loadingBatch, setLoadingBatch] = useState(() => !(initialProductCardId && !suiteId)),
     [batchError, setBatchError] = useState(""),
     [reloadTick, setReloadTick] = useState(0),
     [historyOpen, setHistoryOpen] = useState(false),
-    [active, setActive] = useState<string | undefined>(() => suiteId ?? readLastSuiteId() ?? undefined);
+    [active, setActive] = useState<string | undefined>(() =>
+      initialProductCardId && !suiteId ? undefined : (suiteId ?? readLastSuiteId() ?? undefined),
+    );
 
   const hydrated = useRef<string | undefined>(undefined),
     skipDefaultFeed = useRef(false),
     requestSeq = useRef(0),
     appliedSeq = useRef(0),
+    cardCheckSeq = useRef(0),
     currentBatchIdRef = useRef<string | undefined>(undefined),
     inFlightStates = useRef<Map<string, Promise<StudioState>>>(new Map());
 
@@ -156,7 +168,12 @@ export function SuiteStudioPage({
     };
   }, []);
 
-  const patch = (update: Partial<Config>) => setConfig((c) => ({ ...c, ...update }));
+  const patch = (update: Partial<Config>) => {
+    if ("productCardId" in update) {
+      cardCheckSeq.current += 1;
+    }
+    setConfig((c) => ({ ...c, ...update }));
+  };
   // Options are model-specific; never submit a stale size/ratio restored from another channel.
   const effective: Config = {
     ...config,
@@ -167,15 +184,114 @@ export function SuiteStudioPage({
       : options.aspectRatios[0],
   };
 
-  const hydrate = useCallback((s: StudioState) => {
-    setImages(s.inputImages);
-    setConfig(fromRun(s.pipeline));
-    setClone(!!s.pipeline || s.cards.length > 0);
-  }, []);
+  const verifyBoundCardForEditing = useCallback(
+    (cardId: string, fallbackName: string, mode: "hydrate" | "edit") => {
+      const checkSeq = ++cardCheckSeq.current;
+      void productCardsApi
+        .get(cardId)
+        .then((card) => {
+          if (checkSeq !== cardCheckSeq.current) return;
+          if (card.status === "published") {
+            setConfig((prev) =>
+              prev.productCardId === cardId
+                ? { ...prev, productCardSummary: toSelectedProductCardSummary(card) }
+                : prev,
+            );
+            if (mode === "edit") {
+              setNotice("已载入同款配置，生成后将创建新批次。");
+            }
+            return;
+          }
+          setConfig((prev) =>
+            prev.productCardId === cardId
+              ? { ...prev, productCardId: null, productCardSummary: null }
+              : prev,
+          );
+          setNotice(
+            `原关联商品信息卡「${card.name || fallbackName || cardId}」已归档，已自动清空左侧绑定，请重新选择在用商品卡或手动填写。`,
+          );
+        })
+        .catch(() => {
+          if (checkSeq !== cardCheckSeq.current) return;
+          setConfig((prev) =>
+            prev.productCardId === cardId
+              ? { ...prev, productCardId: null, productCardSummary: null }
+              : prev,
+          );
+          setNotice(
+            `原关联商品信息卡${fallbackName ? `「${fallbackName}」` : ""}已删除或不可用，已自动清空左侧绑定，请重新选择在用商品卡或手动填写。`,
+          );
+        });
+    },
+    [],
+  );
+
+  const hydrate = useCallback(
+    (s: StudioState, mode: "hydrate" | "edit" = "hydrate") => {
+      cardCheckSeq.current += 1;
+      setImages(s.inputImages);
+      const nextConfig = fromRun(s.pipeline);
+      setConfig(nextConfig);
+      setClone(!!s.pipeline || s.cards.length > 0);
+      if (nextConfig.productCardId) {
+        verifyBoundCardForEditing(
+          nextConfig.productCardId,
+          nextConfig.productCardSnapshot?.name ?? nextConfig.productCardSummary?.name ?? "",
+          mode,
+        );
+      } else if (mode === "edit") {
+        setNotice("已载入同款配置，生成后将创建新批次。");
+      }
+    },
+    [verifyBoundCardForEditing],
+  );
 
   const currentSuiteId = suiteId ?? active;
 
   useEffect(() => {
+    // URL ?productCardId=<id> opens a blank new suite pre-bound to the published product card.
+    if (!suiteId && initialProductCardId) {
+      let live = true;
+      const checkSeq = ++cardCheckSeq.current;
+      hydrated.current = undefined;
+      skipDefaultFeed.current = false;
+      setActive(undefined);
+      applyState(null);
+      setLoadingBatch(false);
+      setBusy(false);
+      setBatchError("");
+      setNotice("");
+      setImages([]);
+      setClone(false);
+      setConfig(initialConfig);
+
+      void productCardsApi
+        .get(initialProductCardId)
+        .then((card) => {
+          if (!live || checkSeq !== cardCheckSeq.current) return;
+          if (card.status !== "published") {
+            setNotice(
+              `商品信息卡「${card.name}」已归档，无法用于新建批次，请重新选择或手动填写。`,
+            );
+            return;
+          }
+          setConfig((prev) => ({
+            ...prev,
+            productCardId: card.id,
+            productCardSummary: toSelectedProductCardSummary(card),
+            productCardSnapshot: null,
+          }));
+        })
+        .catch(() => {
+          if (!live || checkSeq !== cardCheckSeq.current) return;
+          setNotice("未找到指定的商品信息卡，请重新选择或手动填写。");
+        });
+
+      return () => {
+        live = false;
+      };
+    }
+
     const savedId = suiteId ? null : readLastSuiteId();
     const targetId = suiteId ?? savedId ?? undefined;
     setActive(targetId);
@@ -197,6 +313,7 @@ export function SuiteStudioPage({
     }
 
     let live = true;
+    cardCheckSeq.current += 1;
     setNotice("");
     setBatchError("");
     setImages([]);
@@ -275,7 +392,7 @@ export function SuiteStudioPage({
     return () => {
       live = false;
     };
-  }, [suiteId, reloadTick, navigate, applyState, fetchStudioState, hydrate]);
+  }, [suiteId, initialProductCardId, reloadTick, navigate, applyState, fetchStudioState, hydrate]);
 
   const currentBatch = currentState && (currentState.cards.length || currentState.pipeline) ? currentState : null;
   const pollingSuiteId = currentBatch && isBatchPolling(currentBatch) ? currentBatch.suite.id : undefined;
@@ -315,6 +432,7 @@ export function SuiteStudioPage({
 
   const startNewSuite = () => {
     clearLastSuiteId();
+    cardCheckSeq.current += 1;
     hydrated.current = undefined;
     setActive(undefined);
     applyState(null);
@@ -324,8 +442,8 @@ export function SuiteStudioPage({
     setImages([]);
     setConfig(initialConfig);
     setClone(false);
-    if (suiteId || window.location.pathname !== "/create/suite" || window.location.search) {
-      if (suiteId) skipDefaultFeed.current = true;
+    if (suiteId || initialProductCardId || window.location.pathname !== "/create/suite" || window.location.search) {
+      if (suiteId || initialProductCardId) skipDefaultFeed.current = true;
       navigate("/create/suite");
     }
   };
@@ -353,7 +471,11 @@ export function SuiteStudioPage({
         throw Error("请上传 PNG、JPEG 或 WebP 格式的图片。");
       let id = currentSuiteId;
       if (!id) {
-        id = (await suiteApi.create(productNameFor(undefined, files[0].name))).id;
+        const initialName =
+          config.productCardId && config.productCardSummary?.name
+            ? config.productCardSummary.name
+            : productNameFor(undefined, files[0].name);
+        id = (await suiteApi.create(initialName)).id;
         applyState(null);
         route(id);
       }
@@ -373,8 +495,13 @@ export function SuiteStudioPage({
     setBusy(true);
     setNotice("");
     try {
-      if (!clone)
-        await suiteApi.rename(currentSuiteId, productNameFor(effective.sellingPoints, images[0].originalFilename));
+      if (!clone) {
+        const nextName =
+          effective.productCardId && effective.productCardSummary?.name
+            ? effective.productCardSummary.name
+            : productNameFor(effective.sellingPoints, images[0].originalFilename);
+        await suiteApi.rename(currentSuiteId, nextName);
+      }
       const result = await studioApi.start(
         clone ? { cloneFrom: { suiteId: currentSuiteId, imageIds: images.map((i) => i.id) } } : { suiteId: currentSuiteId },
         effective,
@@ -449,7 +576,7 @@ export function SuiteStudioPage({
               <button type="button" onClick={() => setHistoryOpen(true)}>
                 生成记录
               </button>
-              {(currentSuiteId || currentBatch) && (
+              {(currentSuiteId || currentBatch || config.productCardId) && (
                 <button type="button" disabled={busy} onClick={startNewSuite}>
                   ＋ 新建套图
                 </button>
@@ -493,10 +620,9 @@ export function SuiteStudioPage({
               navigate={navigate}
               onActivate={setActive}
               onEdit={(s) => {
-                hydrate(s);
+                hydrate(s, "edit");
                 route(s.suite.id);
                 applyState(s);
-                setNotice("已载入同款配置，生成后将创建新批次。");
               }}
               onDelete={(id) => {
                 if (readLastSuiteId() === id) clearLastSuiteId();

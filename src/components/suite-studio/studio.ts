@@ -1,4 +1,5 @@
 import type { ListingConfig } from "../../../shared/listing-config";
+import { readProductCardSnapshot, type ProductCardSnapshot } from "../../../shared/product-card";
 import {
   createIdempotencyKey,
   type ApiImage,
@@ -19,6 +20,10 @@ import {
   type GenerationHistoryFeedPage,
   type GenerationHistoryOrigin,
 } from "../generation-history/history-model";
+import {
+  toSelectedProductCardSummary,
+  type SelectedProductCardSummary,
+} from "../product-card-picker/types";
 
 export type Counts = Record<SuiteCategoryGroupCode, number>;
 export interface Config extends ListingConfig {
@@ -29,6 +34,9 @@ export interface Config extends ListingConfig {
   visualStyle: string;
   sellingPointLayouts: string[];
   listingCopy: boolean;
+  productCardId: string | null;
+  productCardSummary: SelectedProductCardSummary | null;
+  productCardSnapshot: ProductCardSnapshot | null;
 }
 export const initialConfig: Config = {
   platform: "",
@@ -47,6 +55,9 @@ export const initialConfig: Config = {
   visualStyle: "auto",
   sellingPointLayouts: [],
   listingCopy: false,
+  productCardId: null,
+  productCardSummary: null,
+  productCardSnapshot: null,
 };
 export function totalImages(c: Config) {
   return c.mode === "smart"
@@ -120,15 +131,41 @@ export const studioApi = {
   start: (
     source: { suiteId: string } | { cloneFrom: { suiteId: string; imageIds: string[] } },
     config: Config,
-  ) => json<{ suiteId: string; pipeline: Pipeline }>("/api/suites/one-click-generate", { ...source, config }),
+  ) => {
+    const {
+      productCardSummary: _ignoredSummary,
+      productCardSnapshot: _ignoredSnapshot,
+      productCardId,
+      ...rest
+    } = config;
+    const payloadConfig = productCardId ? { ...rest, productCardId } : rest;
+    return json<{ suiteId: string; pipeline: Pipeline }>("/api/suites/one-click-generate", {
+      ...source,
+      config: payloadConfig,
+    });
+  },
   resume: (id: string, action: string, fields?: object) =>
     json(`${path(id)}/one-click-generate/resume`, { action, ...fields }),
   exportUrl: (id: string, ids: string[]) =>
     `${path(id)}/delivery/export?${new URLSearchParams({ taskIds: ids.join(",") })}`,
 };
 export function fromRun(run: Pipeline | null): Config {
-  const { refineBaseImages, ...config } = run?.config ?? {};
+  const {
+    refineBaseImages,
+    productCardSummary: _ignoredSummary,
+    productCardSnapshot: rawSnapshot,
+    productCardId: rawProductCardId,
+    ...config
+  } = run?.config ?? {};
   const counts = { ...initialConfig.counts, ...config.counts };
+  const productCardSnapshot = readProductCardSnapshot(rawSnapshot);
+  const productCardId =
+    typeof rawProductCardId === "string" && rawProductCardId.trim()
+      ? rawProductCardId.trim()
+      : (productCardSnapshot?.cardId ?? null);
+  const productCardSummary = productCardSnapshot
+    ? toSelectedProductCardSummary(productCardSnapshot)
+    : null;
   return {
     ...initialConfig,
     ...config,
@@ -137,6 +174,9 @@ export function fromRun(run: Pipeline | null): Config {
     sellingPointLayouts: config.mode === "smart"
       ? []
       : resolveSellingPointLayouts(config.sellingPointLayouts, counts.selling_points).map(({ id }) => id),
+    productCardId,
+    productCardSummary,
+    productCardSnapshot,
   };
 }
 export async function download(url: string, name: string) {
