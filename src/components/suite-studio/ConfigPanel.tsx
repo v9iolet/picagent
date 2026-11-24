@@ -10,6 +10,10 @@ import {
 import { SUPPORTED_OUTPUT_LANGUAGES } from "../../../shared/workbench-delivery";
 import { requiresPureWhiteMainImage } from "../../../shared/platform-main-background";
 import { VISUAL_STYLES } from "../../../shared/selling-point-layouts";
+import { Icon } from "../../pages/shared";
+import { ProductCardPickerModal } from "../product-card-picker/ProductCardPickerModal";
+import { SelectedProductCardBar } from "../product-card-picker/SelectedProductCardBar";
+import { toSelectedProductCardSummary } from "../product-card-picker/types";
 import { totalImages, type Config } from "./studio";
 import { SellingPointLayoutModal } from "./SellingPointLayoutModal";
 
@@ -19,6 +23,9 @@ const sellingPointsPlaceholder = `建议包含以下信息生成更精准：
 3.适用人群
 4.期望场景
 5.具体参数`;
+
+const supplementalSellingPointsPlaceholder =
+  "客观商品事实将由所选商品信息卡自动注入；可在此补充本次画面侧重点、构图色调偏好或额外说明";
 
 interface Props {
   config: Config;
@@ -47,6 +54,7 @@ export function ConfigPanel({
   const [drag, setDrag] = useState(false);
   const [showSellingPointsHelp, setShowSellingPointsHelp] = useState(false);
   const [showLayouts, setShowLayouts] = useState(false);
+  const [showProductCardPicker, setShowProductCardPicker] = useState(false);
   const sellingPointsHelpId = useId();
   const layoutsHelpId = useId();
   const layoutCountId = useId();
@@ -54,6 +62,7 @@ export function ConfigPanel({
   const profile = platforms.find((p) => p.code === c.platform);
   const pureWhiteMain = requiresPureWhiteMainImage(profile);
   const count = totalImages(c);
+  const hasProductCard = Boolean(c.productCardId && c.productCardSummary);
   function closeLayouts() {
     setShowLayouts(false);
     requestAnimationFrame(() => layoutEntry.current?.focus({ preventScroll: true }));
@@ -160,8 +169,38 @@ export function ConfigPanel({
           )}
         </section>
         <section>
+          {hasProductCard && c.productCardSummary ? (
+            <SelectedProductCardBar
+              card={c.productCardSummary}
+              disabled={busy}
+              onChangeCard={() => setShowProductCardPicker(true)}
+              onRemove={() =>
+                update({
+                  productCardId: null,
+                  productCardSummary: null,
+                  productCardSnapshot: null,
+                })
+              }
+            />
+          ) : (
+            <div className="pcp-trigger-wrap">
+              <button
+                type="button"
+                className="pcp-trigger-btn"
+                aria-haspopup="dialog"
+                disabled={busy}
+                onClick={() => setShowProductCardPicker(true)}
+              >
+                <span className="pcp-trigger-left">
+                  <Icon name="box" />
+                  <span>选择商品信息卡（选填）</span>
+                </span>
+                <span className="pcp-trigger-arrow" aria-hidden="true">›</span>
+              </button>
+            </div>
+          )}
           <div className="ss-selling-points-heading">
-            <h2>商品卖点 & 生成要求</h2>
+            <h2>{hasProductCard ? "补充卖点 & 本次生成要求（选填）" : "商品卖点 & 生成要求"}</h2>
             <button
               type="button"
               aria-label="商品卖点填写说明"
@@ -173,13 +212,15 @@ export function ConfigPanel({
             </button>
           </div>
           <p id={sellingPointsHelpId} className="ss-note" hidden={!showSellingPointsHelp}>
-            建议逐行填写产品名称、核心卖点、适用人群、期望场景和具体参数。请填写已确认的商品事实，不确定的信息可留空。
+            {hasProductCard
+              ? "客观商品事实已由所选商品信息卡自动注入；此处仅填写本次画面的侧重点、构图色调偏好或额外说明。"
+              : "建议逐行填写产品名称、核心卖点、适用人群、期望场景和具体参数。请填写已确认的商品事实，不确定的信息可留空。"}
           </p>
           <textarea
             rows={6}
             aria-label="商品卖点与生成要求"
             aria-describedby={showSellingPointsHelp ? sellingPointsHelpId : undefined}
-            placeholder={sellingPointsPlaceholder}
+            placeholder={hasProductCard ? supplementalSellingPointsPlaceholder : sellingPointsPlaceholder}
             value={c.sellingPoints}
             onChange={(e) => update({ sellingPoints: e.target.value })}
           />
@@ -299,6 +340,18 @@ export function ConfigPanel({
           }}
         />
       )}
+      <ProductCardPickerModal
+        open={showProductCardPicker}
+        selectedCardId={c.productCardId}
+        onClose={() => setShowProductCardPicker(false)}
+        onConfirm={(card) =>
+          update({
+            productCardId: card.id,
+            productCardSummary: toSelectedProductCardSummary(card),
+            productCardSnapshot: null,
+          })
+        }
+      />
       <footer>
         <button className="ss-primary" disabled={busy || !images.length || !profile} onClick={generate}>
           {c.listingCopy ? "一键生成套图与商品上架文案" : "一键生成套图"}（{count}张）

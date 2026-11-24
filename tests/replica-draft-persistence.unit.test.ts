@@ -641,3 +641,56 @@ test("复刻草稿持久化：水合进行中调用 clearDraft 不会回填旧�
   assert.equal(store2.getSnapshot().references.length, 0);
   assert.equal(urls2.active.size, 0);
 });
+
+test("复刻草稿持久化：仅选择商品信息卡时也会持久化到 localStorage，重建 store 后完整恢复且 clearDraft 清空", async () => {
+  const local = new MemoryStorageLike();
+  const blobs = new MemoryBlobStorage();
+
+  const store1 = createReplicaDraftStore({
+    storage: local,
+    legacySessionStorage: null,
+    blobStorage: blobs,
+    createObjectUrl: makeFakeUrlHooks().createObjectUrl,
+    revokeObjectUrl: () => {},
+  });
+
+  store1.updateConfig({
+    productCardId: "card-sku-100",
+    productCardSummary: {
+      cardId: "card-sku-100",
+      name: "氮化镓 65W 折叠快充头",
+      category: "数码配件",
+      skuCode: "SKU-GAN-65W",
+      revision: 2,
+      coverThumbnailUrl: "/api/product-cards/card-sku-100/images/img-1/preview/thumbnail",
+      sellingPoints: ["65W 双口快充", "折叠插脚便携"],
+      specifications: "65W Max，52×36×36mm，112g",
+      materialsCraft: "阻燃 PC 外壳",
+      audienceScenarios: "差旅办公人群",
+      packageContents: "快充头 ×1，说明书 ×1",
+    },
+  });
+
+  const persistedRaw = local.getItem(REPLICA_DRAFT_STORAGE_KEY);
+  assert.ok(persistedRaw, "Selecting only a product card should still persist draft metadata");
+
+  const store2 = createReplicaDraftStore({
+    storage: local,
+    legacySessionStorage: null,
+    blobStorage: blobs,
+    createObjectUrl: makeFakeUrlHooks().createObjectUrl,
+    revokeObjectUrl: () => {},
+  });
+  await store2.waitForHydration();
+
+  const snap2 = store2.getSnapshot();
+  assert.equal(snap2.config.productCardId, "card-sku-100");
+  assert.equal(snap2.config.productCardSummary?.name, "氮化镓 65W 折叠快充头");
+  assert.equal(snap2.config.productCardSummary?.skuCode, "SKU-GAN-65W");
+  assert.equal(snap2.config.productCardSummary?.revision, 2);
+
+  store2.clearDraft();
+  assert.equal(store2.getSnapshot().config.productCardId, null);
+  assert.equal(store2.getSnapshot().config.productCardSummary, null);
+  assert.equal(local.getItem(REPLICA_DRAFT_STORAGE_KEY), null);
+});

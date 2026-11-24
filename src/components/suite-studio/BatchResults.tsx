@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { suiteApi, type ApiPlatformProfile } from "../../api/client";
+import { readProductCardSnapshot } from "../../../shared/product-card";
 import { SUITE_CATEGORY_GROUPS, SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
 import { pipelineErrorMessages } from "../../../shared/suite-pipeline-errors";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
+import { SelectedProductCardBar } from "../product-card-picker/SelectedProductCardBar";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
 import { StudioDialog } from "./StudioDialog";
 import {
@@ -277,6 +279,7 @@ export function BatchResults({
   const structure = s.planning.snapshot?.structure,
     missing = structure?.categoryAllocations.filter((a) => a.missingFacts.some((fact) => fact.trim())) ?? [];
   const originals = s.inputImages[0];
+  const productCardSnapshot = readProductCardSnapshot(run?.config?.productCardSnapshot);
   return (
     <section className="ss-batch" role="region" aria-label="生成批次">
       <header className="ss-batch-head">
@@ -369,6 +372,9 @@ export function BatchResults({
           )}
         </div>
       </header>
+      {productCardSnapshot && (
+        <SelectedProductCardBar card={productCardSnapshot} readOnly compact />
+      )}
       {progressModel && (
         <div className="ss-progress">
           <div className="ss-progress-head">

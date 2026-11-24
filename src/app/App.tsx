@@ -61,13 +61,27 @@ export function App() {
     return tab === "templates" ? <PromptTemplatesPage navigate={navigate} /> : <ImageAssetsPage navigate={navigate} />;
   }
   if (/^\/create\/replica\/?$/.test(canonical)) {
-    const replicaSuiteId = new URLSearchParams(search).get("suite")?.trim() || undefined;
-    return <ReplicaStudioPage suiteId={replicaSuiteId} navigate={navigate} />;
+    const replicaParams = new URLSearchParams(search);
+    const replicaSuiteId = replicaParams.get("suite")?.trim() || undefined;
+    const replicaProductCardId = replicaParams.get("productCardId")?.trim() || undefined;
+    return (
+      <ReplicaStudioPage
+        suiteId={replicaSuiteId}
+        initialProductCardId={replicaProductCardId}
+        navigate={navigate}
+      />
+    );
   }
   if (reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;
   const pathSuiteId = canonical.match(/^\/create\/suite\/([^/]+)\/?$/)?.[1];
-  const querySuiteId = /^\/create\/suite\/?$/.test(canonical)
-    ? new URLSearchParams(search).get("suite")?.trim() || undefined
-    : undefined;
-  return <SuiteStudioPage suiteId={pathSuiteId ?? querySuiteId} navigate={navigate} />;
+  const suiteParams = /^\/create\/suite\/?$/.test(canonical) ? new URLSearchParams(search) : null;
+  const querySuiteId = suiteParams?.get("suite")?.trim() || undefined;
+  const suiteProductCardId = suiteParams?.get("productCardId")?.trim() || undefined;
+  return (
+    <SuiteStudioPage
+      suiteId={pathSuiteId ?? querySuiteId}
+      initialProductCardId={suiteProductCardId}
+      navigate={navigate}
+    />
+  );
 }

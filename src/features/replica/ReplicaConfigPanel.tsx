@@ -1,5 +1,9 @@
 import { useState, type DragEvent } from "react";
 import type { ImageOptions } from "../../../shared/model-settings";
+import { ProductCardPickerModal } from "../../components/product-card-picker/ProductCardPickerModal";
+import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
+import { toSelectedProductCardSummary } from "../../components/product-card-picker/types";
+import { Icon } from "../../pages/shared";
 import {
   allowedReplicaSizes,
   charCount,
@@ -58,6 +62,7 @@ export function ReplicaConfigPanel({
   const [productDragging, setProductDragging] = useState(false);
   const [dragRefIndex, setDragRefIndex] = useState<number | null>(null);
   const [hoveredLevel, setHoveredLevel] = useState<string | null>(null);
+  const [productCardPickerOpen, setProductCardPickerOpen] = useState(false);
 
   const validRefCount = references.filter((item) => item.status === "ready").length;
   const validProductCount = products.filter((item) => item.status === "ready").length;
@@ -66,6 +71,7 @@ export function ReplicaConfigPanel({
   const showNoProductWarning = needsNoProductWarning(config.sceneType, validProductCount);
   const submitState = getReplicaSubmitState(references, products, config, submitting);
   const unifiedCount = charCount(config.unifiedRequirement);
+  const hasProductCard = Boolean(config.productCardId && config.productCardSummary);
 
   const handleRefCardDrop = (targetIndex: number) => (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
@@ -374,15 +380,52 @@ export function ReplicaConfigPanel({
         </section>
 
         <section>
-          <h2>商品信息（选填）</h2>
+          {hasProductCard && config.productCardSummary ? (
+            <SelectedProductCardBar
+              card={config.productCardSummary}
+              disabled={submitting}
+              onChangeCard={() => setProductCardPickerOpen(true)}
+              onRemove={() =>
+                onUpdateConfig({
+                  productCardId: null,
+                  productCardSummary: null,
+                })
+              }
+            />
+          ) : (
+            <div className="pcp-trigger-wrap">
+              <button
+                type="button"
+                className="pcp-trigger-btn"
+                aria-haspopup="dialog"
+                disabled={submitting}
+                onClick={() => setProductCardPickerOpen(true)}
+              >
+                <span className="pcp-trigger-left">
+                  <Icon name="box" />
+                  <span>选择商品信息卡（选填）</span>
+                </span>
+                <span className="pcp-trigger-arrow" aria-hidden="true">›</span>
+              </button>
+            </div>
+          )}
+          <h2>{hasProductCard ? "补充商品信息（选填）" : "商品信息（选填）"}</h2>
           <textarea
             rows={3}
             aria-label="商品信息"
-            placeholder="填写商品名称、核心卖点、参数、规格等真实事实"
+            placeholder={
+              hasProductCard
+                ? "客观商品事实将由所选商品信息卡自动注入；可在此补充本次复刻特有的文案或卖点说明"
+                : "填写商品名称、核心卖点、参数、规格等真实事实"
+            }
             value={config.productInfo}
             onChange={(event) => onUpdateConfig({ productInfo: event.target.value })}
           />
-          <small>作为本批次新文案中参数、卖点、规格的唯一事实来源，未填写的参数不会编造。</small>
+          <small>
+            {hasProductCard
+              ? "客观商品事实由所选商品信息卡自动注入，并与此处补充说明合并作为本批次唯一事实来源。"
+              : "作为本批次新文案中参数、卖点、规格的唯一事实来源，未填写的参数不会编造。"}
+          </small>
         </section>
 
         {showStyleUnified && (
@@ -451,6 +494,18 @@ export function ReplicaConfigPanel({
           </div>
         </section>
       </fieldset>
+
+      <ProductCardPickerModal
+        open={productCardPickerOpen}
+        selectedCardId={config.productCardId}
+        onClose={() => setProductCardPickerOpen(false)}
+        onConfirm={(card) =>
+          onUpdateConfig({
+            productCardId: card.id,
+            productCardSummary: toSelectedProductCardSummary(card),
+          })
+        }
+      />
 
       <footer className="rp-footer">
         {submitState.disabledReason && (
