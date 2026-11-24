@@ -7,6 +7,7 @@ import {
   type ApiProductOnboardingSessionSummary,
 } from "../../api/client";
 import { AppShell } from "../../components/AppShell";
+import { InfoTip } from "../../components/ui/InfoTip";
 import { Icon, ModelSettingsMessage } from "../../pages/shared";
 import {
   toCreateSupplierImagePayloads,
@@ -19,38 +20,10 @@ import {
 } from "./onboarding-attachments";
 
 const QUICK_ENTRIES = [
-  {
-    key: "suite",
-    title: "商品套图",
-    description: "上传实拍原图，自动规划并生成主图、卖点图、场景图与上架文案",
-    to: "/create/suite",
-    icon: "sparkles",
-    tone: "blue",
-  },
-  {
-    key: "replica",
-    title: "爆品图复刻",
-    description: "参考爆品参考图结构与风格，快速复刻同款高转化视觉图",
-    to: "/create/replica",
-    icon: "compare",
-    tone: "indigo",
-  },
-  {
-    key: "canvas",
-    title: "生图画布",
-    description: "在自由画布中编排多节点生图任务、细调提示词与局部重绘",
-    to: "/create/canvas",
-    icon: "columns",
-    tone: "teal",
-  },
-  {
-    key: "products",
-    title: "商品库",
-    description: "检索、编辑、归档已入库商品信息卡与供应商参考图资产",
-    to: "/products",
-    icon: "box",
-    tone: "amber",
-  },
+  { key: "suite", title: "商品套图", to: "/create/suite", icon: "grid" },
+  { key: "replica", title: "爆品图复刻", to: "/create/replica", icon: "compare" },
+  { key: "canvas", title: "生图画布", to: "/create/canvas", icon: "columns" },
+  { key: "products", title: "商品库", to: "/products", icon: "box" },
 ] as const;
 
 export function HomeLandingView({
@@ -68,6 +41,7 @@ export function HomeLandingView({
 
   const [draftSessions, setDraftSessions] = useState<ApiProductOnboardingSessionSummary[]>([]);
   const [recentCards, setRecentCards] = useState<ApiProductCardSummary[]>([]);
+  const [activeTab, setActiveTab] = useState<"recent" | "drafts">("recent");
   const [loadingLists, setLoadingLists] = useState(true);
   const [listError, setListError] = useState("");
   const [reloadTick, setReloadTick] = useState(0);
@@ -102,6 +76,12 @@ export function HomeLandingView({
       active = false;
     };
   }, [reloadTick]);
+
+  useEffect(() => {
+    if (draftSessions.length === 0 && activeTab === "drafts") {
+      setActiveTab("recent");
+    }
+  }, [draftSessions.length, activeTab]);
 
   useEffect(() => {
     if (!deleteTarget) return;
@@ -169,97 +149,84 @@ export function HomeLandingView({
       activeNav="home"
       navigate={navigate}
       crumbs={[{ label: "首页" }]}
-      statusText={creating ? "建档分析中…" : loadingLists ? "正在同步…" : "实时已同步"}
+      statusText={creating ? "提取中…" : loadingLists ? "正在同步…" : "实时已同步"}
       statusTone={creating || loadingLists ? "running" : createError || listError ? "error" : "pass"}
     >
       <main className="home-landing">
-        {/* Top centered Agent hero card */}
-        <section className="home-hero" aria-label="新品商品信息建档">
-          <div className="home-hero-inner">
-            <div className="home-hero-badge">
-              <Icon name="sparkles" />
-              <span>商品建档 Agent</span>
-            </div>
-            <h1>新品商品信息建档</h1>
-            <p className="home-hero-subtitle">
-              输入新品参数与卖点，或上传供应商 <code>.txt</code> 说明与参考图，AI 自动提取结构化商品信息卡并合并追问缺失必填项；仅用于商品建档入库，不直接生图。
-            </p>
-
-            <OnboardingComposer
-              variant="hero"
-              message={message}
-              onMessageChange={setMessage}
-              pendingImages={pendingImages}
-              onPendingImagesChange={setPendingImages}
-              pendingTxtFiles={pendingTxtFiles}
-              onPendingTxtFilesChange={setPendingTxtFiles}
-              sending={creating}
-              onSubmit={handleStartOnboarding}
-              ariaLabel="新品商品信息输入"
-              placeholder="粘贴商品名称、核心卖点、规格尺寸重量、材质工艺、适用人群场景或包装清单，也可直接附带 .txt 文件与供应商参考图开始建档…"
-              submitLabel="开始建档"
-              sendingLabel="正在分析建档…"
+        {/* Centered Hero: Title + InfoTip + Single-layer Composer + Compact Quick Tools */}
+        <section className="home-hero-block" aria-label="新品信息建档">
+          <div className="home-title-row">
+            <h1>新品信息建档</h1>
+            <InfoTip
+              title="建档说明"
+              label="建档说明"
+              align="center"
+              content="输入新品参数与卖点，或附带供应商参考图（最多 6 张）与 .txt 资料（单次最多 3 个、单个 ≤200KB），系统自动提取 6 项必填商品事实并合并追问缺项；仅用于商品建档入库，不直接生图。"
             />
+          </div>
 
-            {createError && (
-              <div className="home-inline-alert" role="alert">
-                <Icon name="alert" />
-                <div className="home-inline-alert-text">
-                  <ModelSettingsMessage message={createError} />
-                </div>
-                <button
-                  type="button"
-                  className="btn home-inline-retry"
-                  disabled={creating}
-                  onClick={() => void handleStartOnboarding()}
-                >
-                  重试
-                </button>
+          <OnboardingComposer
+            variant="hero"
+            message={message}
+            onMessageChange={setMessage}
+            pendingImages={pendingImages}
+            onPendingImagesChange={setPendingImages}
+            pendingTxtFiles={pendingTxtFiles}
+            onPendingTxtFilesChange={setPendingTxtFiles}
+            sending={creating}
+            onSubmit={handleStartOnboarding}
+            ariaLabel="新品商品信息输入"
+            placeholder="输入商品名称、核心卖点或规格参数，点击左下角 ＋ 可附带参考图与 .txt 资料…"
+            submitLabel="开始建档"
+            sendingLabel="提取中…"
+          />
+
+          {createError && (
+            <div className="home-inline-alert" role="alert">
+              <Icon name="alert" />
+              <div className="home-inline-alert-text">
+                <ModelSettingsMessage message={createError} />
               </div>
-            )}
-          </div>
-        </section>
-
-        {/* Middle quick entry cards */}
-        <section className="home-section" aria-label="创作功能快捷入口">
-          <div className="home-section-head">
-            <div>
-              <h2>快捷创作入口</h2>
-              <p>从任意创作工具开始，或直接进入商品库管理已有商品卡</p>
+              <button
+                type="button"
+                className="btn btn-sm home-inline-retry"
+                disabled={creating}
+                onClick={() => void handleStartOnboarding()}
+              >
+                重试
+              </button>
             </div>
-          </div>
-          <div className="home-quick-grid">
+          )}
+
+          <nav className="home-quick-row" aria-label="快捷入口">
             {QUICK_ENTRIES.map((entry) => (
               <a
                 key={entry.key}
-                className={`home-quick-card is-${entry.tone}`}
+                className="home-quick-pill"
                 href={entry.to}
                 onClick={linkTo(entry.to)}
                 data-quick-entry={entry.key}
               >
-                <span className="home-quick-icon">
+                <span className="home-quick-left">
                   <Icon name={entry.icon} />
+                  <span>{entry.title}</span>
                 </span>
-                <div className="home-quick-body">
-                  <div className="home-quick-title-row">
-                    <strong>{entry.title}</strong>
-                    <Icon name="arrow-right" />
-                  </div>
-                  <p>{entry.description}</p>
-                </div>
+                <span className="home-quick-arrow" aria-hidden="true">
+                  <Icon name="arrow-right" />
+                </span>
               </a>
             ))}
-          </div>
+          </nav>
         </section>
 
         {listError && (
-          <div className="home-section">
+          <div className="home-lower-section">
             <div className="home-inline-alert" role="alert">
               <Icon name="alert" />
               <div className="home-inline-alert-text">{listError}</div>
               <button
                 type="button"
-                className="btn home-inline-retry"
+                className="btn btn-sm home-inline-retry"
                 onClick={() => setReloadTick((n) => n + 1)}
               >
                 重试
@@ -268,17 +235,123 @@ export function HomeLandingView({
           </div>
         )}
 
-        {/* Unfinished onboarding drafts */}
-        {draftSessions.length > 0 && (
-          <section className="home-section" aria-label="未完成建档草稿">
-            <div className="home-section-head">
-              <div>
-                <h2>未完成建档草稿</h2>
-                <p>上次中断的新品建档会话，点击即可恢复双栏继续对话与补全</p>
-              </div>
-              <span className="badge">{draftSessions.length} 个草稿</span>
+        {/* Unified Lower Section: Segmented Switch */}
+        <section className="home-lower-section" aria-label="商品卡与建档草稿">
+          <div className="home-lower-header">
+            <div className="home-segmented" role="tablist" aria-label="首页资产切换">
+              <button
+                type="button"
+                role="tab"
+                className={activeTab === "recent" ? "is-active" : ""}
+                aria-selected={activeTab === "recent"}
+                data-home-tab="recent"
+                onClick={() => setActiveTab("recent")}
+              >
+                {recentCards.length > 0 ? `最近商品卡 (${recentCards.length})` : "最近商品卡"}
+              </button>
+              {draftSessions.length > 0 && (
+                <button
+                  type="button"
+                  role="tab"
+                  className={activeTab === "drafts" ? "is-active" : ""}
+                  aria-selected={activeTab === "drafts"}
+                  data-home-tab="drafts"
+                  onClick={() => setActiveTab("drafts")}
+                >
+                  未完成建档草稿 ({draftSessions.length})
+                </button>
+              )}
             </div>
-            <div className="home-draft-grid">
+
+            <a className="home-view-all-link" href="/products" onClick={linkTo("/products")}>
+              <span>查看全部</span>
+              <Icon name="arrow-right" />
+            </a>
+          </div>
+
+          {activeTab === "recent" ? (
+            loadingLists && recentCards.length === 0 ? (
+              <p className="home-empty-line" role="status">
+                正在加载最近商品卡…
+              </p>
+            ) : recentCards.length === 0 ? (
+              <p className="home-empty-line">
+                暂无已入库商品卡，在上方输入新品资料或上传参考图即可开始建档。
+              </p>
+            ) : (
+              <div className="home-cards-grid" role="tabpanel" aria-label="最近商品卡">
+                {recentCards.map((card) => (
+                  <article
+                    key={card.id}
+                    className="home-recent-card"
+                    data-recent-card-id={card.id}
+                  >
+                    <div
+                      className="home-card-top"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => navigate(`/products?selected=${encodeURIComponent(card.id)}`)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          navigate(`/products?selected=${encodeURIComponent(card.id)}`);
+                        }
+                      }}
+                    >
+                      <div className="home-card-thumb">
+                        {card.coverThumbnailUrl ? (
+                          <img src={card.coverThumbnailUrl} alt={card.name} loading="lazy" />
+                        ) : (
+                          <span className="home-card-thumb-empty">
+                            <Icon name="box" />
+                          </span>
+                        )}
+                      </div>
+                      <div className="home-card-meta">
+                        <h3 className="home-card-title" title={card.name}>
+                          {card.name}
+                        </h3>
+                        {card.sellingPoints.length > 0 && (
+                          <ul className="home-card-points">
+                            {card.sellingPoints.slice(0, 2).map((point, index) => (
+                              <li key={`${card.id}-sp-${index}`} title={point}>
+                                {point}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="home-card-foot">
+                      <span className="home-card-time">{formatShortDateTime(card.updatedAt)}</span>
+                      <div className="home-card-actions">
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() =>
+                            navigate(`/create/suite?productCardId=${encodeURIComponent(card.id)}`)
+                          }
+                        >
+                          去套图
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() =>
+                            navigate(`/create/replica?productCardId=${encodeURIComponent(card.id)}`)
+                          }
+                        >
+                          去复刻
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )
+          ) : (
+            <div className="home-cards-grid" role="tabpanel" aria-label="未完成建档草稿">
               {draftSessions.map((draft) => {
                 const missingCount = draft.missingRequiredFields.length;
                 return (
@@ -288,7 +361,7 @@ export function HomeLandingView({
                     data-draft-session-id={draft.id}
                   >
                     <div
-                      className="home-draft-main"
+                      className="home-card-top"
                       role="button"
                       tabIndex={0}
                       onClick={() => navigate(`/?session=${encodeURIComponent(draft.id)}`)}
@@ -308,140 +381,50 @@ export function HomeLandingView({
                           </span>
                         )}
                       </div>
-                      <div className="home-draft-info">
-                        <h3>{draft.title}</h3>
-                        <div className="home-draft-badges">
-                          <span
-                            className={`home-pill ${missingCount > 0 ? "is-warn" : "is-pass"}`}
-                          >
-                            {missingCount > 0 ? `待补 ${missingCount} 项必填` : "6 项必填已齐 · 待保存"}
+                      <div className="home-card-meta">
+                        <h3 className="home-card-title" title={draft.title}>
+                          {draft.title}
+                        </h3>
+                        <span className={`home-draft-badge ${missingCount === 0 ? "is-done" : ""}`}>
+                          <i aria-hidden="true" />
+                          <span>
+                            {missingCount > 0
+                              ? `待补 ${missingCount} 项必填`
+                              : "6 项必填已齐 · 待保存"}
+                            {draft.supplierImageCount > 0
+                              ? ` · ${draft.supplierImageCount} 张参考图`
+                              : ""}
                           </span>
-                          {draft.supplierImageCount > 0 && (
-                            <span className="home-pill">{draft.supplierImageCount} 张参考图</span>
-                          )}
-                        </div>
-                        <span className="home-card-time">
-                          更新于 {formatShortDateTime(draft.updatedAt)}
                         </span>
                       </div>
                     </div>
-                    <div className="home-draft-actions">
-                      <button
-                        type="button"
-                        className="btn home-draft-resume-btn"
-                        onClick={() => navigate(`/?session=${encodeURIComponent(draft.id)}`)}
-                      >
-                        继续建档
-                      </button>
-                      <button
-                        type="button"
-                        className="home-icon-danger-btn"
-                        aria-label={`删除草稿 ${draft.title}`}
-                        title="删除草稿"
-                        onClick={() => setDeleteTarget(draft)}
-                      >
-                        <Icon name="trash" />
-                      </button>
+
+                    <div className="home-card-foot">
+                      <span className="home-card-time">
+                        更新于 {formatShortDateTime(draft.updatedAt)}
+                      </span>
+                      <div className="home-card-actions">
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-primary"
+                          onClick={() => navigate(`/?session=${encodeURIComponent(draft.id)}`)}
+                        >
+                          继续建档
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-btn home-icon-danger-btn"
+                          aria-label={`删除草稿 ${draft.title}`}
+                          title="删除草稿"
+                          onClick={() => setDeleteTarget(draft)}
+                        >
+                          <Icon name="trash" />
+                        </button>
+                      </div>
                     </div>
                   </article>
                 );
               })}
-            </div>
-          </section>
-        )}
-
-        {/* Recent published product cards */}
-        <section className="home-section" aria-label="最近商品信息卡">
-          <div className="home-section-head">
-            <div>
-              <h2>最近商品信息卡</h2>
-              <p>已入库的在用商品信息卡，可直接带入商品套图或爆品图复刻</p>
-            </div>
-            <a className="home-view-all-link" href="/products" onClick={linkTo("/products")}>
-              <span>查看全部</span>
-              <Icon name="arrow-right" />
-            </a>
-          </div>
-
-          {loadingLists && recentCards.length === 0 ? (
-            <div className="home-empty-box" role="status">
-              正在加载最近商品信息卡…
-            </div>
-          ) : recentCards.length === 0 ? (
-            <div className="home-empty-box">
-              <Icon name="box" />
-              <strong>暂无已入库商品信息卡</strong>
-              <p>在上方输入新品资料或上传供应商文件即可开始建档，也可前往商品库手动新建。</p>
-            </div>
-          ) : (
-            <div className="home-recent-grid">
-              {recentCards.map((card) => (
-                <article
-                  key={card.id}
-                  className="home-recent-card"
-                  data-recent-card-id={card.id}
-                >
-                  <div
-                    className="home-recent-card-top"
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => navigate(`/products?selected=${encodeURIComponent(card.id)}`)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        navigate(`/products?selected=${encodeURIComponent(card.id)}`);
-                      }
-                    }}
-                  >
-                    <div className="home-card-thumb">
-                      {card.coverThumbnailUrl ? (
-                        <img src={card.coverThumbnailUrl} alt={card.name} loading="lazy" />
-                      ) : (
-                        <span className="home-card-thumb-empty">
-                          <Icon name="box" />
-                        </span>
-                      )}
-                    </div>
-                    <div className="home-recent-card-head">
-                      <h3>{card.name}</h3>
-                    </div>
-                  </div>
-
-                  {card.sellingPoints.length > 0 && (
-                    <ul className="home-recent-points">
-                      {card.sellingPoints.slice(0, 2).map((point, index) => (
-                        <li key={`${card.id}-sp-${index}`} title={point}>
-                          {point}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-
-                  <div className="home-recent-card-foot">
-                    <span className="home-card-time">{formatShortDateTime(card.updatedAt)}</span>
-                    <div className="home-recent-card-actions">
-                      <button
-                        type="button"
-                        className="product-card-quick-btn"
-                        onClick={() =>
-                          navigate(`/create/suite?productCardId=${encodeURIComponent(card.id)}`)
-                        }
-                      >
-                        去生成套图
-                      </button>
-                      <button
-                        type="button"
-                        className="product-card-quick-btn"
-                        onClick={() =>
-                          navigate(`/create/replica?productCardId=${encodeURIComponent(card.id)}`)
-                        }
-                      >
-                        去爆品图复刻
-                      </button>
-                    </div>
-                  </div>
-                </article>
-              ))}
             </div>
           )}
         </section>
@@ -476,7 +459,7 @@ export function HomeLandingView({
                 </button>
                 <button
                   type="button"
-                  className="btn home-danger-btn"
+                  className="btn btn-danger"
                   disabled={deleting}
                   onClick={() => void handleConfirmDeleteDraft()}
                 >

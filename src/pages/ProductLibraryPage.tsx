@@ -10,6 +10,8 @@ import {
   type ApiProductCardSummary,
 } from "../api/client";
 import { AppShell } from "../components/AppShell";
+import { InfoTip } from "../components/ui/InfoTip";
+import { formatShortDateTime } from "../features/home/onboarding-attachments";
 import {
   ProductCardEditorForm,
   productCardFieldsFromCard,
@@ -29,16 +31,6 @@ function statusLabel(status: ProductCardStatus): string {
   return status === "published" ? "在用" : "已归档";
 }
 
-function statusBadgeClass(status: ProductCardStatus): string {
-  return status === "published" ? "pass" : "";
-}
-
-function filterSummaryLabel(status: ProductStatusFilter): string {
-  if (status === "published") return "在用商品卡";
-  if (status === "archived") return "已归档商品卡";
-  return "全部商品卡";
-}
-
 export function ProductLibraryPage({
   initialSelectedId,
   navigate,
@@ -51,6 +43,7 @@ export function ProductLibraryPage({
   const [submittedKeyword, setSubmittedKeyword] = useState("");
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
+  const [statusCounts, setStatusCounts] = useState({ published: 0, archived: 0, all: 0 });
   const [items, setItems] = useState<ApiProductCardSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [reloadTick, setReloadTick] = useState(0);
@@ -77,6 +70,7 @@ export function ProductLibraryPage({
 
   const listSequence = useRef(0);
   const detailSequence = useRef(0);
+  const countsSequence = useRef(0);
   const selectedIdRef = useRef<string | null>(selectedId);
   selectedIdRef.current = selectedId;
   const pinnedSelectionRef = useRef<string | null>(initialSelectedId ?? null);
@@ -104,6 +98,17 @@ export function ProductLibraryPage({
     };
   }, []);
 
+  // Debounced live search when typing
+  useEffect(() => {
+    const trimmed = keywordInput.trim();
+    if (trimmed === submittedKeyword) return;
+    const timer = window.setTimeout(() => {
+      setSubmittedKeyword(trimmed);
+      setPage(1);
+    }, trimmed === "" ? 0 : 220);
+    return () => window.clearTimeout(timer);
+  }, [keywordInput, submittedKeyword]);
+
   const notify = (message: string) => {
     setToast(message);
     if (toastTimerRef.current !== null) {
@@ -116,6 +121,28 @@ export function ProductLibraryPage({
   };
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  // Fetch counts for left status rail
+  useEffect(() => {
+    let active = true;
+    const seq = ++countsSequence.current;
+    void Promise.all([
+      productCardsApi.list({ status: "published", limit: 1 }),
+      productCardsApi.list({ status: "archived", limit: 1 }),
+    ])
+      .then(([pubRes, archRes]) => {
+        if (!active || seq !== countsSequence.current) return;
+        setStatusCounts({
+          published: pubRes.total,
+          archived: archRes.total,
+          all: pubRes.total + archRes.total,
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [reloadTick]);
 
   // Fetch product cards list
   useEffect(() => {
@@ -345,82 +372,82 @@ export function ProductLibraryPage({
     }
   };
 
+  const filterItems: Array<{ value: ProductStatusFilter; label: string; count: number }> = [
+    { value: "published", label: "在用", count: statusCounts.published },
+    { value: "archived", label: "已归档", count: statusCounts.archived },
+    { value: "all", label: "全部", count: statusCounts.all },
+  ];
+
   return (
     <AppShell
       activeNav="products"
       navigate={navigate}
       fullHeight
       crumbs={[{ label: "商品库" }]}
-      statusText={loading ? "正在同步商品库…" : `共 ${total} 款`}
+      statusText={loading ? "正在同步商品库…" : `共 ${statusCounts.all} 款`}
       statusTone={loading ? "running" : error ? "error" : "pass"}
     >
       <main className="workarea styles-layout style-library-workarea product-library-workarea">
-        {/* Left filter panel */}
-        <section className="panel style-filter-panel">
+        {/* Left Status Filter Rail */}
+        <section className="panel style-filter-panel product-filter-panel">
           <header className="panel-header">
-            <div>
-              <strong className="panel-title">商品筛选</strong>
-              <div className="panel-subtitle">按状态筛选商品信息卡</div>
+            <div className="product-col-title-group">
+              <strong className="panel-title">状态</strong>
+              <InfoTip
+                title="状态与历史快照"
+                label="状态与快照说明"
+                align="start"
+                content="已归档的商品卡不再出现在创作页选择器中；修改、归档或删除商品卡均不影响历史套图与复刻批次已冻结的商品快照。"
+              />
             </div>
-            <span className="badge">{total} 款</span>
+            <span className="product-col-count">{statusCounts.all}</span>
           </header>
           <div className="panel-scroll">
-            <div className="style-filters">
-              <div className="style-filter-group">
-                <h3>状态</h3>
-                {(
-                  [
-                    ["published", "在用"],
-                    ["archived", "已归档"],
-                    ["all", "全部"],
-                  ] as [ProductStatusFilter, string][]
-                ).map(([value, label]) => (
-                  <label className="style-check" key={value}>
-                    <input
-                      type="radio"
-                      name="productCardStatus"
-                      checked={statusFilter === value}
-                      onChange={() => handleStatusFilterChange(value)}
-                    />
-                    {label}
-                  </label>
-                ))}
-              </div>
-              <div className="style-filter-note">
-                <Icon name="box" />
-                <p>
-                  供应商参考图仅用于商品库认款展示与建档识别，不流入创作页生图实拍原图区；修改、归档或删除商品卡均不影响历史套图与爆品图复刻批次已冻结的快照。
-                </p>
-              </div>
+            <div className="product-filter-list" role="radiogroup" aria-label="商品卡状态筛选">
+              {filterItems.map((item) => {
+                const active = statusFilter === item.value;
+                return (
+                  <button
+                    key={item.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    className={`product-filter-item ${active ? "is-active" : ""}`}
+                    data-status-filter={item.value}
+                    onClick={() => handleStatusFilterChange(item.value)}
+                  >
+                    <span>{item.label}</span>
+                    <span className="product-filter-cnt">{item.count}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </section>
 
-        {/* Center catalog */}
+        {/* Center Catalog Column */}
         <section className="styles-center style-library-center product-library-center">
           <header className="panel-header style-catalog-toolbar">
-            <div>
+            <div className="product-col-title-group">
               <strong className="panel-title">商品信息卡</strong>
-              <div className="panel-subtitle">
-                集中维护客观商品事实与供应商参考图，单击卡片在右侧查看与编辑
-              </div>
+              <span className="product-col-count">{total} 款</span>
             </div>
             <div className="product-library-header-actions">
               <button className="btn" type="button" onClick={() => navigate("/")}>
-                <Icon name="sparkles" />
-                <span>AI 对话建档</span>
+                AI 建档
               </button>
               <button className="btn btn-primary" type="button" onClick={openCreateModal}>
                 <Icon name="plus" />
-                <span>手动新建商品卡</span>
+                <span>新建商品卡</span>
               </button>
             </div>
           </header>
 
-          <div className="style-library-toolbar">
-            <div className="search-wrap">
+          <div className="product-search-bar">
+            <div className="product-search-wrap">
+              <Icon name="search" />
               <input
-                className="input"
+                className="product-search-input"
                 type="search"
                 aria-label="搜索商品信息卡"
                 value={keywordInput}
@@ -430,26 +457,21 @@ export function ProductLibraryPage({
                 }}
                 placeholder="搜索商品名称或核心卖点"
               />
+              {(keywordInput || submittedKeyword) && (
+                <button
+                  type="button"
+                  className="product-search-clear"
+                  aria-label="清除搜索"
+                  title="清除搜索"
+                  onClick={handleClearSearch}
+                >
+                  <Icon name="x" />
+                </button>
+              )}
             </div>
             <button className="btn" type="button" onClick={handleSearch}>
               搜索
             </button>
-          </div>
-
-          <div className="style-boundary">
-            <strong>{filterSummaryLabel(statusFilter)}</strong>
-            <span>
-              {submittedKeyword
-                ? `关键词「${submittedKeyword}」命中 ${total} 款商品`
-                : `当前共 ${total} 款商品信息卡`}
-            </span>
-            {submittedKeyword && (
-              <div className="product-boundary-clear">
-                <button className="btn" type="button" onClick={handleClearSearch}>
-                  清除搜索
-                </button>
-              </div>
-            )}
           </div>
 
           <div className="product-library-results">
@@ -473,15 +495,16 @@ export function ProductLibraryPage({
                           ) : (
                             <div className="product-card-thumb-empty">
                               <Icon name="box" />
-                              <span>无参考图</span>
                             </div>
                           )}
                         </div>
                         <div className="product-card-head-info">
-                          <div className="product-card-badges">
-                            <span className={`badge ${statusBadgeClass(item.status)}`}>
-                              {statusLabel(item.status)}
+                          <div className="product-card-status-row">
+                            <span className={`product-status-dot is-${item.status}`}>
+                              <i aria-hidden="true" />
+                              <span>{statusLabel(item.status)}</span>
                             </span>
+                            <span className="product-card-rev">v{item.revision}</span>
                           </div>
                           <h3 className="product-card-name" title={item.name}>
                             {item.name}
@@ -501,29 +524,31 @@ export function ProductLibraryPage({
 
                       <div className="product-card-foot">
                         <span className="product-card-time">
-                          v{item.revision} · {new Date(item.updatedAt).toLocaleString("zh-CN")}
+                          {formatShortDateTime(item.updatedAt)}
                         </span>
                         {item.status === "published" && (
                           <div className="product-card-quick-actions">
                             <button
                               type="button"
-                              className="product-card-quick-btn"
+                              className="btn btn-sm"
                               onClick={(event) => {
                                 event.stopPropagation();
                                 navigate(`/create/suite?productCardId=${encodeURIComponent(item.id)}`);
                               }}
                             >
-                              去生成套图
+                              去套图
                             </button>
                             <button
                               type="button"
-                              className="product-card-quick-btn"
+                              className="btn btn-sm"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                navigate(`/create/replica?productCardId=${encodeURIComponent(item.id)}`);
+                                navigate(
+                                  `/create/replica?productCardId=${encodeURIComponent(item.id)}`,
+                                );
                               }}
                             >
-                              去爆品图复刻
+                              去复刻
                             </button>
                           </div>
                         )}
@@ -538,36 +563,47 @@ export function ProductLibraryPage({
                       ? "没有匹配的商品信息卡"
                       : statusFilter === "archived"
                         ? "暂无已归档的商品信息卡"
-                        : "商品库还没有商品信息卡"}
+                        : "暂无商品信息卡"}
                   </strong>
                   <p>
                     {submittedKeyword
-                      ? "可以尝试更换搜索词或切换左侧状态筛选。"
-                      : "点击右上角「手动新建商品卡」录入第一款新品资料。"}
+                      ? "可尝试更换商品名称或核心卖点关键词，或清除搜索条件。"
+                      : "点击右上角「新建商品卡」录入新品，或前往首页通过 AI 建档。"}
                   </p>
-                  {!submittedKeyword && statusFilter !== "archived" && (
+                  {submittedKeyword ? (
                     <button
-                      className="btn btn-primary"
+                      className="btn"
                       type="button"
                       style={{ marginTop: 8 }}
-                      onClick={openCreateModal}
+                      onClick={handleClearSearch}
                     >
-                      <Icon name="plus" />
-                      <span>手动新建商品卡</span>
+                      清除搜索
                     </button>
+                  ) : (
+                    statusFilter !== "archived" && (
+                      <button
+                        className="btn btn-primary"
+                        type="button"
+                        style={{ marginTop: 8 }}
+                        onClick={openCreateModal}
+                      >
+                        <Icon name="plus" />
+                        <span>新建商品卡</span>
+                      </button>
+                    )
                   )}
                 </div>
               )}
             </div>
           </div>
 
-          <footer className="style-library-pagination" aria-label="商品库分页">
+          <footer className="product-library-pagination" aria-label="商品库分页">
             <span className="style-pagination-info">
               第 {page} / {totalPages} 页 · 共 {total} 款
             </span>
             <div className="style-pagination-actions">
               <button
-                className="btn"
+                className="btn btn-sm"
                 type="button"
                 disabled={loading || page <= 1}
                 onClick={() => handlePageChange(page - 1)}
@@ -575,7 +611,7 @@ export function ProductLibraryPage({
                 上一页
               </button>
               <button
-                className="btn"
+                className="btn btn-sm"
                 type="button"
                 disabled={loading || page >= totalPages}
                 onClick={() => handlePageChange(page + 1)}
@@ -586,29 +622,44 @@ export function ProductLibraryPage({
           </footer>
         </section>
 
-        {/* Right detail / editor inspector */}
+        {/* Right Flat Inspector */}
         <aside className="panel right style-inspector product-library-inspector">
           <header className="panel-header">
-            <div>
-              <strong className="panel-title">商品卡详情与编辑</strong>
-              <div className="panel-subtitle">
-                {selectedDetail
-                  ? `修订版本 v${selectedDetail.revision} · 保存后自动递增版本`
-                  : "选择商品卡查看或编辑客观事实与供应商图"}
-              </div>
+            <div className="product-col-title-group">
+              <strong className="panel-title" title={selectedDetail?.name}>
+                {selectedDetail ? selectedDetail.name : "商品卡详情"}
+              </strong>
+              {selectedDetail && (
+                <span className="product-version-chip" data-testid="product-revision-badge">
+                  v{selectedDetail.revision}
+                </span>
+              )}
             </div>
-            {selectedId && (
-              <button
-                className="icon-btn"
-                type="button"
-                aria-label="关闭详情"
-                onClick={() => {
-                  setSelectedId(null);
-                  setSelectedDetail(null);
-                }}
-              >
-                <Icon name="x" />
-              </button>
+            {selectedDetail && (
+              <div className="product-inspector-header-ops">
+                <button
+                  className="icon-btn"
+                  type="button"
+                  aria-label={selectedDetail.status === "published" ? "归档" : "恢复在用"}
+                  title={selectedDetail.status === "published" ? "归档" : "恢复在用"}
+                  disabled={mutatingStatus || savingEdit || deleting}
+                  onClick={() => void handleToggleArchive(selectedDetail)}
+                >
+                  <Icon name="archive" />
+                </button>
+                <button
+                  className="icon-btn product-icon-danger"
+                  type="button"
+                  aria-label="删除"
+                  title="删除"
+                  disabled={mutatingStatus || savingEdit || deleting}
+                  onClick={() =>
+                    setDeleteTarget({ id: selectedDetail.id, name: selectedDetail.name })
+                  }
+                >
+                  <Icon name="trash" />
+                </button>
+              </div>
             )}
           </header>
 
@@ -619,72 +670,7 @@ export function ProductLibraryPage({
                 <strong>正在加载商品卡详情…</strong>
               </div>
             ) : selectedDetail ? (
-              <div className="inspector-body product-inspector-body">
-                <div className="product-inspector-meta-bar">
-                  <div className="product-inspector-meta-top">
-                    <div className="product-inspector-meta-badges">
-                      <span className={`badge ${statusBadgeClass(selectedDetail.status)}`}>
-                        {statusLabel(selectedDetail.status)}
-                      </span>
-                      <span className="badge mono" data-testid="product-revision-badge">
-                        v{selectedDetail.revision}
-                      </span>
-                    </div>
-                    <span className="product-inspector-meta-time">
-                      更新于 {new Date(selectedDetail.updatedAt).toLocaleString("zh-CN")}
-                    </span>
-                  </div>
-
-                  <div className="product-inspector-ops">
-                    <div className="product-inspector-ops-group">
-                      {selectedDetail.status === "published" && (
-                        <>
-                          <button
-                            className="btn"
-                            type="button"
-                            onClick={() =>
-                              navigate(`/create/suite?productCardId=${encodeURIComponent(selectedDetail.id)}`)
-                            }
-                          >
-                            去生成套图
-                          </button>
-                          <button
-                            className="btn"
-                            type="button"
-                            onClick={() =>
-                              navigate(`/create/replica?productCardId=${encodeURIComponent(selectedDetail.id)}`)
-                            }
-                          >
-                            去爆品图复刻
-                          </button>
-                        </>
-                      )}
-                    </div>
-                    <div className="product-inspector-ops-group">
-                      <button
-                        className="btn"
-                        type="button"
-                        disabled={mutatingStatus || savingEdit || deleting}
-                        onClick={() => void handleToggleArchive(selectedDetail)}
-                      >
-                        <Icon name="archive" />
-                        <span>{selectedDetail.status === "published" ? "归档" : "恢复在用"}</span>
-                      </button>
-                      <button
-                        className="btn btn-danger-outline"
-                        type="button"
-                        disabled={mutatingStatus || savingEdit || deleting}
-                        onClick={() =>
-                          setDeleteTarget({ id: selectedDetail.id, name: selectedDetail.name })
-                        }
-                      >
-                        <Icon name="trash" />
-                        <span>删除</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
+              <div className="product-inspector-body">
                 <ProductCardEditorForm
                   key={selectedDetail.id}
                   idPrefix={`edit-${selectedDetail.id}`}
@@ -695,26 +681,67 @@ export function ProductLibraryPage({
                   onSubmit={handleEditSubmit}
                   submitLabel="保存修改"
                   submitting={savingEdit}
+                  layout="panel"
+                  topSlot={
+                    <div className="product-inspector-action-bar">
+                      <div className="product-inspector-quick-btns">
+                        {selectedDetail.status === "published" ? (
+                          <>
+                            <button
+                              className="btn btn-sm"
+                              type="button"
+                              onClick={() =>
+                                navigate(
+                                  `/create/suite?productCardId=${encodeURIComponent(selectedDetail.id)}`,
+                                )
+                              }
+                            >
+                              去套图
+                            </button>
+                            <button
+                              className="btn btn-sm"
+                              type="button"
+                              onClick={() =>
+                                navigate(
+                                  `/create/replica?productCardId=${encodeURIComponent(selectedDetail.id)}`,
+                                )
+                              }
+                            >
+                              去复刻
+                            </button>
+                          </>
+                        ) : (
+                          <span className="product-status-dot is-archived">
+                            <i aria-hidden="true" />
+                            <span>已归档</span>
+                          </span>
+                        )}
+                      </div>
+                      <span className="product-card-time">
+                        更新于 {formatShortDateTime(selectedDetail.updatedAt)}
+                      </span>
+                    </div>
+                  }
                 />
               </div>
             ) : (
               <div className="style-library-inspector-empty">
                 <Icon name="alert" />
                 <strong>未找到该商品信息卡</strong>
-                <span>卡片可能已被删除，请从左侧列表重新选择。</span>
+                <span>卡片可能已被删除，请从中间列表重新选择。</span>
               </div>
             )
           ) : (
             <div className="style-library-inspector-empty">
               <Icon name="box" />
               <strong>选择一张商品信息卡</strong>
-              <span>从中间列表点击卡片进行编辑，或点击上方「手动新建商品卡」创建新品。</span>
+              <span>点击左侧列表查看与编辑，或点击上方「新建商品卡」录入新品。</span>
             </div>
           )}
         </aside>
       </main>
 
-      {/* Manual create modal / drawer */}
+      {/* Manual Create Modal */}
       {createOpen && (
         <div
           className="style-library-modal-backdrop"
@@ -730,11 +757,7 @@ export function ProductLibraryPage({
             aria-labelledby="product-create-modal-title"
           >
             <header>
-              <div>
-                <span className="style-library-modal-kicker">NEW PRODUCT CARD</span>
-                <h2 id="product-create-modal-title">手动新建商品信息卡</h2>
-                <p>补齐 6 项必填客观商品事实后即可保存到商品库，供商品套图与爆品图复刻复用</p>
-              </div>
+              <h2 id="product-create-modal-title">新建商品信息卡</h2>
               <button
                 className="icon-btn"
                 type="button"
@@ -760,6 +783,7 @@ export function ProductLibraryPage({
                 onSubmit={handleCreateSubmit}
                 submitLabel="保存到商品库"
                 submitting={creating}
+                layout="panel"
                 footerExtra={
                   <button
                     className="btn"
@@ -776,7 +800,7 @@ export function ProductLibraryPage({
         </div>
       )}
 
-      {/* Delete confirmation modal */}
+      {/* Delete Confirmation Modal */}
       {deleteTarget && (
         <div
           className="style-library-modal-backdrop"
@@ -792,10 +816,7 @@ export function ProductLibraryPage({
             aria-labelledby="product-delete-confirm-title"
           >
             <header>
-              <div>
-                <span className="style-library-modal-kicker">DELETE PRODUCT CARD</span>
-                <h2 id="product-delete-confirm-title">确认删除「{deleteTarget.name}」？</h2>
-              </div>
+              <h2 id="product-delete-confirm-title">确认删除「{deleteTarget.name}」？</h2>
               <button
                 className="icon-btn"
                 type="button"

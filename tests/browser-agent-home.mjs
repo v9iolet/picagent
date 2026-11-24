@@ -124,7 +124,7 @@ async function startOfflineHomeApp(t, llmHandler) {
   return { baseUrl, browser, api, llmCalls, apiCalls, productCardRepository };
 }
 
-test("HomePage Agent onboarding: default / landing, upload supplier image + .txt, merged follow-up, manual draft edit, draft resume/delete, publish read-only & quick jumps", async (t) => {
+test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-demand char counters, optional fold, segmented drafts, publish & quick jumps", async (t) => {
   let shouldFailNextReply = false;
   let pendingReplyGate = null;
 
@@ -149,7 +149,7 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
         return {
           schemaVersion: PRODUCT_ONBOARDING_SCHEMA_VERSION,
           reply:
-            "已根据文字、附件与供应商图提取基础信息，请一次性补充以下 3 项剩余必填项：\n1. 材质与工艺细节\n2. 适用人群与使用场景\n3. 包装清单 / 配件说明",
+            "已根据文字、附件与供应商图提取基础信息，请一次性补充以下 3 项剩余必填项：\n1. 材质与工艺细节：主体材质与表面工艺\n2. 适用人群与使用场景：目标人群与典型场景\n3. 包装清单 / 配件说明：包含主体与配件清单",
           draftCard: {
             name: "真空保温随行杯 500ml",
             sellingPoints: [
@@ -218,42 +218,84 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   const pageErrors = [];
   page.on("pageerror", (err) => pageErrors.push(err.message));
 
-  // 1. Open "/" -> defaults to HomePage (not redirected to /create/suite)
+  // 1. Open "/" -> defaults to HomePage (clean v2 hero without gradient card or ✨ badge)
   await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
   assert.equal(new URL(page.url()).pathname, "/", "Root / must stay on HomePage");
 
-  // Verify fixed left navigation order & active Home item & brand link href="/"
   const navLabels = await page.locator(".pa-rail-item span").allInnerTexts();
   assert.deepEqual(navLabels, ["首页", "创建", "商品库", "图片库", "模板库", "配置"]);
   await page.locator('.pa-rail-item.is-active[href="/"]').waitFor({ state: "visible" });
   assert.equal(await page.locator(".pa-brand").getAttribute("href"), "/");
 
-  // Verify hero heading and 4 quick entry cards
-  await page.getByRole("heading", { name: "新品商品信息建档" }).waitFor({ state: "visible" });
-  const quickEntryTitles = await page.locator(".home-quick-card strong").allInnerTexts();
+  // Verify de-AI-ified hero heading, InfoTip popover, 4 compact quick entry pills, and no drafts tab when N=0
+  await page.getByRole("heading", { name: "新品信息建档", exact: true }).waitFor({ state: "visible" });
+  assert.equal(await page.locator(".home-hero-badge").count(), 0, "Legacy ✨ badge must be removed");
+  assert.equal(await page.locator(".home-empty-box").count(), 0, "Legacy dashed empty box must be removed");
+  assert.equal(
+    await page.locator('[data-home-tab="drafts"]').count(),
+    0,
+    "Drafts tab must be hidden when draft count is 0",
+  );
+  const quickEntryTitles = await page.locator(".home-quick-pill .home-quick-left span").allInnerTexts();
   assert.deepEqual(quickEntryTitles, ["商品套图", "爆品图复刻", "生图画布", "商品库"]);
 
-  // 2. Frontend validation: oversize > 200KB .txt rejected client-side
+  // Verify Home InfoTip opens on click and closes on Escape
+  const homeInfoBtn = page.getByRole("button", { name: "建档说明" });
+  await homeInfoBtn.click();
+  const homeTip = page.locator("#" + (await homeInfoBtn.getAttribute("aria-controls")));
+  await homeTip.waitFor({ state: "visible" });
+  assert.match(await homeTip.innerText(), /不直接生图/);
+  await page.keyboard.press("Escape");
+  await homeTip.waitFor({ state: "hidden" });
+
+  // 2. Unified "+" floating menu: open, close on Escape, then upload via menu items
+  const plusBtn = page.getByRole("button", { name: "添加附件" });
+  await plusBtn.click();
+  const plusMenu = page.getByRole("menu", { name: "上传附件菜单" });
+  await plusMenu.waitFor({ state: "visible" });
+  assert.match(await plusMenu.innerText(), /上传供应商参考图[\s\S]*上传文本资料/);
+  await page.keyboard.press("Escape");
+  await plusMenu.waitFor({ state: "hidden" });
+
+  // Oversize > 200KB .txt rejected client-side via unified "+" menu
   const oversizeTxt = {
     name: "too-big.txt",
     mimeType: "text/plain",
     buffer: Buffer.from("a".repeat(201 * 1024), "utf8"),
   };
-  await page.getByLabel("上传 .txt 文本附件").setInputFiles(oversizeTxt);
+  await plusBtn.click();
+  await plusMenu.waitFor({ state: "visible" });
+  const [oversizeChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    plusMenu.getByRole("menuitem", { name: /上传文本资料/ }).click(),
+  ]);
+  await oversizeChooser.setFiles(oversizeTxt);
   await page.locator(".home-composer-error").waitFor({ state: "visible" });
   assert.match(await page.locator(".home-composer-error").innerText(), /200 KB/);
   assert.equal(await page.locator(".home-pending-txt").count(), 0);
 
-  // 3. Upload 1 supplier image + 1 valid .txt + enter text -> start onboarding
+  // 3. Upload 1 supplier image + 1 valid .txt through the "+" menu -> start onboarding
   const imgPath = path.resolve("public/assets/gan65-product.jpg");
   const validTxt = {
     name: "supplier-spec.txt",
     mimeType: "text/plain",
     buffer: Buffer.from("商品规格：容量 500ml，高度 215mm，净重 265g", "utf8"),
   };
-  await page.getByLabel("选择供应商参考图").setInputFiles(imgPath);
-  await page.getByLabel("上传 .txt 文本附件").setInputFiles(validTxt);
+  await plusBtn.click();
+  const [imgChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    plusMenu.getByRole("menuitem", { name: /上传供应商参考图/ }).click(),
+  ]);
+  await imgChooser.setFiles(imgPath);
   await page.locator('.home-pending-image[data-pending-image="gan65-product.jpg"]').waitFor({ state: "visible" });
+
+  await plusBtn.click();
+  assert.match(await plusMenu.innerText(), /已传 1\/6 张/);
+  const [txtChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    plusMenu.getByRole("menuitem", { name: /上传文本资料/ }).click(),
+  ]);
+  await txtChooser.setFiles(validTxt);
   await page.locator('.home-pending-txt[data-pending-txt="supplier-spec.txt"]').waitFor({ state: "visible" });
 
   await page
@@ -268,10 +310,15 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   const sessionId = new URL(page.url()).searchParams.get("session");
   assert.ok(sessionId, "URL should contain ?session=<id>");
 
-  // Verify left chat renders user text, .txt capsule, image thumbnail, and Agent merged follow-up
+  // Verify left chat renders user text, attachments, and clean assistant reply without repeated Agent header
   await page.locator(".home-chat-messages").waitFor({ state: "visible" });
   assert.equal(await page.locator('.home-msg[data-message-role="user"]').count(), 1);
   assert.equal(await page.locator('.home-msg[data-message-role="assistant"]').count(), 1);
+  assert.equal(
+    await page.locator(".home-chat-messages").getByText("商品建档 Agent").count(),
+    0,
+    "Repeated '商品建档 Agent' message header must be removed",
+  );
   assert.match(await page.locator(".home-msg-txt-pill").innerText(), /supplier-spec\.txt/);
   assert.equal(await page.locator(".home-msg-image-thumb img").count(), 1);
   assert.match(
@@ -279,12 +326,41 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
     /材质与工艺细节[\s\S]*适用人群与使用场景[\s\S]*包装清单/,
   );
 
-  // Verify right ProductCardEditorForm auto-filled extracted fields & highlights 3 missing fields
+  // Verify right flat ProductCardEditorForm: auto-filled fields, no nested boxes, on-demand char counter & collapsed optional section
   const cardPane = page.locator(".home-card-pane");
-  assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).inputValue(), "真空保温随行杯 500ml");
+  const nameInput = cardPane.locator(`#onboarding-${sessionId}-name`);
+  assert.equal(await nameInput.inputValue(), "真空保温随行杯 500ml");
   assert.equal(await cardPane.locator('[data-testid="required-progress-pill"]').innerText(), "已填 3/6 必填");
   assert.equal(await cardPane.locator(".pc-field.is-missing").count(), 3);
   assert.equal(await cardPane.locator(".pc-supplier-card").count(), 1);
+
+  // On-demand char counter: hidden when blurred, visible on focus, hidden again on blur
+  const nameCounter = cardPane.locator('[data-char-counter="name"]');
+  assert.equal(await nameCounter.isVisible(), false, "Char counter must be hidden when field is not focused");
+  await nameInput.focus();
+  await nameCounter.waitFor({ state: "visible" });
+  assert.match(await nameCounter.innerText(), /\/120$/);
+  await nameInput.blur();
+  await nameCounter.waitFor({ state: "hidden" });
+
+  // Optional extended section collapsed by default, expandable on click
+  const optionalTrigger = cardPane.locator(".pc-optional-fold-trigger");
+  assert.equal(await optionalTrigger.getAttribute("aria-expanded"), "false");
+  assert.equal(await cardPane.locator(`#onboarding-${sessionId}-painPointsComparison`).count(), 0);
+  await optionalTrigger.click();
+  assert.equal(await optionalTrigger.getAttribute("aria-expanded"), "true");
+  await cardPane.locator(`#onboarding-${sessionId}-painPointsComparison`).waitFor({ state: "visible" });
+  await optionalTrigger.click();
+  assert.equal(await optionalTrigger.getAttribute("aria-expanded"), "false");
+
+  // Supplier image InfoTip opens and closes with Escape
+  const supplierTipBtn = cardPane.getByRole("button", { name: "供应商参考图边界说明" });
+  await supplierTipBtn.click();
+  const supplierTip = page.locator("#" + (await supplierTipBtn.getAttribute("aria-controls")));
+  await supplierTip.waitFor({ state: "visible" });
+  assert.match(await supplierTip.innerText(), /不流入创作页生图原图区/);
+  await page.keyboard.press("Escape");
+  await supplierTip.waitFor({ state: "hidden" });
 
   const publishBtn = cardPane.getByRole("button", { name: "保存到商品库" });
   assert.equal(await publishBtn.isDisabled(), true, "Publish button must be disabled when 3 required fields are missing");
@@ -302,8 +378,8 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   );
 
   // 4. Regression assertion 2: edit name on right form and IMMEDIATELY click .pa-brand (<500ms) ->
-  // must flush PATCH /draft before leaving and display updated name in "未完成建档草稿"
-  await cardPane.locator(`#onboarding-${sessionId}-name`).fill("星河真空保温随行杯 500ml（旗舰版）");
+  // must flush PATCH /draft before leaving and display updated name in segmented "未完成建档草稿" tab
+  await nameInput.fill("星河真空保温随行杯 500ml（旗舰版）");
   await page.locator(".pa-brand").click();
   await page.waitForFunction(
     () => window.location.pathname === "/" && !new URLSearchParams(window.location.search).get("session"),
@@ -312,6 +388,11 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
     apiCalls.some((c) => c.method === "PATCH" && c.path === `/api/product-onboarding/sessions/${sessionId}/draft`),
     "Navigating via .pa-brand immediately after editing must flush PATCH /draft",
   );
+
+  const draftsTab = page.locator('[data-home-tab="drafts"]');
+  await draftsTab.waitFor({ state: "visible" });
+  assert.match(await draftsTab.innerText(), /未完成建档草稿 \(1\)/);
+  await draftsTab.click();
 
   const draftCard = page.locator(`.home-draft-card[data-draft-session-id="${sessionId}"]`);
   await draftCard.waitFor({ state: "visible" });
@@ -342,12 +423,12 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   assert.match(await page.getByLabel("补充商品信息输入框").inputValue(), /316L/);
 
   // Regression assertion 3: during delayed POST /messages, right form inputs & publish button are disabled
-  // while publish button text remains "保存到商品库"
   const replyGate = Promise.withResolvers();
   pendingReplyGate = replyGate;
   try {
     await page.getByRole("button", { name: "重试发送" }).click();
     await page.locator(".home-msg.is-loading").waitFor({ state: "visible" });
+    assert.match(await page.locator(".home-msg.is-loading").innerText(), /提取中/);
     assert.equal(
       await cardPane.locator(`#onboarding-${sessionId}-name`).isDisabled(),
       true,
@@ -412,14 +493,14 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   await page.locator(".pa-brand").click();
   await page.waitForFunction(() => window.location.pathname === "/" && window.location.search === "");
 
-  // Published session is no longer in drafts, and appears in "最近商品信息卡"
-  assert.equal(await page.locator(`.home-draft-card[data-draft-session-id="${sessionId}"]`).count(), 0);
+  // Published session is no longer in drafts (drafts tab hidden), and appears in "最近商品卡"
+  assert.equal(await page.locator('[data-home-tab="drafts"]').count(), 0);
   const recentCard = page.locator(`.home-recent-card[data-recent-card-id="${productCardId}"]`);
   await recentCard.waitFor({ state: "visible" });
   assert.match(await recentCard.innerText(), /星河真空保温随行杯 500ml（旗舰版）/);
 
-  // Verify quick jump to Replica Studio from recent card
-  await recentCard.getByRole("button", { name: "去爆品图复刻" }).click();
+  // Verify quick jump to Replica Studio from recent card ("去复刻")
+  await recentCard.getByRole("button", { name: "去复刻", exact: true }).click();
   await page.waitForFunction(
     (id) =>
       window.location.pathname === "/create/replica" &&
@@ -432,7 +513,7 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   assert.equal(libRes.status, 200);
   assert.equal(libRes.body.data.items.length, 0, "Onboarding supplier images must not appear in image library");
 
-  // 8. Seed another draft session via API and verify delete action on HomePage
+  // 8. Seed another draft session via API and verify segmented switch + delete action on HomePage
   const extraDraftRes = await api.request("POST", "/api/product-onboarding/sessions", {
     body: { message: "临时测试草稿" },
   });
@@ -440,6 +521,10 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   const extraDraftId = extraDraftRes.body.data.id;
 
   await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
+  const extraDraftsTab = page.locator('[data-home-tab="drafts"]');
+  await extraDraftsTab.waitFor({ state: "visible" });
+  await extraDraftsTab.click();
+
   const extraDraftCard = page.locator(`.home-draft-card[data-draft-session-id="${extraDraftId}"]`);
   await extraDraftCard.waitFor({ state: "visible" });
   await extraDraftCard.locator(".home-icon-danger-btn").click();
@@ -448,6 +533,9 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   await confirmModal.getByRole("button", { name: "确认删除" }).click();
   await confirmModal.waitFor({ state: "hidden" });
   assert.equal(await page.locator(`.home-draft-card[data-draft-session-id="${extraDraftId}"]`).count(), 0);
+  // Deleting last draft hides the drafts tab and switches back to recent cards
+  assert.equal(await page.locator('[data-home-tab="drafts"]').count(), 0);
+  await page.locator(`.home-recent-card[data-recent-card-id="${productCardId}"]`).waitFor({ state: "visible" });
 
   assert.equal(llmCalls.length, 4, "Expected 4 total LLM invocations (1st turn + failed 2nd + retried 2nd + extra draft)");
   assert.deepEqual(pageErrors, [], `Expected no uncaught page errors, got: ${pageErrors.join("; ")}`);
