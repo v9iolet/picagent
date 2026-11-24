@@ -270,6 +270,22 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
 
   await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
   assert.equal(await page.locator(".rp-showcase-card").count(), 4);
+  const showcaseWidths = await page.locator(".rp-showcase-card img").evaluateAll((imgs) =>
+    Promise.all(
+      imgs.map(
+        (img) =>
+          new Promise((resolve) => {
+            if (img.complete) return resolve(img.naturalWidth);
+            img.addEventListener("load", () => resolve(img.naturalWidth), { once: true });
+            img.addEventListener("error", () => resolve(0), { once: true });
+          }),
+      ),
+    ),
+  );
+  assert.ok(
+    showcaseWidths.length === 8 && showcaseWidths.every((w) => w > 0),
+    `expected all 8 showcase images to load with naturalWidth > 0, got ${JSON.stringify(showcaseWidths)}`,
+  );
 
   // 2. Initial disabled button, reason, authorization hint, and strong no-product warning
   const submitBtn = page.getByRole("button", { name: /^一键复刻/ });
@@ -341,7 +357,28 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   // 6. Clone level hover schematic + toggle, unified requirement counter, product info, generation settings
   const composeRadio = page.getByRole("radio", { name: /参考风格/ });
   await composeRadio.hover();
-  await page.locator(".rp-level-popover.is-visible img[src='/replica/clone-level-compose.svg']").waitFor();
+  const composeImg = page.locator(".rp-level-popover.is-visible img[src='/replica/clone-level-compose.webp']");
+  await composeImg.waitFor();
+  const composeImgWidth = await composeImg.evaluate((img) =>
+    new Promise((resolve) => {
+      if (img.complete) return resolve(img.naturalWidth);
+      img.addEventListener("load", () => resolve(img.naturalWidth), { once: true });
+      img.addEventListener("error", () => resolve(0), { once: true });
+    }),
+  );
+  assert.ok(composeImgWidth > 0, `expected clone-level-compose.webp to load, got naturalWidth=${composeImgWidth}`);
+  const highRadio = page.getByRole("radio", { name: /高度复刻/ });
+  await highRadio.hover();
+  const highImg = page.locator(".rp-level-popover.is-visible img[src='/replica/clone-level-high.webp']");
+  await highImg.waitFor();
+  const highImgWidth = await highImg.evaluate((img) =>
+    new Promise((resolve) => {
+      if (img.complete) return resolve(img.naturalWidth);
+      img.addEventListener("load", () => resolve(img.naturalWidth), { once: true });
+      img.addEventListener("error", () => resolve(0), { once: true });
+    }),
+  );
+  assert.ok(highImgWidth > 0, `expected clone-level-high.webp to load, got naturalWidth=${highImgWidth}`);
   await composeRadio.click();
   assert.equal(await composeRadio.getAttribute("aria-checked"), "true");
 

@@ -52,7 +52,7 @@ export const REPLICA_CLONE_LEVEL_OPTIONS: ReadonlyArray<{
     shortDesc: "参考整体风格结构，重塑色彩与场景",
     hoverTitle: "参考风格（compose）",
     hoverDesc: "提取参考图的风格调性与视觉层次，结合产品形态重新编排光影与场景。",
-    previewImage: "/replica/clone-level-compose.svg",
+    previewImage: "/replica/clone-level-compose.webp",
   },
   {
     value: "high",
@@ -60,7 +60,7 @@ export const REPLICA_CLONE_LEVEL_OPTIONS: ReadonlyArray<{
     shortDesc: "沿用参考图构图与版式，替换商品和文案",
     hoverTitle: "高度复刻（high）",
     hoverDesc: "严格沿用参考图的构图机位、版式与文字位置，仅替换商品主体与新文案。",
-    previewImage: "/replica/clone-level-high.svg",
+    previewImage: "/replica/clone-level-high.webp",
   },
 ];
 
