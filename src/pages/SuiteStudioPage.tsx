@@ -17,6 +17,12 @@ import { toSelectedProductCardSummary } from "../components/product-card-picker/
 import { CreateToolsNav } from "../features/create/CreateToolsNav";
 import { ConfigPanel } from "../components/suite-studio/ConfigPanel";
 import { BatchResults } from "../components/suite-studio/BatchResults";
+import { SuiteEmptyState } from "../components/suite-studio/SuiteEmptyState";
+import {
+  isConfigDirty,
+  saveLastSuiteId,
+  suiteWorkspaceStore,
+} from "../components/suite-studio/suite-draft-store";
 import {
   currentImageOptions,
   fromRun,
@@ -28,60 +34,86 @@ import {
 } from "../components/suite-studio/studio";
 import "../components/suite-studio/studio.css";
 
-function EmptyStudio() {
-  return (
-    <div className="ss-empty">
-      <div className="ss-eyebrow">PRODUCT PHOTOGRAPHY</div>
-      <h2>AI 商品套图</h2>
-      <p>上传商品原图，按平台规范生成主图、卖点图和场景图。</p>
-      <div className="ss-examples">
-        {[
-          ["gan65-product.jpg", "产品全貌", "01"],
-          ["gan65-product-tight.jpg", "商品细节", "02"],
-          ["tokyo-desk-v3.jpg", "生活场景", "03"],
-        ].map(([file, title, n]) => (
-          <figure key={n}>
-            <img src={"/assets/" + file} alt={title + "示例"} />
-            <figcaption>
-              <b>{n}</b> {title}
-            </figcaption>
-          </figure>
-        ))}
-      </div>
-      <small>示例套图 · 点击左侧「上传原图」开始创作</small>
-    </div>
-  );
-}
-
-const LAST_SUITE_STORAGE_KEY = "picagent:suite-studio:last-suite-id";
 const POLL_INTERVAL_MS = 2500;
-
-function readLastSuiteId(): string | null {
-  try {
-    return window.sessionStorage.getItem(LAST_SUITE_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function saveLastSuiteId(id: string) {
-  try {
-    window.sessionStorage.setItem(LAST_SUITE_STORAGE_KEY, id);
-  } catch {
-    // Ignore storage quota or privacy-mode errors.
-  }
-}
-
-function clearLastSuiteId() {
-  try {
-    window.sessionStorage.removeItem(LAST_SUITE_STORAGE_KEY);
-  } catch {
-    // Ignore storage errors.
-  }
-}
 
 function isBatchPolling(state: StudioState): boolean {
   return state.pipeline?.status === "running" || state.listingCopy?.status === "running";
+}
+
+function isActiveNonTerminalFeedItem(
+  item: (GenerationHistoryFeedItem & { listingCopy?: { status?: string } | null }) | undefined,
+): boolean {
+  if (!item) return false;
+  const status = item.pipeline?.status;
+  return (
+    status === "running" ||
+    status === "waiting_base_refine_decision" ||
+    status === "waiting_human_input" ||
+    item.listingCopy?.status === "running"
+  );
+}
+
+function readInitialWorkspace(suiteId?: string, initialProductCardId?: string) {
+  if (!suiteId && initialProductCardId) {
+    return {
+      active: undefined as string | undefined,
+      config: initialConfig,
+      configDirty: false,
+      images: [] as ApiImage[],
+      clone: false,
+      state: null as StudioState | null,
+      loadingBatch: false,
+    };
+  }
+  const snap = suiteWorkspaceStore.getSnapshot();
+  const targetId = suiteId ?? snap.activeSuiteId ?? undefined;
+  if (targetId) {
+    const cached = suiteWorkspaceStore.getMemoryCache(targetId);
+    const hasDraftForTarget = snap.configSuiteId === targetId && snap.hasLocalConfigEdits;
+    const restoredConfig = hasDraftForTarget
+      ? snap.config
+      : cached?.state
+        ? fromRun(cached.state.pipeline)
+        : snap.configSuiteId === targetId
+          ? snap.config
+          : initialConfig;
+    const restoredClone = cached?.state
+      ? Boolean(cached.state.pipeline || cached.state.cards.length > 0)
+      : snap.activeSuiteId === targetId
+        ? snap.clone
+        : false;
+    return {
+      active: targetId,
+      config: restoredConfig,
+      configDirty: hasDraftForTarget,
+      images: cached?.images ?? [],
+      clone: restoredClone,
+      state: cached?.state ?? null,
+      loadingBatch: !cached,
+    };
+  }
+  const hasUnuploadedDraft =
+    snap.activeSuiteId === null && (snap.hasLocalConfigEdits || isConfigDirty(snap.config));
+  if (hasUnuploadedDraft) {
+    return {
+      active: undefined as string | undefined,
+      config: snap.config,
+      configDirty: true,
+      images: [] as ApiImage[],
+      clone: false,
+      state: null as StudioState | null,
+      loadingBatch: false,
+    };
+  }
+  return {
+    active: undefined as string | undefined,
+    config: initialConfig,
+    configDirty: false,
+    images: [] as ApiImage[],
+    clone: false,
+    state: null as StudioState | null,
+    loadingBatch: true,
+  };
 }
 
 export function SuiteStudioPage({
@@ -93,29 +125,37 @@ export function SuiteStudioPage({
   initialProductCardId?: string;
   navigate: (path: string, options?: { replace?: boolean }) => void;
 }) {
-  const [config, setConfig] = useState<Config>(initialConfig),
+  const boot = useRef(readInitialWorkspace(suiteId, initialProductCardId));
+  const [config, setConfig] = useState<Config>(() => boot.current.config),
+    [configDirty, setConfigDirty] = useState<boolean>(() => boot.current.configDirty),
     [profiles, setProfiles] = useState<ApiPlatformProfile[]>([]),
     [options, setOptions] = useState(defaultImageOptions(""));
-  const [images, setImages] = useState<ApiImage[]>([]),
-    [clone, setClone] = useState(false),
+  const [images, setImages] = useState<ApiImage[]>(() => boot.current.images),
+    [clone, setClone] = useState<boolean>(() => boot.current.clone),
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState("");
-  const [currentState, setCurrentState] = useState<StudioState | null>(null),
-    [loadingBatch, setLoadingBatch] = useState(() => !(initialProductCardId && !suiteId)),
+  const [currentState, setCurrentState] = useState<StudioState | null>(() => boot.current.state),
+    [loadingBatch, setLoadingBatch] = useState<boolean>(() => boot.current.loadingBatch),
     [batchError, setBatchError] = useState(""),
     [reloadTick, setReloadTick] = useState(0),
     [historyOpen, setHistoryOpen] = useState(false),
-    [active, setActive] = useState<string | undefined>(() =>
-      initialProductCardId && !suiteId ? undefined : (suiteId ?? readLastSuiteId() ?? undefined),
-    );
+    [active, setActive] = useState<string | undefined>(() => boot.current.active);
 
-  const hydrated = useRef<string | undefined>(undefined),
+  const mountedRef = useRef(true),
+    hydrated = useRef<string | undefined>(undefined),
     skipDefaultFeed = useRef(false),
     requestSeq = useRef(0),
     appliedSeq = useRef(0),
     cardCheckSeq = useRef(0),
-    currentBatchIdRef = useRef<string | undefined>(undefined),
+    currentBatchIdRef = useRef<string | undefined>(boot.current.state?.suite.id),
     inFlightStates = useRef<Map<string, Promise<StudioState>>>(new Map());
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const fetchStudioState = useCallback((id: string) => {
     const existing = inFlightStates.current.get(id);
@@ -146,7 +186,14 @@ export function SuiteStudioPage({
     async (id: string) => {
       const seq = ++requestSeq.current;
       const next = await studioApi.state(id);
-      applyState(next, seq);
+      suiteWorkspaceStore.setMemoryCache({
+        suiteId: next.suite.id,
+        state: next,
+        images: next.inputImages,
+      });
+      if (mountedRef.current) {
+        applyState(next, seq);
+      }
     },
     [applyState],
   );
@@ -168,12 +215,25 @@ export function SuiteStudioPage({
     };
   }, []);
 
+  const currentSuiteId = suiteId ?? active;
+
   const patch = (update: Partial<Config>) => {
     if ("productCardId" in update) {
       cardCheckSeq.current += 1;
     }
-    setConfig((c) => ({ ...c, ...update }));
+    setConfig((prev) => {
+      const next = { ...prev, ...update };
+      const targetSuiteId = currentSuiteId ?? null;
+      suiteWorkspaceStore.updateConfig(next, {
+        suiteId: targetSuiteId,
+        markDirty: true,
+        clone: targetSuiteId ? clone : false,
+      });
+      return next;
+    });
+    setConfigDirty(true);
   };
+
   // Options are model-specific; never submit a stale size/ratio restored from another channel.
   const effective: Config = {
     ...config,
@@ -190,34 +250,59 @@ export function SuiteStudioPage({
       void productCardsApi
         .get(cardId)
         .then((card) => {
-          if (checkSeq !== cardCheckSeq.current) return;
+          if (!mountedRef.current || checkSeq !== cardCheckSeq.current) return;
           if (card.status === "published") {
-            setConfig((prev) =>
-              prev.productCardId === cardId
-                ? { ...prev, productCardSummary: toSelectedProductCardSummary(card) }
-                : prev,
-            );
+            const summary = toSelectedProductCardSummary(card);
+            setConfig((prev) => {
+              if (prev.productCardId !== cardId) return prev;
+              const next = { ...prev, productCardSummary: summary };
+              const snap = suiteWorkspaceStore.getSnapshot();
+              if (snap.config.productCardId === cardId) {
+                suiteWorkspaceStore.updateConfig(next, {
+                  suiteId: snap.activeSuiteId,
+                  markDirty: false,
+                  clone: snap.clone,
+                });
+              }
+              return next;
+            });
             if (mode === "edit") {
               setNotice("已载入同款配置，生成后将创建新批次。");
             }
             return;
           }
-          setConfig((prev) =>
-            prev.productCardId === cardId
-              ? { ...prev, productCardId: null, productCardSummary: null }
-              : prev,
-          );
+          setConfig((prev) => {
+            if (prev.productCardId !== cardId) return prev;
+            const next = { ...prev, productCardId: null, productCardSummary: null };
+            const snap = suiteWorkspaceStore.getSnapshot();
+            if (snap.config.productCardId === cardId) {
+              suiteWorkspaceStore.updateConfig(next, {
+                suiteId: snap.activeSuiteId,
+                markDirty: false,
+                clone: snap.clone,
+              });
+            }
+            return next;
+          });
           setNotice(
             `原关联商品信息卡「${card.name || fallbackName || cardId}」已归档，已自动清空左侧绑定，请重新选择在用商品卡或手动填写。`,
           );
         })
         .catch(() => {
-          if (checkSeq !== cardCheckSeq.current) return;
-          setConfig((prev) =>
-            prev.productCardId === cardId
-              ? { ...prev, productCardId: null, productCardSummary: null }
-              : prev,
-          );
+          if (!mountedRef.current || checkSeq !== cardCheckSeq.current) return;
+          setConfig((prev) => {
+            if (prev.productCardId !== cardId) return prev;
+            const next = { ...prev, productCardId: null, productCardSummary: null };
+            const snap = suiteWorkspaceStore.getSnapshot();
+            if (snap.config.productCardId === cardId) {
+              suiteWorkspaceStore.updateConfig(next, {
+                suiteId: snap.activeSuiteId,
+                markDirty: false,
+                clone: snap.clone,
+              });
+            }
+            return next;
+          });
           setNotice(
             `原关联商品信息卡${fallbackName ? `「${fallbackName}」` : ""}已删除或不可用，已自动清空左侧绑定，请重新选择在用商品卡或手动填写。`,
           );
@@ -229,10 +314,18 @@ export function SuiteStudioPage({
   const hydrate = useCallback(
     (s: StudioState, mode: "hydrate" | "edit" = "hydrate") => {
       cardCheckSeq.current += 1;
-      setImages(s.inputImages);
+      const nextClone = Boolean(s.pipeline || s.cards.length > 0);
       const nextConfig = fromRun(s.pipeline);
+      setImages(s.inputImages);
       setConfig(nextConfig);
-      setClone(!!s.pipeline || s.cards.length > 0);
+      setConfigDirty(false);
+      setClone(nextClone);
+      suiteWorkspaceStore.hydrateFromServer(s.suite.id, nextConfig, nextClone);
+      suiteWorkspaceStore.setMemoryCache({
+        suiteId: s.suite.id,
+        state: s,
+        images: s.inputImages,
+      });
       if (nextConfig.productCardId) {
         verifyBoundCardForEditing(
           nextConfig.productCardId,
@@ -245,8 +338,6 @@ export function SuiteStudioPage({
     },
     [verifyBoundCardForEditing],
   );
-
-  const currentSuiteId = suiteId ?? active;
 
   useEffect(() => {
     // URL ?productCardId=<id> opens a blank new suite pre-bound to the published product card.
@@ -264,6 +355,7 @@ export function SuiteStudioPage({
       setImages([]);
       setClone(false);
       setConfig(initialConfig);
+      setConfigDirty(false);
 
       void productCardsApi
         .get(initialProductCardId)
@@ -275,12 +367,20 @@ export function SuiteStudioPage({
             );
             return;
           }
-          setConfig((prev) => ({
-            ...prev,
+          const boundConfig: Config = {
+            ...initialConfig,
             productCardId: card.id,
             productCardSummary: toSelectedProductCardSummary(card),
             productCardSnapshot: null,
-          }));
+          };
+          suiteWorkspaceStore.clear();
+          suiteWorkspaceStore.updateConfig(boundConfig, {
+            suiteId: null,
+            markDirty: true,
+            clone: false,
+          });
+          setConfig(boundConfig);
+          setConfigDirty(true);
         })
         .catch(() => {
           if (!live || checkSeq !== cardCheckSeq.current) return;
@@ -292,12 +392,12 @@ export function SuiteStudioPage({
       };
     }
 
-    const savedId = suiteId ? null : readLastSuiteId();
-    const targetId = suiteId ?? savedId ?? undefined;
+    const snap = suiteWorkspaceStore.getSnapshot();
+    const targetId = suiteId ?? snap.activeSuiteId ?? undefined;
     setActive(targetId);
 
     if (targetId && targetId === hydrated.current) {
-      saveLastSuiteId(targetId);
+      suiteWorkspaceStore.setActiveSuite(targetId);
       if (!suiteId) navigate(`/create/suite/${targetId}`, { replace: true });
       setLoadingBatch(false);
       return;
@@ -312,20 +412,40 @@ export function SuiteStudioPage({
       return;
     }
 
+    // Restore an unuploaded local config draft (e.g. sellingPoints, counts, pre-bound productCard)
+    // without fetching historical feed batches.
+    if (!targetId && snap.activeSuiteId === null && (snap.hasLocalConfigEdits || isConfigDirty(snap.config))) {
+      hydrated.current = undefined;
+      setNotice("");
+      setBatchError("");
+      setImages([]);
+      setClone(false);
+      setConfig(snap.config);
+      setConfigDirty(true);
+      applyState(null);
+      setBusy(false);
+      setLoadingBatch(false);
+      if (snap.config.productCardId) {
+        verifyBoundCardForEditing(
+          snap.config.productCardId,
+          snap.config.productCardSummary?.name ?? snap.config.productCardSnapshot?.name ?? "",
+          "hydrate",
+        );
+      }
+      return;
+    }
+
     let live = true;
     cardCheckSeq.current += 1;
     setNotice("");
     setBatchError("");
-    setImages([]);
-    setConfig(initialConfig);
-    setClone(false);
 
-    async function loadDefaultLatest(seq: number) {
+    async function loadDefaultActive(seq: number) {
       try {
         const page = await studioApi.feed({ origin: "suite_studio", limit: 1, offset: 0 });
         if (!live) return;
         const latest = page.items[0];
-        if (!latest) {
+        if (!isActiveNonTerminalFeedItem(latest)) {
           applyState(null);
           return;
         }
@@ -333,6 +453,9 @@ export function SuiteStudioPage({
           const state = await fetchStudioState(latest.suite.id);
           if (!live) return;
           applyState(state, seq);
+          hydrate(state);
+          hydrated.current = state.suite.id;
+          setActive(state.suite.id);
         } catch {
           if (live) applyState(null);
         }
@@ -345,30 +468,97 @@ export function SuiteStudioPage({
     }
 
     if (targetId) {
-      setBusy(true);
-      setLoadingBatch(true);
+      const cached = suiteWorkspaceStore.getMemoryCache(targetId);
+      const hasSavedConfigForTarget =
+        snap.configSuiteId === targetId && (snap.hasLocalConfigEdits || !cached?.state?.pipeline);
+
+      if (cached) {
+        applyState(cached.state);
+        setImages(cached.images);
+        setLoadingBatch(false);
+      } else {
+        setImages([]);
+        setLoadingBatch(true);
+      }
+
+      if (hasSavedConfigForTarget) {
+        setConfig(snap.config);
+        setConfigDirty(snap.hasLocalConfigEdits);
+        setClone(snap.clone);
+      } else if (!cached) {
+        setConfig(initialConfig);
+        setConfigDirty(false);
+        setClone(false);
+      }
+
+      setBusy(!cached);
       const seq = ++requestSeq.current;
       void fetchStudioState(targetId)
         .then((s) => {
           if (!live) return;
+          const isDraftSuite = !s.pipeline && s.cards.length === 0;
+          const nextClone = Boolean(s.pipeline || s.cards.length > 0);
           applyState(s, seq);
-          hydrate(s);
+          suiteWorkspaceStore.setMemoryCache({
+            suiteId: s.suite.id,
+            state: s,
+            images: s.inputImages,
+          });
+          setImages(s.inputImages);
+          setClone(nextClone);
+
+          const latestSnap = suiteWorkspaceStore.getSnapshot();
+          const shouldPreserveDraftConfig =
+            (isDraftSuite &&
+              (latestSnap.configSuiteId === s.suite.id ||
+                (latestSnap.configSuiteId === null && latestSnap.hasLocalConfigEdits))) ||
+            (!isDraftSuite && latestSnap.configSuiteId === s.suite.id && latestSnap.hasLocalConfigEdits);
+
+          if (shouldPreserveDraftConfig) {
+            const preserved = latestSnap.config;
+            setConfig(preserved);
+            setConfigDirty(latestSnap.hasLocalConfigEdits);
+            suiteWorkspaceStore.updateConfig(preserved, {
+              suiteId: s.suite.id,
+              markDirty: latestSnap.hasLocalConfigEdits,
+              clone: nextClone,
+            });
+            if (preserved.productCardId) {
+              verifyBoundCardForEditing(
+                preserved.productCardId,
+                preserved.productCardSummary?.name ?? preserved.productCardSnapshot?.name ?? "",
+                "hydrate",
+              );
+            }
+          } else {
+            hydrate(s);
+          }
+
           hydrated.current = s.suite.id;
           setActive(s.suite.id);
-          saveLastSuiteId(s.suite.id);
           if (!suiteId) navigate(`/create/suite/${s.suite.id}`, { replace: true });
         })
         .catch(async (e) => {
           if (!live) return;
           if (!suiteId) {
-            clearLastSuiteId();
+            suiteWorkspaceStore.clear();
             hydrated.current = undefined;
             setActive(undefined);
+            setImages([]);
+            setConfig(initialConfig);
+            setConfigDirty(false);
+            setClone(false);
             applyState(null);
-            await loadDefaultLatest(++requestSeq.current);
+            await loadDefaultActive(++requestSeq.current);
           } else {
-            if (readLastSuiteId() === suiteId) clearLastSuiteId();
+            if (suiteWorkspaceStore.getSnapshot().activeSuiteId === suiteId) {
+              suiteWorkspaceStore.clear();
+            }
             hydrated.current = undefined;
+            setImages([]);
+            setConfig(initialConfig);
+            setConfigDirty(false);
+            setClone(false);
             applyState(null);
             setBatchError(message(e));
           }
@@ -380,11 +570,15 @@ export function SuiteStudioPage({
           }
         });
     } else {
+      setImages([]);
+      setConfig(initialConfig);
+      setConfigDirty(false);
+      setClone(false);
       hydrated.current = undefined;
       setBusy(false);
       setLoadingBatch(true);
       const seq = ++requestSeq.current;
-      void loadDefaultLatest(seq).finally(() => {
+      void loadDefaultActive(seq).finally(() => {
         if (live) setLoadingBatch(false);
       });
     }
@@ -392,7 +586,16 @@ export function SuiteStudioPage({
     return () => {
       live = false;
     };
-  }, [suiteId, initialProductCardId, reloadTick, navigate, applyState, fetchStudioState, hydrate]);
+  }, [
+    suiteId,
+    initialProductCardId,
+    reloadTick,
+    navigate,
+    applyState,
+    fetchStudioState,
+    hydrate,
+    verifyBoundCardForEditing,
+  ]);
 
   const currentBatch = currentState && (currentState.cards.length || currentState.pipeline) ? currentState : null;
   const pollingSuiteId = currentBatch && isBatchPolling(currentBatch) ? currentBatch.suite.id : undefined;
@@ -405,6 +608,11 @@ export function SuiteStudioPage({
       const seq = ++requestSeq.current;
       try {
         const next = await studioApi.state(pollingSuiteId!);
+        suiteWorkspaceStore.setMemoryCache({
+          suiteId: next.suite.id,
+          state: next,
+          images: next.inputImages,
+        });
         if (!live || currentBatchIdRef.current !== pollingSuiteId) return;
         applyState(next, seq);
         if (isBatchPolling(next)) {
@@ -426,12 +634,12 @@ export function SuiteStudioPage({
   const route = (id: string) => {
     hydrated.current = id;
     setActive(id);
-    saveLastSuiteId(id);
+    suiteWorkspaceStore.setActiveSuite(id);
     if (id !== suiteId) navigate(`/create/suite/${id}`);
   };
 
   const startNewSuite = () => {
-    clearLastSuiteId();
+    suiteWorkspaceStore.clear();
     cardCheckSeq.current += 1;
     hydrated.current = undefined;
     setActive(undefined);
@@ -441,6 +649,7 @@ export function SuiteStudioPage({
     setNotice("");
     setImages([]);
     setConfig(initialConfig);
+    setConfigDirty(false);
     setClone(false);
     if (suiteId || initialProductCardId || window.location.pathname !== "/create/suite" || window.location.search) {
       if (suiteId || initialProductCardId) skipDefaultFeed.current = true;
@@ -453,11 +662,11 @@ export function SuiteStudioPage({
     setBatchError("");
     skipDefaultFeed.current = false;
     hydrated.current = undefined;
+    suiteWorkspaceStore.setActiveSuite(id, { resetLocalConfig: true });
     if (id === suiteId) {
       setReloadTick((n) => n + 1);
       return;
     }
-    saveLastSuiteId(id);
     navigate(`/create/suite/${id}`);
   };
 
@@ -470,52 +679,95 @@ export function SuiteStudioPage({
       if (files.some((f) => !["image/png", "image/jpeg", "image/webp"].includes(f.type)))
         throw Error("请上传 PNG、JPEG 或 WebP 格式的图片。");
       let id = currentSuiteId;
+      let nextImages = [...images];
       if (!id) {
         const initialName =
           config.productCardId && config.productCardSummary?.name
             ? config.productCardSummary.name
             : productNameFor(undefined, files[0].name);
         id = (await suiteApi.create(initialName)).id;
-        applyState(null);
-        route(id);
+        suiteWorkspaceStore.updateConfig(config, {
+          suiteId: id,
+          markDirty: configDirty || isConfigDirty(config),
+          clone: false,
+        });
+        suiteWorkspaceStore.setMemoryCache({ suiteId: id, state: null, images: nextImages });
+        if (mountedRef.current) {
+          applyState(null);
+          route(id);
+        }
       }
       for (const [i, file] of files.entries()) {
         const image = await suiteApi.upload(id, file, images.length + i + 1);
-        setImages((prev) => [...prev, image]);
+        nextImages = [...nextImages, image];
+        suiteWorkspaceStore.setMemoryCache({
+          suiteId: id,
+          state: currentState,
+          images: nextImages,
+        });
+        if (mountedRef.current) {
+          setImages(nextImages);
+        }
       }
     } catch (e) {
-      setNotice(message(e));
+      if (mountedRef.current) setNotice(message(e));
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   };
 
   const generate = async () => {
     if (!currentSuiteId || !images.length || busy) return;
+    const sourceSuiteId = currentSuiteId;
+    const sourceImages = [...images];
+    const submitConfig = { ...effective };
+    const isCloneRun = clone;
     setBusy(true);
     setNotice("");
     try {
-      if (!clone) {
+      if (!isCloneRun) {
         const nextName =
-          effective.productCardId && effective.productCardSummary?.name
-            ? effective.productCardSummary.name
-            : productNameFor(effective.sellingPoints, images[0].originalFilename);
-        await suiteApi.rename(currentSuiteId, nextName);
+          submitConfig.productCardId && submitConfig.productCardSummary?.name
+            ? submitConfig.productCardSummary.name
+            : productNameFor(submitConfig.sellingPoints, sourceImages[0].originalFilename);
+        await suiteApi.rename(sourceSuiteId, nextName);
       }
       const result = await studioApi.start(
-        clone ? { cloneFrom: { suiteId: currentSuiteId, imageIds: images.map((i) => i.id) } } : { suiteId: currentSuiteId },
-        effective,
+        isCloneRun
+          ? { cloneFrom: { suiteId: sourceSuiteId, imageIds: sourceImages.map((i) => i.id) } }
+          : { suiteId: sourceSuiteId },
+        submitConfig,
       );
-      route(result.suiteId);
-      setClone(true);
+      suiteWorkspaceStore.hydrateFromServer(result.suiteId, submitConfig, true);
+      saveLastSuiteId(result.suiteId);
+
+      const canUpdateUi = () =>
+        mountedRef.current && window.location.pathname.startsWith("/create/suite");
+
+      if (canUpdateUi()) {
+        route(result.suiteId);
+        setClone(true);
+        setConfigDirty(false);
+      }
+
       const seq = ++requestSeq.current;
       const latest = await studioApi.state(result.suiteId);
-      applyState(latest, seq);
-      setImages(latest.inputImages);
+      suiteWorkspaceStore.setMemoryCache({
+        suiteId: latest.suite.id,
+        state: latest,
+        images: latest.inputImages,
+      });
+      suiteWorkspaceStore.hydrateFromServer(latest.suite.id, fromRun(latest.pipeline), true);
+      saveLastSuiteId(latest.suite.id);
+
+      if (canUpdateUi()) {
+        applyState(latest, seq);
+        setImages(latest.inputImages);
+      }
     } catch (e) {
-      setNotice(message(e));
+      if (mountedRef.current) setNotice(message(e));
     } finally {
-      setBusy(false);
+      if (mountedRef.current) setBusy(false);
     }
   };
 
@@ -558,7 +810,13 @@ export function SuiteStudioPage({
             setBusy(true);
             try {
               if (!clone) await suiteApi.removeInputImage(currentSuiteId, im.id);
-              setImages((a) => a.filter((x) => x.id !== im.id));
+              const nextImages = images.filter((x) => x.id !== im.id);
+              suiteWorkspaceStore.setMemoryCache({
+                suiteId: currentSuiteId,
+                state: currentState,
+                images: nextImages,
+              });
+              setImages(nextImages);
             } catch (e) {
               setNotice(message(e));
             } finally {
@@ -576,7 +834,7 @@ export function SuiteStudioPage({
               <button type="button" onClick={() => setHistoryOpen(true)}>
                 生成记录
               </button>
-              {(currentSuiteId || currentBatch || config.productCardId) && (
+              {(currentSuiteId || currentBatch || config.productCardId || configDirty) && (
                 <button type="button" disabled={busy} onClick={startNewSuite}>
                   ＋ 新建套图
                 </button>
@@ -608,7 +866,7 @@ export function SuiteStudioPage({
                 </button>
               </div>
             ) : (
-              <EmptyStudio />
+              <SuiteEmptyState />
             ))}
           {currentBatch && (
             <BatchResults
@@ -625,7 +883,9 @@ export function SuiteStudioPage({
                 applyState(s);
               }}
               onDelete={(id) => {
-                if (readLastSuiteId() === id) clearLastSuiteId();
+                if (suiteWorkspaceStore.getSnapshot().activeSuiteId === id) {
+                  suiteWorkspaceStore.clear();
+                }
                 if (currentBatch.suite.id === id || currentSuiteId === id) {
                   startNewSuite();
                 }
