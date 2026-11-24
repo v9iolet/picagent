@@ -1,7 +1,7 @@
 import { parseProviderJson } from "./provider-json.js";
 import type { ModelChannelSnapshot } from "../../shared/model-settings.js";
 import { randomUUID } from "node:crypto";
-import type { CategoryPromptLlmInput, LlmClient, PlanLlmInput, ReplicaPromptLlmInput } from "../types.js";
+import type { CategoryPromptLlmInput, LlmClient, PlanLlmInput, ProductOnboardingLlmInput, ReplicaPromptLlmInput } from "../types.js";
 import { failModelArchive, finishModelArchive, startModelArchive } from "../prompt-archive.js";
 import { failObservation, finishObservation, logObservation, recordModelFailure, recordModelSuccess, startGeneration } from "../observability.js";
 
@@ -49,6 +49,42 @@ export function buildReplicaPromptUserContent(input: ReplicaPromptLlmInput): Vis
     { type: "text", text },
     ...orderedReferences.map((image) => ({ type: "image_url" as const, image_url: { url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}` } })),
     ...orderedProducts.map((image) => ({ type: "image_url" as const, image_url: { url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}` } })),
+  ];
+}
+
+const DEFAULT_PRODUCT_ONBOARDING_USER_PROMPT_TEMPLATE = [
+  "当前右侧商品信息卡草稿（currentDraftCard）：{{currentDraftCard}}",
+  "当前缺失必填字段（missingRequiredFields）：{{missingRequiredFields}}",
+  "历史对话记录（conversationHistory）：{{conversationHistory}}",
+  "本轮用户消息（latestUserMessage）：{{latestUserMessage}}",
+  "本轮上传的 .txt 附件内容（txtAttachments）：{{txtAttachments}}",
+  "当前会话供应商参考图列表（按 ordinal 排序，对应下方图片）：{{supplierImages}}",
+  "",
+  "请严格基于上述文本、.txt 附件与供应商参考图中的客观事实，合并更新商品信息卡草稿，并严格输出符合 product-onboarding-v1 的唯一 JSON 对象。",
+].join("\n");
+
+export function buildProductOnboardingUserContent(input: ProductOnboardingLlmInput): VisionContent[] {
+  const orderedImages = [...input.supplierImages].sort((a, b) => a.ordinal - b.ordinal);
+  const imagesSummary = orderedImages.map((img, index) => ({
+    imageIndex: index + 1,
+    id: img.id,
+    ordinal: img.ordinal,
+    filename: img.filename,
+    mimeType: img.mimeType,
+  }));
+  const text = (input.template.userPromptTemplate?.trim() || DEFAULT_PRODUCT_ONBOARDING_USER_PROMPT_TEMPLATE)
+    .replaceAll("{{currentDraftCard}}", JSON.stringify(input.currentDraftCard))
+    .replaceAll("{{missingRequiredFields}}", JSON.stringify(input.missingRequiredFields))
+    .replaceAll("{{conversationHistory}}", JSON.stringify(input.conversationHistory))
+    .replaceAll("{{latestUserMessage}}", input.latestUserMessage.trim() || "无")
+    .replaceAll("{{txtAttachments}}", JSON.stringify(input.txtAttachments))
+    .replaceAll("{{supplierImages}}", JSON.stringify(imagesSummary));
+  return [
+    { type: "text", text },
+    ...orderedImages.map((image) => ({
+      type: "image_url" as const,
+      image_url: { url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}` },
+    })),
   ];
 }
 
@@ -241,6 +277,129 @@ export class DashScopeLlmClient implements LlmClient {
         },
       },
       inputFiles: orderedImages.map((image) => ({ label: `${image.role}-${image.ordinal}-${image.id}`, mimeType: image.mimeType, bytes: image.bytes })),
+    });
+    let archived = false;
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        redirect: "error",
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: this.model,
+          temperature: 0,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: userContent },
+          ],
+        }),
+      });
+      if (!response.ok) {
+        const error = new Error(`LLM_HTTP_${response.status}`);
+        await failModelArchive(archive, error, { httpStatus: response.status });
+        archived = true;
+        throw error;
+      }
+      let payload: { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }; [key: string]: unknown };
+      try {
+        payload = parseProviderJson(await response.text(), this.apiKey, "LLM_INVALID_HTTP_RESPONSE") as typeof payload;
+      } catch {
+        const error = new Error("LLM_INVALID_HTTP_RESPONSE");
+        await failModelArchive(archive, error, { httpStatus: response.status });
+        archived = true;
+        throw error;
+      }
+      const content = payload.choices?.[0]?.message?.content;
+      if (!content) {
+        const error = new Error("LLM_EMPTY_RESPONSE");
+        await failModelArchive(archive, error, { httpStatus: response.status, payload });
+        archived = true;
+        throw error;
+      }
+      let parsed: unknown;
+      try {
+        parsed = parseProviderJson(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""), this.apiKey, "LLM_INVALID_JSON_RESPONSE");
+      } catch {
+        const error = new Error("LLM_INVALID_JSON_RESPONSE");
+        await failModelArchive(archive, error, { httpStatus: response.status });
+        archived = true;
+        throw error;
+      }
+      await finishModelArchive(archive, { httpStatus: response.status, payload, content, parsed });
+      finishObservation(observation, { content: captureText(content), status: "succeeded" }, { http_status: response.status });
+      recordModelSuccess(flow, this.provider, this.model, Date.now() - startedAt, { input: payload.usage?.prompt_tokens, output: payload.usage?.completion_tokens });
+      logObservation("model.completed", { request_id: requestId, flow, provider: this.provider, model: this.model, duration_ms: Date.now() - startedAt, status: "success" });
+      archived = true;
+      return parsed;
+    } catch (error) {
+      const normalized = error instanceof DOMException && error.name === "AbortError" ? new Error("LLM_TIMEOUT") : error;
+      if (!archived) await failModelArchive(archive, normalized);
+      failObservation(observation, normalized);
+      recordModelFailure(flow, this.provider, this.model, Date.now() - startedAt, normalized instanceof Error ? normalized.message : "LLM_FAILED");
+      logObservation("model.failed", { request_id: requestId, flow, provider: this.provider, model: this.model, duration_ms: Date.now() - startedAt, status: "error", error_code: normalized instanceof Error ? normalized.message : "LLM_FAILED" });
+      throw normalized;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async generateProductOnboarding(input: ProductOnboardingLlmInput): Promise<unknown> {
+    const startedAt = Date.now();
+    const flow = "product-onboarding";
+    const requestId = input.requestId ?? randomUUID();
+    const orderedImages = [...input.supplierImages].sort((a, b) => a.ordinal - b.ordinal);
+    const system = input.template.body;
+    const userContent = buildProductOnboardingUserContent(input);
+    const userPrompt = userContent[0].type === "text" ? userContent[0].text : "";
+    const observation = startGeneration(`llm.${flow}`, {
+      system,
+      user: userPrompt,
+      images: orderedImages.map(({ id, ordinal, filename, mimeType, bytes }) => ({
+        id,
+        ordinal,
+        filename,
+        mimeType,
+        byteLength: bytes.length,
+      })),
+    }, { flow, provider: this.provider, model: this.model, template_version_id: input.template.templateVersionId, request_id: requestId });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const endpoint = new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`).toString();
+    const archive = await startModelArchive({
+      type: "multimodal-product-onboarding",
+      flow,
+      requestId,
+      provider: this.provider,
+      model: this.model,
+      request: {
+        endpoint,
+        templateVersionId: input.template.templateVersionId,
+        body: {
+          model: this.model,
+          temperature: 0,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: system },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: userPrompt },
+                ...orderedImages.map((image, index) => ({
+                  type: "image_url",
+                  image_url: { url: `[archive-input-${index + 1}:supplier:${image.ordinal}:${image.id}]` },
+                })),
+              ],
+            },
+          ],
+        },
+      },
+      inputFiles: orderedImages.map((image) => ({
+        label: `supplier-${image.ordinal}-${image.id}`,
+        mimeType: image.mimeType,
+        bytes: image.bytes,
+        filename: image.filename,
+      })),
     });
     let archived = false;
     try {

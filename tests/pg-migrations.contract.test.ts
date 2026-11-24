@@ -1148,11 +1148,11 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
     const prompts = new PostgresPromptRepository(pool);
     const library = new PostgresLibraryRepository(pool);
 
-    // 1. After fresh migrations (001..036): reverse.* seeded in 018 are retired; replica.* upgraded by 036 stay published at v2 with usedBy
+    // 1. After fresh migrations (001..039): reverse.* seeded in 018 are retired; replica.* upgraded by 036 and product.onboarding seeded by 039 stay published with usedBy
     const initialPublished = await prompts.listPublished();
     assert.deepEqual(
       initialPublished.map((item) => item.code).sort(),
-      ["replica.compose", "replica.high"],
+      ["product.onboarding", "replica.compose", "replica.high"],
     );
     assert.equal(initialPublished.find((i) => i.code === "replica.compose")?.versionNo, 2);
     assert.equal(initialPublished.find((i) => i.code === "replica.high")?.versionNo, 2);
@@ -1200,6 +1200,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
         "general.category-prompt",
         "general.listing-copy",
         "general.structure-plan",
+        "product.onboarding",
         "replica.compose",
         "replica.high",
       ],
@@ -1207,12 +1208,12 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
 
     // Library repository filters published vs retired vs all accurately with usedBy
     const libPublished = await library.listResources({ resourceType: "prompt_template", status: "published", pageSize: 100 });
-    assert.equal(libPublished.items.length, 6);
+    assert.equal(libPublished.items.length, 7);
     assert.ok(libPublished.items.every((item) => (item.usedBy?.length ?? 0) > 0));
     const libRetired = await library.listResources({ resourceType: "prompt_template", status: "retired", pageSize: 100 });
     assert.equal(libRetired.items.length, 13); // 10 reverse + 2 plan + 1 repair
     const libAll = await library.listResources({ resourceType: "prompt_template", pageSize: 100 });
-    assert.equal(libAll.items.length, 19);
+    assert.equal(libAll.items.length, 20);
 
     // 3. Active template copy -> edit draft -> draft filtering -> publish flow works end-to-end in PG
     const baseRefine = activeAfterImport.find((i) => i.code === "general.base_refine")!;
@@ -1277,6 +1278,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
         "general.category-prompt",
         "general.listing-copy",
         "general.structure-plan",
+        "product.onboarding",
         "replica.compose",
         "replica.high",
       ],
@@ -2427,6 +2429,204 @@ test("038 migration enforces product library and onboarding constraints, cascade
       [sessionId],
     );
     assert.equal(remainingMessages.rows[0]?.cnt, 0);
+  });
+});
+
+test("039 migration extends prompt stages, seeds product.onboarding idempotently, and supports PostgresProductOnboardingRepository", { skip }, async () => {
+  const { PostgresProductCardRepository } = await import(
+    "../server/repositories/postgres-product-card-repository.js"
+  );
+  const { PostgresProductOnboardingRepository } = await import(
+    "../server/product-onboarding/index.js"
+  );
+  const { importPromptRecordsWithPolicy } = await import("../server/prompt-library.js");
+
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const productCards = new PostgresProductCardRepository(pool);
+    const onboarding = new PostgresProductOnboardingRepository(pool);
+
+    // 1. Seeded product.onboarding template is active & published at v1 with stage product_onboarding
+    const published = await prompts.listPublished("product_onboarding");
+    assert.equal(published.length, 1);
+    assert.equal(published[0].code, "product.onboarding");
+    assert.equal(published[0].stage, "product_onboarding");
+    assert.equal(published[0].versionNo, 1);
+    assert.deepEqual(published[0].usedBy, ["首页·商品信息建档"]);
+
+    // 2. source_sha256 strictly matches prompt/normalized/product-onboarding.md and import-prompts is idempotent
+    const sourcePath = "prompt/normalized/product-onboarding.md";
+    const markdown = await readFile(sourcePath, "utf8");
+    const parsedRecord = parseNormalizedPromptMarkdown(markdown, sourcePath);
+    const seededRuntime = await prompts.getPublishedVersion(
+      published[0].templateVersionId,
+      "product_onboarding",
+    );
+    assert.ok(seededRuntime);
+    assert.equal(seededRuntime.sourceSha256, parsedRecord.sourceSha256);
+
+    const [reimported] = await importPromptRecordsWithPolicy(prompts, [parsedRecord], {
+      publish: false,
+    });
+    assert.equal(reimported.templateVersionId, seededRuntime.templateVersionId);
+    assert.equal(reimported.versionNo, 1);
+    assert.equal(reimported.status, "published");
+    assert.equal((await prompts.listVersions(seededRuntime.templateId)).length, 1);
+
+    // 3. Stage CHECK rejects unknown stage values
+    const tx = await pool.connect();
+    try {
+      await tx.query("BEGIN");
+      await assert.rejects(
+        tx.query(
+          `INSERT INTO prompt_library.prompt_templates (id, code, name, kind, stage, execution_target)
+           VALUES ($1, 'bad.stage', '非法阶段', 'planner', 'unknown_stage', 'llm')`,
+          [randomUUID()],
+        ),
+        { code: "23514", constraint: "prompt_templates_stage_check" },
+      );
+    } finally {
+      await tx.query("ROLLBACK");
+      tx.release();
+    }
+
+    // 4. Replaying runMigrations with live product_onboarding rows succeeds idempotently
+    await runMigrations(pool);
+    assert.equal((await prompts.listPublished("product_onboarding")).length, 1);
+
+    // 5. PostgresProductOnboardingRepository end-to-end CRUD, draft update, turn append, publish lock, and delete
+    const sessionId = randomUUID();
+    const imgId = randomUUID();
+    const created = await onboarding.createWithMessages({
+      id: sessionId,
+      title: "PG 保温杯建档",
+      draftCard: {
+        name: "PG 不锈钢保温杯",
+        category: "水杯水具",
+        sellingPoints: ["316L 内胆"],
+        specifications: "",
+        materialsCraft: "",
+        audienceScenarios: "",
+        packageContents: "",
+        skuCode: "",
+        painPointsComparison: "",
+        usageDemoHighlights: "",
+        certificationsProhibitions: "",
+      },
+      draftImages: [
+        {
+          id: imgId,
+          ordinal: 1,
+          originalObjectKey: `product-onboarding/${sessionId}/images/${imgId}/original`,
+          thumbnailObjectKey: `product-onboarding/${sessionId}/images/${imgId}/thumbnail`,
+          sha256: "a".repeat(64),
+          width: 400,
+          height: 400,
+          mimeType: "image/png",
+          originalFilename: "cup.png",
+          createdAt: timestamp,
+        },
+      ],
+      missingRequiredFields: [
+        "specifications",
+        "materialsCraft",
+        "audienceScenarios",
+        "packageContents",
+      ],
+      messages: [
+        {
+          id: randomUUID(),
+          role: "user",
+          content: "帮我建档一款 316L 保温杯",
+          attachments: [],
+          templateVersionId: null,
+          modelSnapshot: null,
+          createdAt: timestamp,
+        },
+        {
+          id: randomUUID(),
+          role: "assistant",
+          content: "请补充规格、材质工艺、人群场景与包装清单。",
+          attachments: [],
+          templateVersionId: seededRuntime.templateVersionId,
+          modelSnapshot: { provider: "fake", model: "vision-v1", isFake: true },
+          createdAt: timestamp,
+        },
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    assert.equal(created.messages.length, 2);
+    assert.equal(created.supplierImages.length, 1);
+    assert.equal(
+      (await onboarding.getDraftImage(sessionId, imgId))?.thumbnailPreviewUrl,
+      `/api/product-onboarding/sessions/${sessionId}/images/${imgId}/preview/thumbnail`,
+    );
+
+    const draftUpdate = await onboarding.updateDraft(sessionId, {
+      title: "PG 不锈钢保温杯 500ml",
+      draftCard: {
+        ...created.draftCard,
+        name: "PG 不锈钢保温杯 500ml",
+        specifications: "500ml，高 215mm，重 265g",
+        materialsCraft: "316L 内胆 + 304 外壳",
+        audienceScenarios: "通勤办公与户外露营",
+        packageContents: "单品本体 ×1，无额外配件",
+      },
+      draftImages: created.supplierImages.map(({ originalPreviewUrl: _o, thumbnailPreviewUrl: _t, ...rest }) => rest),
+      missingRequiredFields: [],
+      updatedAt: "2026-01-01T00:05:00.000Z",
+    });
+    assert.ok(draftUpdate && "session" in draftUpdate);
+    assert.deepEqual(draftUpdate.session.missingRequiredFields, []);
+
+    const cardId = randomUUID();
+    await productCards.create({
+      id: cardId,
+      status: "published",
+      fields: draftUpdate.session.draftCard,
+      sourceSessionId: sessionId,
+      revision: 1,
+      images: [],
+      createdAt: "2026-01-01T00:06:00.000Z",
+      updatedAt: "2026-01-01T00:06:00.000Z",
+    });
+    const completed = await onboarding.markCompleted(
+      sessionId,
+      cardId,
+      "2026-01-01T00:06:00.000Z",
+    );
+    assert.ok(completed);
+    assert.equal(completed.alreadyCompleted, false);
+    assert.equal(completed.session.status, "completed");
+    assert.equal(completed.session.productCardId, cardId);
+
+    // Second markCompleted is idempotent and mutations return conflict
+    const completedAgain = await onboarding.markCompleted(
+      sessionId,
+      randomUUID(),
+      "2026-01-01T00:07:00.000Z",
+    );
+    assert.equal(completedAgain?.alreadyCompleted, true);
+    assert.equal(completedAgain?.session.productCardId, cardId);
+    const conflictTurn = await onboarding.appendTurn(sessionId, {
+      title: "尝试追加",
+      draftCard: draftUpdate.session.draftCard,
+      draftImages: [],
+      missingRequiredFields: [],
+      messages: [],
+      updatedAt: "2026-01-01T00:08:00.000Z",
+    });
+    assert.deepEqual(conflictTurn, { conflict: "completed" });
+
+    assert.equal((await onboarding.list({ status: "completed" })).total, 1);
+    assert.equal((await onboarding.list({ status: "draft" })).total, 0);
+
+    // Deleting session cascades messages and leaves published product card intact
+    const deletedSession = await onboarding.delete(sessionId);
+    assert.ok(deletedSession);
+    assert.equal(await onboarding.get(sessionId), null);
+    assert.ok(await productCards.get(cardId));
   });
 });
 

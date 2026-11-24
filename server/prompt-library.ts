@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt", "listing_copy", "replica_prompt"] as const;
+export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt", "listing_copy", "replica_prompt", "product_onboarding"] as const;
 export type PromptStage = (typeof PROMPT_STAGES)[number];
 export type PromptVersionStatus = "draft" | "published" | "retired";
 
@@ -11,6 +11,7 @@ export const PROMPT_TEMPLATE_USAGE_BY_CODE = {
   "general.listing-copy": ["上架文案"],
   "replica.compose": ["爆品图复刻·参考风格"],
   "replica.high": ["爆品图复刻·高度复刻"],
+  "product.onboarding": ["首页·商品信息建档"],
 } as const satisfies Record<string, readonly string[]>;
 
 export const IN_USE_PROMPT_STAGES: readonly PromptStage[] = [
@@ -19,6 +20,7 @@ export const IN_USE_PROMPT_STAGES: readonly PromptStage[] = [
   "category_prompt",
   "listing_copy",
   "replica_prompt",
+  "product_onboarding",
 ];
 
 export const UNUSED_PROMPT_STAGES: readonly PromptStage[] = [
@@ -51,6 +53,8 @@ export function resolvePromptTemplateUsedBy(template: {
       if (cloneLevel === "high") return ["爆品图复刻·高度复刻"];
       return ["爆品图复刻"];
     }
+    case "product_onboarding":
+      return ["首页·商品信息建档"];
     default:
       return [];
   }
@@ -146,6 +150,13 @@ export function validatePromptTemplateContract(
     applicability?: Record<string, unknown>;
   },
 ): void {
+  if (record.stage === "product_onboarding") {
+    if (record.kind !== "planner" || record.executionTarget !== "llm") throw new Error(`Product onboarding template ${record.code} must be an llm planner`);
+    const schemaVersion = (record.outputSchema.properties as Record<string, unknown> | undefined)?.schemaVersion as Record<string, unknown> | undefined;
+    if (!schemaVersion || schemaVersion.const !== "product-onboarding-v1") throw new Error(`Product onboarding template ${record.code} has incompatible output schema`);
+    if (!record.body.includes("product-onboarding-v1")) throw new Error(`Product onboarding template ${record.code} body must declare product-onboarding-v1`);
+    return;
+  }
   if (record.stage === "replica_prompt") {
     if (record.kind !== "planner" || record.executionTarget !== "llm") throw new Error(`Replica template ${record.code} must be an llm planner`);
     const schemaVersion = (record.outputSchema.properties as Record<string, unknown> | undefined)?.schemaVersion as Record<string, unknown> | undefined;

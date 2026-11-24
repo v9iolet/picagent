@@ -203,6 +203,7 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
                   ["base_refine", "底图精修"],
                   ["listing_copy", "上架文案"],
                   ["replica_prompt", "爆品图复刻"],
+                  ["product_onboarding", "商品建档"],
                   ["plan", "计划生成"],
                   ["task_image", "单卡创作"],
                   ["reverse_prompt", "爆品图反推"],

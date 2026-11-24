@@ -3,6 +3,7 @@ import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import type {
   ProductCard,
   ProductCardFields,
+  ProductCardRequiredField,
   ProductCardStatus,
   ProductCardSummary,
   ProductCardSupplierImage,
@@ -45,7 +46,7 @@ export interface SuiteAggregate extends Suite { inputImages: InputImage[] }
 export interface UploadFile { filename: string; mimeType: string; bytes: Buffer; ordinal?: number; idempotencyKey?: string }
 
 export interface ResponseEnvelope<T> { data: T; requestId: string }
-export interface ErrorEnvelope { error: { code: string; message: string }; requestId: string }
+export interface ErrorEnvelope { error: { code: string; message: string; missingFields?: string[]; details?: Record<string, unknown> }; requestId: string }
 
 export interface SuiteRepository {
   createSuite(name: string, idempotencyKey?: string, origin?: SuiteOrigin): Promise<Suite>;
@@ -230,12 +231,40 @@ export interface ReplicaPromptLlmInput {
   references: ReplicaPromptReferenceImage[];
   productImages: ReplicaPromptProductImage[];
 }
+export interface ProductOnboardingLlmImage {
+  id: string;
+  ordinal: number;
+  filename: string;
+  mimeType: string;
+  bytes: Buffer;
+}
+export interface ProductOnboardingLlmHistoryItem {
+  role: "user" | "assistant";
+  content: string;
+  txtAttachments?: Array<{ filename: string; charCount: number; content: string }>;
+  imageFilenames?: string[];
+}
+export interface ProductOnboardingLlmInput {
+  requestId?: string;
+  template: {
+    templateVersionId: string;
+    body: string;
+    userPromptTemplate?: string;
+  };
+  currentDraftCard: ProductCardFields;
+  missingRequiredFields: ProductCardRequiredField[];
+  conversationHistory: ProductOnboardingLlmHistoryItem[];
+  latestUserMessage: string;
+  txtAttachments: Array<{ filename: string; byteLength: number; charCount: number; content: string }>;
+  supplierImages: ProductOnboardingLlmImage[];
+}
 export interface LlmClient {
   channel?: ModelChannelSnapshot;
   provider: string; model: string; isFake: boolean;
   generatePlan(input: PlanLlmInput): Promise<unknown>;
   generateCategoryPrompt?(input: CategoryPromptLlmInput): Promise<unknown>;
   generateReplicaPrompts?(input: ReplicaPromptLlmInput): Promise<unknown>;
+  generateProductOnboarding?(input: ProductOnboardingLlmInput): Promise<unknown>;
   translateTexts?(input: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }): Promise<Array<{ id: string; originalText: string; translatedText: string }>>;
 }
 export type PlanAttemptStatus = "running" | "succeeded" | "failed";
