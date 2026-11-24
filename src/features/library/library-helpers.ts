@@ -18,6 +18,7 @@ export const stageLabel = (stage: ApiLibraryResource["stage"]) => ({
   reverse_prompt: "爆品图反推",
   listing_copy: "上架文案",
   replica_prompt: "爆品图复刻",
+  product_onboarding: "商品建档",
 } as Record<string, string>)[stage ?? ""] ?? "工作台资源";
 
 export const sourceOriginLabel = (resource: ApiLibraryResource) => {

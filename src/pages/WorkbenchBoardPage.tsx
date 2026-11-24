@@ -643,6 +643,7 @@ function PromptLibraryButton({ onNotify }: { onNotify: (message: string) => void
               <option value="base_refine">底图精修</option>
               <option value="listing_copy">上架文案</option>
               <option value="replica_prompt">爆品图复刻</option>
+              <option value="product_onboarding">商品建档</option>
             </select>
             <div className="wb-prompt-list">
               {templates.length > 0 ? templates.map((template) => (

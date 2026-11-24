@@ -17,12 +17,20 @@ const SUITE_INPUT_IMAGE_UPLOAD_RE = /^\/api\/suites\/[^/]+\/input-images$/;
 const LISTING_INPUT_IMAGE_UPLOAD_RE = /^\/api\/listing-copies\/[^/]+\/input-images$/;
 const IMAGE_EDITOR_OPERATION_RE = /^\/api\/image-editor\/sessions\/[^/]+\/operations$/;
 const PRODUCT_CARD_ITEM_RE = /^\/api\/product-cards\/[^/]+$/;
+const PRODUCT_ONBOARDING_MESSAGES_RE = /^\/api\/product-onboarding\/sessions\/[^/]+\/messages$/;
+const PRODUCT_ONBOARDING_DRAFT_RE = /^\/api\/product-onboarding\/sessions\/[^/]+\/draft$/;
 
 export function resolveRequestBodyLimit(method: string | undefined, pathname: string): number {
   const upperMethod = (method ?? "GET").toUpperCase();
   if (upperMethod === "POST") {
     if (pathname === "/api/replicas") return REPLICA_REQUEST_BODY_MAX_BYTES;
-    if (pathname === "/api/product-cards") return PRODUCT_CARD_WRITE_BODY_MAX_BYTES;
+    if (
+      pathname === "/api/product-cards" ||
+      pathname === "/api/product-onboarding/sessions" ||
+      PRODUCT_ONBOARDING_MESSAGES_RE.test(pathname)
+    ) {
+      return PRODUCT_CARD_WRITE_BODY_MAX_BYTES;
+    }
     if (SUITE_INPUT_IMAGE_UPLOAD_RE.test(pathname) || LISTING_INPUT_IMAGE_UPLOAD_RE.test(pathname)) {
       return SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES;
     }
@@ -30,7 +38,10 @@ export function resolveRequestBodyLimit(method: string | undefined, pathname: st
       return IMAGE_EDITOR_OPERATION_BODY_MAX_BYTES;
     }
   }
-  if (upperMethod === "PATCH" && PRODUCT_CARD_ITEM_RE.test(pathname)) {
+  if (
+    upperMethod === "PATCH" &&
+    (PRODUCT_CARD_ITEM_RE.test(pathname) || PRODUCT_ONBOARDING_DRAFT_RE.test(pathname))
+  ) {
     return PRODUCT_CARD_WRITE_BODY_MAX_BYTES;
   }
   return DEFAULT_REQUEST_BODY_MAX_BYTES;
