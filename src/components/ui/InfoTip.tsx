@@ -27,6 +27,8 @@ export interface InfoTipProps {
   align?: "center" | "start" | "end";
   /** Additional className on the anchor wrapper */
   className?: string;
+  /** Additional className on the popover element */
+  popoverClassName?: string;
   /** Optional explicit popover id (used for aria-controls / aria-describedby) */
   id?: string;
 }
@@ -55,6 +57,7 @@ export function InfoTip({
   placement = "bottom",
   align = "center",
   className = "",
+  popoverClassName,
   id,
 }: InfoTipProps) {
   const generatedId = useId();
@@ -307,7 +310,7 @@ export function InfoTip({
             id={popoverId}
             role="tooltip"
             tabIndex={-1}
-            className="pa-info-popover"
+            className={["pa-info-popover", popoverClassName].filter(Boolean).join(" ")}
             data-placement={coords?.placement ?? placement}
             style={
               coords
