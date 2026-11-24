@@ -1,5 +1,13 @@
 import type { ListingConfig, ListingContent, ListingRules } from "../../shared/listing-config";
 import type { ModelChannelInput, ModelChannelSnapshot, ModelPreferences, ModelSettingsView } from "../../shared/model-settings";
+import type {
+  ProductCard,
+  ProductCardFields,
+  ProductCardSnapshot,
+  ProductCardStatus,
+  ProductCardSummary,
+  ProductCardSupplierImage,
+} from "../../shared/product-card";
 
 export interface ApiImage {
   id: string; suiteId: string; ordinal: number; originalObjectKey: string; thumbnailObjectKey: string;
@@ -263,4 +271,95 @@ export const suiteApi = {
   importReversePlan(planId: string, body: { targetSuiteId?: string; name?: string } = {}) { return request<{ suiteId: string; taskGroupId: string; taskIds: string[]; duplicate: boolean }>(`/api/reverse-plans/${encodeURIComponent(planId)}/canvas-imports`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   bindWhiteResources(taskId: string, resourceIds: string[]) { return request<{ task: ApiSuiteTask; reference: ApiLibraryReference; references: ApiLibraryReference[]; duplicate: boolean }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/white-resource`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ resourceIds }) }); },
   bindWhiteResource(taskId: string, resourceId: string) { return this.bindWhiteResources(taskId, [resourceId]); },
+};
+
+export type {
+  ProductCard as ApiProductCard,
+  ProductCardFields as ApiProductCardFields,
+  ProductCardSnapshot as ApiProductCardSnapshot,
+  ProductCardStatus as ApiProductCardStatus,
+  ProductCardSummary as ApiProductCardSummary,
+  ProductCardSupplierImage as ApiProductCardSupplierImage,
+};
+
+export interface ApiProductCardListQuery {
+  status?: ProductCardStatus | "all";
+  keyword?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ApiProductCardListResult {
+  items: ProductCardSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ApiProductCardNewImagePayload {
+  filename: string;
+  mimeType: string;
+  bytesBase64: string;
+}
+
+export type ApiProductCardUpdateImagePayload =
+  | { imageId: string }
+  | ApiProductCardNewImagePayload;
+
+export interface ApiCreateProductCardPayload extends ProductCardFields {
+  sourceSessionId?: string | null;
+  supplierImages?: ApiProductCardNewImagePayload[];
+}
+
+export interface ApiUpdateProductCardPayload extends Partial<ProductCardFields> {
+  supplierImages?: ApiProductCardUpdateImagePayload[];
+}
+
+const productCardsPath = "/api/product-cards";
+const productCardItemPath = (id: string) => `${productCardsPath}/${encodeURIComponent(id)}`;
+
+export const productCardsApi = {
+  list(query: ApiProductCardListQuery = {}) {
+    const search = new URLSearchParams();
+    if (query.status) search.set("status", query.status);
+    if (query.keyword?.trim()) search.set("keyword", query.keyword.trim());
+    if (query.limit !== undefined) search.set("limit", String(query.limit));
+    if (query.offset !== undefined) search.set("offset", String(query.offset));
+    const qs = search.toString();
+    return request<ApiProductCardListResult>(qs ? `${productCardsPath}?${qs}` : productCardsPath);
+  },
+  get(id: string) {
+    return request<ProductCard>(productCardItemPath(id));
+  },
+  create(payload: ApiCreateProductCardPayload) {
+    return request<ProductCard>(productCardsPath, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify(payload),
+    });
+  },
+  update(id: string, payload: ApiUpdateProductCardPayload) {
+    return request<ProductCard>(productCardItemPath(id), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify(payload),
+    });
+  },
+  archive(id: string) {
+    return request<ProductCard>(`${productCardItemPath(id)}/archive`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify({}),
+    });
+  },
+  restore(id: string) {
+    return request<ProductCard>(`${productCardItemPath(id)}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify({}),
+    });
+  },
+  delete(id: string) {
+    return request<{ id: string }>(productCardItemPath(id), { method: "DELETE" });
+  },
 };

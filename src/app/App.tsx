@@ -4,6 +4,7 @@ import { SuiteStudioPage } from "../pages/SuiteStudioPage";
 import { BoardPage } from "../pages/BoardPage";
 import { CanvasListPage } from "../pages/CanvasListPage";
 import { ImageAssetsPage } from "../pages/ImageAssetsPage";
+import { ProductLibraryPage } from "../pages/ProductLibraryPage";
 import { PromptTemplatesPage } from "../pages/PromptTemplatesPage";
 import { ReplicaStudioPage } from "../pages/ReplicaStudioPage";
 import { ReversePage } from "../pages/ReversePage";
@@ -44,6 +45,10 @@ export function App() {
   if (/^\/create\/canvas\/?$/.test(canonical)) return <CanvasListPage navigate={navigate} />;
   const canvasId = canonical.match(/^\/create\/canvas\/([^/]+)\/?$/)?.[1];
   if (canvasId) return <BoardPage key={canvasId} suiteId={canvasId} search={search} navigate={navigate} />;
+  if (path === "/products" || path === "/products/") {
+    const selectedId = new URLSearchParams(search).get("selected")?.trim() || undefined;
+    return <ProductLibraryPage initialSelectedId={selectedId} navigate={navigate} />;
+  }
   if (path === "/assets") return <ImageAssetsPage navigate={navigate} />;
   if (path === "/templates") return <PromptTemplatesPage navigate={navigate} />;
   if (path === "/style-library") {
