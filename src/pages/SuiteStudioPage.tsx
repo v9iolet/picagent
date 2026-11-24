@@ -69,12 +69,14 @@ function readInitialWorkspace(suiteId?: string, initialProductCardId?: string) {
   const targetId = suiteId ?? snap.activeSuiteId ?? undefined;
   if (targetId) {
     const cached = suiteWorkspaceStore.getMemoryCache(targetId);
-    const hasDraftForTarget = snap.configSuiteId === targetId && snap.hasLocalConfigEdits;
+    const canReusePersistedConfig = Boolean(cached) || !snap.clone;
+    const hasDraftForTarget =
+      canReusePersistedConfig && snap.configSuiteId === targetId && snap.hasLocalConfigEdits;
     const restoredConfig = hasDraftForTarget
       ? snap.config
       : cached?.state
         ? fromRun(cached.state.pipeline)
-        : snap.configSuiteId === targetId
+        : canReusePersistedConfig && snap.configSuiteId === targetId
           ? snap.config
           : initialConfig;
     const restoredClone = cached?.state
@@ -469,8 +471,12 @@ export function SuiteStudioPage({
 
     if (targetId) {
       const cached = suiteWorkspaceStore.getMemoryCache(targetId);
+      const isInSpaRestore = Boolean(cached);
+      const canReusePersistedConfig = isInSpaRestore || !snap.clone;
       const hasSavedConfigForTarget =
-        snap.configSuiteId === targetId && (snap.hasLocalConfigEdits || !cached?.state?.pipeline);
+        canReusePersistedConfig &&
+        snap.configSuiteId === targetId &&
+        (snap.hasLocalConfigEdits || !cached?.state?.pipeline);
 
       if (cached) {
         applyState(cached.state);
@@ -512,7 +518,10 @@ export function SuiteStudioPage({
             (isDraftSuite &&
               (latestSnap.configSuiteId === s.suite.id ||
                 (latestSnap.configSuiteId === null && latestSnap.hasLocalConfigEdits))) ||
-            (!isDraftSuite && latestSnap.configSuiteId === s.suite.id && latestSnap.hasLocalConfigEdits);
+            (!isDraftSuite &&
+              isInSpaRestore &&
+              latestSnap.configSuiteId === s.suite.id &&
+              latestSnap.hasLocalConfigEdits);
 
           if (shouldPreserveDraftConfig) {
             const preserved = latestSnap.config;
