@@ -244,7 +244,7 @@ async function offlineReplicaStudio(t, gates = {}) {
   const url = vite.resolvedUrls.local[0];
   const page = await browser.newPage({ viewport: { width: 1480, height: 960 }, acceptDownloads: true });
   page.setDefaultTimeout(10000);
-  return { api, calls, url, page };
+  return { api, browser, calls, url, page };
 }
 
 test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与批次操作、生成记录与新建清空", async (t) => {
@@ -1017,4 +1017,252 @@ test("爆品图复刻：提交请求在途时切到套图页，返回后不抢�
   } finally {
     createGate.resolve();
   }
+});
+
+test("爆品图复刻：刷新页面后恢复已选参考图、产品图、顺序与配置，提交与清空后清除持久化（含 IndexedDB）", async (t) => {
+  const { calls, url, page } = await offlineReplicaStudio(t);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+
+  const readIdbBlobCount = () =>
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const req = window.indexedDB.open("picagent-replica-draft", 1);
+          req.onupgradeneeded = () => {
+            if (!req.result.objectStoreNames.contains("blobs")) {
+              req.result.createObjectStore("blobs");
+            }
+          };
+          req.onerror = () => resolve(-1);
+          req.onsuccess = () => {
+            const db = req.result;
+            const tx = db.transaction("blobs", "readonly");
+            const countReq = tx.objectStore("blobs").count();
+            countReq.onsuccess = () => {
+              const count = countReq.result;
+              db.close();
+              resolve(count);
+            };
+            countReq.onerror = () => {
+              db.close();
+              resolve(-1);
+            };
+          };
+        }),
+    );
+
+  const readLoadedNaturalWidths = (locator) =>
+    locator.evaluateAll((imgs) =>
+      Promise.all(
+        imgs.map(
+          (img) =>
+            new Promise((resolve) => {
+              if (img.complete) return resolve(img.naturalWidth);
+              img.addEventListener("load", () => resolve(img.naturalWidth), { once: true });
+              img.addEventListener("error", () => resolve(0), { once: true });
+            }),
+        ),
+      ),
+    );
+
+  await page.goto(url + "create/replica");
+  await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+
+  // Upload 2 reference images, fill per-image remarks, reorder (2nd -> 1st)
+  const refInput = page.getByLabel("上传参考图", { exact: true });
+  await refInput.setInputFiles("public/assets/gan65-product.jpg");
+  await refInput.setInputFiles("public/assets/tokyo-desk-v3.jpg");
+  await page.getByRole("button", { name: "一键复刻（2张）", exact: true }).waitFor();
+  await page.getByLabel("单张参考要求 1", { exact: true }).fill("参考图一保持光影");
+  await page.getByLabel("单张参考要求 2", { exact: true }).fill("参考图二顶部留白");
+  await page.getByRole("button", { name: "上移参考图 2", exact: true }).click();
+
+  // Upload 1 local product image and wait until reading/persisting completes (submit enabled)
+  await page.getByLabel("上传产品原图", { exact: true }).setInputFiles("public/assets/gan65-product-tight.jpg");
+  const submitBtn = page.getByRole("button", { name: "一键复刻（2张）", exact: true });
+  await page.waitForFunction(() => {
+    const btn = Array.from(document.querySelectorAll("button")).find((el) =>
+      el.textContent?.includes("一键复刻（2张）"),
+    );
+    return Boolean(btn && !btn.disabled);
+  });
+
+  // Fill config fields
+  await page.getByRole("radio", { name: "服饰电商图", exact: true }).click();
+  await page.getByRole("radio", { name: /参考风格/ }).click();
+  await page.getByLabel("统一复刻要求", { exact: true }).fill("刷新后应完整恢复统一要求");
+  await page.getByLabel("商品信息", { exact: true }).fill("65W 折叠快充头，双 C 口");
+  await page.getByRole("checkbox", { name: "输出风格保持一致", exact: true }).uncheck();
+  await page.getByLabel("输出语言", { exact: true }).selectOption("en");
+  await page.getByLabel("比例", { exact: true }).selectOption("3:4");
+  await page.getByLabel("分辨率", { exact: true }).selectOption("2K");
+
+  // Confirm localStorage stores metadata without base64 and IDB holds 3 blobs
+  const storedRaw = await page.evaluate(() =>
+    window.localStorage.getItem("picagent:replica-studio:draft-v1"),
+  );
+  assert.ok(storedRaw, "draft metadata should be persisted in localStorage");
+  assert.equal(storedRaw.includes("bytesBase64"), false, "localStorage must not contain base64 image data");
+  assert.equal(await readIdbBlobCount(), 3, "IndexedDB should store 2 reference blobs + 1 product blob");
+
+  // Full page reload -> thumbnails, order, remarks, and all config fields restore
+  await page.reload();
+  await page.getByRole("button", { name: "一键复刻（2张）", exact: true }).waitFor();
+  await page.waitForFunction(() => {
+    const btn = Array.from(document.querySelectorAll("button")).find((el) =>
+      el.textContent?.includes("一键复刻（2张）"),
+    );
+    return Boolean(btn && !btn.disabled);
+  });
+
+  const refItems = page.locator("[data-ref-item]");
+  assert.equal(await refItems.count(), 2);
+  assert.equal(await refItems.nth(0).locator(".rp-ref-top strong").textContent(), "tokyo-desk-v3.jpg");
+  assert.equal(await refItems.nth(1).locator(".rp-ref-top strong").textContent(), "gan65-product.jpg");
+  assert.equal(await page.getByLabel("单张参考要求 1", { exact: true }).inputValue(), "参考图二顶部留白");
+  assert.equal(await page.getByLabel("单张参考要求 2", { exact: true }).inputValue(), "参考图一保持光影");
+
+  const refWidths = await readLoadedNaturalWidths(refItems.locator(".rp-ref-thumb-wrap img"));
+  assert.ok(
+    refWidths.length === 2 && refWidths.every((w) => w > 0),
+    `expected restored reference thumbnails naturalWidth > 0, got ${JSON.stringify(refWidths)}`,
+  );
+
+  const productItems = page.locator("[data-product-item]");
+  assert.equal(await productItems.count(), 1);
+  assert.equal(await productItems.nth(0).locator(".rp-product-source").textContent(), "本地");
+  const productWidths = await readLoadedNaturalWidths(productItems.locator("img"));
+  assert.ok(
+    productWidths.length === 1 && productWidths[0] > 0,
+    `expected restored product thumbnail naturalWidth > 0, got ${JSON.stringify(productWidths)}`,
+  );
+
+  assert.equal(await page.getByRole("radio", { name: "服饰电商图", exact: true }).getAttribute("aria-checked"), "true");
+  assert.equal(await page.getByRole("radio", { name: /参考风格/ }).getAttribute("aria-checked"), "true");
+  assert.equal(await page.getByLabel("统一复刻要求", { exact: true }).inputValue(), "刷新后应完整恢复统一要求");
+  assert.equal(await page.getByLabel("商品信息", { exact: true }).inputValue(), "65W 折叠快充头，双 C 口");
+  assert.equal(await page.getByRole("checkbox", { name: "输出风格保持一致", exact: true }).isChecked(), false);
+  assert.equal(await page.getByLabel("输出语言", { exact: true }).inputValue(), "en");
+  await page.waitForFunction(() => document.querySelector('select[aria-label="比例"]')?.value === "3:4");
+  assert.equal(await page.getByLabel("分辨率", { exact: true }).inputValue(), "2K");
+
+  // Submit restored draft -> succeeds with full restored payload & clears persisted draft
+  await submitBtn.click();
+  await page.waitForURL(/\/create\/replica\?suite=[^&]+/);
+  const postCall = calls.find((c) => c.method === "POST" && c.path === "/api/replicas");
+  assert.ok(postCall, "POST /api/replicas should succeed with restored draft");
+  assert.equal(postCall.body.references.length, 2);
+  assert.equal(postCall.body.references[0].filename, "tokyo-desk-v3.jpg");
+  assert.equal(postCall.body.references[0].remark, "参考图二顶部留白");
+  assert.ok(postCall.body.references[0].bytesBase64.length > 100);
+  assert.equal(postCall.body.products.length, 1);
+  assert.ok(postCall.body.products[0].bytesBase64.length > 100);
+
+  // Wait for IDB blobs to clear after submit
+  await page.waitForFunction(
+    () => window.localStorage.getItem("picagent:replica-studio:draft-v1") === null,
+  );
+  assert.equal(await readIdbBlobCount(), 0, "IndexedDB blobs should be cleared after submit");
+
+  // Reload after submit -> draft stays completely empty
+  await page.reload();
+  const batch = page.getByRole("region", { name: "复刻批次" });
+  await batch.locator('[data-status="completed"]').waitFor({ timeout: 10000 });
+  assert.equal(await page.locator("[data-ref-item]").count(), 0);
+  assert.equal(await page.locator("[data-product-item]").count(), 0);
+  assert.equal(await page.getByLabel("统一复刻要求", { exact: true }).inputValue(), "");
+  assert.equal(await page.getByLabel("商品信息", { exact: true }).inputValue(), "");
+  assert.equal(await page.getByRole("button", { name: "一键复刻（0张）", exact: true }).isDisabled(), true);
+
+  // Upload a draft and clear via "＋ 新建复刻" -> reload stays empty & IDB stays empty
+  await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+  await page.getByRole("button", { name: "一键复刻（1张）", exact: true }).waitFor();
+  assert.equal(await readIdbBlobCount(), 1);
+  await page.getByRole("button", { name: "＋ 新建复刻", exact: true }).click();
+  await page.waitForURL(/\/create\/replica$/);
+  await page.reload();
+  await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+  assert.equal(await page.locator("[data-ref-item]").count(), 0);
+  assert.equal(await readIdbBlobCount(), 0);
+
+  assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);
+});
+
+test("爆品图复刻：资源库产品图被删除后刷新自动剔除并提示；IndexedDB 不可用时正常降级不报错", async (t) => {
+  const { browser, url, page } = await offlineReplicaStudio(t);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+
+  await page.goto(url + "create/replica");
+  await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+
+  // Upload 1 reference + 1 local product + pick 1 library product
+  await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+  await page.getByLabel("上传产品原图", { exact: true }).setInputFiles("public/assets/gan65-product-tight.jpg");
+  await page.getByRole("button", { name: "从资源库选择", exact: true }).click();
+  const picker = page.getByRole("dialog", { name: "从资源库选择产品原图" });
+  await picker.waitFor();
+  await picker.getByRole("button", { name: /已发布白底产品图\.jpg/ }).click();
+  await picker.getByRole("button", { name: "确认选择", exact: true }).click();
+  await picker.waitFor({ state: "hidden" });
+  assert.equal(await page.locator("[data-product-item]").count(), 2);
+
+  await page.waitForFunction(() => {
+    const btn = Array.from(document.querySelectorAll("button")).find((el) =>
+      el.textContent?.includes("一键复刻（1张）"),
+    );
+    return Boolean(btn && !btn.disabled);
+  });
+
+  // Delete the library product resource on the server, then reload
+  const delRes = await page.request.delete(url + "api/library/resources/lib-base-001");
+  assert.equal(delRes.status(), 200);
+
+  await page.reload();
+  await page.getByText("已移除 1 张已删除的图片", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "一键复刻（1张）", exact: true }).waitFor();
+
+  // Local product & reference image survive reload; deleted library product is pruned
+  const productItems = page.locator("[data-product-item]");
+  assert.equal(await productItems.count(), 1);
+  assert.equal(await productItems.nth(0).locator(".rp-product-source").textContent(), "本地");
+  const persistedAfterPrune = await page.evaluate(() =>
+    window.localStorage.getItem("picagent:replica-studio:draft-v1"),
+  );
+  assert.equal(persistedAfterPrune?.includes("lib-base-001"), false);
+
+  // Verify IndexedDB unavailable fallback on a separate clean browser page
+  const fallbackPage = await browser.newPage({ viewport: { width: 1480, height: 960 } });
+  fallbackPage.setDefaultTimeout(10000);
+  const fallbackErrors = [];
+  fallbackPage.on("pageerror", (error) => fallbackErrors.push(error.message));
+  await fallbackPage.addInitScript(() => {
+    Object.defineProperty(window, "indexedDB", { value: undefined, configurable: true });
+  });
+
+  await fallbackPage.goto(url + "create/replica");
+  await fallbackPage.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+
+  await fallbackPage.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+  await fallbackPage.getByLabel("统一复刻要求", { exact: true }).fill("无 IndexedDB 仍可正常填写");
+  await fallbackPage.getByRole("button", { name: "一键复刻（1张）", exact: true }).waitFor();
+  assert.equal(
+    await fallbackPage.getByRole("button", { name: "一键复刻（1张）", exact: true }).isDisabled(),
+    false,
+  );
+
+  // Reload without IndexedDB: text config restores, uploaded image simply isn't restored, no error shown
+  await fallbackPage.reload();
+  await fallbackPage.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
+  assert.equal(
+    await fallbackPage.getByLabel("统一复刻要求", { exact: true }).inputValue(),
+    "无 IndexedDB 仍可正常填写",
+  );
+  assert.equal(await fallbackPage.locator("[data-ref-item]").count(), 0);
+  assert.equal(await fallbackPage.locator(".ss-note[role='alert']").count(), 0);
+
+  await fallbackPage.close();
+  assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);
+  assert.deepEqual(fallbackErrors, [], `Unexpected fallback page errors: ${fallbackErrors.join("; ")}`);
 });
