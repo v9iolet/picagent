@@ -335,11 +335,22 @@ test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-
   assert.equal(await cardPane.locator(".pc-supplier-card").count(), 1);
 
   // On-demand char counter: hidden when blurred, visible on focus, hidden again on blur
+  // Also verify focused + hovered input keeps #18181B (rgb(24, 24, 27)) charcoal border
   const nameCounter = cardPane.locator('[data-char-counter="name"]');
   assert.equal(await nameCounter.isVisible(), false, "Char counter must be hidden when field is not focused");
   await nameInput.focus();
   await nameCounter.waitFor({ state: "visible" });
   assert.match(await nameCounter.innerText(), /\/120$/);
+  await nameInput.hover();
+  await page.waitForFunction(
+    (id) => {
+      const el = document.getElementById(id);
+      return Boolean(el && getComputedStyle(el).borderTopColor === "rgb(24, 24, 27)");
+    },
+    `onboarding-${sessionId}-name`,
+  );
+  const focusedHoverBorder = await nameInput.evaluate((el) => getComputedStyle(el).borderTopColor);
+  assert.equal(focusedHoverBorder, "rgb(24, 24, 27)", "Focused input must retain #18181B border while hovered");
   await nameInput.blur();
   await nameCounter.waitFor({ state: "hidden" });
 
@@ -435,6 +446,16 @@ test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-
       "Right form inputs must be disabled while POST /messages is in flight",
     );
     assert.equal(
+      await cardPane.locator(".pc-optional-fold-trigger").isDisabled(),
+      true,
+      "Optional fold trigger must be disabled while POST /messages is in flight",
+    );
+    assert.equal(
+      await cardPane.locator(".pc-quick-fill-chip").isDisabled(),
+      true,
+      "Quick-fill chip must be disabled while POST /messages is in flight",
+    );
+    assert.equal(
       await publishBtn.isDisabled(),
       true,
       "Publish button must be disabled while POST /messages is in flight",
@@ -454,6 +475,8 @@ test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-
     () => document.querySelectorAll('.home-msg[data-message-role="assistant"]').length === 2,
   );
   assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).isDisabled(), false);
+  assert.equal(await cardPane.locator(".pc-optional-fold-trigger").isDisabled(), false);
+  assert.equal(await cardPane.locator(".pc-quick-fill-chip").isDisabled(), false);
   assert.equal(await cardPane.locator('[data-testid="required-progress-pill"]').innerText(), "6/6 必填已齐");
   assert.equal(await cardPane.locator(".pc-field.is-missing").count(), 0);
   assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).inputValue(), "星河真空保温随行杯 500ml（旗舰版）");
@@ -469,10 +492,15 @@ test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-
   await completedBanner.getByRole("button", { name: "在商品库查看" }).waitFor({ state: "visible" });
   await completedBanner.getByRole("button", { name: "继续录入新品" }).waitFor({ state: "visible" });
 
-  // Left chat composer hidden & read-only notice visible; right form read-only
+  // Left chat composer hidden & read-only notice visible; right form read-only (optional fold remains viewable)
   assert.equal(await page.locator(".home-chat-composer-wrap").count(), 0);
   await page.locator('[data-testid="chat-readonly-notice"]').waitFor({ state: "visible" });
   assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).isDisabled(), true);
+  assert.equal(
+    await cardPane.locator(".pc-optional-fold-trigger").isDisabled(),
+    false,
+    "Optional fold trigger must remain enabled in read-only completed state for inspection",
+  );
 
   // Fetch published productCardId from session API
   const sessionRes = await api.request("GET", `/api/product-onboarding/sessions/${sessionId}`);

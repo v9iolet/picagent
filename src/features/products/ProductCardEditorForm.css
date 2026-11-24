@@ -355,8 +355,8 @@
   transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
 }
 
-.pc-input:hover:not(:disabled),
-.pc-textarea:hover:not(:disabled) {
+.pc-input:hover:not(:disabled):not(:focus),
+.pc-textarea:hover:not(:disabled):not(:focus) {
   border-color: var(--pa-border-strong, #D4D4D8);
 }
 
@@ -523,10 +523,15 @@
   transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
-.pc-optional-fold-trigger:hover {
+.pc-optional-fold-trigger:hover:not(:disabled) {
   background: var(--pa-surface-soft, #F4F4F5);
   border-color: var(--pa-border, #E4E4E7);
   color: var(--pa-ink, #18181B);
+}
+
+.pc-optional-fold-trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .pc-optional-fold-left {

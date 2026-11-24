@@ -845,6 +845,7 @@ export function ProductCardEditorForm({
               type="button"
               className="pc-optional-fold-trigger"
               aria-expanded={extendedOpen}
+              disabled={Boolean(disabled || submitting)}
               onClick={() => setExtendedOpen((open) => !open)}
             >
               <span className="pc-optional-fold-left">
