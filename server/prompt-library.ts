@@ -1,8 +1,74 @@
 import { createHash } from "node:crypto";
 
-export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt", "listing_copy"] as const;
+export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt", "listing_copy", "replica_prompt"] as const;
 export type PromptStage = (typeof PROMPT_STAGES)[number];
 export type PromptVersionStatus = "draft" | "published" | "retired";
+
+export const PROMPT_TEMPLATE_USAGE_BY_CODE = {
+  "general.structure-plan": ["套图·结构规划"],
+  "general.category-prompt": ["套图·品类提示词"],
+  "general.base_refine": ["套图·白底精修"],
+  "general.listing-copy": ["上架文案"],
+  "replica.compose": ["爆品图复刻·参考风格"],
+  "replica.high": ["爆品图复刻·高度复刻"],
+} as const satisfies Record<string, readonly string[]>;
+
+export const IN_USE_PROMPT_STAGES: readonly PromptStage[] = [
+  "base_refine",
+  "structure_plan",
+  "category_prompt",
+  "listing_copy",
+  "replica_prompt",
+];
+
+export const UNUSED_PROMPT_STAGES: readonly PromptStage[] = [
+  "plan",
+  "task_image",
+  "reverse_prompt",
+];
+
+export function resolvePromptTemplateUsedBy(template: {
+  code?: string | null;
+  stage?: PromptStage | string | null;
+  applicability?: Record<string, unknown> | null;
+}): string[] {
+  const code = typeof template.code === "string" ? template.code.trim() : "";
+  if (code && code in PROMPT_TEMPLATE_USAGE_BY_CODE) {
+    return [...PROMPT_TEMPLATE_USAGE_BY_CODE[code as keyof typeof PROMPT_TEMPLATE_USAGE_BY_CODE]];
+  }
+  switch (template.stage) {
+    case "structure_plan":
+      return ["套图·结构规划"];
+    case "category_prompt":
+      return ["套图·品类提示词"];
+    case "base_refine":
+      return ["套图·白底精修"];
+    case "listing_copy":
+      return ["上架文案"];
+    case "replica_prompt": {
+      const cloneLevel = template.applicability?.cloneLevel;
+      if (cloneLevel === "compose") return ["爆品图复刻·参考风格"];
+      if (cloneLevel === "high") return ["爆品图复刻·高度复刻"];
+      return ["爆品图复刻"];
+    }
+    default:
+      return [];
+  }
+}
+
+export function isPromptTemplateInUse(template: {
+  code?: string | null;
+  stage?: PromptStage | string | null;
+  applicability?: Record<string, unknown> | null;
+}): boolean {
+  return resolvePromptTemplateUsedBy(template).length > 0;
+}
+
+export function withPromptTemplateUsage<
+  T extends { code?: string | null; stage?: PromptStage | string | null; applicability?: Record<string, unknown> | null },
+>(item: T): T & { usedBy: string[] } {
+  return { ...item, usedBy: resolvePromptTemplateUsedBy(item) };
+}
 
 export interface PromptInputField {
   key: string;
@@ -43,6 +109,8 @@ export interface PromptTemplatePublic {
   executionTarget: "llm" | "image_model";
   inputSchema: PromptInputField[];
   applicability: Record<string, unknown>;
+  usedBy?: string[];
+  status?: PromptVersionStatus;
 }
 
 export interface PromptTemplateRuntime extends PromptTemplatePublic {
@@ -73,7 +141,20 @@ const V11_STAGE_CONTRACTS = {
   },
 } as const;
 
-export function validatePromptTemplateContract(record: Pick<PromptTemplateRecord, "code" | "kind" | "stage" | "executionTarget" | "inputSchema" | "outputSchema" | "body">): void {
+export function validatePromptTemplateContract(
+  record: Pick<PromptTemplateRecord, "code" | "kind" | "stage" | "executionTarget" | "inputSchema" | "outputSchema" | "body"> & {
+    applicability?: Record<string, unknown>;
+  },
+): void {
+  if (record.stage === "replica_prompt") {
+    if (record.kind !== "planner" || record.executionTarget !== "llm") throw new Error(`Replica template ${record.code} must be an llm planner`);
+    const schemaVersion = (record.outputSchema.properties as Record<string, unknown> | undefined)?.schemaVersion as Record<string, unknown> | undefined;
+    if (!schemaVersion || schemaVersion.const !== "replica-prompt-v1") throw new Error(`Replica template ${record.code} has incompatible output schema`);
+    if (!record.body.includes("replica-prompt-v1")) throw new Error(`Replica template ${record.code} body must declare replica-prompt-v1`);
+    const cloneLevel = record.applicability?.cloneLevel;
+    if (cloneLevel !== "compose" && cloneLevel !== "high") throw new Error(`Replica template ${record.code} applicability.cloneLevel must be compose or high`);
+    return;
+  }
   if (record.stage !== "structure_plan" && record.stage !== "category_prompt" && record.stage !== "listing_copy") return;
   const contract = V11_STAGE_CONTRACTS[record.stage];
   if (record.code !== contract.code) throw new Error(`V1.1 template code must be ${contract.code}`);
@@ -256,11 +337,41 @@ export function parsePromptMarkdown(markdown: string, sourceFile: string): Promp
   return records;
 }
 
+function frontmatterBlock(markdown: string): string {
+  const match = markdown.trimStart().match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  return match ? match[1] : markdown;
+}
+
 function frontmatterValue(markdown: string, key: string): string | undefined {
-  const match = markdown.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
+  const match = frontmatterBlock(markdown).match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
   if (!match) return undefined;
   const value = match[1].trim();
-  return value.replace(/^['\"]|['\"]$/g, "");
+  if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith("\"") && value.endsWith("\""))) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function parseFrontmatterApplicability(markdown: string, sourceFile: string): Record<string, unknown> {
+  const raw = frontmatterValue(markdown, "applicability");
+  let applicability: Record<string, unknown> = {};
+  if (raw) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`Invalid normalized prompt applicability JSON: ${sourceFile}`);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`Normalized prompt applicability must be a JSON object: ${sourceFile}`);
+    }
+    applicability = parsed as Record<string, unknown>;
+  }
+  const cloneLevel = frontmatterValue(markdown, "clone_level");
+  if (cloneLevel && applicability.cloneLevel === undefined) {
+    applicability = { ...applicability, cloneLevel };
+  }
+  return applicability;
 }
 
 function sectionBody(markdown: string, heading: string, nextHeading: string): string {
@@ -330,7 +441,7 @@ export function parseNormalizedPromptMarkdown(markdown: string, sourceFile: stri
     executionTarget,
     inputSchema: parseNormalizedInputSchema(markdown),
     outputSchema,
-    applicability: {},
+    applicability: parseFrontmatterApplicability(markdown, sourceFile),
     body,
     userPromptTemplate,
     sourceFile,
@@ -382,4 +493,79 @@ export function renderPromptTemplate(template: PromptTemplateRuntime, input: Rec
     return value === undefined || value === null || String(value).trim() === "" ? [] : [`- ${field.label}: ${String(value)}`];
   });
   return lines.length === 0 ? template.body : `${template.body}\n\n用户输入：\n${lines.join("\n")}`;
+}
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => [key, stableJsonValue(item)]),
+  );
+}
+
+export function samePromptTemplateContent(
+  existing: Pick<PromptTemplateRuntime, "name" | "kind" | "stage" | "executionTarget" | "body" | "userPromptTemplate" | "inputSchema" | "outputSchema" | "applicability">,
+  record: PromptTemplateRecord,
+): boolean {
+  const norm = (value: string | undefined) => (value ?? "").replace(/\r\n/g, "\n").trim();
+  return (
+    existing.name === record.name &&
+    existing.kind === record.kind &&
+    existing.stage === record.stage &&
+    existing.executionTarget === record.executionTarget &&
+    norm(existing.body) === norm(record.body) &&
+    norm(existing.userPromptTemplate) === norm(record.userPromptTemplate) &&
+    JSON.stringify(stableJsonValue(existing.inputSchema)) === JSON.stringify(stableJsonValue(record.inputSchema)) &&
+    JSON.stringify(stableJsonValue(existing.outputSchema)) === JSON.stringify(stableJsonValue(record.outputSchema)) &&
+    JSON.stringify(stableJsonValue(existing.applicability)) === JSON.stringify(stableJsonValue(record.applicability))
+  );
+}
+
+export async function importPromptRecordsWithPolicy(
+  repository: {
+    importRecords(records: PromptTemplateRecord[]): Promise<PromptTemplateRuntime[]>;
+    publishVersion(versionId: string): Promise<PromptTemplateRuntime | null>;
+    retireVersion(versionId: string): Promise<PromptTemplateRuntime | null>;
+    listVersions(templateId: string): Promise<PromptTemplateRuntime[]>;
+  },
+  records: PromptTemplateRecord[],
+  options: { publish?: boolean } = {},
+): Promise<PromptTemplateRuntime[]> {
+  const results: PromptTemplateRuntime[] = [];
+  for (const record of records) {
+    const inUse = isPromptTemplateInUse(record);
+    if (!inUse) {
+      const existingVersions = await repository.listVersions(record.templateId);
+      const matched = existingVersions.find(
+        (version) =>
+          (version.sourceSha256 === record.sourceSha256 && version.sourceHeading === record.sourceHeading) ||
+          samePromptTemplateContent(version, record),
+      );
+      if (matched) {
+        if (matched.status !== "retired") {
+          const retired = await repository.retireVersion(matched.templateVersionId);
+          results.push(retired ?? matched);
+        } else {
+          results.push(matched);
+        }
+        continue;
+      }
+    }
+    const [imported] = await repository.importRecords([record]);
+    if (!inUse) {
+      const retired =
+        imported.status === "retired"
+          ? imported
+          : (await repository.retireVersion(imported.templateVersionId)) ?? imported;
+      results.push(retired);
+    } else if (options.publish && imported.status !== "published") {
+      const published = (await repository.publishVersion(imported.templateVersionId)) ?? imported;
+      results.push(published);
+    } else {
+      results.push(imported);
+    }
+  }
+  return results;
 }

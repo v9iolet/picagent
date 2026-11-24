@@ -17,13 +17,43 @@ export const stageLabel = (stage: ApiLibraryResource["stage"]) => ({
   task_image: "单卡创作",
   reverse_prompt: "爆品图反推",
   listing_copy: "上架文案",
+  replica_prompt: "爆品图复刻",
 } as Record<string, string>)[stage ?? ""] ?? "工作台资源";
 
+export const sourceOriginLabel = (resource: ApiLibraryResource) => {
+  const isEditorDerived = resource.source?.generatedBy === "image_editor";
+  const isReplica =
+    resource.source?.origin === "replica" ||
+    resource.source?.originKind === "replica" ||
+    resource.stage === "replica_prompt";
+  if (isEditorDerived) {
+    return isReplica ? "编辑生成 · 爆品图复刻" : "编辑生成";
+  }
+  if (isReplica) {
+    return "爆品图复刻";
+  }
+  if (resource.source?.reversePlanId) {
+    return "爆品图反推";
+  }
+  return null;
+};
+
 export const statusLabel = (status: ApiLibraryResource["status"]) =>
-  ({ draft: "草稿", published: "已发布", archived: "已归档" }[status ?? "published"] ?? "已发布");
+  ({ draft: "草稿", published: "已发布", archived: "已归档", retired: "已下架" }[status ?? "published"] ?? "已发布");
+
+export const templateStatusLabel = (status: ApiLibraryResource["status"]) =>
+  ({ draft: "草稿", published: "在用", archived: "已归档", retired: "已下架" }[status ?? "published"] ?? "在用");
 
 export const statusClass = (status: ApiLibraryResource["status"]) =>
-  status === "draft" ? "warn" : status === "archived" ? "risk" : "pass";
+  status === "draft" ? "warn" : status === "archived" || status === "retired" ? "risk" : "pass";
+
+export const templateUsedBy = (resource: ApiLibraryResource): string[] => {
+  if (Array.isArray(resource.usedBy)) return resource.usedBy.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  if (Array.isArray(resource.source?.usedBy)) {
+    return (resource.source.usedBy as unknown[]).filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  }
+  return [];
+};
 
 export const promptTextFor = (resource: ApiLibraryResource) => {
   if (resource.resourceType === "prompt_template") return String(resource.source?.body ?? "暂无提示词正文");

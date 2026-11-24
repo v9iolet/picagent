@@ -5,16 +5,18 @@ import {
   promptTextFor,
   stageLabel,
   statusClass,
-  statusLabel,
+  templateStatusLabel,
+  templateUsedBy,
 } from "../features/library/library-helpers";
 import { Icon } from "./shared";
 
 type StageFilter = "all" | ApiPromptTemplate["stage"];
+type TemplateStatusFilter = "published" | "retired" | "draft" | "all";
 
 export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => void }) {
   const [query, setQuery] = useState("");
   const [stageFilter, setStageFilter] = useState<StageFilter>("all");
-  const [statusFilter, setStatusFilter] = useState<"all" | "published" | "draft" | "archived">("published");
+  const [statusFilter, setStatusFilter] = useState<TemplateStatusFilter>("published");
   const [items, setItems] = useState<ApiLibraryResource[]>([]);
   const [selected, setSelected] = useState<ApiLibraryResource | null>(null);
   const [templateVersions, setTemplateVersions] = useState<ApiPromptTemplateCopy[]>([]);
@@ -45,10 +47,21 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
         query: query.trim() || undefined,
         resourceType: "prompt_template",
         stage: stageFilter !== "all" ? stageFilter : undefined,
+        pageSize: 100,
       });
       if (sequence !== loadSequence.current) return;
       setItems(result.items);
-      setSelected((current) => result.items.find((item) => item.id === current?.id) ?? result.items[0] ?? null);
+      setSelected((current) => {
+        if (!current) return result.items[0] ?? null;
+        const byId = result.items.find((item) => item.id === current.id);
+        if (byId) return byId;
+        const currentTemplateId = typeof current.source?.templateId === "string" ? current.source.templateId : null;
+        if (currentTemplateId) {
+          const byTemplateId = result.items.find((item) => item.source?.templateId === currentTemplateId);
+          if (byTemplateId) return byTemplateId;
+        }
+        return result.items[0] ?? null;
+      });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "提示词模板加载失败，请重试");
     } finally {
@@ -168,33 +181,34 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
           <div className="panel-scroll">
             <div className="style-filters">
               <div className="style-filter-group">
-                <h3>执行阶段</h3>
+                <h3>状态</h3>
                 {([
-                  ["all", "全部阶段"],
-                  ["base_refine", "底图精修"],
-                  ["structure_plan", "结构规划"],
-                  ["category_prompt", "类别提示词"],
-                  ["plan", "计划生成"],
-                  ["task_image", "单卡创作"],
-                  ["reverse_prompt", "爆品图反推"],
-                  ["listing_copy", "上架文案"],
-                ] as [StageFilter, string][]).map(([value, label]) => (
+                  ["published", "在用"],
+                  ["retired", "已下架"],
+                  ["draft", "草稿"],
+                  ["all", "全部"],
+                ] as [TemplateStatusFilter, string][]).map(([value, label]) => (
                   <label className="style-check" key={value}>
-                    <input type="radio" name="templateStage" checked={stageFilter === value} onChange={() => setStageFilter(value)} />
+                    <input type="radio" name="templateStatus" checked={statusFilter === value} onChange={() => setStatusFilter(value)} />
                     {label}
                   </label>
                 ))}
               </div>
               <div className="style-filter-group">
-                <h3>状态</h3>
+                <h3>执行阶段</h3>
                 {([
-                  ["published", "已发布"],
-                  ["draft", "草稿"],
-                  ["archived", "已归档"],
-                  ["all", "全部状态"],
-                ] as const).map(([value, label]) => (
+                  ["all", "全部阶段"],
+                  ["structure_plan", "结构规划"],
+                  ["category_prompt", "类别提示词"],
+                  ["base_refine", "底图精修"],
+                  ["listing_copy", "上架文案"],
+                  ["replica_prompt", "爆品图复刻"],
+                  ["plan", "计划生成"],
+                  ["task_image", "单卡创作"],
+                  ["reverse_prompt", "爆品图反推"],
+                ] as [StageFilter, string][]).map(([value, label]) => (
                   <label className="style-check" key={value}>
-                    <input type="radio" name="templateStatus" checked={statusFilter === value} onChange={() => setStatusFilter(value)} />
+                    <input type="radio" name="templateStage" checked={stageFilter === value} onChange={() => setStageFilter(value)} />
                     {label}
                   </label>
                 ))}
@@ -230,20 +244,32 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
               {loading ? (
                 <div className="style-library-loading">正在加载提示词模板…</div>
               ) : items.length ? (
-                items.map((item) => (
-                  <article className={`template-card ${selected?.id === item.id ? "active" : ""}`} key={item.id} onClick={() => setSelected(item)}>
-                    <div className="template-card-head">
-                      <span className="badge">{stageLabel(item.stage)}</span>
-                      <span className={`badge ${statusClass(item.status)}`}>{statusLabel(item.status)}</span>
-                    </div>
-                    <h3 className="template-card-title">{item.title}</h3>
-                    <p className="template-card-snippet">{promptTextFor(item)}</p>
-                    <div className="template-card-meta">
-                      <span>v{String(item.source?.versionNo ?? "-")}</span>
-                      <span className="mono">{String(item.source?.code ?? item.resourceVersionId.slice(0, 8))}</span>
-                    </div>
-                  </article>
-                ))
+                items.map((item) => {
+                  const usedBy = templateUsedBy(item);
+                  return (
+                    <article className={`template-card ${selected?.id === item.id ? "active" : ""}`} key={item.id} onClick={() => setSelected(item)}>
+                      <div className="template-card-head">
+                        <span className="badge">{stageLabel(item.stage)}</span>
+                        <span className={`badge ${statusClass(item.status)}`}>{templateStatusLabel(item.status)}</span>
+                      </div>
+                      <h3 className="template-card-title">{item.title}</h3>
+                      <div className="template-card-usage" aria-label="使用功能">
+                        {usedBy.length > 0 ? (
+                          usedBy.map((feature) => (
+                            <span className="badge template-usage-badge" key={feature}>{feature}</span>
+                          ))
+                        ) : (
+                          <span className="badge template-usage-badge is-unused">未绑定运行功能</span>
+                        )}
+                      </div>
+                      <p className="template-card-snippet">{promptTextFor(item)}</p>
+                      <div className="template-card-meta">
+                        <span>v{String(item.source?.versionNo ?? "-")}</span>
+                        <span className="mono">{String(item.source?.code ?? item.resourceVersionId.slice(0, 8))}</span>
+                      </div>
+                    </article>
+                  );
+                })
               ) : (
                 <div className="style-library-empty">
                   <strong>没有匹配的提示词模板</strong>
@@ -266,7 +292,7 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
             <div className="inspector-body">
               <section className="inspector-section style-overview">
                 <div className="resource-card-meta">
-                  <span className={`badge ${statusClass(selected.status)}`}>{statusLabel(selected.status)}</span>
+                  <span className={`badge ${statusClass(selected.status)}`}>{templateStatusLabel(selected.status)}</span>
                   <span className="badge">{stageLabel(selected.stage)}</span>
                   <span className="badge">v{String(selected.source?.versionNo ?? "-")}</span>
                 </div>
@@ -276,6 +302,18 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
               <section className="inspector-section">
                 <h3>模板信息</h3>
                 <dl className="definition-list">
+                  <dt>使用功能</dt>
+                  <dd>
+                    {templateUsedBy(selected).length > 0 ? (
+                      <div className="template-usage-list">
+                        {templateUsedBy(selected).map((feature) => (
+                          <span className="badge template-usage-badge" key={feature}>{feature}</span>
+                        ))}
+                      </div>
+                    ) : (
+                      "未绑定运行功能（历史模板）"
+                    )}
+                  </dd>
                   <dt>资源 ID</dt><dd className="mono">{selected.id}</dd>
                   <dt>模板代码</dt><dd className="mono">{String(selected.source?.code ?? "未记录")}</dd>
                   <dt>当前版本 ID</dt><dd className="mono">{selected.resourceVersionId}</dd>
@@ -301,7 +339,7 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
                   {templateVersions.map((version) => (
                     <div className={`style-version-row ${version.templateVersionId === activeVersionId ? "is-selected" : ""}`} key={version.templateVersionId}>
                       <button type="button" className="style-version-select" onClick={() => selectTemplateVersion(version)}>
-                        <span>v{version.versionNo} · {version.status === "published" ? "已发布" : version.status === "draft" ? "草稿" : "已下线"}</span>
+                        <span>v{version.versionNo} · {version.status === "published" ? "在用" : version.status === "draft" ? "草稿" : "已下架"}</span>
                         <small>{version.templateVersionId.slice(0, 8)}</small>
                       </button>
                       <div className="style-version-ops">
@@ -364,7 +402,7 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
               <div>
                 <span className="style-library-modal-kicker">PROMPT TEMPLATE</span>
                 <h2 id="template-prompt-title">{promptModal.title}</h2>
-                <p>{stageLabel(promptModal.stage)} · v{String(promptModal.source?.versionNo ?? "-")} · {statusLabel(promptModal.status)}</p>
+                <p>{stageLabel(promptModal.stage)} · v{String(promptModal.source?.versionNo ?? "-")} · {templateStatusLabel(promptModal.status)}</p>
               </div>
               <button className="icon-btn" type="button" aria-label="关闭正文预览" onClick={() => setPromptModal(null)}><Icon name="x" /></button>
             </header>

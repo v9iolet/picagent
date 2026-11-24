@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { CanvasLayout, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskRepository, TaskResultSlot } from "../types.js";
+import type { CanvasLayout, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskPreviewVersion, TaskRepository, TaskResultSlot } from "../types.js";
 
 export class MemoryTaskRepository implements TaskRepository {
   private tasks = new Map<string, SuiteTask>(); private batches = new Map<string, TaskGenerationBatch>();
@@ -31,6 +31,8 @@ export class MemoryTaskRepository implements TaskRepository {
       createdAt: now,
       updatedAt: now,
       originKind: "suite_plan",
+      replicaReferenceId: null,
+      replicaReferenceObjectKey: null,
       referenceImageIds: input.sourceInputImageId ? [input.sourceInputImageId] : [],
       factRefs: [],
       promptSha256: taskPromptHash(input.promptDraft),
@@ -46,7 +48,7 @@ export class MemoryTaskRepository implements TaskRepository {
     const existing = [...this.tasks.values()].filter((task) => task.suiteId === suiteId); const created: SuiteTask[] = [];
     for (const item of snapshot.items) {
       if (existing.some((task) => task.planItemId === item.id)) continue;
-      const task: SuiteTask = { id: randomUUID(), suiteId, planSnapshotId: snapshot.id, planItemId: item.id, ordinal: item.ordinal, imageType: item.imageType, title: item.title, purpose: item.purpose, promptDraft: item.prompt, promptRevision: 1, sourceInputImageId: item.referenceImageIds?.[0] ?? inputImages[0]?.id ?? null, generationParams: { size: "1K", quality: "medium", ...(item.suggestedParams ?? {}), ...(item.aspectRatio ? { aspectRatio: item.aspectRatio } : {}) }, status: inputImages.length ? "pending" : "incomplete", archivedAt: null, createdAt: now, updatedAt: now, categoryCode: item.categoryCode, referenceImageIds: item.referenceImageIds ?? [], factRefs: item.factRefs ?? [], globalStyleCard: item.globalStyleCard, promptSha256: item.promptSha256 ?? taskPromptHash(item.prompt) };
+      const task: SuiteTask = { id: randomUUID(), suiteId, planSnapshotId: snapshot.id, planItemId: item.id, ordinal: item.ordinal, imageType: item.imageType, title: item.title, purpose: item.purpose, promptDraft: item.prompt, promptRevision: 1, sourceInputImageId: item.referenceImageIds?.[0] ?? inputImages[0]?.id ?? null, generationParams: { size: "1K", quality: "medium", ...(item.suggestedParams ?? {}), ...(item.aspectRatio ? { aspectRatio: item.aspectRatio } : {}) }, status: inputImages.length ? "pending" : "incomplete", archivedAt: null, createdAt: now, updatedAt: now, categoryCode: item.categoryCode, referenceImageIds: item.referenceImageIds ?? [], factRefs: item.factRefs ?? [], globalStyleCard: item.globalStyleCard, promptSha256: item.promptSha256 ?? taskPromptHash(item.prompt), originKind: "suite_plan", replicaReferenceId: null, replicaReferenceObjectKey: null };
       this.tasks.set(task.id, task); created.push(task);
     }
     return { tasks: [...this.tasks.values()].filter((task) => task.suiteId === suiteId).sort((a, b) => a.ordinal - b.ordinal), created };
@@ -56,14 +58,64 @@ export class MemoryTaskRepository implements TaskRepository {
     if (existing) return { tasks: await this.listTasks(input.suiteId), created: existing.map((id) => this.tasks.get(id)!).filter(Boolean), duplicate: true };
     const now = new Date().toISOString(); const offset = (await this.listTasks(input.suiteId)).reduce((max, task) => Math.max(max, task.ordinal), 0); const created: SuiteTask[] = [];
     for (const item of input.items) {
-      const task: SuiteTask = { id: randomUUID(), suiteId: input.suiteId, planSnapshotId: null, planItemId: null, ordinal: offset + item.ordinal, imageType: input.mode, title: item.filename, purpose: "爆品参考图反推生图", promptDraft: item.prompt, promptRevision: 1, sourceInputImageId: null, generationParams: { size: "1K", quality: "medium" }, status: "incomplete", archivedAt: null, createdAt: now, updatedAt: now, originKind: "reverse_import", reversePlanId: input.reversePlanId, reverseReferenceId: item.referenceId, reversePromptVersionId: item.promptVersionId, reverseTaskGroupId: input.taskGroupId, sourceLibraryReferenceId: null, sourceResourceVersionId: null, sourceRevision: 0, referenceImageIds: [item.referenceId], factRefs: [], promptSha256: taskPromptHash(item.prompt) };
+      const task: SuiteTask = { id: randomUUID(), suiteId: input.suiteId, planSnapshotId: null, planItemId: null, ordinal: offset + item.ordinal, imageType: input.mode, title: item.filename, purpose: "爆品参考图反推生图", promptDraft: item.prompt, promptRevision: 1, sourceInputImageId: null, generationParams: { size: "1K", quality: "medium" }, status: "incomplete", archivedAt: null, createdAt: now, updatedAt: now, originKind: "reverse_import", reversePlanId: input.reversePlanId, reverseReferenceId: item.referenceId, reversePromptVersionId: item.promptVersionId, reverseTaskGroupId: input.taskGroupId, replicaReferenceId: null, replicaReferenceObjectKey: null, sourceLibraryReferenceId: null, sourceResourceVersionId: null, sourceRevision: 0, referenceImageIds: [item.referenceId], factRefs: [], promptSha256: taskPromptHash(item.prompt) };
       this.tasks.set(task.id, task); created.push(task);
     }
     this.reverseKeys.set(key, created.map((task) => task.id)); return { tasks: await this.listTasks(input.suiteId), created, duplicate: false };
   }
+  async createReplicaTasks(input: { suiteId: string; globalStyleCard?: Record<string, unknown>; items: Array<{ referenceId: string; referenceObjectKey: string; ordinal: number; title: string; purpose: string; prompt: string; generationParams: Record<string, unknown> }> }) {
+    const now = new Date().toISOString();
+    const existing = await this.listTasks(input.suiteId);
+    const created: SuiteTask[] = [];
+    for (const item of [...input.items].sort((a, b) => a.ordinal - b.ordinal)) {
+      const found = existing.find((task) => task.originKind === "replica" && task.replicaReferenceId === item.referenceId && task.status !== "archived");
+      if (found) continue;
+      const task: SuiteTask = {
+        id: randomUUID(),
+        suiteId: input.suiteId,
+        planSnapshotId: null,
+        planItemId: null,
+        ordinal: item.ordinal,
+        imageType: "main",
+        title: item.title,
+        purpose: item.purpose,
+        promptDraft: item.prompt,
+        promptRevision: 1,
+        sourceInputImageId: null,
+        generationParams: { size: "1K", quality: "medium", ...item.generationParams },
+        status: "pending",
+        archivedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        originKind: "replica",
+        replicaReferenceId: item.referenceId,
+        replicaReferenceObjectKey: item.referenceObjectKey,
+        sourceLibraryReferenceId: null,
+        sourceResourceVersionId: null,
+        sourceRevision: 0,
+        referenceImageIds: [item.referenceId],
+        factRefs: [],
+        globalStyleCard: input.globalStyleCard ?? {},
+        promptSha256: taskPromptHash(item.prompt),
+      };
+      this.tasks.set(task.id, task);
+      created.push(task);
+    }
+    return { tasks: await this.listTasks(input.suiteId), created };
+  }
   async getTask(id: string) { return this.tasks.get(id) ?? null; }
   async listTasks(suiteId: string) { return [...this.tasks.values()].filter((task) => task.suiteId === suiteId).sort((a, b) => a.ordinal - b.ordinal); }
-  async updateTask(id: string, patch: Partial<Pick<SuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status" | "sourceLibraryReferenceId" | "sourceResourceVersionId" | "sourceRevision">>) { const current = this.tasks.get(id); if (!current) return null; const changed = patch.promptDraft !== undefined && patch.promptDraft !== current.promptDraft; const next = { ...current, ...patch, promptRevision: changed ? current.promptRevision + 1 : current.promptRevision, updatedAt: new Date().toISOString() }; this.tasks.set(id, next); return next; }
+  listAllTasks(): SuiteTask[] { return [...this.tasks.values()]; }
+  listAllVersions(): Array<{ task: SuiteTask; version: TaskImageVersion; attempt?: TaskGenerationAttempt }> {
+    const entries: Array<{ task: SuiteTask; version: TaskImageVersion; attempt?: TaskGenerationAttempt }> = [];
+    for (const version of this.versions.values()) {
+      const task = this.tasks.get(version.taskId);
+      if (!task) continue;
+      entries.push({ task, version, attempt: this.attempts.get(version.attemptId) });
+    }
+    return entries;
+  }
+  async updateTask(id: string, patch: Partial<Pick<SuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status" | "sourceLibraryReferenceId" | "sourceResourceVersionId" | "sourceRevision">>) { const current = this.tasks.get(id); if (!current) return null; const now = new Date().toISOString(); const changed = patch.promptDraft !== undefined && patch.promptDraft !== current.promptDraft; const archivedAt = patch.status === "archived" ? (current.archivedAt ?? now) : current.archivedAt; const next = { ...current, ...patch, archivedAt, promptRevision: changed ? current.promptRevision + 1 : current.promptRevision, updatedAt: now }; this.tasks.set(id, next); return next; }
   async beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }) { const scope = input.batch.suiteId + ":" + input.batch.idempotencyKey; const old = this.batchKeys.get(scope); if (old) return { batch: this.batches.get(old)!, slots: [...this.slots.values()].filter((slot) => slot.batchId === old), attempts: [...this.attempts.values()].filter((attempt) => input.slots.some((slot) => slot.id === attempt.slotId)), duplicate: true }; this.batches.set(input.batch.id, input.batch); this.batchKeys.set(scope, input.batch.id); input.slots.forEach((slot) => this.slots.set(slot.id, slot)); input.attempts.forEach((attempt) => this.attempts.set(attempt.id, attempt)); input.batch.taskIds.forEach((id) => { const task = this.tasks.get(id); if (task) this.tasks.set(id, { ...task, status: "generating", updatedAt: input.batch.createdAt }); }); return { ...input, duplicate: false }; }
   async getBatch(id: string) { return this.batches.get(id) ?? null; }
   async listBatches(suiteId: string) { return [...this.batches.values()].filter((batch) => batch.suiteId === suiteId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }
@@ -73,7 +125,31 @@ export class MemoryTaskRepository implements TaskRepository {
   async completeAttempt(input: { attemptId: string; slotId: string; taskId: string; objectKey: string; processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string; completedAt: string }) { const attempt = this.attempts.get(input.attemptId); const slot = this.slots.get(input.slotId); const task = this.tasks.get(input.taskId); if (!attempt || !slot || !task || attempt.status !== "running") throw new Error("INVALID_TASK_ATTEMPT"); const old = [...this.versions.values()].filter((version) => version.taskId === task.id); for (const version of old) this.versions.set(version.id, { ...version, isCurrent: false }); const id = randomUUID(); const version: TaskImageVersion = { id, taskId: task.id, slotId: slot.id, attemptId: attempt.id, versionNumber: old.length + 1, objectKey: input.objectKey, processObjectKeys: input.processObjectKeys, sha256: input.sha256, width: input.width, height: input.height, mimeType: input.mimeType, promptSnapshot: attempt.promptSnapshot, contextSnapshot: attempt.contextSnapshot, isCurrent: true, isFinal: false, createdAt: input.completedAt, previewUrl: "/api/suite-tasks/" + task.id + "/versions/" + id + "/preview" }; this.versions.set(id, version); this.attempts.set(attempt.id, { ...attempt, status: "succeeded", finishedAt: input.completedAt }); this.slots.set(slot.id, { ...slot, status: "succeeded", selectedVersionId: id, completedAt: input.completedAt }); this.tasks.set(task.id, { ...task, status: task.status === "archived" ? "archived" : "generated", updatedAt: input.completedAt }); await this.refreshBatch(slot.batchId, input.completedAt); return { attempt: this.attempts.get(attempt.id)!, version }; }
   async failAttempt(id: string, code: string, message: string, completedAt: string) { const attempt = this.attempts.get(id); if (!attempt) throw new Error("INVALID_TASK_ATTEMPT"); const slot = this.slots.get(attempt.slotId); const task = slot ? this.tasks.get(slot.taskId) : null; const failed = { ...attempt, status: "failed" as const, errorCode: code, errorMessage: message, finishedAt: completedAt }; this.attempts.set(id, failed); if (slot) this.slots.set(slot.id, { ...slot, status: "failed", completedAt }); if (task) this.tasks.set(task.id, { ...task, status: task.status === "archived" ? "archived" : "failed", updatedAt: completedAt }); if (slot) await this.refreshBatch(slot.batchId, completedAt); return failed; }
   async selectVersion(taskId: string, versionId: string, selection: "current" | "final") { const version = this.versions.get(versionId); if (!version || version.taskId !== taskId) return null; for (const item of [...this.versions.values()].filter((item) => item.taskId === taskId)) this.versions.set(item.id, { ...item, ...(selection === "current" ? { isCurrent: item.id === versionId } : { isFinal: item.id === versionId }) }); return this.versions.get(versionId)!; }
+  async clearFinalVersion(taskId: string) { for (const item of [...this.versions.values()].filter((item) => item.taskId === taskId && item.isFinal)) this.versions.set(item.id, { ...item, isFinal: false }); }
   async listTaskVersions(taskId: string) { return { versions: [...this.versions.values()].filter((version) => version.taskId === taskId).sort((a, b) => b.versionNumber - a.versionNumber), attempts: [...this.attempts.values()].filter((attempt) => this.slots.get(attempt.slotId)?.taskId === taskId).sort((a, b) => a.startedAt.localeCompare(b.startedAt)) }; }
+  async listPreviewVersionsByTaskIds(taskIds: string[]) {
+    const result = new Map<string, TaskPreviewVersion>();
+    if (!taskIds.length) return result;
+    const wanted = new Set(taskIds);
+    const grouped = new Map<string, TaskImageVersion[]>();
+    for (const version of this.versions.values()) {
+      if (!wanted.has(version.taskId)) continue;
+      const list = grouped.get(version.taskId);
+      if (list) list.push(version);
+      else grouped.set(version.taskId, [version]);
+    }
+    for (const [taskId, versions] of grouped) {
+      versions.sort(
+        (a, b) =>
+          Number(b.isFinal) - Number(a.isFinal) ||
+          Number(b.isCurrent) - Number(a.isCurrent) ||
+          b.versionNumber - a.versionNumber,
+      );
+      const picked = versions[0];
+      if (picked) result.set(taskId, { taskId, versionId: picked.id, previewUrl: picked.previewUrl });
+    }
+    return result;
+  }
   async getLayout(suiteId: string) { return this.layouts.get(suiteId) ?? null; }
   async saveLayout(suiteId: string, expectedVersion: number, layout: Omit<CanvasLayout, "id" | "suiteId" | "layoutVersion" | "updatedAt">) { const current = this.layouts.get(suiteId); if (current && JSON.stringify({ viewport: current.viewport, nodes: current.nodes, groups: current.groups }) === JSON.stringify(layout)) return current; if (current && current.layoutVersion !== expectedVersion) throw new Error("LAYOUT_VERSION_CONFLICT"); const saved: CanvasLayout = { ...layout, id: current?.id ?? randomUUID(), suiteId, layoutVersion: (current?.layoutVersion ?? 0) + 1, updatedAt: new Date().toISOString() }; this.layouts.set(suiteId, saved); return saved; }
   private async refreshBatch(id: string, finishedAt: string) { const batch = this.batches.get(id); if (!batch) return; const slots = [...this.slots.values()].filter((slot) => slot.batchId === id); const done = slots.filter((slot) => slot.status === "succeeded").length; const failed = slots.filter((slot) => slot.status === "failed").length; const status = done + failed < slots.length ? "running" : failed === slots.length ? "failed" : failed ? "partial" : "completed"; this.batches.set(id, { ...batch, status, finishedAt: status === "running" ? null : finishedAt }); }

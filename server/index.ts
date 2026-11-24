@@ -8,7 +8,8 @@ import { Pool } from "pg";
 import { createSuiteStudioApp } from "./app.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
-import { dispatchInputImageUpload, parseMultipartFile } from "./multipart.js";
+import { dispatchInputImageUpload } from "./multipart.js";
+import { readBoundedRequestBody } from "./request-body-limit.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
 import { resolveImageSize } from "../shared/model-settings.js";
@@ -22,6 +23,7 @@ import { PostgresPromptRepository } from "./repositories/postgres-prompt-reposit
 import { PostgresLibraryRepository } from "./repositories/postgres-library-repository.js";
 import { PostgresReverseRepository } from "./repositories/postgres-reverse-repository.js";
 import { PostgresPipelineRepository } from "./repositories/postgres-pipeline-repository.js";
+import { PostgresReplicaRepository } from "./repositories/postgres-replica-repository.js";
 import { MinioStorage } from "./storage/minio-storage.js";
 import { ImageEditorService, type ImageEditProvider, type ImageSource } from "./image-editor.js";
 import { createImageEditorApi } from "./image-editor-api.js";
@@ -142,6 +144,7 @@ const app = createSuiteStudioApp({
   taskRepository,
   listingRepository: new PostgresListingRepository(pool),
   pipelineRepository: new PostgresPipelineRepository(pool),
+  replicaRepository: new PostgresReplicaRepository(pool),
   imageEditorApi,
   libraryRepository: new PostgresLibraryRepository(pool),
   reverseRepository: new PostgresReverseRepository(pool),
@@ -168,21 +171,15 @@ async function serveStatic(pathname: string): Promise<{ bytes: Buffer; contentTy
 }
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-  const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
-  const body = Buffer.concat(chunks);
   const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+  const body = await readBoundedRequestBody(req, res, requestUrl.pathname);
+  if (body === null) return;
   const path = requestUrl.pathname + requestUrl.search;
   const headers = req.headers as Record<string, string | undefined>;
   let response;
   const upload = req.method === "POST" ? await dispatchInputImageUpload(app, requestUrl.pathname, body, headers) : null;
   if (upload) {
     response = upload;
-  } else if (req.method === "POST" && /^\/api\/reverse-plans\/[^/]+\/references$/.test(path)) {
-    const parsed = parseMultipartFile(body, headers["content-type"] ?? "");
-    if (!parsed) response = { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "未找到图片文件" }, requestId: "" } };
-    else {
-      response = await app.request("POST", path, { headers: headers as Record<string, string>, body: { filename: parsed.filename, mimeType: parsed.mimeType, bytesBase64: parsed.bytes.toString("base64") } });
-    }
   } else if (req.method === "GET" && /^\/api\/listing-copies\/[^/]+\/input-images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname)) {
     response = await app.request("GET", requestUrl.pathname);
   } else if (req.method === "GET" && path.includes("/preview")) {
@@ -192,6 +189,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     const editTaskMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
     const libraryMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     const reverseMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
+    const replicaMatch = requestUrl.pathname.match(/^\/api\/replicas\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
+    const safeDecode = (raw: string) => {
+      try { return decodeURIComponent(raw); } catch { return null; }
+    };
     response = inputMatch
       ? await app.preview(inputMatch[1], inputMatch[2], inputMatch[3] as "original" | "thumbnail")
       : baseMatch
@@ -201,9 +202,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       : taskMatch
         ? await app.previewTaskVersion(taskMatch[1], taskMatch[2])
         : libraryMatch
-          ? await app.previewLibraryResource(libraryMatch[1])
+          ? await app.previewLibraryResource(safeDecode(libraryMatch[1]) ?? libraryMatch[1])
         : reverseMatch
           ? await app.previewReverseReference(reverseMatch[1], reverseMatch[2], (reverseMatch[3] as "original" | "thumbnail" | undefined) ?? "thumbnail")
+        : replicaMatch
+          ? await app.previewReplicaReference(replicaMatch[1], replicaMatch[2], ((replicaMatch[3] ?? requestUrl.searchParams.get("kind")) === "original" ? "original" : "thumbnail"))
         : { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } };
     if ((response.headers as Record<string, string> | undefined)?.location) { res.statusCode = response.status; res.setHeader("location", (response.headers as Record<string, string>).location); res.end(); return; }
     if (response.raw) { const rawHeaders = response.headers as Record<string, string> | undefined; res.statusCode = response.status; for (const [name, value] of Object.entries(rawHeaders ?? {})) res.setHeader(name, value); res.setHeader("content-type", rawHeaders?.["content-type"] ?? "application/octet-stream"); res.setHeader("cache-control", rawHeaders?.["cache-control"] ?? "private, max-age=60"); res.end(response.raw); return; }

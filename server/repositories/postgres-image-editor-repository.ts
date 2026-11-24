@@ -35,4 +35,11 @@ export class PostgresImageEditorRepository implements ImageEditorRepository {
   async listAttempts(childTaskId: string) { const r = await this.pool.query<ImageEditAttempt>(`SELECT ${attemptRow} FROM suite_workbench.image_edit_attempts WHERE child_task_id=$1 ORDER BY attempt_no`, [childTaskId]); return r.rows; }
   async listVersions(childTaskId: string) { const r = await this.pool.query<ImageEditVersion>(`SELECT ${versionRow} FROM suite_workbench.image_edit_versions WHERE child_task_id=$1 ORDER BY version_number DESC`, [childTaskId]); return r.rows; }
   async selectVersion(childTaskId: string, versionId: string, selection: "current" | "final") { const version = (await this.listVersions(childTaskId)).find((v) => v.id === versionId); if (!version) return null; if (selection === "final") { const attempt = await this.getAttempt(version.attemptId); if (!attempt || attempt.status !== "succeeded") throw new Error("VERSION_NOT_ELIGIBLE_FOR_FINAL"); } await this.pool.query(`UPDATE suite_workbench.image_edit_child_tasks SET ${selection === "current" ? "current_version_id" : "final_version_id"}=$2,updated_at=now() WHERE id=$1`, [childTaskId,versionId]); return version; }
+  async clearFinalVersions(childTaskIds: string[]) {
+    if (!childTaskIds.length) return;
+    await this.pool.query(
+      `UPDATE suite_workbench.image_edit_child_tasks SET final_version_id=NULL, updated_at=now() WHERE id = ANY($1::uuid[]) AND final_version_id IS NOT NULL`,
+      [childTaskIds],
+    );
+  }
 }

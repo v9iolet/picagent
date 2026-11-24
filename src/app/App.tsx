@@ -5,6 +5,7 @@ import { BoardPage } from "../pages/BoardPage";
 import { CanvasListPage } from "../pages/CanvasListPage";
 import { ImageAssetsPage } from "../pages/ImageAssetsPage";
 import { PromptTemplatesPage } from "../pages/PromptTemplatesPage";
+import { ReplicaStudioPage } from "../pages/ReplicaStudioPage";
 import { ReversePage } from "../pages/ReversePage";
 
 const readLocation = () => ({ path: window.location.pathname, search: window.location.search });
@@ -28,8 +29,10 @@ export function App() {
   const legacy = path.match(/^\/suites\/([^/]+)\/?$/);
   const legacyBoard = path.match(/^\/suites\/([^/]+)\/board\/?$/);
   const legacyListing = /^\/create\/listing-copy(?:\/[^/]+)?\/?$/.test(path);
+  const legacyReverseRoot = /^\/reverse\/?$/.test(path);
   const canonical = legacyBoard ? `/create/canvas/${legacyBoard[1]}`
     : legacy && legacy[1] !== "new" ? `/create/suite/${legacy[1]}`
+    : legacyReverseRoot ? "/create/replica"
     : legacy || legacyListing || path === "/" ? "/create/suite" : path;
   useEffect(() => {
     if (path === canonical) return;
@@ -47,6 +50,14 @@ export function App() {
     const tab = new URLSearchParams(search).get("tab");
     return tab === "templates" ? <PromptTemplatesPage navigate={navigate} /> : <ImageAssetsPage navigate={navigate} />;
   }
-  if (path === "/reverse" || reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;
-  return <SuiteStudioPage suiteId={canonical.match(/^\/create\/suite\/([^/]+)\/?$/)?.[1]} navigate={navigate} />;
+  if (/^\/create\/replica\/?$/.test(canonical)) {
+    const replicaSuiteId = new URLSearchParams(search).get("suite")?.trim() || undefined;
+    return <ReplicaStudioPage suiteId={replicaSuiteId} navigate={navigate} />;
+  }
+  if (reverseId) return <ReversePage planId={reverseId} navigate={navigate} />;
+  const pathSuiteId = canonical.match(/^\/create\/suite\/([^/]+)\/?$/)?.[1];
+  const querySuiteId = /^\/create\/suite\/?$/.test(canonical)
+    ? new URLSearchParams(search).get("suite")?.trim() || undefined
+    : undefined;
+  return <SuiteStudioPage suiteId={pathSuiteId ?? querySuiteId} navigate={navigate} />;
 }

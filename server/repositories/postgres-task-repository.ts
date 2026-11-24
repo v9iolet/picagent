@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import type { CanvasLayout, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskRepository, TaskResultSlot } from "../types.js";
+import type { CanvasLayout, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskPreviewVersion, TaskRepository, TaskResultSlot } from "../types.js";
 
-const taskCols = `id,suite_id AS "suiteId",plan_snapshot_id AS "planSnapshotId",plan_item_id AS "planItemId",ordinal,image_type AS "imageType",title,purpose,prompt_draft AS "promptDraft",prompt_revision AS "promptRevision",source_input_image_id AS "sourceInputImageId",generation_params_json AS "generationParams",status,archived_at AS "archivedAt",created_at AS "createdAt",updated_at AS "updatedAt",category_code AS "categoryCode",reference_image_ids_json AS "referenceImageIds",fact_refs_json AS "factRefs",global_style_card_json AS "globalStyleCard",prompt_sha256 AS "promptSha256",origin_kind AS "originKind",reverse_plan_id AS "reversePlanId",reverse_reference_id AS "reverseReferenceId",reverse_prompt_version_id AS "reversePromptVersionId",reverse_task_group_id AS "reverseTaskGroupId",source_library_reference_id AS "sourceLibraryReferenceId",source_resource_version_id AS "sourceResourceVersionId",source_revision AS "sourceRevision"`;
+const taskCols = `id,suite_id AS "suiteId",plan_snapshot_id AS "planSnapshotId",plan_item_id AS "planItemId",ordinal,image_type AS "imageType",title,purpose,prompt_draft AS "promptDraft",prompt_revision AS "promptRevision",source_input_image_id AS "sourceInputImageId",generation_params_json AS "generationParams",status,archived_at AS "archivedAt",created_at AS "createdAt",updated_at AS "updatedAt",category_code AS "categoryCode",reference_image_ids_json AS "referenceImageIds",fact_refs_json AS "factRefs",global_style_card_json AS "globalStyleCard",prompt_sha256 AS "promptSha256",origin_kind AS "originKind",reverse_plan_id AS "reversePlanId",reverse_reference_id AS "reverseReferenceId",reverse_prompt_version_id AS "reversePromptVersionId",reverse_task_group_id AS "reverseTaskGroupId",replica_reference_id AS "replicaReferenceId",replica_reference_object_key AS "replicaReferenceObjectKey",source_library_reference_id AS "sourceLibraryReferenceId",source_resource_version_id AS "sourceResourceVersionId",source_revision AS "sourceRevision"`;
 const batchCols = `id,suite_id AS "suiteId",kind,requested_count AS "requestedCount",task_ids_json AS "taskIds",status,idempotency_key AS "idempotencyKey",created_at AS "createdAt",started_at AS "startedAt",finished_at AS "finishedAt"`;
 const slotCols = `id,batch_id AS "batchId",task_id AS "taskId",slot_ordinal AS "slotOrdinal",retry_of_slot_id AS "retryOfSlotId",status,selected_version_id AS "selectedVersionId",created_at AS "createdAt",completed_at AS "completedAt"`;
 const attemptCols = `id,slot_id AS "slotId",attempt_no AS "attemptNo",provider,model,endpoint,request_summary_json AS "requestSummary",prompt_snapshot_json AS "promptSnapshot",prompt_sha256 AS "promptSha256",context_snapshot_json AS "contextSnapshot",source_kind AS "sourceKind",source_object_key AS "sourceObjectKey",source_input_image_id AS "sourceInputImageId",source_base_version_id AS "sourceBaseVersionId",source_library_reference_id AS "sourceLibraryReferenceId",source_resource_version_id AS "sourceResourceVersionId",status,error_code AS "errorCode",error_message AS "errorMessage",external_request_id AS "externalRequestId",started_at AS "startedAt",finished_at AS "finishedAt"`;
@@ -47,6 +47,51 @@ export class PostgresTaskRepository implements TaskRepository {
   }
   async createTasksFromSnapshot(suiteId: string, snapshot: PlanSnapshot, inputImages: InputImage[]) { const client = await this.pool.connect(); const created: SuiteTask[] = []; try { await client.query("BEGIN"); await client.query("UPDATE suite_workbench.suite_tasks SET status='archived',archived_at=COALESCE(archived_at,now()),updated_at=now() WHERE suite_id=$1 AND plan_item_id<>ALL($2::uuid[]) AND status<>'archived'", [suiteId, snapshot.items.map((item) => item.id)]); for (const item of snapshot.items) { const found = await client.query<SuiteTask>("SELECT " + taskCols + " FROM suite_workbench.suite_tasks WHERE suite_id=$1 AND plan_item_id=$2", [suiteId,item.id]); if (found.rows[0]) continue; const now = new Date().toISOString(); const params = { size: "1K", quality: "medium", ...(item.suggestedParams ?? {}), ...(item.aspectRatio ? { aspectRatio: item.aspectRatio } : {}) }; const r = await client.query<SuiteTask>("INSERT INTO suite_workbench.suite_tasks (id,suite_id,plan_snapshot_id,plan_item_id,ordinal,image_type,title,purpose,prompt_draft,source_input_image_id,generation_params_json,status,category_code,reference_image_ids_json,fact_refs_json,global_style_card_json,prompt_sha256,created_at,updated_at) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12,$13,$14,$15,$16,$16) RETURNING " + taskCols, [suiteId,snapshot.id,item.id,item.ordinal,item.imageType,item.title,item.purpose,item.prompt,item.referenceImageIds?.[0] ?? inputImages[0]?.id ?? null,JSON.stringify(params),item.categoryCode ?? null,JSON.stringify(item.referenceImageIds ?? []),JSON.stringify(item.factRefs ?? []),JSON.stringify(item.globalStyleCard ?? {}),item.promptSha256 ?? null,now]); created.push(r.rows[0]); } await client.query("COMMIT"); return { tasks: await this.listTasks(suiteId), created }; } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); } }
   async createReverseTasks(input: { suiteId: string; reversePlanId: string; taskGroupId: string; mode: "main" | "detail"; idempotencyKey: string; items: Array<{ referenceId: string; ordinal: number; filename: string; promptVersionId: string; prompt: string }> }) { const c = await this.pool.connect(); const created: SuiteTask[] = []; try { await c.query("BEGIN"); const found = await c.query<{ taskIds: string[] }>('SELECT task_ids_json AS "taskIds" FROM suite_workbench.reverse_canvas_imports WHERE suite_id=$1 AND idempotency_key=$2', [input.suiteId,input.idempotencyKey]); if (found.rows[0]) { await c.query("COMMIT"); const tasks = await this.listTasks(input.suiteId); return { tasks, created: tasks.filter((task) => found.rows[0].taskIds.includes(task.id)), duplicate: true }; } const offset = Number((await c.query<{ n: number }>("SELECT COALESCE(MAX(ordinal),0) AS n FROM suite_workbench.suite_tasks WHERE suite_id=$1", [input.suiteId])).rows[0].n); const now = new Date().toISOString(); for (const item of input.items) { const row = await c.query<SuiteTask>(`INSERT INTO suite_workbench.suite_tasks (id,suite_id,plan_snapshot_id,plan_item_id,ordinal,image_type,title,purpose,prompt_draft,generation_params_json,status,created_at,updated_at,reference_image_ids_json,fact_refs_json,prompt_sha256,origin_kind,reverse_plan_id,reverse_reference_id,reverse_prompt_version_id,reverse_task_group_id,source_revision) VALUES (gen_random_uuid(),$1,NULL,NULL,$2,$3,$4,'爆品参考图反推生图',$5,'{"size":"1K","quality":"medium"}'::jsonb,'incomplete',$6,$6,$7,'[]'::jsonb,encode(digest($5,'sha256'),'hex'),'reverse_import',$8,$9,$10,$11,0) RETURNING ${taskCols}`, [input.suiteId,offset+item.ordinal,input.mode,item.filename,item.prompt,now,JSON.stringify([item.referenceId]),input.reversePlanId,item.referenceId,item.promptVersionId,input.taskGroupId]); created.push(row.rows[0]); } await c.query("INSERT INTO suite_workbench.reverse_canvas_imports (id,suite_id,reverse_plan_id,task_group_id,idempotency_key,task_ids_json,created_at) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6)", [input.suiteId,input.reversePlanId,input.taskGroupId,input.idempotencyKey,JSON.stringify(created.map((task) => task.id)),now]); await c.query("COMMIT"); return { tasks: await this.listTasks(input.suiteId), created, duplicate: false }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
+  async createReplicaTasks(input: { suiteId: string; globalStyleCard?: Record<string, unknown>; items: Array<{ referenceId: string; referenceObjectKey: string; ordinal: number; title: string; purpose: string; prompt: string; generationParams: Record<string, unknown> }> }) {
+    const client = await this.pool.connect();
+    const created: SuiteTask[] = [];
+    try {
+      await client.query("BEGIN");
+      const now = new Date().toISOString();
+      for (const item of [...input.items].sort((a, b) => a.ordinal - b.ordinal)) {
+        const existing = await client.query<SuiteTask>(
+          `SELECT ${taskCols} FROM suite_workbench.suite_tasks WHERE suite_id = $1 AND origin_kind = 'replica' AND replica_reference_id = $2 AND status <> 'archived'`,
+          [input.suiteId, item.referenceId],
+        );
+        if (existing.rows[0]) continue;
+        const params = { size: "1K", quality: "medium", ...item.generationParams };
+        const sha = createHash("sha256").update(item.prompt).digest("hex");
+        const inserted = await client.query<SuiteTask>(
+          `INSERT INTO suite_workbench.suite_tasks
+            (id, suite_id, plan_snapshot_id, plan_item_id, ordinal, image_type, title, purpose, prompt_draft, source_input_image_id, generation_params_json, status, reference_image_ids_json, fact_refs_json, global_style_card_json, prompt_sha256, origin_kind, replica_reference_id, replica_reference_object_key, source_revision, created_at, updated_at)
+           VALUES (gen_random_uuid(),$1,NULL,NULL,$2,'main',$3,$4,$5,NULL,$6,'pending',$7,'[]'::jsonb,$8,$9,'replica',$10,$11,0,$12,$12)
+           RETURNING ${taskCols}`,
+          [
+            input.suiteId,
+            item.ordinal,
+            item.title,
+            item.purpose,
+            item.prompt,
+            JSON.stringify(params),
+            JSON.stringify([item.referenceId]),
+            JSON.stringify(input.globalStyleCard ?? {}),
+            sha,
+            item.referenceId,
+            item.referenceObjectKey,
+            now,
+          ],
+        );
+        created.push(inserted.rows[0]);
+      }
+      await client.query("COMMIT");
+      return { tasks: await this.listTasks(input.suiteId), created };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
   async getTask(id: string) { const r = await this.pool.query<SuiteTask>("SELECT " + taskCols + " FROM suite_workbench.suite_tasks WHERE id=$1", [id]); return r.rows[0] ?? null; }
   async listTasks(suiteId: string) { const r = await this.pool.query<SuiteTask>("SELECT " + taskCols + " FROM suite_workbench.suite_tasks WHERE suite_id=$1 ORDER BY ordinal,id", [suiteId]); return r.rows; }
   async updateTask(id: string, patch: Partial<Pick<SuiteTask,"title"|"purpose"|"promptDraft"|"sourceInputImageId"|"generationParams"|"status"|"sourceLibraryReferenceId"|"sourceResourceVersionId"|"sourceRevision">>) {
@@ -57,6 +102,7 @@ export class PostgresTaskRepository implements TaskRepository {
       title=COALESCE($2,title),purpose=COALESCE($3,purpose),prompt_draft=COALESCE($4,prompt_draft),prompt_revision=$5,
       source_input_image_id=CASE WHEN $12 THEN $6::uuid ELSE source_input_image_id END,
       generation_params_json=COALESCE($7,generation_params_json),status=COALESCE($8,status),
+      archived_at=CASE WHEN $8='archived' THEN COALESCE(archived_at,now()) ELSE archived_at END,
       source_library_reference_id=CASE WHEN $13 THEN $9::uuid ELSE source_library_reference_id END,
       source_resource_version_id=CASE WHEN $14 THEN $10::text ELSE source_resource_version_id END,
       source_revision=COALESCE($11,source_revision),updated_at=now() WHERE id=$1 RETURNING ${taskCols}`,
@@ -73,10 +119,68 @@ export class PostgresTaskRepository implements TaskRepository {
   async listSlots(suiteId: string) { const r = await this.pool.query<TaskResultSlot>("SELECT " + slotCols + " FROM suite_workbench.task_result_slots WHERE task_id IN (SELECT id FROM suite_workbench.suite_tasks WHERE suite_id=$1) ORDER BY created_at", [suiteId]); return r.rows; }
   async getAttempt(id: string) { const r = await this.pool.query<TaskGenerationAttempt>("SELECT " + attemptCols + " FROM suite_workbench.task_generation_attempts WHERE id=$1", [id]); return r.rows[0] ?? null; }
   async completeAttempt(input: { attemptId: string; slotId: string; taskId: string; objectKey: string; processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string; completedAt: string }) { const c = await this.pool.connect(); try { await c.query("BEGIN"); const a = (await c.query<TaskGenerationAttempt>("SELECT " + attemptCols + " FROM suite_workbench.task_generation_attempts WHERE id=$1 FOR UPDATE", [input.attemptId])).rows[0]; if (!a || a.status !== "running") throw new Error("INVALID_TASK_ATTEMPT"); const next = await c.query<{ n: number }>("SELECT COALESCE(MAX(version_number),0)+1 AS n FROM suite_workbench.task_image_versions WHERE task_id=$1", [input.taskId]); await c.query("UPDATE suite_workbench.task_image_versions SET is_current=false WHERE task_id=$1", [input.taskId]); const versionId = randomUUID(); await c.query("INSERT INTO suite_workbench.task_image_versions (id,task_id,slot_id,attempt_id,version_number,object_key,process_object_keys_json,sha256,width,height,mime_type,prompt_snapshot_json,context_snapshot_json,is_current,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,true,$14)", [versionId,input.taskId,input.slotId,input.attemptId,next.rows[0].n,input.objectKey,JSON.stringify(input.processObjectKeys),input.sha256,input.width,input.height,input.mimeType,JSON.stringify(a.promptSnapshot),JSON.stringify(a.contextSnapshot),input.completedAt]); await c.query("UPDATE suite_workbench.task_generation_attempts SET status='succeeded',finished_at=$2 WHERE id=$1", [input.attemptId,input.completedAt]); await c.query("UPDATE suite_workbench.task_result_slots SET status='succeeded',selected_version_id=$2,completed_at=$3 WHERE id=$1", [input.slotId,versionId,input.completedAt]); await c.query("UPDATE suite_workbench.suite_tasks SET status=CASE WHEN status='archived' THEN 'archived' ELSE 'generated' END,updated_at=$2 WHERE id=$1", [input.taskId,input.completedAt]); const slot = await c.query<{ batchId: string }>('SELECT batch_id AS "batchId" FROM suite_workbench.task_result_slots WHERE id=$1', [input.slotId]); await this.refreshBatch(c,slot.rows[0]?.batchId ?? "",input.completedAt); await c.query("COMMIT"); const v = await this.pool.query<TaskImageVersion>("SELECT " + versionCols + ", '/api/suite-tasks/' || task_id || '/versions/' || id || '/preview' AS \"previewUrl\" FROM suite_workbench.task_image_versions WHERE id=$1", [versionId]); return { attempt: (await this.getAttempt(input.attemptId))!, version: v.rows[0] }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
-  async failAttempt(id: string, code: string, message: string, finishedAt: string) { const c = await this.pool.connect(); try { await c.query("BEGIN"); const a = await this.getAttempt(id); if (!a) throw new Error("INVALID_TASK_ATTEMPT"); await c.query("UPDATE suite_workbench.task_generation_attempts SET status='failed',error_code=$2,error_message=$3,finished_at=$4 WHERE id=$1", [id,code,message,finishedAt]); await c.query("UPDATE suite_workbench.task_result_slots SET status='failed',completed_at=$2 WHERE id=$1", [a.slotId,finishedAt]); const s = await this.getSlot(a.slotId); if (s) { await c.query("UPDATE suite_workbench.suite_tasks SET status=CASE WHEN status='archived' THEN 'archived' ELSE 'failed' END,updated_at=$2 WHERE id=$1", [s.taskId,finishedAt]); await this.refreshBatch(c,s.batchId,finishedAt); } await c.query("COMMIT"); return (await this.getAttempt(id))!; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
+  async failAttempt(id: string, code: string, message: string, finishedAt: string) {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      const a = (await c.query<TaskGenerationAttempt>("SELECT " + attemptCols + " FROM suite_workbench.task_generation_attempts WHERE id=$1 FOR UPDATE", [id])).rows[0];
+      if (!a || a.status !== "running") throw new Error("INVALID_TASK_ATTEMPT");
+      const updatedAttempt = await c.query<TaskGenerationAttempt>(
+        `UPDATE suite_workbench.task_generation_attempts SET status='failed',error_code=$2,error_message=$3,finished_at=$4 WHERE id=$1 RETURNING ${attemptCols}`,
+        [id, code, message, finishedAt],
+      );
+      const slot = await c.query<TaskResultSlot>(
+        `UPDATE suite_workbench.task_result_slots SET status='failed',completed_at=$2 WHERE id=$1 RETURNING ${slotCols}`,
+        [a.slotId, finishedAt],
+      );
+      const s = slot.rows[0];
+      if (s) {
+        await c.query("UPDATE suite_workbench.suite_tasks SET status=CASE WHEN status='archived' THEN 'archived' ELSE 'failed' END,updated_at=$2 WHERE id=$1", [s.taskId, finishedAt]);
+        await this.refreshBatch(c, s.batchId, finishedAt);
+      }
+      await c.query("COMMIT");
+      return updatedAttempt.rows[0];
+    } catch (e) {
+      await c.query("ROLLBACK");
+      throw e;
+    } finally {
+      c.release();
+    }
+  }
   async selectVersion(taskId: string, versionId: string, selection: "current" | "final") { const found = await this.pool.query("SELECT 1 FROM suite_workbench.task_image_versions WHERE id=$1 AND task_id=$2", [versionId,taskId]); if (!found.rowCount) return null; await this.pool.query("UPDATE suite_workbench.task_image_versions SET " + (selection === "current" ? "is_current" : "is_final") + "=false WHERE task_id=$1", [taskId]); const r = await this.pool.query<TaskImageVersion>("UPDATE suite_workbench.task_image_versions SET " + (selection === "current" ? "is_current" : "is_final") + "=true WHERE id=$1 RETURNING " + versionCols + ", '/api/suite-tasks/' || task_id || '/versions/' || id || '/preview' AS \"previewUrl\"", [versionId]); return r.rows[0] ?? null; }
+  async clearFinalVersion(taskId: string) { await this.pool.query("UPDATE suite_workbench.task_image_versions SET is_final=false WHERE task_id=$1 AND is_final=true", [taskId]); }
   async listTaskVersions(taskId: string) { const [v,a] = await Promise.all([this.pool.query<TaskImageVersion>("SELECT " + versionCols + ", '/api/suite-tasks/' || task_id || '/versions/' || id || '/preview' AS \"previewUrl\" FROM suite_workbench.task_image_versions WHERE task_id=$1 ORDER BY version_number DESC", [taskId]), this.pool.query<TaskGenerationAttempt>("SELECT " + attemptColsJoined + " FROM suite_workbench.task_generation_attempts a JOIN suite_workbench.task_result_slots s ON s.id=a.slot_id WHERE s.task_id=$1 ORDER BY a.started_at ASC", [taskId])]); return { versions: v.rows, attempts: a.rows }; }
+  async listPreviewVersionsByTaskIds(taskIds: string[]) {
+    const result = new Map<string, TaskPreviewVersion>();
+    const uniqueIds = [...new Set(taskIds)];
+    if (!uniqueIds.length) return result;
+    const r = await this.pool.query<TaskPreviewVersion>(
+      `SELECT DISTINCT ON (task_id)
+         task_id AS "taskId",
+         id AS "versionId",
+         '/api/suite-tasks/' || task_id || '/versions/' || id || '/preview' AS "previewUrl"
+       FROM suite_workbench.task_image_versions
+       WHERE task_id = ANY($1::uuid[])
+       ORDER BY task_id, is_final DESC, is_current DESC, version_number DESC`,
+      [uniqueIds],
+    );
+    for (const row of r.rows) {
+      result.set(row.taskId, row);
+    }
+    return result;
+  }
   async getLayout(suiteId: string) { const r = await this.pool.query('SELECT id,suite_id AS "suiteId",layout_version AS "layoutVersion",viewport_json AS viewport,nodes_json AS nodes,groups_json AS groups,updated_at AS "updatedAt" FROM suite_workbench.suite_canvas_layouts WHERE suite_id=$1', [suiteId]); return r.rows[0] ?? null; }
   async saveLayout(suiteId: string, expectedVersion: number, layout: Omit<CanvasLayout,"id"|"suiteId"|"layoutVersion"|"updatedAt">) { const c = await this.pool.connect(); try { await c.query("BEGIN"); const current = await this.getLayout(suiteId); if (current && JSON.stringify({ viewport: current.viewport, nodes: current.nodes, groups: current.groups }) === JSON.stringify(layout)) { await c.query("COMMIT"); return current; } if (current && current.layoutVersion !== expectedVersion) throw new Error("LAYOUT_VERSION_CONFLICT"); const next = (current?.layoutVersion ?? 0) + 1; const r = await c.query('INSERT INTO suite_workbench.suite_canvas_layouts (suite_id,layout_version,viewport_json,nodes_json,groups_json,updated_at) VALUES ($1,$2,$3,$4,$5,now()) ON CONFLICT (suite_id) DO UPDATE SET layout_version=EXCLUDED.layout_version,viewport_json=EXCLUDED.viewport_json,nodes_json=EXCLUDED.nodes_json,groups_json=EXCLUDED.groups_json,updated_at=now() RETURNING id,suite_id AS "suiteId",layout_version AS "layoutVersion",viewport_json AS viewport,nodes_json AS nodes,groups_json AS groups,updated_at AS "updatedAt"', [suiteId,next,JSON.stringify(layout.viewport),JSON.stringify(layout.nodes),JSON.stringify(layout.groups)]); await c.query("COMMIT"); return r.rows[0]; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
-  private async refreshBatch(c: PoolClient, batchId: string, finishedAt: string) { if (!batchId) return; const r = await c.query<{ status: string }>("SELECT status FROM suite_workbench.task_result_slots WHERE batch_id=$1", [batchId]); const done = r.rows.filter((x) => x.status === "succeeded").length; const failed = r.rows.filter((x) => x.status === "failed").length; const status = done + failed < r.rows.length ? "running" : failed === r.rows.length ? "failed" : failed ? "partial" : "completed"; await c.query("UPDATE suite_workbench.task_generation_batches SET status=$2,finished_at=CASE WHEN $2='running' THEN NULL ELSE $3::timestamptz END WHERE id=$1", [batchId,status,finishedAt]); }
+  private async refreshBatch(c: PoolClient, batchId: string, finishedAt: string) {
+    if (!batchId) return;
+    await c.query("SELECT id FROM suite_workbench.task_generation_batches WHERE id=$1 FOR UPDATE", [batchId]);
+    const r = await c.query<{ status: string }>("SELECT status FROM suite_workbench.task_result_slots WHERE batch_id=$1", [batchId]);
+    const done = r.rows.filter((x) => x.status === "succeeded").length;
+    const failed = r.rows.filter((x) => x.status === "failed").length;
+    const status = done + failed < r.rows.length ? "running" : failed === r.rows.length ? "failed" : failed ? "partial" : "completed";
+    await c.query(
+      "UPDATE suite_workbench.task_generation_batches SET status=$2,finished_at=CASE WHEN $2='running' THEN NULL ELSE $3::timestamptz END WHERE id=$1",
+      [batchId, status, finishedAt],
+    );
+  }
 }

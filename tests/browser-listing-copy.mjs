@@ -182,7 +182,7 @@ test("创作栏仅显示三个入口，两个旧文案路由都重定向到商�
     await page.goto(url + path);
     await page.waitForURL(url + "create/suite");
     const tools = page.getByRole("navigation", { name: "创作功能" });
-    assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图反推"]);
+    assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图复刻"]);
   }
 });
 
@@ -305,7 +305,7 @@ test("模板库：上架文案阶段显示名称并筛除其他模板", async (t
   await page.getByText("商品套图分组结构计划", { exact: true }).first().waitFor();
   const listing = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "商品上架文案", exact: true }) });
   await listing.waitFor();
-  assert.equal(await listing.getByText("上架文案", { exact: true }).isVisible(), true);
+  assert.equal(await listing.locator(".template-card-head").getByText("上架文案", { exact: true }).isVisible(), true);
   const response = page.waitForResponse((r) => new URL(r.url()).searchParams.get("stage") === "listing_copy");
   await page.getByRole("radio", { name: "上架文案", exact: true }).check();
   assert.equal((await response).status(), 200);

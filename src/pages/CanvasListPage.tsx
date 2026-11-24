@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { suiteApi, type ApiSuite } from "../api/client";
 import { AppShell } from "../components/AppShell";
-import { createTools } from "../features/create/tool-registry";
+import { CreateToolsNav } from "../features/create/CreateToolsNav";
 import { Icon } from "./shared";
 import "../components/suite-studio/studio.css";
 import "./CanvasListPage.css";
@@ -15,7 +15,7 @@ export function CanvasListPage({ navigate }: { navigate: (to: string) => void })
   useEffect(() => {
     let active = true;
     suiteApi.listCanvases()
-      .then((items) => { if (active) setCanvases(items); })
+      .then((items) => { if (active) setCanvases(items.filter((item) => item.origin !== "replica")); })
       .catch(() => { if (active) setLoadError(true); });
     return () => { active = false; };
   }, [loadVersion]);
@@ -36,15 +36,7 @@ export function CanvasListPage({ navigate }: { navigate: (to: string) => void })
   return (
     <AppShell activeNav="create" crumbs={[{ label: "创建", to: "/create/suite" }, { label: "生图画布" }]} navigate={navigate} fullHeight>
       <div className="ss-layout canvas-list-layout">
-        <nav className="ss-tools" aria-label="创作功能">
-          {createTools.map((tool) => (
-            <a key={tool.id} href={tool.path} aria-current={tool.id === "canvas" ? "page" : undefined} onClick={(event) => {
-              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-              event.preventDefault();
-              navigate(tool.path);
-            }}><Icon name={tool.icon} />{tool.label}</a>
-          ))}
-        </nav>
+        <CreateToolsNav activeTool="canvas" navigate={navigate} />
         <main className="canvas-list">
           <header>
             <h1>生图画布</h1>

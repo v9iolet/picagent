@@ -465,3 +465,70 @@ test("创作画布：移除卖点排版入口，未配 OCR 时可手工框选改
   await page.locator(".wb-edit-child-card").first().waitFor();
   await page.locator(".wb-edit-child-card").first().locator(".wb-card-state").filter({ hasText: /^已生成$/ }).waitFor();
 });
+
+test("图片资源库联动：画布单卡归档后 /assets 隐藏且预览仍 200；编辑器派生图进入 /assets 标注编辑生成并可软删除", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId, tasks } = await seedGeneratedCanvas(api, 2);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+
+  // 1. Open /assets -> both generated task cards (商品视图 1, 商品视图 2) appear under AI 生成结果
+  await page.goto(url + "assets");
+  await page.getByRole("radio", { name: "AI 生成结果", exact: true }).check();
+  await page.locator(".style-card", { hasText: "商品视图 1" }).waitFor();
+  await page.locator(".style-card", { hasText: "商品视图 2" }).waitFor();
+  await page.getByText("第 1 / 1 页 · 共 2 项").waitFor();
+
+  // Record task 1's version preview URL before archiving
+  const wbBefore = await api.request("GET", `/api/suites/${suiteId}/workbench`);
+  const task1VersionId = wbBefore.body.data.tasks.find((t) => t.id === tasks[0]).versions[0].id;
+
+  // 2. Archive task 1 via PATCH /api/suite-tasks/:id -> reload /assets -> 商品视图 1 disappears, total drops to 1, preview stays 200
+  const archiveRes = await page.request.patch(url + `api/suite-tasks/${tasks[0]}`, {
+    data: { status: "archived" },
+  });
+  assert.equal(archiveRes.status(), 200);
+
+  await page.goto(url + "assets");
+  await page.getByRole("radio", { name: "AI 生成结果", exact: true }).check();
+  await page.getByText("第 1 / 1 页 · 共 1 项").waitFor();
+  await page.locator(".style-card", { hasText: "商品视图 2" }).waitFor();
+  assert.equal(await page.locator(".style-card", { hasText: "商品视图 1" }).count(), 0);
+  const archivedPreview = await page.request.get(url + `api/library/resources/${encodeURIComponent(`task-version:${task1VersionId}`)}/preview`);
+  assert.equal(archivedPreview.status(), 200);
+
+  // 3. Open canvas -> edit remaining card (商品视图 2) in image editor -> child card generated
+  await page.goto(url + `create/canvas/${suiteId}`);
+  await page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit").first().click();
+  const editorDialog = page.getByRole("dialog", { name: "图片编辑器" });
+  await editorDialog.waitFor();
+  await editorDialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
+  await editorDialog.getByLabel("原文字").fill("旧标题");
+  await editorDialog.getByLabel("新文字").fill("新品主图");
+  await editorDialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
+  await editorDialog.waitFor({ state: "hidden" });
+  await page.locator(".wb-edit-child-card").first().locator(".wb-card-state").filter({ hasText: /^已生成$/ }).waitFor();
+
+  // 4. Open /assets -> editor-derived image appears under AI 生成结果 with 编辑生成 source label, loads cleanly, and can be soft-deleted
+  await page.goto(url + "assets");
+  await page.getByRole("radio", { name: "AI 生成结果", exact: true }).check();
+  await page.getByText("第 1 / 1 页 · 共 2 项").waitFor();
+  const editedCard = page.locator(".style-card", { hasText: "商品视图 2 · 编辑版本 1" });
+  await editedCard.waitFor();
+  await editedCard.click();
+  const inspector = page.locator(".style-inspector");
+  await inspector.getByText("编辑生成", { exact: true }).waitFor();
+  const detailImg = inspector.locator(".style-detail-image img");
+  await detailImg.waitFor();
+  assert.equal(await detailImg.evaluate((el) => el.complete && el.naturalWidth > 0), true);
+
+  await inspector.getByRole("button", { name: "删除图片" }).click();
+  const confirm = page.getByRole("dialog");
+  await confirm.waitFor();
+  await confirm.getByRole("button", { name: "确认删除" }).click();
+  await page.getByText("图片已从资源库删除").waitFor();
+  await page.getByText("第 1 / 1 页 · 共 1 项").waitFor();
+  assert.equal(await page.locator(".style-card", { hasText: "商品视图 2 · 编辑版本 1" }).count(), 0);
+
+  assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);
+});

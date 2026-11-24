@@ -7,7 +7,7 @@ export interface ApiImage {
   currentBaseVersionId: string | null; createdAt: string; originalPreviewUrl: string; thumbnailPreviewUrl: string;
 }
 export interface ApiSuite {
-  id: string; name: string; status: "draft" | "in_progress"; origin?: "suite_studio" | "canvas";
+  id: string; name: string; status: "draft" | "in_progress"; origin?: "suite_studio" | "canvas" | "replica";
   styleOverride?: string | null; styleOverrideUpdatedAt?: string | null;
   coverPreviewUrl?: string | null; inputImageCount?: number; taskCount?: number; isDemo?: boolean;
   createdAt: string; updatedAt: string; inputImages: ApiImage[];
@@ -27,8 +27,9 @@ export interface ApiPromptInputField {
 }
 export interface ApiPromptTemplate {
   templateId: string; templateVersionId: string; versionNo: number; code: string; name: string;
-  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy"; executionTarget: "llm" | "image_model";
+  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy" | "replica_prompt"; executionTarget: "llm" | "image_model";
   inputSchema: ApiPromptInputField[]; applicability: Record<string, unknown>;
+  usedBy?: string[]; status?: "draft" | "published" | "retired";
 }
 export interface ApiPromptTemplateCopy extends ApiPromptTemplate { body: string; userPromptTemplate: string; outputSchema?: Record<string, unknown>; status?: "draft" | "published" | "retired" }
 export interface ApiPlatformProfile {
@@ -63,12 +64,12 @@ export interface ApiTaskVersion { id: string; taskId: string; slotId: string; at
 export interface ApiTaskAttempt { id: string; slotId: string; attemptNo: number; provider: string; model: string; endpoint: string; requestSummary: Record<string, unknown>; promptSnapshot: Record<string, unknown>; promptSha256: string; contextSnapshot: Record<string, unknown>; sourceKind: "base" | "original" | "library"; sourceObjectKey: string; sourceInputImageId: string | null; sourceBaseVersionId: string | null; sourceLibraryReferenceId?: string | null; sourceResourceVersionId?: string | null; status: "running" | "succeeded" | "failed"; errorCode: string | null; errorMessage: string | null; externalRequestId: string | null; startedAt: string; finishedAt: string | null }
 export interface ApiTaskSlot { id: string; batchId: string; taskId: string; slotOrdinal: number; retryOfSlotId: string | null; status: "pending" | "generating" | "succeeded" | "failed"; selectedVersionId: string | null; createdAt: string; completedAt: string | null }
 export interface ApiProductMaterialRef { libraryReferenceId: string; resourceId: string; resourceVersionId: string; order: number; title?: string; previewUrl?: string }
-export interface ApiSuiteTask { id: string; suiteId: string; planSnapshotId: string | null; planItemId: string | null; ordinal: number; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; promptRevision: number; sourceInputImageId: string | null; generationParams: Record<string, unknown>; status: ApiTaskStatus; archivedAt: string | null; createdAt: string; updatedAt: string; originKind?: "suite_plan" | "reverse_import"; reversePlanId?: string | null; reverseReferenceId?: string | null; reversePromptVersionId?: string | null; reverseTaskGroupId?: string | null; sourceLibraryReferenceId?: string | null; sourceResourceVersionId?: string | null; sourceRevision?: number; versions: ApiTaskVersion[]; attempts: ApiTaskAttempt[]; slots: ApiTaskSlot[] }
+export interface ApiSuiteTask { id: string; suiteId: string; planSnapshotId: string | null; planItemId: string | null; ordinal: number; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; promptRevision: number; sourceInputImageId: string | null; generationParams: Record<string, unknown>; status: ApiTaskStatus; archivedAt: string | null; createdAt: string; updatedAt: string; originKind?: "suite_plan" | "reverse_import" | "replica"; reversePlanId?: string | null; reverseReferenceId?: string | null; reversePromptVersionId?: string | null; reverseTaskGroupId?: string | null; replicaReferenceId?: string | null; replicaReferenceObjectKey?: string | null; sourceLibraryReferenceId?: string | null; sourceResourceVersionId?: string | null; sourceRevision?: number; versions: ApiTaskVersion[]; attempts: ApiTaskAttempt[]; slots: ApiTaskSlot[] }
 export interface ApiTaskBatch { id: string; suiteId: string; kind: "batch" | "single" | "retry"; requestedCount: number; taskIds: string[]; status: "running" | "completed" | "partial" | "failed"; idempotencyKey: string; createdAt: string; startedAt: string | null; finishedAt: string | null }
 export interface ApiCanvasLayout { id: string; suiteId: string; layoutVersion: number; viewport: { x: number; y: number; zoom: number }; nodes: Array<{ nodeId: string; x: number; y: number; width?: number; height?: number; groupKey?: string; hidden?: boolean }>; groups: Array<{ groupKey: string; x: number; y: number; width: number; height: number; collapsed?: boolean }>; updatedAt: string }
 export interface ApiWorkbench { suite: ApiSuite; inputImages: ApiImage[]; planSnapshot: ApiPlanSnapshot | null; tasks: ApiSuiteTask[]; batches: ApiTaskBatch[]; imageEditChildren?: Array<{ task: Record<string, unknown>; snapshot: Record<string, unknown> | null; attempts: Array<Record<string, unknown> & { provider?: { name: string; version: string; channel?: ModelChannelSnapshot } }>; versions: Array<{ id: string; previewUrl?: string; versionNumber: number; width?: number; height?: number; mimeType?: string; objectKey?: string; attemptId?: string; createdAt?: string }> }>; layout: ApiCanvasLayout | null; planStyleGuide?: string; styleOverride?: string | null; effectiveStyleGuide?: string }
 export type ApiLibraryResourceType = "prompt_template" | "input_image" | "base_image" | "task_image_version" | "process_image" | "reverse_reference_asset";
-export interface ApiLibraryResource { id: string; resourceType: ApiLibraryResourceType; title: string; summary: string; mimeType: string | null; previewUrl: string | null; suiteId: string | null; taskId: string | null; imageVersionId: string | null; baseVersionId: string | null; templateVersionId: string | null; resourceVersionId: string; stage: ApiPromptTemplate["stage"] | null; source: Record<string, unknown>; status?: "draft" | "published" | "archived"; promptSnapshot?: Record<string, unknown> | null; createdAt: string; updatedAt: string }
+export interface ApiLibraryResource { id: string; resourceType: ApiLibraryResourceType; title: string; summary: string; mimeType: string | null; previewUrl: string | null; suiteId: string | null; taskId: string | null; imageVersionId: string | null; baseVersionId: string | null; templateVersionId: string | null; resourceVersionId: string; stage: ApiPromptTemplate["stage"] | null; source: Record<string, unknown>; status?: "draft" | "published" | "archived" | "retired"; usedBy?: string[]; promptSnapshot?: Record<string, unknown> | null; createdAt: string; updatedAt: string }
 export interface ApiLibraryReference { id: string; suiteId: string; resourceId: string; resourceType: ApiLibraryResourceType; targetType: "plan" | "task"; targetId: string; resourceVersionId: string; snapshot: Record<string, unknown>; createdAt: string; createdBy: string | null; archivedAt: string | null }
 
 type CryptoSource = {
@@ -91,10 +92,17 @@ export function createIdempotencyKey(cryptoApi: CryptoSource | undefined = globa
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${fallbackId.toString(36)}`;
 }
 
+export class ApiHttpError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+    this.name = "ApiHttpError";
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, cache: "no-store" });
-  const payload = await response.json().catch(() => null) as { data?: T; error?: { message?: string } } | null;
-  if (!response.ok) throw new Error(payload?.error?.message ?? "请求失败");
+  const payload = await response.json().catch(() => null) as { data?: T; error?: { code?: string; message?: string } } | null;
+  if (!response.ok) throw new ApiHttpError(payload?.error?.message ?? "请求失败", response.status, payload?.error?.code);
   return payload?.data as T;
 }
 
@@ -141,7 +149,7 @@ export const modelSettingsApi = {
 };
 
 export const suiteApi = {
-  create(name: string, origin?: ApiSuite["origin"]) { return request<ApiSuite>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name, origin }) }); },
+  create(name: string, origin?: Exclude<ApiSuite["origin"], "replica">) { return request<ApiSuite>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name, origin }) }); },
   rename(id: string, name: string) { return request<ApiSuite>(`/api/suites/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name }) }); },
   delete(id: string) { return request<{ id: string }>(`/api/suites/${encodeURIComponent(id)}`, { method: "DELETE" }); },
   list() { return request<ApiSuite[]>("/api/suites"); },
@@ -162,8 +170,15 @@ export const suiteApi = {
   getBaseVersions(suiteId: string, inputImageId: string) {
     return request<ApiBaseHistory>(`/api/suites/${encodeURIComponent(suiteId)}/input-images/${encodeURIComponent(inputImageId)}/base-versions`);
   },
-  listPromptTemplates(stage?: ApiPromptTemplate["stage"]) {
-    return request<ApiPromptTemplate[]>(stage ? `/api/prompt-templates?stage=${encodeURIComponent(stage)}` : "/api/prompt-templates");
+  listPromptTemplates(stage?: ApiPromptTemplate["stage"], status?: "published" | "draft" | "retired" | "all") {
+    const search = new URLSearchParams();
+    if (stage) search.set("stage", stage);
+    if (status) search.set("status", status);
+    const qs = search.toString();
+    return request<ApiPromptTemplate[]>(qs ? `/api/prompt-templates?${qs}` : "/api/prompt-templates");
+  },
+  getPromptTemplateVersion(versionId: string) {
+    return request<ApiPromptTemplateCopy>(`/api/prompt-templates/${encodeURIComponent(versionId)}`);
   },
   copyPromptTemplate(templateVersionId: string, stage?: ApiPromptTemplate["stage"]) { return request<ApiPromptTemplateCopy>(`/api/prompt-templates/${encodeURIComponent(templateVersionId)}/copy${stage ? `?stage=${encodeURIComponent(stage)}` : ""}`); },
   listPromptTemplateVersions(templateId: string) { return request<ApiPromptTemplateCopy[]>(`/api/prompt-templates/${encodeURIComponent(templateId)}/versions`); },
@@ -191,7 +206,6 @@ export const suiteApi = {
   getCategoryPrompts(suiteId: string) { return request<ApiCategoryPromptState>(`/api/suites/${encodeURIComponent(suiteId)}/category-prompts`); },
   generateCategoryPrompts(suiteId: string, planSnapshotId: string, templateVersionId?: string) { return request<{ planSnapshotId: string; status: string }>(`/api/suites/${encodeURIComponent(suiteId)}/category-prompts`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ planSnapshotId, templateVersionId }) }); },
   retryCategoryPrompt(suiteId: string, categoryCode: string, templateVersionId?: string) { return request<ApiCategoryPromptRequest>(`/api/suites/${encodeURIComponent(suiteId)}/category-prompts/${encodeURIComponent(categoryCode)}/retry`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(templateVersionId ? { templateVersionId } : {}) }); },
-  generatePlan(suiteId: string, templateVersionId: string, dynamicInput: Record<string, unknown>, selectedChunks: ApiRagChunk[]) { return request<{ attemptId: string; status: string }>(`/api/suites/${encodeURIComponent(suiteId)}/plan`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ templateVersionId, dynamicInput, humanInput: {}, selectedChunks: selectedChunks.map(({ id, version }) => ({ id, version })) }) }); },
   savePlan(suiteId: string, items: Array<Pick<ApiPlanItem, "title" | "purpose" | "prompt">>) { return request<ApiPlanSnapshot>(`/api/suites/${encodeURIComponent(suiteId)}/plan`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ items }) }); },
   startCreationCheck(suiteId: string) { return request<{ ready: boolean; planSnapshotId: string; itemCount: number }>(`/api/suites/${encodeURIComponent(suiteId)}/start-creation-check`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() } }); },
   getWorkbench(suiteId: string) { return request<ApiWorkbench>(`/api/suites/${encodeURIComponent(suiteId)}/workbench`); },
@@ -215,7 +229,7 @@ export const suiteApi = {
     return request<{ targetLanguage: string; translations: Array<{ id: string; originalText: string; translatedText: string }>; model: string; channelName: string | null }>("/api/image-editor/translate-text", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   },
   createTasks(suiteId: string, planSnapshotId?: string) { return request<{ planSnapshotId: string; tasks: ApiSuiteTask[]; createdTaskIds: string[] }>(`/api/suites/${encodeURIComponent(suiteId)}/tasks`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(planSnapshotId ? { planSnapshotId } : {}) }); },
-  updateTask(taskId: string, body: Partial<Pick<ApiSuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams">>) { return request<ApiSuiteTask>(`/api/suite-tasks/${encodeURIComponent(taskId)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
+  updateTask(taskId: string, body: Partial<Pick<ApiSuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status">>) { return request<ApiSuiteTask>(`/api/suite-tasks/${encodeURIComponent(taskId)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   generateBatch(suiteId: string, taskIds?: string[]) { return request<{ batchId: string; status: string; requestedCount?: number }>(`/api/suites/${encodeURIComponent(suiteId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(taskIds ? { taskIds } : {}) }); },
   generateTask(taskId: string, promptDraft?: string) { return request<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(promptDraft === undefined ? {} : { promptDraft }) }); },
   retryTaskAttempt(attemptId: string) {
@@ -237,12 +251,14 @@ export const suiteApi = {
   selectImageEditVersion(taskId: string, versionId: string, selection: "current" | "final") { return request<Record<string, unknown>>(`/api/image-editor/tasks/${encodeURIComponent(taskId)}/versions/${encodeURIComponent(versionId)}/select`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ selection }) }); },
   getLayout(suiteId: string) { return request<ApiCanvasLayout | null>(`/api/suites/${encodeURIComponent(suiteId)}/workbench/layout`); },
   saveLayout(suiteId: string, layout: Pick<ApiCanvasLayout, "layoutVersion" | "viewport" | "nodes" | "groups">) { return request<ApiCanvasLayout>(`/api/suites/${encodeURIComponent(suiteId)}/workbench/layout`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(layout) }); },
-  listLibraryResources(params: { resourceType?: ApiLibraryResourceType; stage?: ApiPromptTemplate["stage"]; suiteId?: string; query?: string; page?: number; pageSize?: number; status?: "draft" | "published" | "archived" } = {}) { const search = new URLSearchParams(); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') search.set(key, String(value)); }); return request<{ items: ApiLibraryResource[]; total: number; page: number; pageSize: number }>(`/api/library/resources?${search.toString()}`); },
+  listLibraryResources(params: { resourceType?: ApiLibraryResourceType; scope?: "image"; stage?: ApiPromptTemplate["stage"]; suiteId?: string; query?: string; page?: number; pageSize?: number; status?: "draft" | "published" | "archived" | "retired" } = {}) { const search = new URLSearchParams(); Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') search.set(key, String(value)); }); return request<{ items: ApiLibraryResource[]; total: number; page: number; pageSize: number }>(`/api/library/resources?${search.toString()}`); },
   getLibraryResource(resourceId: string) { return request<ApiLibraryResource>(`/api/library/resources/${encodeURIComponent(resourceId)}`); },
   listLibraryReferences(suiteId: string, targetType?: "plan" | "task", targetId?: string) { const search = new URLSearchParams(); if (targetType) search.set("targetType", targetType); if (targetId) search.set("targetId", targetId); return request<ApiLibraryReference[]>(`/api/suites/${encodeURIComponent(suiteId)}/library/references?${search.toString()}`); },
   createLibraryReference(suiteId: string, body: { resourceId: string; targetType: "plan" | "task"; targetId: string }) { return request<ApiLibraryReference>(`/api/suites/${encodeURIComponent(suiteId)}/library/references`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   archiveLibraryReference(suiteId: string, referenceId: string) { return request<ApiLibraryReference>(`/api/suites/${encodeURIComponent(suiteId)}/library/references/${encodeURIComponent(referenceId)}`, { method: "DELETE" }); },
   setLibraryResourceStatus(resourceId: string, status: "draft" | "published" | "archived") { return request<ApiLibraryResource>(`/api/library/resources/${encodeURIComponent(resourceId)}/status`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ status }) }); },
+  deleteLibraryResource(resourceId: string) { return request<{ id: string; deletedAt: string; alreadyDeleted: boolean }>(`/api/library/resources/${encodeURIComponent(resourceId)}`, { method: "DELETE" }); },
+  batchDeleteLibraryResources(ids: string[]) { return request<{ deletedIds: string[]; alreadyDeletedIds: string[]; notFoundIds: string[]; deletedCount: number }>("/api/library/resources/batch-delete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids }) }); },
   createReverseReferenceAsset(body: { suiteId?: string | null; title: string; summary?: string; objectKey: string; mimeType: string; promptSnapshot: Record<string, unknown>; visualStructure?: Record<string, unknown>; source?: Record<string, unknown> }) { return request<ApiLibraryResource>("/api/library/reverse-reference-assets", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   importReversePlan(planId: string, body: { targetSuiteId?: string; name?: string } = {}) { return request<{ suiteId: string; taskGroupId: string; taskIds: string[]; duplicate: boolean }>(`/api/reverse-plans/${encodeURIComponent(planId)}/canvas-imports`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   bindWhiteResources(taskId: string, resourceIds: string[]) { return request<{ task: ApiSuiteTask; reference: ApiLibraryReference; references: ApiLibraryReference[]; duplicate: boolean }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/white-resource`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ resourceIds }) }); },

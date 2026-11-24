@@ -508,3 +508,10 @@
   gap: 5px;
   white-space: nowrap;
 }
+
+.wb-prompt-empty {
+  padding: 20px 14px;
+  text-align: center;
+  color: var(--pa-muted, #6b7280);
+  font-size: 12px;
+}

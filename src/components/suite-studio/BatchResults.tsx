@@ -1,12 +1,18 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { suiteApi, type ApiPlatformProfile } from "../../api/client";
 import { SUITE_CATEGORY_GROUPS, SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
 import { pipelineErrorMessages } from "../../../shared/suite-pipeline-errors";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
-import { ImageEditorModal } from "../../pages/WorkbenchBoardPage";
 import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
 import { StudioDialog } from "./StudioDialog";
+import {
+  JOB_SUCCESS_STATUSES,
+  readImageEditJobStatus,
+  readRetryJobStatus,
+  StudioImageEditorHost,
+  useResultJob,
+} from "./StudioResultShared";
 
 const phaseOrder: Record<string, number> = {
   base_refining: 0,
@@ -163,39 +169,6 @@ type Props = {
   onActivate: (id: string) => void;
   navigate: (path: string) => void;
 };
-const retryStatus = async (job: string) => (await suiteApi.getBatch(job)).batch.status;
-const editStatus = async (job: string) =>
-  ((await suiteApi.getImageEditTask(job)).task as { status: string }).status;
-const JOB_SUCCESS_STATUSES = ["completed", "succeeded"] as const;
-
-// Each invocation owns the timer and completion state of a single job.
-function useResultJob(
-  job: string, readStatus: (job: string) => Promise<string>, success: readonly string[], suiteId: string,
-  refresh: Props["refresh"], setJob: (id: string) => void, notify: (text: string) => void,
-) {
-  useEffect(() => {
-    if (!job) return;
-    let live = true;
-    async function poll() {
-      try {
-        const status = await readStatus(job);
-        if (!live) return;
-        if (status === "running" || status === "generating") {
-          timer = setTimeout(poll, 3000);
-          return;
-        }
-        await refresh(suiteId);
-        if (live)
-          notify(success.includes(status) ? "图片已更新" : "图片生成失败，可在创作板查看详情。");
-      } catch (error) {
-        if (live) notify(message(error));
-      }
-      if (live) setJob("");
-    }
-    let timer = setTimeout(poll, 1000);
-    return () => { live = false; clearTimeout(timer); };
-  }, [job, readStatus, success, suiteId, refresh, setJob, notify]);
-}
 
 export function BatchResults({
   state: s,
@@ -262,8 +235,26 @@ export function BatchResults({
       setBusy(false);
     }
   };
-  useResultJob(retryJob, retryStatus, JOB_SUCCESS_STATUSES, id, refresh, setRetryJob, setNotice);
-  useResultJob(editJob, editStatus, JOB_SUCCESS_STATUSES, id, refresh, setEditJob, setNotice);
+  useResultJob(
+    retryJob,
+    readRetryJobStatus,
+    JOB_SUCCESS_STATUSES,
+    id,
+    refresh,
+    setRetryJob,
+    setNotice,
+    "图片生成失败，可在创作板查看详情。",
+  );
+  useResultJob(
+    editJob,
+    readImageEditJobStatus,
+    JOB_SUCCESS_STATUSES,
+    id,
+    refresh,
+    setEditJob,
+    setNotice,
+    "图片生成失败，可在创作板查看详情。",
+  );
   const resume = (action: string, fields?: object) =>
     void act(async () => {
       await studioApi.resume(id, action, fields);
@@ -578,54 +569,13 @@ export function BatchResults({
         </p>
       )}
       {showListingCopy && <ListingCopyDrawer state={s} profiles={profiles} close={() => setShowListingCopy(false)} />}
-      {editCard && editCard.versionId && editCard.previewUrl && (() => {
-        const targetTaskId = editCard.editChildTaskId ?? editCard.parentTaskId;
-        return (
-          <ImageEditorModal
-            task={{ id: targetTaskId, title: editCard.title, promptDraft: editCard.promptText }}
-            version={{
-              id: editCard.versionId,
-              versionNumber: editCard.versionNumber ?? 1,
-              previewUrl: editCard.previewUrl,
-              width: editCard.width ?? 1024,
-              height: editCard.height ?? 1024,
-              promptSnapshot: editCard.promptSnapshot,
-            }}
-            onClose={() => setEditCard(null)}
-            onOperationAdded={async (op, summary) => {
-              await suiteApi.upsertImageEditOperation(targetTaskId, op as unknown as Record<string, unknown>, summary);
-            }}
-            onSubmit={async (spec, instruction) => {
-              const ops = Array.isArray(spec.operations) ? spec.operations : [];
-              for (const op of ops) {
-                await suiteApi.upsertImageEditOperation(targetTaskId, op as Record<string, unknown>, instruction);
-              }
-              const res = await suiteApi.submitImageEdit(targetTaskId, {
-                sourceCardId: targetTaskId,
-                sourceVersionId: String(spec.sourceVersionId ?? editCard.versionId),
-                parentVersionId: String(spec.sourceVersionId ?? editCard.versionId),
-                summary: instruction,
-              });
-              setEditCard(null);
-              setEditJob(String((res.childTask as { id: string }).id));
-              setNotice("已提交图片编辑，正在生成图片…");
-            }}
-            onRegenerate={async () => {
-              if (editCard.editChildTaskId) {
-                await suiteApi.regenerateImageEditTask(editCard.editChildTaskId, editCard.promptText);
-                setEditCard(null);
-                setEditJob(editCard.editChildTaskId);
-                setNotice("已提交再次生成，正在更新图片…");
-              } else {
-                const r = await suiteApi.generateTask(editCard.parentTaskId);
-                setEditCard(null);
-                setRetryJob(r.batchId);
-                setNotice("已提交单张生成。");
-              }
-            }}
-          />
-        );
-      })()}
+      <StudioImageEditorHost
+        card={editCard}
+        onClose={() => setEditCard(null)}
+        onEditJobStarted={setEditJob}
+        onRetryJobStarted={setRetryJob}
+        onNotify={setNotice}
+      />
       {preview && (
         <StudioDialog title={preview.title} close={() => setPreview(null)}>
           <img className="ss-zoom" src={preview.url} alt={preview.title} />

@@ -3,7 +3,7 @@ import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import type { PromptStage } from "./prompt-library.js";
 
 export type SuiteStatus = "draft" | "in_progress";
-export type SuiteOrigin = "suite_studio" | "canvas";
+export type SuiteOrigin = "suite_studio" | "canvas" | "replica";
 
 export interface Suite {
   id: string;
@@ -65,6 +65,7 @@ export interface PromptRepository {
   importRecords(records: import("./prompt-library.js").PromptTemplateRecord[]): Promise<import("./prompt-library.js").PromptTemplateRuntime[]>;
   publishVersion(versionId: string): Promise<import("./prompt-library.js").PromptTemplateRuntime | null>;
   listPublished(stage?: import("./prompt-library.js").PromptStage): Promise<import("./prompt-library.js").PromptTemplatePublic[]>;
+  listTemplates?(options?: { stage?: import("./prompt-library.js").PromptStage; status?: import("./prompt-library.js").PromptVersionStatus | "all" }): Promise<import("./prompt-library.js").PromptTemplatePublic[]>;
   getPublishedVersion(versionId: string, expectedStage?: import("./prompt-library.js").PromptStage): Promise<import("./prompt-library.js").PromptTemplateRuntime | null>;
   listVersions(templateId: string): Promise<import("./prompt-library.js").PromptTemplateRuntime[]>;
   getVersion(versionId: string): Promise<import("./prompt-library.js").PromptTemplateRuntime | null>;
@@ -192,12 +193,42 @@ export interface CategoryPromptLlmInput extends PlanLlmInput {
 }
 export interface PlanVisionImage { id: string; sourceKind: "base" | "original"; sourceVersionId: string | null; mimeType: string; bytes: Buffer }
 export interface LlmModelSnapshot { name: string; model: string; isFake: boolean; channel?: ModelChannelSnapshot }
+export type ReplicaCloneLevel = "compose" | "high";
+export interface ReplicaPromptReferenceImage {
+  referenceId: string;
+  ordinal: number;
+  requirement?: string;
+  mimeType: string;
+  bytes: Buffer;
+}
+export interface ReplicaPromptProductImage {
+  id: string;
+  ordinal: number;
+  mimeType: string;
+  bytes: Buffer;
+}
+export interface ReplicaPromptLlmInput {
+  requestId?: string;
+  template: {
+    templateVersionId: string;
+    body: string;
+    userPromptTemplate?: string;
+  };
+  cloneLevel: ReplicaCloneLevel;
+  sceneType: string;
+  language: string;
+  styleUnified: boolean;
+  unifiedRequirement?: string;
+  productInfo?: string;
+  references: ReplicaPromptReferenceImage[];
+  productImages: ReplicaPromptProductImage[];
+}
 export interface LlmClient {
   channel?: ModelChannelSnapshot;
   provider: string; model: string; isFake: boolean;
   generatePlan(input: PlanLlmInput): Promise<unknown>;
   generateCategoryPrompt?(input: CategoryPromptLlmInput): Promise<unknown>;
-  generateReversePrompt?(input: { template: { body: string; userPromptTemplate: string; templateVersionId: string }; referenceImageId: string; referenceImage: Buffer; referenceMimeType?: string; baselineImage?: Buffer; baselineMimeType?: string; mode: "main" | "detail" }): Promise<unknown>;
+  generateReplicaPrompts?(input: ReplicaPromptLlmInput): Promise<unknown>;
   translateTexts?(input: { targetLanguage: string; items: Array<{ id: string; text: string }>; preserveBrandTerms?: boolean }): Promise<Array<{ id: string; originalText: string; translatedText: string }>>;
 }
 export type PlanAttemptStatus = "running" | "succeeded" | "failed";
@@ -260,7 +291,7 @@ export interface PlanSnapshot {
 }
 
 export type SuitePipelineStatus = "running" | "waiting_base_refine_decision" | "waiting_human_input" | "completed" | "partial_failed" | "failed";
-export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "done";
+export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "replica_analyzing" | "done";
 export interface SuitePipelineRun {
   id: string;
   suiteId: string;
@@ -366,11 +397,13 @@ export interface SuiteTask {
   factRefs?: string[];
   globalStyleCard?: Record<string, unknown>;
   promptSha256?: string;
-  originKind?: "suite_plan" | "reverse_import";
+  originKind?: "suite_plan" | "reverse_import" | "replica";
   reversePlanId?: string | null;
   reverseReferenceId?: string | null;
   reversePromptVersionId?: string | null;
   reverseTaskGroupId?: string | null;
+  replicaReferenceId?: string | null;
+  replicaReferenceObjectKey?: string | null;
   sourceLibraryReferenceId?: string | null;
   sourceResourceVersionId?: string | null;
   sourceRevision?: number;
@@ -398,6 +431,11 @@ export interface TaskImageVersion {
   promptSnapshot: Record<string, unknown>; contextSnapshot: Record<string, unknown>;
   isCurrent: boolean; isFinal: boolean; createdAt: string; previewUrl: string;
 }
+export interface TaskPreviewVersion {
+  taskId: string;
+  versionId: string;
+  previewUrl: string;
+}
 export interface SuiteTaskAggregate extends SuiteTask {
   versions: TaskImageVersion[]; attempts: TaskGenerationAttempt[]; slots: TaskResultSlot[];
 }
@@ -411,6 +449,19 @@ export interface TaskRepository {
   createTasksFromSnapshot(suiteId: string, snapshot: PlanSnapshot, inputImages: InputImage[]): Promise<{ tasks: SuiteTask[]; created: SuiteTask[] }>;
   createCustomTask?(input: { suiteId: string; planSnapshotId: string | null; imageType: TaskImageType; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }): Promise<{ task: SuiteTask; duplicate: boolean }>;
   createReverseTasks(input: { suiteId: string; reversePlanId: string; taskGroupId: string; mode: ReverseMode; idempotencyKey: string; items: Array<{ referenceId: string; ordinal: number; filename: string; promptVersionId: string; prompt: string }> }): Promise<{ tasks: SuiteTask[]; created: SuiteTask[]; duplicate: boolean }>;
+  createReplicaTasks(input: {
+    suiteId: string;
+    globalStyleCard?: Record<string, unknown>;
+    items: Array<{
+      referenceId: string;
+      referenceObjectKey: string;
+      ordinal: number;
+      title: string;
+      purpose: string;
+      prompt: string;
+      generationParams: Record<string, unknown>;
+    }>;
+  }): Promise<{ tasks: SuiteTask[]; created: SuiteTask[] }>;
   getTask(taskId: string): Promise<SuiteTask | null>;
   listTasks(suiteId: string): Promise<SuiteTask[]>;
   updateTask(taskId: string, patch: Partial<Pick<SuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status" | "sourceLibraryReferenceId" | "sourceResourceVersionId" | "sourceRevision">>): Promise<SuiteTask | null>;
@@ -423,13 +474,15 @@ export interface TaskRepository {
   completeAttempt(input: { attemptId: string; slotId: string; taskId: string; objectKey: string; processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string; completedAt: string }): Promise<{ attempt: TaskGenerationAttempt; version: TaskImageVersion }>;
   failAttempt(attemptId: string, code: string, message: string, completedAt: string): Promise<TaskGenerationAttempt>;
   selectVersion(taskId: string, versionId: string, selection: "current" | "final"): Promise<TaskImageVersion | null>;
+  clearFinalVersion?(taskId: string): Promise<void>;
   listTaskVersions(taskId: string): Promise<{ versions: TaskImageVersion[]; attempts: TaskGenerationAttempt[] }>;
+  listPreviewVersionsByTaskIds(taskIds: string[]): Promise<Map<string, TaskPreviewVersion>>;
   getLayout(suiteId: string): Promise<CanvasLayout | null>;
   saveLayout(suiteId: string, expectedVersion: number, layout: Omit<CanvasLayout, "id" | "suiteId" | "layoutVersion" | "updatedAt">): Promise<CanvasLayout>;
 }
 
 export type LibraryResourceType = "prompt_template" | "input_image" | "base_image" | "task_image_version" | "process_image" | "reverse_reference_asset";
-export type LibraryAssetStatus = "draft" | "published" | "archived";
+export type LibraryAssetStatus = "draft" | "published" | "archived" | "retired";
 export type LibraryReferenceTargetType = "plan" | "task";
 export interface LibraryResource {
   id: string;
@@ -447,6 +500,7 @@ export interface LibraryResource {
   stage: PromptStage | null;
   source: Record<string, unknown>;
   status?: LibraryAssetStatus;
+  usedBy?: string[];
   promptSnapshot?: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
@@ -466,6 +520,7 @@ export interface LibraryReference {
 }
 export interface LibraryResourceQuery {
   resourceType?: LibraryResourceType;
+  scope?: "image";
   stage?: PromptStage;
   suiteId?: string;
   query?: string;
@@ -473,10 +528,24 @@ export interface LibraryResourceQuery {
   pageSize?: number;
   status?: LibraryAssetStatus;
 }
+export interface LibraryResourceDeletionResult {
+  id: string;
+  deletedAt: string;
+  alreadyDeleted: boolean;
+}
+export interface LibraryResourceBatchDeleteResult {
+  deletedIds: string[];
+  alreadyDeletedIds: string[];
+  notFoundIds: string[];
+  deletedCount: number;
+}
 export interface LibraryRepository {
   listResources(query: LibraryResourceQuery): Promise<{ items: LibraryResource[]; total: number; page: number; pageSize: number }>;
-  getResource(resourceId: string): Promise<LibraryResource | null>;
+  getResource(resourceId: string, options?: { includeDeleted?: boolean }): Promise<LibraryResource | null>;
   getPreviewObject(resourceId: string): Promise<{ objectKey: string } | null>;
+  deleteResource(resourceId: string): Promise<LibraryResourceDeletionResult | null>;
+  deleteResources(resourceIds: string[]): Promise<LibraryResourceBatchDeleteResult>;
+  restoreResource(resourceId: string): Promise<void>;
   createReference(input: { suiteId: string; resourceId: string; targetType: LibraryReferenceTargetType; targetId: string; idempotencyKey: string; createdBy?: string | null }): Promise<{ reference: LibraryReference; duplicate: boolean }>;
   listReferences(suiteId: string, targetType?: LibraryReferenceTargetType, targetId?: string): Promise<LibraryReference[]>;
   archiveReference(suiteId: string, referenceId: string): Promise<LibraryReference | null>;
@@ -509,4 +578,49 @@ export interface ReverseRepository {
   getPlan(id: string): Promise<ReversePlan | null>;
   listPlans(): Promise<ReversePlan[]>;
   savePlan(plan: ReversePlan): Promise<ReversePlan>;
+}
+
+export type ReplicaSceneType = "ecommerce_product" | "apparel" | "marketing_poster" | "social_post" | "other";
+export type ReplicaLanguage = "zh" | "en";
+
+export interface ReplicaReference {
+  id: string;
+  suiteId: string;
+  ordinal: number;
+  filename: string;
+  mimeType: string;
+  sha256: string;
+  width: number;
+  height: number;
+  objectKey: string;
+  thumbnailObjectKey: string;
+  remark: string;
+  createdAt: string;
+}
+
+export type ReplicaProductImageSourceKind = "upload" | "library";
+
+export interface ReplicaProductImage {
+  id: string;
+  suiteId: string;
+  ordinal: number;
+  sourceKind: ReplicaProductImageSourceKind;
+  objectKey: string;
+  thumbnailObjectKey?: string | null;
+  filename?: string | null;
+  mimeType?: string | null;
+  sha256?: string | null;
+  width?: number | null;
+  height?: number | null;
+  libraryResourceId: string | null;
+  resourceVersionId: string | null;
+  createdAt: string;
+}
+
+export interface ReplicaRepository {
+  saveReferences(suiteId: string, references: ReplicaReference[]): Promise<ReplicaReference[]>;
+  listReferences(suiteId: string): Promise<ReplicaReference[]>;
+  getReference(suiteId: string, referenceId: string): Promise<ReplicaReference | null>;
+  saveProductImages(suiteId: string, products: ReplicaProductImage[]): Promise<ReplicaProductImage[]>;
+  listProductImages(suiteId: string): Promise<ReplicaProductImage[]>;
 }

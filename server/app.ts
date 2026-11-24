@@ -16,10 +16,13 @@ import type { ModelSettings } from "./model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { processGeneratedImage, processImage } from "./image.js";
-import { PROMPT_STAGES, renderPromptTemplate, validateDynamicInput, type PromptStage, type PromptTemplateRuntime } from "./prompt-library.js";
+import { PROMPT_STAGES, renderPromptTemplate, resolvePromptTemplateUsedBy, validateDynamicInput, withPromptTemplateUsage, type PromptStage, type PromptTemplateRuntime, type PromptVersionStatus } from "./prompt-library.js";
 import { MemoryCategoryPromptRepository } from "./repositories/memory-category-prompt-repository.js";
+import { MemoryLibraryRepository } from "./repositories/memory-library-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { MemoryPipelineRepository } from "./repositories/memory-pipeline-repository.js";
+import { MemoryReplicaRepository } from "./repositories/memory-replica-repository.js";
+import { buildReplicaRolePrefix, createReplicaPipeline, resolveReplicaCloneLevel } from "./replica/replica-pipeline.js";
 import { buildProviderImagePrompt, materializeCategoryPlanItems } from "./suite-task-prompt.js";
 import {
   applyStyleOverrideToPrompt,
@@ -62,8 +65,9 @@ import type {
   TaskGenerationBatch,
   TaskResultSlot,
   LibraryRepository,
-  ReverseRepository, ReversePlan, ReverseReference, ReverseAttempt, ReversePromptVersion,
+  ReverseRepository, ReverseReference, ReversePromptVersion,
   PipelineRepository,
+  ReplicaRepository,
 } from "./types.js";
 import { failObservation, finishObservation, startTool } from "./observability.js";
 
@@ -75,6 +79,14 @@ export interface SuiteStudioApp {
   previewTaskVersion(taskId: string, versionId: string): Promise<AppResponse>;
   previewLibraryResource(resourceId: string): Promise<AppResponse>;
   previewReverseReference(planId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+  previewReplicaReference(suiteId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+}
+
+function extensionForImageMime(mimeType: string): string {
+  const lower = mimeType.toLowerCase();
+  if (lower.includes("jpeg") || lower.includes("jpg")) return "jpg";
+  if (lower.includes("webp")) return "webp";
+  return "png";
 }
 
 function platformForPlanning(profile: PlatformProfile | null, background: unknown): PlatformProfile | undefined {
@@ -152,43 +164,6 @@ function parseJsonLike(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const text = value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   try { return JSON.parse(text); } catch { return value; }
-}
-
-function normalizePlanOutput(value: unknown): { schemaVersion: "suite-plan-v1"; items: Array<{ itemId: string; imageType: "main" | "detail"; ordinal: number; title: string; purpose: string; prompt: string }> } | null {
-  let parsed = parseJsonLike(value);
-  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-    const object = parsed as Record<string, unknown>;
-    if (typeof object.items === "string") parsed = parseJsonLike(object.items);
-  }
-  const object = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
-  const candidates: Array<{ value: unknown; imageType?: "main" | "detail" }> = Array.isArray(parsed)
-    ? parsed.map((value) => ({ value }))
-    : object
-      ? ["items", "plans", "imagePlans", "image_plans", "mainImages", "detailImages", "images", "cards", "prompts", "图片计划", "主图生图提示词", "详情页生图提示词"].flatMap((key) => {
-        const candidate = parseJsonLike(object[key]);
-        if (!Array.isArray(candidate)) return [];
-        const imageType = ["detailImages", "详情页生图提示词"].includes(key) ? "detail" as const
-          : ["mainImages", "主图生图提示词"].includes(key) ? "main" as const : undefined;
-        return candidate.map((value) => ({ value, imageType }));
-      })
-      : [];
-  if (!candidates.length && object && (object.title || object.name || object.prompt || object["提示词"])) candidates.push({ value: object });
-  const items = candidates.map(({ value, imageType: wrapperImageType }, index) => {
-    const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
-    const prompt = String(source.prompt ?? source.text ?? source.body ?? source["提示词"] ?? "").trim();
-    const title = String(source.title ?? source.name ?? source.heading ?? source["产品专属职责"] ?? source["职责"] ?? `图片 ${index + 1}`).trim();
-    const purpose = String(source.purpose ?? source.reason ?? source.description ?? source["为什么需要这张图"] ?? "完成本套图中的独立图片职责").trim();
-    if (!prompt) return null;
-    return {
-      itemId: String(source.itemId ?? source.id ?? `item-${index + 1}`),
-      imageType: source.imageType === "detail" ? "detail" as const : wrapperImageType ?? "main" as const,
-      ordinal: typeof source.ordinal === "number" && Number.isInteger(source.ordinal) ? source.ordinal : index + 1,
-      title,
-      purpose,
-      prompt,
-    };
-  }).filter((item): item is NonNullable<typeof item> => Boolean(item));
-  return items.length ? { schemaVersion: "suite-plan-v1", items } : null;
 }
 
 function summarizeOutput(value: unknown, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -380,23 +355,19 @@ function categoryRequestView(request: CategoryPromptRequest) {
   };
 }
 
-export function planOutputMatchesRequestedCounts(output: { items: Array<{ imageType: "main" | "detail" }> }, dynamicInput: Record<string, unknown>): boolean {
-  const outputMode = dynamicInput.output_mode;
-  const expectations = [
-    { imageType: "main" as const, enabled: outputMode !== "detail_only", mode: dynamicInput.main_image_count_mode, count: dynamicInput.main_image_count },
-    { imageType: "detail" as const, enabled: outputMode !== "main_only", mode: dynamicInput.detail_image_count_mode, count: dynamicInput.detail_image_count },
-  ];
-  return expectations.every(({ imageType, enabled, mode, count }) => {
-    if (!enabled || mode !== "fixed" || typeof count !== "number") return true;
-    return output.items.filter((item) => item.imageType === imageType).length === count;
-  });
-}
-
 function llmSource(client: LlmClient) {
   return { name: client.provider, model: client.model, isFake: client.isFake, channel: client.channel };
 }
 
-export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse> }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
+function safeDecodePathParam(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
+export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>; clearFinalVersions?(childTaskIds: string[]): Promise<void>; setOnVersionCompleted?(listener: (childTask: { id: string; sourceCardId: string }) => Promise<void>): void }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
   const imageGenerationConcurrency = Math.max(1, Math.floor(Number.isFinite(deps.imageGenerationConcurrency) ? deps.imageGenerationConcurrency! : 3));
   const imageRetryDelayMs = Math.max(0, Math.floor(Number.isFinite(deps.imageRetryDelayMs) ? deps.imageRetryDelayMs! : 1500));
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
@@ -418,20 +389,16 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const styleOverrideIdempotency = new Map<string, { suite: import("./types.js").Suite; planStyleGuide: string; styleOverride: string | null; effectiveStyleGuide: string }>();
   const categoryPromptRepository = deps.categoryPromptRepository ?? new MemoryCategoryPromptRepository();
   const pipelineRepository = deps.pipelineRepository ?? new MemoryPipelineRepository();
+  const replicaRepository = deps.replicaRepository ?? new MemoryReplicaRepository();
   const listingRepository = deps.listingRepository ?? new MemoryListingRepository();
   const listing = createListingCopyApi({ jobs: listingRepository, suites: deps.repository, storage: deps.storage, pipelines: pipelineRepository, plans: deps.planRepository, platforms: deps.platformRepository, prompts: deps.promptRepository, vision: resolveVision });
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
-  const reversePlanWrites = new Map<string, Promise<void>>();
-  const withReversePlanWrite = async <T>(planId: string, action: () => Promise<T>): Promise<T> => {
-    const previous = reversePlanWrites.get(planId) ?? Promise.resolve();
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const current = previous.catch(() => undefined).then(() => gate);
-    reversePlanWrites.set(planId, current);
-    await previous.catch(() => undefined);
-    try { return await action(); }
-    finally { release(); if (reversePlanWrites.get(planId) === current) reversePlanWrites.delete(planId); }
-  };
+  if (deps.libraryRepository instanceof MemoryLibraryRepository) {
+    deps.libraryRepository.bindSources({
+      taskRepository: deps.taskRepository,
+      imageEditorApi: deps.imageEditorApi,
+    });
+  }
 
   const resolveCategorySourceSnapshot = async (snapshot: PlanSnapshot): Promise<PlanSnapshot> => {
     if (!deps.planRepository) return snapshot;
@@ -611,72 +578,173 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const materialRefs = Array.isArray(generationParams.productMaterialRefs) ? generationParams.productMaterialRefs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 3) : [];
       const inputImages: Array<{ bytes: Buffer; mimeType: string; filename: string; role: string; objectKey: string; resourceId?: string; resourceVersionId?: string; libraryReferenceId?: string }> = [];
       const currentTaskVersionId = sourceVersionIds[task.id];
-      if (!currentTaskVersionId && materialRefs.length && deps.libraryRepository) {
-        const references = await deps.libraryRepository.listReferences(suiteId, "task", task.id);
-        for (const [materialIndex, material] of materialRefs.entries()) {
-          const referenceId = typeof material.libraryReferenceId === "string" ? material.libraryReferenceId : "";
-          const reference = references.find((item) => item.id === referenceId);
+      const isReplicaTask = task.originKind === "replica";
+      const replicaPromptMeta = isReplicaTask ? asRecord(generationParams.replicaPromptSnapshot) : null;
+      const replicaCloneLevel = isReplicaTask ? resolveReplicaCloneLevel(generationParams) : "high";
+      let replicaProductCount = 0;
+
+      if (isReplicaTask) {
+        const replicaProducts = await replicaRepository.listProductImages(suiteId);
+        replicaProductCount = replicaProducts.length;
+        for (const [productIndex, product] of replicaProducts.entries()) {
+          const stored = await deps.storage.get(product.objectKey);
+          if (!stored) throw new Error("TASK_INVALID_SOURCE");
+          const fallbackFilename = `product-${productIndex + 1}.${extensionForImageMime(stored.contentType)}`;
+          const resolvedFilename =
+            product.sourceKind === "upload" && product.filename && /\.(png|jpe?g|webp)$/i.test(product.filename)
+              ? product.filename
+              : fallbackFilename;
+          inputImages.push({
+            bytes: stored.bytes,
+            mimeType: stored.contentType,
+            filename: resolvedFilename,
+            role: productIndex === 0 ? "product_primary" : "product_detail",
+            objectKey: product.objectKey,
+            resourceId: product.libraryResourceId ?? undefined,
+            resourceVersionId: product.resourceVersionId ?? undefined,
+          });
+        }
+        const firstProduct = replicaProducts[0];
+        if (firstProduct) {
+          sourceKind = firstProduct.sourceKind === "library" ? "library" : "original";
+          sourceObjectKey = firstProduct.objectKey;
+          sourceResourceVersionId = firstProduct.resourceVersionId ?? null;
+        }
+      } else {
+        if (!currentTaskVersionId && materialRefs.length && deps.libraryRepository) {
+          const references = await deps.libraryRepository.listReferences(suiteId, "task", task.id);
+          for (const [materialIndex, material] of materialRefs.entries()) {
+            const referenceId = typeof material.libraryReferenceId === "string" ? material.libraryReferenceId : "";
+            const reference = references.find((item) => item.id === referenceId);
+            const source = reference?.snapshot.source as Record<string, unknown> | undefined;
+            if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
+            const stored = await deps.storage.get(source.objectKey);
+            if (!stored) throw new Error("TASK_INVALID_SOURCE");
+            inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: `product-${materialIndex + 1}.png`, role: materialIndex === 0 ? "product_primary" : "product_detail", objectKey: source.objectKey, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, libraryReferenceId: reference.id });
+          }
+          const first = inputImages[0];
+          if (first) {
+            const reference = references.find((item) => item.id === first.libraryReferenceId);
+            sourceKind = "library"; sourceObjectKey = first.objectKey; sourceLibraryReferenceId = first.libraryReferenceId ?? null; sourceResourceVersionId = first.resourceVersionId ?? null;
+            sourceBaseVersionId = typeof reference?.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
+          }
+        }
+        if (currentTaskVersionId) {
+          const history = await deps.taskRepository.listTaskVersions(task.id);
+          const current = history.versions.find((version) => version.id === currentTaskVersionId && version.isCurrent);
+          if (!current) throw new Error("TASK_CURRENT_VERSION_NOT_FOUND");
+          sourceKind = "original";
+          sourceObjectKey = current.objectKey;
+          sourceBaseVersionId = null;
+          sourceInputImageId = task.sourceInputImageId;
+        } else if (!inputImages.length && task.sourceLibraryReferenceId && deps.libraryRepository) {
+          const reference = (await deps.libraryRepository.listReferences(suiteId, "task", task.id)).find((item) => item.id === task.sourceLibraryReferenceId);
           const source = reference?.snapshot.source as Record<string, unknown> | undefined;
           if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
-          const stored = await deps.storage.get(source.objectKey);
-          if (!stored) throw new Error("TASK_INVALID_SOURCE");
-          inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: `product-${materialIndex + 1}.png`, role: materialIndex === 0 ? "product_primary" : "product_detail", objectKey: source.objectKey, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, libraryReferenceId: reference.id });
+          sourceKind = "library"; sourceObjectKey = source.objectKey; sourceLibraryReferenceId = reference.id; sourceResourceVersionId = reference.resourceVersionId;
+          sourceBaseVersionId = typeof reference.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
+        } else if (!inputImages.length) {
+          if (!task.sourceInputImageId) throw new Error("TASK_INVALID_SOURCE");
+          const image = await deps.repository.getInputImage(suiteId, task.sourceInputImageId);
+          if (!image) throw new Error("TASK_INVALID_SOURCE");
+          sourceKind = "original"; sourceObjectKey = image.originalObjectKey; sourceInputImageId = image.id;
+          if (!useOriginalImages && image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId); if (base) { sourceKind = "base"; sourceObjectKey = base.objectKey; sourceBaseVersionId = base.id; } }
         }
-        const first = inputImages[0];
-        if (first) {
-          const reference = references.find((item) => item.id === first.libraryReferenceId);
-          sourceKind = "library"; sourceObjectKey = first.objectKey; sourceLibraryReferenceId = first.libraryReferenceId ?? null; sourceResourceVersionId = first.resourceVersionId ?? null;
-          sourceBaseVersionId = typeof reference?.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
+        if (!inputImages.length) {
+          const stored = await deps.storage.get(sourceObjectKey);
+          inputImages.push({ bytes: stored?.bytes ?? Buffer.alloc(0), mimeType: stored?.contentType ?? "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
         }
       }
-      if (currentTaskVersionId) {
-        const history = await deps.taskRepository.listTaskVersions(task.id);
-        const current = history.versions.find((version) => version.id === currentTaskVersionId && version.isCurrent);
-        if (!current) throw new Error("TASK_CURRENT_VERSION_NOT_FOUND");
-        sourceKind = "original";
-        sourceObjectKey = current.objectKey;
-        sourceBaseVersionId = null;
-        sourceInputImageId = task.sourceInputImageId;
-      } else if (!inputImages.length && task.sourceLibraryReferenceId && deps.libraryRepository) {
-        const reference = (await deps.libraryRepository.listReferences(suiteId, "task", task.id)).find((item) => item.id === task.sourceLibraryReferenceId);
-        const source = reference?.snapshot.source as Record<string, unknown> | undefined;
-        if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
-        sourceKind = "library"; sourceObjectKey = source.objectKey; sourceLibraryReferenceId = reference.id; sourceResourceVersionId = reference.resourceVersionId;
-        sourceBaseVersionId = typeof reference.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
-      } else if (!inputImages.length) {
-        if (!task.sourceInputImageId) throw new Error("TASK_INVALID_SOURCE");
-        const image = await deps.repository.getInputImage(suiteId, task.sourceInputImageId);
-        if (!image) throw new Error("TASK_INVALID_SOURCE");
-        sourceKind = "original"; sourceObjectKey = image.originalObjectKey; sourceInputImageId = image.id;
-        if (!useOriginalImages && image.currentBaseVersionId) { const base = await deps.repository.getBaseImageVersion(suiteId, image.id, image.currentBaseVersionId); if (base) { sourceKind = "base"; sourceObjectKey = base.objectKey; sourceBaseVersionId = base.id; } }
-      }
-      if (!inputImages.length) {
-        const stored = await deps.storage.get(sourceObjectKey);
-        inputImages.push({ bytes: stored?.bytes ?? Buffer.alloc(0), mimeType: stored?.contentType ?? "image/png", filename: task.title.replace(/[^\w.-]+/g, "_") + ".png", role: "product", objectKey: sourceObjectKey });
-      }
-      if (task.originKind === "reverse_import" && generationParams.explosiveReferenceEnabled !== false && task.reversePlanId && task.reverseReferenceId) {
+
+      // Generalized reference image injection for both replica and reverse_import tasks.
+      // For replica compose with product images, omit the reference image so the image model
+      // redesigns the scene from text while anchoring strictly to the product images.
+      let referenceInjection: { objectKey: string; filename: string; role: string; required: boolean } | null = null;
+      if (isReplicaTask && (replicaCloneLevel !== "compose" || replicaProductCount === 0)) {
+        const refObjectKey =
+          task.replicaReferenceObjectKey ||
+          (task.replicaReferenceId
+            ? (await replicaRepository.getReference(suiteId, task.replicaReferenceId))?.objectKey ?? null
+            : null);
+        if (!refObjectKey) throw new Error("TASK_INVALID_SOURCE");
+        referenceInjection = {
+          objectKey: refObjectKey,
+          filename: "replica-reference.png",
+          role: "replica_reference",
+          required: true,
+        };
+      } else if (task.originKind === "reverse_import" && generationParams.explosiveReferenceEnabled !== false && task.reversePlanId && task.reverseReferenceId) {
         const ref = await reverseRepository.getPlan(task.reversePlanId).then((plan) => plan?.references.find((item) => item.id === task.reverseReferenceId));
-        const stored = ref ? await deps.storage.get(ref.objectKey) : null;
-        if (stored) inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: "explosive-reference.png", role: "explosive_reference", objectKey: ref?.objectKey ?? "" });
+        if (ref?.objectKey) {
+          referenceInjection = {
+            objectKey: ref.objectKey,
+            filename: "explosive-reference.png",
+            role: "explosive_reference",
+            required: false,
+          };
+        }
       }
+      if (referenceInjection) {
+        const stored = await deps.storage.get(referenceInjection.objectKey);
+        if (!stored) {
+          if (referenceInjection.required) throw new Error("TASK_INVALID_SOURCE");
+        } else {
+          inputImages.push({
+            bytes: stored.bytes,
+            mimeType: stored.contentType,
+            filename: referenceInjection.filename,
+            role: referenceInjection.role,
+            objectKey: referenceInjection.objectKey,
+          });
+          if (!sourceObjectKey) {
+            sourceKind = "original";
+            sourceObjectKey = referenceInjection.objectKey;
+          }
+        }
+      }
+
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
-      const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import";
-      const finalPrompt = shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft;
+      const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import" && task.originKind !== "replica";
+      const replicaRolePrefix = isReplicaTask ? buildReplicaRolePrefix(replicaProductCount, replicaCloneLevel) : null;
+      const finalPrompt = isReplicaTask
+        ? (task.promptDraft.startsWith(replicaRolePrefix!) ? task.promptDraft : `${replicaRolePrefix}\n${task.promptDraft}`)
+        : (shouldApplyStyleOverride ? applyStyleOverrideToPrompt(task.promptDraft, activeStyleOverride) : task.promptDraft);
       const pureWhiteMain =
+        !isReplicaTask &&
         task.categoryCode === "main" &&
         (taskPlan?.dynamicInput.main_image_background === "pure_white_required" ||
           finalPrompt.includes(PURE_WHITE_MAIN_IMAGE_REQUIREMENTS));
       const providerPrompt = buildProviderImagePrompt(finalPrompt, {
-        categoryCode: task.categoryCode ?? null,
+        categoryCode: isReplicaTask ? null : (task.categoryCode ?? null),
         pureWhiteMain,
       });
       const effectiveGlobalStyleCard = shouldApplyStyleOverride
         ? { ...(task.globalStyleCard ?? {}), promptPrefix: activeStyleOverride, overridden: true }
         : (task.globalStyleCard ?? {});
-      const effectivePromptSha256 = shouldApplyStyleOverride
-        ? createHash("sha256").update(finalPrompt).digest("hex")
-        : (task.promptSha256 ?? createHash("sha256").update(finalPrompt).digest("hex"));
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: planTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      const effectiveTemplateVersionId =
+        (isReplicaTask && typeof replicaPromptMeta?.templateVersionId === "string"
+          ? replicaPromptMeta.templateVersionId
+          : null) ?? planTemplateVersionId;
+      const effectivePromptSha256 =
+        isReplicaTask || shouldApplyStyleOverride
+          ? createHash("sha256").update(finalPrompt).digest("hex")
+          : (task.promptSha256 ?? createHash("sha256").update(finalPrompt).digest("hex"));
+      const replicaFrozenFields = isReplicaTask
+        ? {
+            sharedStyle: replicaPromptMeta?.sharedStyle ?? null,
+            copy: Array.isArray(replicaPromptMeta?.copy) ? replicaPromptMeta.copy : [],
+            visualStructure:
+              replicaPromptMeta?.visualStructure && typeof replicaPromptMeta.visualStructure === "object"
+                ? replicaPromptMeta.visualStructure
+                : {},
+            cloneLevel: replicaPromptMeta?.cloneLevel ?? generationParams.cloneLevel ?? replicaCloneLevel,
+            sceneType: replicaPromptMeta?.sceneType ?? generationParams.sceneType ?? null,
+            language: replicaPromptMeta?.language ?? generationParams.language ?? null,
+            replicaReferenceId: task.replicaReferenceId ?? null,
+            styleSketch: replicaProductCount === 0,
+          }
+        : {};
+      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, ...replicaFrozenFields, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, replicaReferenceId: task.replicaReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
@@ -736,6 +804,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const processed = await processGeneratedImage(generated.bytes);
       const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
       await deps.storage.put({ key: objectKey, bytes: processed.bytes, contentType: processed.mimeType });
+      if (task.originKind === "replica") {
+        await clearReplicaCardFinalLocks(task);
+      }
       await deps.taskRepository.completeAttempt({ attemptId: attempt.id, slotId: slot.id, taskId: task.id, objectKey, processObjectKeys: [], sha256: processed.sha256, width: processed.width, height: processed.height, mimeType: processed.mimeType, completedAt: new Date().toISOString() });
       const latestRun = await pipelineRepository.getLatestRun(task.suiteId);
       if (latestRun && (latestRun.status === "partial_failed" || latestRun.status === "failed")) {
@@ -762,41 +833,6 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
   };
 
-  const runReverse = async (plan: ReversePlan, ref: ReverseReference, retry: boolean, llmClient: LlmClient | undefined) => {
-    if (!ref.templateVersionId) return fail("REVERSE_TEMPLATE_REQUIRED");
-    if (!llmClient?.generateReversePrompt || !deps.promptRepository) return fail("REVERSE_LLM_NOT_CONFIGURED", 503);
-    const generateReversePrompt = llmClient.generateReversePrompt.bind(llmClient);
-    const template = await observedPromptLoad(deps.promptRepository, ref.templateVersionId, "reverse_prompt"); if (!template || template.applicability.targetType !== plan.mode) return fail("REVERSE_TEMPLATE_NOT_FOUND", 400);
-    const source = await deps.storage.get(ref.objectKey);
-    if (!source) return fail("INPUT_OBJECT_NOT_FOUND", 404);
-    const baselineRef = plan.mode === "detail" ? plan.references.find((item) => item.id === plan.baselineReferenceId && item.id !== ref.id) : undefined;
-    const baseline = baselineRef ? await deps.storage.get(baselineRef.objectKey) : null;
-    const attempt: ReverseAttempt = { id: randomUUID(), referenceId: ref.id, status: "running", retryOfAttemptId: retry ? [...ref.attempts].reverse().find((item) => item.status === "failed")?.id ?? null : null, templateVersionId: template.templateVersionId, mode: plan.mode, baselineReferenceId: plan.baselineReferenceId, requestSummary: { provider: llmClient.provider, model: llmClient.model, channel: llmClient.channel, inputRoles: baseline ? ["reference", "series_color_baseline"] : ["reference"] }, rawOutput: null, errorCode: null, errorMessage: null, promptVersionId: null, createdAt: new Date().toISOString(), completedAt: null }; ref.attempts.push(attempt); await reverseRepository.savePlan({ ...plan, updatedAt: new Date().toISOString() });
-    void (async () => {
-      try {
-        const output = await generateReversePrompt({ template: { body: template.body, userPromptTemplate: template.userPromptTemplate, templateVersionId: template.templateVersionId }, referenceImageId: ref.id, referenceImage: source.bytes, referenceMimeType: ref.mimeType, baselineImage: baseline?.bytes, baselineMimeType: baselineRef?.mimeType, mode: plan.mode });
-        const parsed = typeof output === "string" ? JSON.parse(output) : output; const row = parsed as Record<string, unknown>;
-        if (!row || row.schemaVersion !== "reverse-prompt-v1" || row.referenceImageId !== ref.id || typeof row.prompt !== "string" || !row.prompt.trim()) throw new Error("REVERSE_OUTPUT_INVALID");
-        const generatedPrompt = row.prompt.trim();
-        await withReversePlanWrite(plan.id, async () => {
-          const latest = await reverseRepository.getPlan(plan.id); const latestRef = latest?.references.find((item) => item.id === ref.id); const latestAttempt = latestRef?.attempts.find((item) => item.id === attempt.id);
-          if (!latest || !latestRef || !latestAttempt) return;
-          const version: ReversePromptVersion = { id: randomUUID(), referenceId: ref.id, kind: "model", prompt: generatedPrompt, rawOutput: output, templateVersionId: template.templateVersionId, mode: plan.mode, provider: llmSource(llmClient), createdAt: new Date().toISOString() };
-          latestRef.promptVersions.push(version); latestRef.effectivePromptVersionId = version.id; latestAttempt.status = "succeeded"; latestAttempt.rawOutput = output; latestAttempt.promptVersionId = version.id; latestAttempt.completedAt = new Date().toISOString();
-          await reverseRepository.savePlan({ ...latest, updatedAt: new Date().toISOString() });
-        });
-      } catch (error) {
-        await withReversePlanWrite(plan.id, async () => {
-          const latest = await reverseRepository.getPlan(plan.id); const latestAttempt = latest?.references.find((item) => item.id === ref.id)?.attempts.find((item) => item.id === attempt.id);
-          if (!latest || !latestAttempt) return;
-          latestAttempt.status = "failed"; latestAttempt.errorCode = error instanceof Error ? error.message : "REVERSE_OUTPUT_INVALID"; latestAttempt.errorMessage = latestAttempt.errorCode; latestAttempt.completedAt = new Date().toISOString();
-          await reverseRepository.savePlan({ ...latest, updatedAt: new Date().toISOString() });
-        });
-      }
-    })();
-    return ok({ attemptId: attempt.id }, 202);
-  };
-
   const loadSuiteImageEditChildren = async (tasks: SuiteTask[]): Promise<DeliveryEditChildLike[]> => {
     if (!deps.imageEditorApi) return [];
     const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
@@ -815,11 +851,71 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
     return all.filter((child) => typeof child.task?.id === "string" && allowed.has(child.task.id));
   };
+
+  const clearReplicaCardFinalLocks = async (task: SuiteTask) => {
+    if (!deps.taskRepository || task.originKind !== "replica") return;
+    await deps.taskRepository.clearFinalVersion?.(task.id);
+    if (!deps.imageEditorApi?.clearFinalVersions) return;
+    const children = await loadSuiteImageEditChildren([task]);
+    const childIds = children
+      .map((child) => (typeof child.task?.id === "string" ? child.task.id : ""))
+      .filter(Boolean);
+    if (childIds.length) {
+      await deps.imageEditorApi.clearFinalVersions(childIds);
+    }
+  };
+
+  const resolveRootTaskForEditCard = async (sourceCardId: string): Promise<SuiteTask | null> => {
+    if (!deps.taskRepository || !sourceCardId) return null;
+    const direct = await deps.taskRepository.getTask(sourceCardId);
+    if (direct) return direct;
+    if (!deps.imageEditorApi) return null;
+    const response = await deps.imageEditorApi.request("GET", "/api/image-editor/tasks");
+    const data = dataOf(response);
+    if (response.status !== 200 || !Array.isArray(data)) return null;
+    const childById = new Map<string, string>();
+    for (const entry of data as DeliveryEditChildLike[]) {
+      const id = typeof entry.task?.id === "string" ? entry.task.id : "";
+      const parent = typeof entry.task?.sourceCardId === "string" ? entry.task.sourceCardId : "";
+      if (id && parent) childById.set(id, parent);
+    }
+    const visited = new Set<string>();
+    let current = sourceCardId;
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      const next = childById.get(current);
+      if (!next) break;
+      const root = await deps.taskRepository.getTask(next);
+      if (root) return root;
+      current = next;
+    }
+    return null;
+  };
+
+  deps.imageEditorApi?.setOnVersionCompleted?.(async (childTask) => {
+    const rootTask = await resolveRootTaskForEditCard(childTask.sourceCardId);
+    if (rootTask?.originKind === "replica") {
+      await clearReplicaCardFinalLocks(rootTask);
+    }
+  });
   const pipeline = createSuitePipeline({
     repository: deps.repository, storage: deps.storage, platformRepository: deps.platformRepository,
     promptRepository: deps.promptRepository, planRepository: deps.planRepository, taskRepository: deps.taskRepository,
+    replicaRepository,
     hasPlanningModel: () => Boolean(deps.llmClient || deps.modelSettings), pipelineRepository, listingRepository,
     startListingCopy: listing.startPipeline, appendConfirmedSnapshot, loadSuiteImageEditChildren, request,
+  });
+  const replicaPipeline = createReplicaPipeline({
+    repository: deps.repository,
+    storage: deps.storage,
+    replicaRepository,
+    pipelineRepository,
+    taskRepository: deps.taskRepository,
+    promptRepository: deps.promptRepository,
+    libraryRepository: deps.libraryRepository,
+    resolveVision,
+    resolveImageOptions: async () => (await resolveImage()).imageOptions,
+    request,
   });
 
   async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
@@ -854,8 +950,43 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return fail(error instanceof Error ? error.message : "LLM_FAILED", 502);
       }
     }
-    if (path.startsWith("/api/image-editor/")) return deps.imageEditorApi ? deps.imageEditorApi.request(method, path, options) : fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
+    const editVersionPreviewMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
+    if (method === "GET" && editVersionPreviewMatch) {
+      if (!deps.imageEditorApi) return fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
+      const taskRes = await deps.imageEditorApi.request("GET", `/api/image-editor/tasks/${editVersionPreviewMatch[1]}`);
+      const taskData = dataOf(taskRes) as { versions?: Array<{ id?: string; objectKey?: string }> } | null;
+      const version = taskRes.status === 200 ? taskData?.versions?.find((item) => item.id === editVersionPreviewMatch[2]) : null;
+      return version?.objectKey ? previewObject(version.objectKey, deps.storage) : fail("NOT_FOUND", 404);
+    }
+    const selectEditVersionMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/select$/);
+    if (path.startsWith("/api/image-editor/")) {
+      if (!deps.imageEditorApi) return fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
+      const res = await deps.imageEditorApi.request(method, path, options);
+      if (
+        method === "POST" &&
+        selectEditVersionMatch &&
+        res.status >= 200 &&
+        res.status < 300 &&
+        asRecord(options.body, { allowArrays: true }).selection === "final" &&
+        deps.libraryRepository
+      ) {
+        await deps.libraryRepository.restoreResource(`edit-version:${selectEditVersionMatch[2]}`);
+      }
+      return res;
+    }
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
+
+    if (method === "POST" && path === "/api/replicas") return replicaPipeline.createReplica(idempotencyKey, options.body);
+    const replicaResumeMatch = path.match(/^\/api\/replicas\/([^/]+)\/resume$/);
+    if (method === "POST" && replicaResumeMatch) return replicaPipeline.resumeReplica(replicaResumeMatch[1], idempotencyKey);
+    const replicaReverseAssetMatch = path.match(/^\/api\/replicas\/([^/]+)\/tasks\/([^/]+)\/reverse-asset$/);
+    if (method === "POST" && replicaReverseAssetMatch) return replicaPipeline.saveReverseAsset(replicaReverseAssetMatch[1], replicaReverseAssetMatch[2], options.body);
+    const replicaPreviewMatch = path.match(/^\/api\/replicas\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?(?:\?(.*))?$/);
+    if (method === "GET" && replicaPreviewMatch) {
+      const queryKind = new URLSearchParams(replicaPreviewMatch[4] ?? "").get("kind");
+      const kind = (replicaPreviewMatch[3] ?? queryKind) === "original" ? "original" : "thumbnail";
+      return replicaPipeline.previewReference(replicaPreviewMatch[1], replicaPreviewMatch[2], kind);
+    }
 
     if (method === "POST" && path === "/api/suites/one-click-generate") return pipeline.startRun(idempotencyKey, options.body);
     const resumeMatch = path.match(/^\/api\/suites\/([^/]+)\/one-click-generate\/resume$/);
@@ -865,84 +996,22 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const feedMatch = path.match(/^\/api\/suites\/feed(?:\?(.*))?$/);
     if (method === "GET" && feedMatch) return pipeline.getFeed(feedMatch[1]);
     const reversePlanMatch = path.match(/^\/api\/reverse-plans\/([^/]+)$/);
-    if (method === "POST" && path === "/api/reverse-plans") {
-      const result = await reverseRepository.createPlan(idempotencyKey); const body = asRecord(options.body, { allowArrays: true });
-      if (body.mode === "detail") result.plan.mode = "detail";
-      return ok(await reverseRepository.savePlan(result.plan), result.duplicate ? 200 : 201);
-    }
+    if (method === "POST" && path === "/api/reverse-plans") return fail("REVERSE_PLAN_READ_ONLY", 410);
     if (method === "GET" && path === "/api/reverse-plans") return ok(await reverseRepository.listPlans());
     if (reversePlanMatch && method === "GET") { const plan = await reverseRepository.getPlan(reversePlanMatch[1]); return plan ? ok(plan) : fail("INVALID_REVERSE_PLAN", 404); }
-    if (reversePlanMatch && method === "PATCH") {
-      const plan = await reverseRepository.getPlan(reversePlanMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-      const body = asRecord(options.body, { allowArrays: true });
-      if (body.mode !== undefined && body.mode !== "main" && body.mode !== "detail") return fail("INVALID_REVERSE_MODE");
-      const next = { ...plan, mode: (body.mode ?? plan.mode) as "main" | "detail", baselineReferenceId: typeof body.baselineReferenceId === "string" ? body.baselineReferenceId : body.baselineReferenceId === null ? null : plan.baselineReferenceId, updatedAt: new Date().toISOString() };
-      if (next.mode === "detail" && !next.baselineReferenceId && next.references[0]) next.baselineReferenceId = next.references[0].id;
-      return ok(await reverseRepository.savePlan(next));
-    }
+    if (reversePlanMatch && method === "PATCH") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseRefsMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references$/);
-    if (reverseRefsMatch && method === "POST") {
-      return withReversePlanWrite(reverseRefsMatch[1], async () => {
-        const plan = await reverseRepository.getPlan(reverseRefsMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-        if (plan.references.length >= 16) return fail("REVERSE_REFERENCE_LIMIT", 400);
-        const body = asRecord(options.body, { allowArrays: true });
-        if (typeof body.filename !== "string" || typeof body.mimeType !== "string" || typeof body.bytesBase64 !== "string") return fail("INVALID_INPUT_IMAGE");
-        let processed; try { processed = await processImage(Buffer.from(body.bytesBase64, "base64"), body.mimeType); } catch (error) { const code = error instanceof Error ? error.message : "INVALID_IMAGE"; return fail(code); }
-        if (plan.references.some((item) => item.sha256 === processed.sha256)) return fail("DUPLICATE_IMAGE", 409, "该参考图已存在");
-        const referenceId = randomUUID(); const objectKey = `reverse-plans/${plan.id}/references/${referenceId}/original`; const thumbKey = `reverse-plans/${plan.id}/references/${referenceId}/thumbnail`;
-        await deps.storage.put({ key: objectKey, bytes: Buffer.from(body.bytesBase64, "base64"), contentType: processed.mimeType }); await deps.storage.put({ key: thumbKey, bytes: processed.thumbnail, contentType: "image/jpeg" });
-        const reference: ReverseReference = { id: referenceId, planId: plan.id, ordinal: plan.references.length + 1, filename: body.filename, mimeType: processed.mimeType, sha256: processed.sha256, width: processed.width, height: processed.height, objectKey, thumbnailObjectKey: thumbKey, templateVersionId: null, attempts: [], promptVersions: [], effectivePromptVersionId: null, createdAt: new Date().toISOString() };
-        const next = { ...plan, references: [...plan.references, reference], baselineReferenceId: plan.mode === "detail" && !plan.baselineReferenceId ? reference.id : plan.baselineReferenceId, updatedAt: new Date().toISOString() }; await reverseRepository.savePlan(next); return ok(reference, 201);
-      });
-    }
+    if (reverseRefsMatch && method === "POST") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseRefMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)$/);
-    if (reverseRefMatch && method === "PATCH") {
-      const plan = await reverseRepository.getPlan(reverseRefMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const body = asRecord(options.body, { allowArrays: true }); const refs = [...plan.references]; const ref = refs.find((item) => item.id === reverseRefMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      if (typeof body.templateVersionId === "string") { if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503); const template = await deps.promptRepository.getPublishedVersion(body.templateVersionId, "reverse_prompt"); if (!template || template.applicability.targetType !== plan.mode) return fail("REVERSE_TEMPLATE_NOT_FOUND", 400); ref.templateVersionId = template.templateVersionId; }
-      if (typeof body.ordinal === "number") { const target = Math.max(1, Math.min(refs.length, Math.trunc(body.ordinal))); refs.splice(refs.indexOf(ref), 1); refs.splice(target - 1, 0, ref); refs.forEach((item, i) => item.ordinal = i + 1); }
-      await reverseRepository.savePlan({ ...plan, references: refs, updatedAt: new Date().toISOString() }); return ok(ref);
-    }
-    if (reverseRefMatch && method === "DELETE") {
-      const plan = await reverseRepository.getPlan(reverseRefMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const removed = plan.references.find((item) => item.id === reverseRefMatch[2]); if (!removed) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      const refs = plan.references.filter((item) => item.id !== removed.id); refs.forEach((item, index) => item.ordinal = index + 1); const baselineReferenceId = plan.baselineReferenceId === removed.id ? refs[0]?.id ?? null : plan.baselineReferenceId;
-      await reverseRepository.savePlan({ ...plan, references: refs, baselineReferenceId, updatedAt: new Date().toISOString() }); return ok({ id: removed.id, removed: true, baselineReferenceId });
-    }
+    if (reverseRefMatch && (method === "PATCH" || method === "DELETE")) return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseRunMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/(run|retry)$/);
-    if (reverseRunMatch && method === "POST") {
-      const llmClient = await resolveVision();
-      return withReversePlanWrite(reverseRunMatch[1], async () => {
-        const plan = await reverseRepository.getPlan(reverseRunMatch[1]);
-        if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-        const reference = plan.references.find((item) => item.id === reverseRunMatch[2]);
-        return reference ? runReverse(plan, reference, reverseRunMatch[3] === "retry", llmClient) : fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      });
-    }
+    if (reverseRunMatch && method === "POST") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseBatchMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/attempts$/);
-    if (reverseBatchMatch && method === "POST") {
-      const llmClient = await resolveVision();
-      if (!llmClient?.generateReversePrompt) return fail("REVERSE_LLM_NOT_CONFIGURED", 503);
-      return withReversePlanWrite(reverseBatchMatch[1], async () => {
-        const plan = await reverseRepository.getPlan(reverseBatchMatch[1]);
-        if (!plan) return fail("INVALID_REVERSE_PLAN", 404);
-        const results: Array<{ referenceId: string; attemptId?: string; error?: string }> = [];
-        for (const reference of plan.references) {
-          if (!reference.templateVersionId || reference.attempts.some((item) => item.status === "succeeded" || item.status === "running")) continue;
-          const response = await runReverse(plan, reference, false, llmClient);
-          const data = dataOf(response) as { attemptId: string } | null;
-          results.push(data ? { referenceId: reference.id, attemptId: data.attemptId } : { referenceId: reference.id, error: "error" in response.body ? response.body.error.code : "REVERSE_OUTPUT_INVALID" });
-        }
-        return ok({ planId: plan.id, attempts: results }, 202);
-      });
-    }
+    if (reverseBatchMatch && method === "POST") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseAttemptMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/attempts\/([^/]+)$/);
     if (reverseAttemptMatch && method === "GET") { const plan = await reverseRepository.getPlan(reverseAttemptMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const found = plan.references.flatMap((item) => item.attempts).find((item) => item.id === reverseAttemptMatch[2]); return found ? ok(found) : fail("REVERSE_REFERENCE_NOT_FOUND", 404); }
     const reversePromptMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/prompt$/);
-    if (reversePromptMatch && method === "PATCH") {
-      const plan = await reverseRepository.getPlan(reversePromptMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const ref = plan.references.find((item) => item.id === reversePromptMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404);
-      const body = asRecord(options.body, { allowArrays: true }); if (typeof body.prompt !== "string" || !body.prompt.trim()) return fail("REVERSE_OUTPUT_INVALID");
-      const source = ref.promptVersions.find((item) => item.id === ref.effectivePromptVersionId) ?? [...ref.promptVersions].reverse()[0]; if (!source) return fail("REVERSE_OUTPUT_INVALID");
-      const version: ReversePromptVersion = { ...source, id: randomUUID(), kind: "user", prompt: body.prompt.trim(), rawOutput: null, createdAt: new Date().toISOString() }; ref.promptVersions.push(version); ref.effectivePromptVersionId = version.id; await reverseRepository.savePlan({ ...plan, updatedAt: new Date().toISOString() }); return ok(version, 201);
-    }
+    if (reversePromptMatch && method === "PATCH") return fail("REVERSE_PLAN_READ_ONLY", 410);
     const reverseAssetMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/asset$/);
     if (reverseAssetMatch && method === "POST") {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503); const plan = await reverseRepository.getPlan(reverseAssetMatch[1]); if (!plan) return fail("INVALID_REVERSE_PLAN", 404); const ref = plan.references.find((item) => item.id === reverseAssetMatch[2]); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404); const prompt = ref.promptVersions.find((item) => item.id === ref.effectivePromptVersionId); if (!prompt) return fail("REVERSE_OUTPUT_INVALID");
@@ -958,6 +1027,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const body = asRecord(options.body, { allowArrays: true });
       let suite = typeof body.targetSuiteId === "string" ? await deps.repository.getSuite(body.targetSuiteId) : null;
       if (typeof body.targetSuiteId === "string" && !suite) return fail("INVALID_SUITE_ID", 404);
+      if (suite?.origin === "replica") return fail("INVALID_SUITE_ORIGIN", 400, "复刻批次不支持导入画布任务");
       if (!suite) suite = await deps.repository.createSuite(typeof body.name === "string" && body.name.trim() ? body.name.trim() : `爆品图反推 ${new Date().toISOString().slice(0, 10)}`, `${idempotencyKey}:suite`, "canvas");
       const taskGroupId = typeof body.taskGroupId === "string" ? body.taskGroupId : randomUUID();
       const result = await deps.taskRepository.createReverseTasks({ suiteId: suite.id, reversePlanId: plan.id, taskGroupId, mode: plan.mode, idempotencyKey, items: items.map(({ reference, prompt }) => ({ referenceId: reference.id, ordinal: reference.ordinal, filename: reference.filename, promptVersionId: prompt.id, prompt: prompt.prompt })) });
@@ -967,6 +1037,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const body = asRecord(options.body, { allowArrays: true });
       const name = "name" in body ? String(body.name).trim() : "";
       if (!name) return fail("EMPTY_NAME");
+      if (body.origin !== undefined && body.origin !== "suite_studio" && body.origin !== "canvas") {
+        return fail("INVALID_SUITE_ORIGIN", 400);
+      }
       const origin = body.origin === "canvas" ? "canvas" : "suite_studio";
       return ok(await deps.repository.createSuite(name, idempotencyKey, origin), 201);
     }
@@ -1006,18 +1079,72 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           isDemo: suite.name.includes("演示") || suite.name.includes("Demo"),
         };
       }));
-      return ok(canvasOnly ? enriched.filter((suite) => suite.origin === "canvas" || suite.taskCount > 0) : enriched);
+      return ok(canvasOnly ? enriched.filter((suite) => suite.origin !== "replica" && (suite.origin === "canvas" || suite.taskCount > 0)) : enriched);
+    }
+    const enrichLibraryResource = (resource: import("./types.js").LibraryResource): import("./types.js").LibraryResource => {
+      if (resource.resourceType !== "prompt_template") return resource;
+      const source = resource.source && typeof resource.source === "object" ? resource.source : {};
+      const usedBy = Array.isArray(resource.usedBy)
+        ? resource.usedBy
+        : resolvePromptTemplateUsedBy({
+          code: typeof source.code === "string" ? source.code : null,
+          stage: resource.stage,
+          applicability: source.applicability && typeof source.applicability === "object" ? (source.applicability as Record<string, unknown>) : null,
+        });
+      return { ...resource, usedBy, source: { ...source, usedBy } };
+    };
+    if (method === "POST" && path === "/api/library/resources/batch-delete") {
+      if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const body = asRecord(options.body, { allowArrays: true });
+      const rawIds = body.ids;
+      if (!Array.isArray(rawIds) || rawIds.length === 0) return fail("INVALID_LIBRARY_BATCH_DELETE", 400);
+      if (rawIds.length > 100) return fail("LIBRARY_BATCH_DELETE_LIMIT", 400);
+      const ids: string[] = [];
+      for (const item of rawIds) {
+        if (typeof item !== "string" || !item.trim()) return fail("INVALID_LIBRARY_BATCH_DELETE", 400);
+        ids.push(item.trim());
+      }
+      try {
+        const result = await deps.libraryRepository.deleteResources(ids);
+        if (result.deletedIds.length === 0 && result.alreadyDeletedIds.length === 0 && result.notFoundIds.length > 0) {
+          return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+        }
+        return ok(result);
+      } catch (error) {
+        if (error instanceof Error && error.message === "LIBRARY_RESOURCE_FORBIDDEN") {
+          return fail("LIBRARY_RESOURCE_FORBIDDEN", 403, "提示词模板不支持在图片资源库中删除");
+        }
+        throw error;
+      }
     }
     const libraryResourceMatch = path.match(/^\/api\/library\/resources\/([^/]+)$/);
     if (method === "GET" && libraryResourceMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const resource = await deps.libraryRepository.getResource(libraryResourceMatch[1]);
-      return resource ? ok(resource) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      const resourceId = safeDecodePathParam(libraryResourceMatch[1]);
+      if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      const resource = await deps.libraryRepository.getResource(resourceId);
+      return resource ? ok(enrichLibraryResource(resource)) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+    }
+    if (method === "DELETE" && libraryResourceMatch) {
+      if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const resourceId = safeDecodePathParam(libraryResourceMatch[1]);
+      if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      try {
+        const deleted = await deps.libraryRepository.deleteResource(resourceId);
+        return deleted ? ok(deleted) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      } catch (error) {
+        if (error instanceof Error && error.message === "LIBRARY_RESOURCE_FORBIDDEN") {
+          return fail("LIBRARY_RESOURCE_FORBIDDEN", 403, "提示词模板不支持在图片资源库中删除");
+        }
+        throw error;
+      }
     }
     const libraryPreviewMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     if (method === "GET" && libraryPreviewMatch) return await (async () => {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const resource = await deps.libraryRepository.getResource(libraryPreviewMatch[1]);
+      const resourceId = safeDecodePathParam(libraryPreviewMatch[1]);
+      if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      const resource = await deps.libraryRepository.getResource(resourceId, { includeDeleted: true });
       if (!resource) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       const target = await deps.libraryRepository.getPreviewObject(resource.id);
       return target ? previewObject(target.objectKey, deps.storage) : fail("OBJECT_NOT_FOUND", 404);
@@ -1026,19 +1153,28 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       const params = new URLSearchParams(path.split("?")[1] ?? "");
       const resourceType = params.get("resourceType") as import("./types.js").LibraryResourceType | null;
+      const scopeParam = params.get("scope");
+      if (scopeParam && scopeParam !== "image") return fail("INVALID_LIBRARY_SCOPE");
       const stage = params.get("stage") as PromptStage | null;
       if (stage && !PROMPT_STAGES.includes(stage)) return fail("INVALID_PROMPT_STAGE");
       const status = params.get("status") as import("./types.js").LibraryAssetStatus | null;
-      if (status && !["draft", "published", "archived"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
-      return ok(await deps.libraryRepository.listResources({ resourceType: resourceType ?? undefined, stage: stage ?? undefined, suiteId: params.get("suiteId") ?? undefined, query: params.get("query") ?? undefined, status: status ?? undefined, page: Number(params.get("page") ?? 1), pageSize: Number(params.get("pageSize") ?? 24) }));
+      if (status && !["draft", "published", "archived", "retired"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
+      const rawPage = Number(params.get("page") ?? 1);
+      const rawPageSize = Number(params.get("pageSize") ?? 24);
+      const page = Number.isFinite(rawPage) ? Math.floor(rawPage) : 1;
+      const pageSize = Number.isFinite(rawPageSize) ? Math.floor(rawPageSize) : 24;
+      const listed = await deps.libraryRepository.listResources({ resourceType: resourceType ?? undefined, scope: scopeParam === "image" ? "image" : undefined, stage: stage ?? undefined, suiteId: params.get("suiteId") ?? undefined, query: params.get("query") ?? undefined, status: status ?? undefined, page, pageSize });
+      return ok({ ...listed, items: listed.items.map(enrichLibraryResource) });
     }
     const reverseAssetStatusMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/status$/);
     if (method === "POST" && reverseAssetStatusMatch) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const resourceId = safeDecodePathParam(reverseAssetStatusMatch[1]);
+      if (!resourceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
       const body = asRecord(options.body, { allowArrays: true });
       const status = body.status as import("./types.js").LibraryAssetStatus;
       if (!["draft", "published", "archived"].includes(status)) return fail("INVALID_LIBRARY_STATUS");
-      const resource = await deps.libraryRepository.setResourceStatus(reverseAssetStatusMatch[1], status);
+      const resource = await deps.libraryRepository.setResourceStatus(resourceId, status);
       return resource ? ok(resource) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     }
     if (method === "POST" && path === "/api/library/reverse-reference-assets") {
@@ -1051,29 +1187,45 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const libraryReferencesMatch = path.match(/^\/api\/suites\/([^/]+)\/library\/references(?:\/([^/?]+))?(?:\?.*)?$/);
     if (libraryReferencesMatch && method === "GET") {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
+      const suiteId = safeDecodePathParam(libraryReferencesMatch[1]);
+      if (!suiteId) return fail("INVALID_SUITE_ID", 404);
       const params = new URLSearchParams(path.split("?")[1] ?? "");
-      return ok(await deps.libraryRepository.listReferences(libraryReferencesMatch[1], (params.get("targetType") as "plan" | "task" | null) ?? undefined, params.get("targetId") ?? undefined));
+      return ok(await deps.libraryRepository.listReferences(suiteId, (params.get("targetType") as "plan" | "task" | null) ?? undefined, params.get("targetId") ?? undefined));
     }
     if (libraryReferencesMatch && method === "POST" && !libraryReferencesMatch[2]) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
       if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
+      const suiteId = safeDecodePathParam(libraryReferencesMatch[1]);
+      if (!suiteId) return fail("INVALID_SUITE_ID", 404);
       const body = asRecord(options.body, { allowArrays: true });
       if (typeof body.resourceId !== "string" || (body.targetType !== "plan" && body.targetType !== "task") || typeof body.targetId !== "string") return fail("LIBRARY_RESOURCE_NOT_FOUND");
-      try { const result = await deps.libraryRepository.createReference({ suiteId: libraryReferencesMatch[1], resourceId: body.resourceId, targetType: body.targetType, targetId: body.targetId, idempotencyKey, createdBy: typeof body.createdBy === "string" ? body.createdBy : null }); return ok(result.reference, result.duplicate ? 200 : 201); }
+      try { const result = await deps.libraryRepository.createReference({ suiteId, resourceId: body.resourceId, targetType: body.targetType, targetId: body.targetId, idempotencyKey, createdBy: typeof body.createdBy === "string" ? body.createdBy : null }); return ok(result.reference, result.duplicate ? 200 : 201); }
       catch (error) { const code = error instanceof Error ? error.message : "LIBRARY_RESOURCE_NOT_FOUND"; return fail(code, code === "LIBRARY_RESOURCE_FORBIDDEN" || code === "LIBRARY_TARGET_NOT_FOUND" ? 403 : code === "LIBRARY_RESOURCE_NOT_FOUND" ? 404 : 409); }
     }
     if (libraryReferencesMatch && method === "DELETE" && libraryReferencesMatch[2]) {
       if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-      const archived = await deps.libraryRepository.archiveReference(libraryReferencesMatch[1], libraryReferencesMatch[2]);
+      const suiteId = safeDecodePathParam(libraryReferencesMatch[1]);
+      const referenceId = safeDecodePathParam(libraryReferencesMatch[2]);
+      if (!suiteId || !referenceId) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+      const archived = await deps.libraryRepository.archiveReference(suiteId, referenceId);
       return archived ? ok(archived) : fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     }
     const promptCopyMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/copy(?:\?.*)?$/);
     const promptVersionMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/versions$/);
     if (method === "GET" && promptVersionMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      return ok(await deps.promptRepository.listVersions(promptVersionMatch[1]));
+      const versions = await deps.promptRepository.listVersions(promptVersionMatch[1]);
+      return ok(versions.map((version) => withPromptTemplateUsage(version)));
     }
-    const promptLifecycleMatch = path.match(/^\/api\/prompt-templates\/([^/]+)$/);
+    const promptLifecycleMatch = path.match(/^\/api\/prompt-templates\/([^/?]+)$/);
+    if (method === "GET" && promptLifecycleMatch) {
+      if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
+      const versionId = safeDecodePathParam(promptLifecycleMatch[1]);
+      if (!versionId) return fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      const version = await deps.promptRepository.getVersion(versionId);
+      if (!version) return fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      return ok(withPromptTemplateUsage(version));
+    }
     if (method === "PATCH" && promptLifecycleMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       const body = asRecord(options.body, { allowArrays: true });
@@ -1085,25 +1237,25 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         outputSchema: body.outputSchema && typeof body.outputSchema === "object" ? body.outputSchema as Record<string, unknown> : undefined,
         applicability: body.applicability && typeof body.applicability === "object" ? body.applicability as Record<string, unknown> : undefined,
       });
-      return updated ? ok(updated) : fail("PROMPT_DRAFT_NOT_FOUND", 404);
+      return updated ? ok(withPromptTemplateUsage(updated)) : fail("PROMPT_DRAFT_NOT_FOUND", 404);
     }
     const promptCopyPostMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/copy$/);
     if (method === "POST" && promptCopyPostMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       const copied = await deps.promptRepository.copyVersion(promptCopyPostMatch[1]);
-      return copied ? ok(copied, 201) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      return copied ? ok(withPromptTemplateUsage(copied), 201) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
     }
     const promptPublishMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/publish$/);
     if (method === "POST" && promptPublishMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       const published = await deps.promptRepository.publishVersion(promptPublishMatch[1]);
-      return published ? ok(published) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      return published ? ok(withPromptTemplateUsage(published)) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
     }
     const promptRetireMatch = path.match(/^\/api\/prompt-templates\/([^/]+)\/retire$/);
     if (method === "POST" && promptRetireMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
       const retired = await deps.promptRepository.retireVersion(promptRetireMatch[1]);
-      return retired ? ok(retired) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+      return retired ? ok(withPromptTemplateUsage(retired)) : fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
     }
     if (method === "GET" && promptCopyMatch) {
       if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
@@ -1112,13 +1264,22 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (stageValue && !PROMPT_STAGES.includes(stageValue as PromptStage)) return fail("INVALID_PROMPT_STAGE");
       const template = await deps.promptRepository.getPublishedVersion(promptCopyMatch[1], stageValue as PromptStage | undefined);
       if (!template) return fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
-      return ok({ templateId: template.templateId, templateVersionId: template.templateVersionId, versionNo: template.versionNo, code: template.code, name: template.name, kind: template.kind, stage: template.stage, executionTarget: template.executionTarget, inputSchema: template.inputSchema, applicability: template.applicability, body: template.body, userPromptTemplate: template.userPromptTemplate });
+      return ok(withPromptTemplateUsage({ templateId: template.templateId, templateVersionId: template.templateVersionId, versionNo: template.versionNo, code: template.code, name: template.name, kind: template.kind, stage: template.stage, executionTarget: template.executionTarget, inputSchema: template.inputSchema, applicability: template.applicability, body: template.body, userPromptTemplate: template.userPromptTemplate }));
     }
-    if (method === "GET" && path.startsWith("/api/prompt-templates")) {
+    const promptListMatch = path.match(/^\/api\/prompt-templates(?:\?(.*))?$/);
+    if (method === "GET" && promptListMatch) {
       if (!deps.promptRepository) return ok([]);
-      const stageValue = new URLSearchParams(path.split("?")[1] ?? "").get("stage") ?? undefined;
+      const params = new URLSearchParams(promptListMatch[1] ?? "");
+      const stageValue = params.get("stage") ?? undefined;
       if (stageValue && !PROMPT_STAGES.includes(stageValue as PromptStage)) return fail("INVALID_PROMPT_STAGE");
-      return ok(await deps.promptRepository.listPublished(stageValue as PromptStage | undefined));
+      const statusValue = params.get("status") ?? "published";
+      if (!["published", "draft", "retired", "all"].includes(statusValue)) return fail("INVALID_PROMPT_STATUS");
+      const listed = statusValue === "published"
+        ? await deps.promptRepository.listPublished(stageValue as PromptStage | undefined)
+        : deps.promptRepository.listTemplates
+          ? await deps.promptRepository.listTemplates({ stage: stageValue as PromptStage | undefined, status: statusValue as PromptVersionStatus | "all" })
+          : await deps.promptRepository.listPublished(stageValue as PromptStage | undefined);
+      return ok(listed.map((item) => withPromptTemplateUsage(item)));
     }
     if (method === "GET" && path === "/api/platforms") {
       return ok(deps.platformRepository ? await deps.platformRepository.listEnabled() : []);
@@ -1389,70 +1550,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const [attempt, snapshot] = await Promise.all([deps.planRepository.getLatestAttempt(planMatch[1]), deps.planRepository.getLatestSnapshot(planMatch[1])]);
       return ok({ attempt: attempt ? planAttemptView(attempt, attempt.snapshotId === snapshot?.id ? snapshot : null) : null, snapshot: snapshot ? planSnapshotView(snapshot) : null });
     }
-    if (method === "POST" && planMatch) {
-      if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
-      if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
-      if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      if (!deps.ragClient) return fail("RAG_NOT_CONFIGURED", 503);
-      const llmClient = await resolveVision();
-      if (!llmClient) return fail("LLM_NOT_CONFIGURED", 503);
-      const suite = await deps.repository.getSuite(planMatch[1]);
-      if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = asRecord(options.body);
-      const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
-      const template = await observedPromptLoad(deps.promptRepository, templateVersionId, "plan");
-      if (!template) return fail("PLAN_TEMPLATE_NOT_FOUND", 404);
-      const validated = validateDynamicInput(template.inputSchema, body.dynamicInput);
-      if (!validated.ok) return fail("PROMPT_INPUT_INVALID", 400, validated.message);
-      const platformValue = typeof validated.value.platform === "string" ? validated.value.platform.trim() : "";
-      const platformProfile = platformValue && deps.platformRepository ? await deps.platformRepository.find(platformValue) : null;
-      if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
-      const humanInput = asRecord(body.humanInput);
-      const refs = Array.isArray(body.selectedChunks) ? body.selectedChunks.flatMap((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).version === "string" ? [{ id: (item as { id: string }).id, version: (item as { version: string }).version }] : []) : [];
-      const chunks = await deps.ragClient.getByIds(refs);
-      for (const ref of refs) {
-        const chunk = chunks.find((item) => item.id === ref.id);
-        if (!chunk || !chunk.published) return fail("RAG_CHUNK_NOT_FOUND", 409);
-        if (chunk.version !== ref.version) return fail("RAG_CHUNK_VERSION_DRIFT", 409);
-      }
-      const images = await deps.repository.getInputImages(suite.id);
-      const visionImages = [];
-      for (const image of images) {
-        let sourceKind: "base" | "original" = "original";
-        let sourceVersionId: string | null = null;
-        let sourceObjectKey = image.originalObjectKey;
-        let source = null;
-        if (image.currentBaseVersionId) {
-          const base = await deps.repository.getBaseImageVersion(suite.id, image.id, image.currentBaseVersionId);
-          if (base) { sourceKind = "base"; sourceVersionId = base.id; sourceObjectKey = base.objectKey; }
-        }
-        if (sourceKind === "original") {
-          const generationInputKey = image.originalObjectKey.replace(/\/original$/, "/generation-input.jpg");
-          if (generationInputKey !== image.originalObjectKey) source = await deps.storage.get(generationInputKey);
-          if (source) sourceObjectKey = generationInputKey;
-        }
-        source ??= await deps.storage.get(sourceObjectKey);
-        if (!source) return fail("PLAN_INPUT_IMAGE_NOT_FOUND", 409);
-        visionImages.push({ id: image.id, sourceKind, sourceVersionId, mimeType: source.contentType, bytes: source.bytes });
-      }
-      const createdAt = new Date().toISOString();
-      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: images.flatMap((item) => item.currentBaseVersionId ? [item.currentBaseVersionId] : []), provider: llmSource(llmClient), errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
-      const reservation = await deps.planRepository.beginAttempt(attempt);
-      if (reservation.duplicate) return ok({ attemptId: reservation.attempt.id, status: reservation.attempt.status }, reservation.attempt.status === "running" ? 202 : 200);
-      void (async () => {
-        let raw: unknown;
-        try { raw = await llmClient.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined }); }
-        catch (error) { const code = error instanceof Error && error.message === "LLM_TIMEOUT" ? "LLM_TIMEOUT" : "LLM_PROVIDER_FAILED"; await deps.planRepository!.failAttempt(attempt.id, code, errorMessages[code]); return; }
-        const normalizedOutput = normalizePlanOutput(raw);
-        if (!normalizedOutput || !validPlanOutput(normalizedOutput, template.outputSchema)) { await deps.planRepository!.failAttempt(attempt.id, "LLM_OUTPUT_SCHEMA_INVALID", errorMessages.LLM_OUTPUT_SCHEMA_INVALID, summarizeOutput(raw)); return; }
-        if (!planOutputMatchesRequestedCounts(normalizedOutput, validated.value)) { await deps.planRepository!.failAttempt(attempt.id, "LLM_OUTPUT_COUNT_MISMATCH", errorMessages.LLM_OUTPUT_COUNT_MISMATCH, summarizeOutput(raw)); return; }
-        const latest = await deps.planRepository!.getLatestSnapshot(suite.id);
-        const output = normalizedOutput;
-        const snapshot: PlanSnapshot = { id: randomUUID(), suiteId: suite.id, revisionNumber: (latest?.revisionNumber ?? 0) + 1, revisionKind: "llm", parentSnapshotId: latest?.id ?? null, templateVersionId, dynamicInput: validated.value, humanInput, chunks: chunks.map((chunk) => ({ sourceChunkId: chunk.id, sourceVersion: chunk.version, title: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256 })), inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, provider: attempt.provider, requestSummary: { dynamicFieldCount: Object.keys(validated.value).length, chunkCount: chunks.length, inputImageCount: attempt.inputImageIds.length, templateVersionId }, rawOutputSummary: summarizeOutput(raw), schemaVersion: output.schemaVersion, items: output.items.map((item, index) => ({ id: randomUUID(), ordinal: index + 1, imageType: item.imageType ?? "main", title: item.title, purpose: item.purpose, prompt: item.prompt })), createdAt: new Date().toISOString() };
-        await deps.planRepository!.completeAttempt(attempt.id, snapshot);
-      })().catch((error) => deps.planRepository!.failAttempt(attempt.id, error instanceof Error && error.message === "LLM_TIMEOUT" ? "LLM_TIMEOUT" : "LLM_PROVIDER_FAILED", error instanceof Error && error.message === "LLM_TIMEOUT" ? errorMessages.LLM_TIMEOUT : errorMessages.LLM_PROVIDER_FAILED).catch(() => undefined));
-      return ok({ attemptId: attempt.id, status: "running" }, 202);
-    }
+    if (method === "POST" && planMatch) return fail("LEGACY_ENDPOINT_GONE", 410);
     if (method === "PATCH" && planMatch) {
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       const latest = await deps.planRepository.getLatestSnapshot(planMatch[1]);
@@ -1544,7 +1642,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return { ...taskView(task), versions: history.versions.map(taskVersionView), attempts: history.attempts.map(taskAttemptView), slots: [] };
       }));
       const imageEditChildren = await loadSuiteImageEditChildren(tasks);
-      const slots = resolveDeliverySlots(taskAggregates, imageEditChildren, { defaultTemplateVersionId: snapshot?.templateVersionId ?? null });
+      const slots = resolveDeliverySlots(taskAggregates, imageEditChildren, {
+        defaultTemplateVersionId: snapshot?.templateVersionId ?? null,
+        preferLatestByTime: suite.origin === "replica",
+      });
       const deliverable = slots.filter((slot) => slot.sourceRole !== "pending" && slot.exportPath && (!selectedTaskIds.size || selectedTaskIds.has(slot.parentTaskId)));
       if (!deliverable.length) return fail("DELIVERY_EMPTY", 400);
 
@@ -1986,7 +2087,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         const currentVersion = history.versions.find((version) => version.isCurrent);
         const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);
         const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (current?.sourceRevision ?? 0);
-        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, currentVersion && sourceUnchanged ? { [task.id]: currentVersion.id } : {});
+        const useCurrentVersionAsSource = current?.originKind !== "replica" && currentVersion && sourceUnchanged;
+        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, useCurrentVersionAsSource ? { [task.id]: currentVersion.id } : {});
         return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
       }
       catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
@@ -2024,7 +2126,11 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (method === "POST" && selectTaskVersionMatch) {
       if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
       const selection = asRecord(options.body, { allowArrays: true }).selection === "final" ? "final" : "current";
-      const version = await deps.taskRepository.selectVersion(selectTaskVersionMatch[1], selectTaskVersionMatch[2], selection); return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
+      const version = await deps.taskRepository.selectVersion(selectTaskVersionMatch[1], selectTaskVersionMatch[2], selection);
+      if (version && selection === "final" && deps.libraryRepository) {
+        await deps.libraryRepository.restoreResource(`task-version:${version.id}`);
+      }
+      return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
     }
     const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
     if (method === "GET" && taskPreviewMatch) return await previewTaskVersion(taskPreviewMatch[1], taskPreviewMatch[2]);
@@ -2269,14 +2375,18 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
 
   const previewLibraryResource = async (resourceId: string) => {
     if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-    const resource = await deps.libraryRepository.getResource(resourceId);
+    const decoded = safeDecodePathParam(resourceId);
+    if (!decoded) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
+    const resource = await deps.libraryRepository.getResource(decoded, { includeDeleted: true });
     if (!resource) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
     const target = await deps.libraryRepository.getPreviewObject(resource.id);
     return target ? previewObject(target.objectKey, deps.storage) : fail("OBJECT_NOT_FOUND", 404);
   };
 
   const previewReverseReference = async (planId: string, referenceId: string, kind: "original" | "thumbnail" = "thumbnail"): Promise<AppResponse> => { const plan = await reverseRepository.getPlan(planId); const ref = plan?.references.find((item) => item.id === referenceId); if (!ref) return fail("REVERSE_REFERENCE_NOT_FOUND", 404); const object = await deps.storage.get(kind === "original" ? ref.objectKey : ref.thumbnailObjectKey); return object ? { status: 200, body: { data: { contentType: object.contentType }, requestId: randomUUID() }, headers: { "content-type": object.contentType }, raw: object.bytes } : fail("OBJECT_NOT_FOUND", 404); };
-  return { request, upload, preview, previewBaseVersion, previewTaskVersion, previewLibraryResource, previewReverseReference };
+  const previewReplicaReference = (suiteId: string, referenceId: string, kind: "original" | "thumbnail" = "thumbnail") =>
+    replicaPipeline.previewReference(suiteId, referenceId, kind);
+  return { request, upload, preview, previewBaseVersion, previewTaskVersion, previewLibraryResource, previewReverseReference, previewReplicaReference };
 }
 
 async function previewObject(key: string, storage: StorageAdapter): Promise<AppResponse> {

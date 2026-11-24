@@ -20,7 +20,9 @@ import { AppShell } from "../components/AppShell";
 import { BeforeAfterLightbox, type LightboxPreview } from "../components/BeforeAfterLightbox";
 import { CustomTaskModal } from "../components/CustomTaskModal";
 import { DeliveryGalleryView } from "../components/DeliveryGalleryView";
+import { ProductResourcePickerModal } from "../components/resource-picker";
 import { VersionCompareModal } from "../components/VersionCompareModal";
+import { stageLabel } from "../features/library/library-helpers";
 import { Icon, ImageWithState, ModelSettingsMessage } from "./shared";
 import { Circle as KonvaCircle, Layer, Line, Rect as KonvaRect, Stage, Text as KonvaText, Transformer } from "react-konva";
 import type Konva from "konva";
@@ -363,7 +365,7 @@ function projectComposeGraph(
 ) {
   const saved = new Map((layout?.nodes ?? []).map((node) => [node.nodeId, { x: node.x, y: node.y }]));
   const active = workbench.tasks
-    .filter((task) => task.status !== "archived" && (task.originKind === "reverse_import" || !workbench.planSnapshot || task.planSnapshotId === workbench.planSnapshot.id))
+    .filter((task) => task.status !== "archived" && task.originKind !== "replica" && (task.originKind === "reverse_import" || !workbench.planSnapshot || task.planSnapshotId === workbench.planSnapshot.id))
     .slice()
     .sort((left, right) => (left.imageType !== right.imageType ? (left.imageType === "main" ? -1 : 1) : left.ordinal - right.ordinal));
   const materialsByInputId = new Map(workbench.inputImages.map((image) => [image.id, {
@@ -636,17 +638,21 @@ function PromptLibraryButton({ onNotify }: { onNotify: (message: string) => void
               }).catch(() => onNotify("阶段模板加载失败"));
             }}>
               <option value="">全部阶段</option>
+              <option value="structure_plan">结构规划</option>
+              <option value="category_prompt">类别提示词</option>
               <option value="base_refine">底图精修</option>
-              <option value="plan">计划生成</option>
-              <option value="task_image">单卡创作</option>
+              <option value="listing_copy">上架文案</option>
+              <option value="replica_prompt">爆品图复刻</option>
             </select>
             <div className="wb-prompt-list">
-              {templates.map((template) => (
+              {templates.length > 0 ? templates.map((template) => (
                 <button type="button" key={template.templateVersionId} className={selected?.templateVersionId === template.templateVersionId ? "is-selected" : ""} onClick={() => setSelected(template)}>
                   <strong>{template.name}</strong>
-                  <span>{template.stage} · v{template.versionNo}</span>
+                  <span>{template.usedBy?.length ? template.usedBy.join(" / ") : stageLabel(template.stage)} · v{template.versionNo}</span>
                 </button>
-              ))}
+              )) : (
+                <div className="wb-prompt-empty">当前阶段暂无在用提示词模板</div>
+              )}
             </div>
             {selected && (
               <div className="wb-prompt-detail">
@@ -665,97 +671,31 @@ function PromptLibraryButton({ onNotify }: { onNotify: (message: string) => void
 }
 
 function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; onBound: () => Promise<void>; onNotify: (message: string) => void }) {
-  const [items, setItems] = useState<ApiLibraryResource[] | null>(null);
-  const [selected, setSelected] = useState<ApiProductMaterialRef[]>([]);
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState(false);
   const bound = Array.isArray(task.generationParams?.productMaterialRefs) ? task.generationParams.productMaterialRefs as ApiProductMaterialRef[] : [];
 
-  useEffect(() => {
-    if (!open) return;
-    let active = true;
-    Promise.all((["base_image", "input_image"] as const).map((resourceType) => suiteApi.listLibraryResources({ resourceType, status: "published", pageSize: 100 })))
-      .then((results) => { if (active) setItems(results.flatMap((result) => result.items)); })
-      .catch(() => { if (active) setLoadError(true); });
-    return () => { active = false; };
-  }, [open]);
-
-  const show = () => {
-    setSelected(bound.slice().sort((a, b) => a.order - b.order));
-    setItems(null);
-    setLoadError(false);
-    setOpen(true);
-  };
-  const toggle = (item: ApiLibraryResource) => setSelected((current) => current.some((ref) => ref.resourceId === item.id) ? current.filter((ref) => ref.resourceId !== item.id) : current.length >= 3 ? current : [...current, { libraryReferenceId: "", resourceId: item.id, resourceVersionId: item.resourceVersionId, order: current.length + 1, title: item.title, previewUrl: item.previewUrl ?? `/api/library/resources/${encodeURIComponent(item.id)}/preview` }]);
-  const move = (index: number, delta: number) => setSelected((current) => {
-    const next = current.slice();
-    const target = index + delta;
-    if (target < 0 || target >= next.length) return current;
-    [next[index], next[target]] = [next[target], next[index]];
-    return next.map((item, order) => ({ ...item, order: order + 1 }));
-  });
-  const save = async () => {
-    if (!selected.length) return;
-    setLoading(true);
-    try {
-      await suiteApi.bindWhiteResources(task.id, selected.map((item) => item.resourceId));
-      await onBound();
-      setOpen(false);
-      onNotify("已绑定图片库参考图");
-    } catch {
-      onNotify("参考图绑定失败");
-    } finally {
-      setLoading(false);
-    }
-  };
   return (
     <>
       <div className="wb-inspector-field">
         <span>图片库参考图</span>
         {bound.length > 0 && <div className="wb-material-summary">{bound.map((item, index) => <span key={item.resourceId}>{index + 1}. {item.title ?? item.resourceId.slice(0, 8)}</span>)}</div>}
-        <button type="button" className="wb-link-button" disabled={task.status === "generating"} onClick={show}>从图片库选择</button>
+        <button type="button" className="wb-link-button" disabled={task.status === "generating"} onClick={() => setOpen(true)}>从图片库选择</button>
       </div>
-      {open && (
-        <div className="wb-prompt-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
-          <section className="wb-prompt-modal wb-white-picker" role="dialog" aria-modal="true" aria-label="选择图片库参考图">
-            <div className="wb-prompt-popover-head">
-              <div><span className="wb-modal-eyebrow">PRODUCT MATERIALS</span><strong>选择图片库参考图</strong><small>最多 3 张，按顺序作为主图和补充角度</small></div>
-              <button type="button" aria-label="关闭图片库选择器" onClick={() => setOpen(false)}><Icon name="x" /></button>
-            </div>
-            {loadError ? <p role="alert">图片库加载失败</p> : !items ? <p role="status">正在加载图片库…</p> : !items.length && <p>暂无已发布的原图或白底图</p>}
-            <div className="wb-white-picker-grid">
-              {items?.map((item) => {
-                const active = selected.some((ref) => ref.resourceId === item.id);
-                return (
-                  <button type="button" key={item.id} aria-pressed={active} disabled={loading || (!active && selected.length >= 3)} className={`wb-white-picker-item ${active ? "is-selected" : ""}`} onClick={() => toggle(item)}>
-                    <span className="wb-picker-check">{active ? "✓" : ""}</span>
-                    {item.previewUrl && <img src={item.previewUrl} alt={item.title} />}
-                    <strong>{item.title}</strong>
-                    <small>{item.resourceType === "base_image" ? "白底图" : "原图"} · {item.resourceVersionId.slice(0, 8)}</small>
-                  </button>
-                );
-              })}
-            </div>
-            {selected.length > 0 && (
-              <div className="wb-white-picker-order">
-                <strong>已选顺序</strong>
-                {selected.map((item, index) => (
-                  <div key={item.resourceId}>
-                    <span>{index + 1}. {item.title}</span>
-                    <button type="button" disabled={index === 0} onClick={() => move(index, -1)}>上移</button>
-                    <button type="button" disabled={index === selected.length - 1} onClick={() => move(index, 1)}>下移</button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="wb-prompt-modal-actions">
-              <button type="button" onClick={() => setOpen(false)}>取消</button>
-              <button type="button" className="wb-primary-action" disabled={!selected.length || loading} onClick={() => void save()}>{loading ? "保存中…" : "确认绑定"}</button>
-            </div>
-          </section>
-        </div>
-      )}
+      <ProductResourcePickerModal
+        open={open}
+        onClose={() => setOpen(false)}
+        max={3}
+        initialSelected={bound}
+        title="选择图片库参考图"
+        subtitle="最多 3 张，按顺序作为主图和补充角度"
+        confirmLabel="确认绑定"
+        onConfirm={async (selected) => {
+          await suiteApi.bindWhiteResources(task.id, selected.map((item) => item.resourceId));
+          await onBound();
+          onNotify("已绑定图片库参考图");
+        }}
+        onError={() => onNotify("参考图绑定失败")}
+      />
     </>
   );
 }
@@ -1718,6 +1658,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
   }, [selectedNodeId, canvasFilter, mode, rebuildGraph]);
 
   useEffect(() => {
+    if (workbench?.suite.origin === "replica") return;
     const ordinaryTaskRunning = workbench?.tasks.some((task) => task.status === "generating");
     const editChildRunning = workbench?.imageEditChildren?.some((child) => String(child.task.status) === "generating");
     if (!ordinaryTaskRunning && !editChildRunning) return;
@@ -1932,11 +1873,19 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     );
   }
 
+  if (workbench.suite.origin === "replica") {
+    return (
+      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "生图画布", to: "/create/canvas" }]} statusText="复刻批次暂不支持画布模式" statusTone="error">
+        <div className="flow-loading">复刻批次暂不支持在生图画布中打开。<button type="button" className="pa-topbar-btn" onClick={() => navigate("/create/canvas")}>返回画布列表</button></div>
+      </AppShell>
+    );
+  }
+
   const currentVersion = selectedTask?.versions.find((version) => version.isCurrent) ?? selectedTask?.versions[0];
   const isFreeCanvas = workbench.suite.origin === "canvas";
   const returnPath = isFreeCanvas ? "/create/canvas" : `/create/suite/${suiteId}`;
   const missingReference = Boolean(selectedTask && !selectedIsImageEditChild && !hasTaskReference(selectedTask));
-  const appliesStyleOverride = Boolean(styleOverride && selectedTask && !selectedIsImageEditChild && selectedTask.originKind !== "reverse_import");
+  const appliesStyleOverride = Boolean(styleOverride && selectedTask && !selectedIsImageEditChild && selectedTask.originKind !== "reverse_import" && selectedTask.originKind !== "replica");
   const effectiveInspectorPrompt = selectedTask
     ? (selectedIsImageEditChild
       ? (currentVersion ? versionGenerationPrompt(currentVersion, promptDraft) : promptDraft)

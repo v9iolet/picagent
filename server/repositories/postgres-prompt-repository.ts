@@ -1,12 +1,15 @@
+import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { validatePromptTemplateContract, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime } from "../prompt-library.js";
+import { samePromptTemplateContent, validatePromptTemplateContract, withPromptTemplateUsage, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime, type PromptVersionStatus } from "../prompt-library.js";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const runtimeColumns = `t.id AS "templateId", v.id AS "templateVersionId", v.version_no AS "versionNo",
   t.code, v.name, v.kind, v.stage, v.execution_target AS "executionTarget", v.input_schema AS "inputSchema",
   v.output_schema AS "outputSchema", v.applicability, v.body, v.user_prompt_template AS "userPromptTemplate", v.status, v.source_file AS "sourceFile",
   v.source_heading AS "sourceHeading", v.source_sha256 AS "sourceSha256"`;
 const publicColumns = `t.id AS "templateId", v.id AS "templateVersionId", v.version_no AS "versionNo",
-  t.code, v.name, v.kind, v.stage, v.execution_target AS "executionTarget", v.input_schema AS "inputSchema", v.applicability`;
+  t.code, v.name, v.kind, v.stage, v.execution_target AS "executionTarget", v.input_schema AS "inputSchema", v.applicability, v.status`;
 
 export class PostgresPromptRepository {
   constructor(private readonly pool: Pool) {}
@@ -91,14 +94,20 @@ export class PostgresPromptRepository {
             v.source_heading AS "sourceHeading", v.source_sha256 AS "sourceSha256"`,
         [existing.rows[0].templateVersionId, record.name, record.kind, record.stage, record.executionTarget,
           JSON.stringify(record.inputSchema), JSON.stringify(record.outputSchema), JSON.stringify(record.applicability), record.body, record.userPromptTemplate ?? "", record.sourceFile]);
-        if (normalized.rows[0]) return normalized.rows[0];
+        if (normalized.rows[0]) return withPromptTemplateUsage(normalized.rows[0]);
         const current = await client.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
           FROM prompt_library.prompt_template_versions v JOIN prompt_library.prompt_templates t ON t.id = v.template_id
           WHERE v.id = $1`, [existing.rows[0].templateVersionId]);
-        return current.rows[0];
+        return withPromptTemplateUsage(current.rows[0]);
       }
-      return existing.rows[0];
+      return withPromptTemplateUsage(existing.rows[0]);
     }
+    const existingVersions = await client.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
+      FROM prompt_library.prompt_template_versions v JOIN prompt_library.prompt_templates t ON t.id = v.template_id
+      WHERE v.template_id = $1 AND v.status <> 'retired'
+      ORDER BY CASE WHEN v.status = 'published' THEN 0 ELSE 1 END, v.version_no DESC`, [templateId]);
+    const sameContent = existingVersions.rows.find((version) => samePromptTemplateContent(version, record));
+    if (sameContent) return withPromptTemplateUsage(sameContent);
     const next = await client.query<{ version_no: number }>("SELECT COALESCE(MAX(version_no), 0) + 1 AS version_no FROM prompt_library.prompt_template_versions WHERE template_id = $1", [templateId]);
     const inserted = await client.query<PromptTemplateRuntime>(`INSERT INTO prompt_library.prompt_template_versions
       (id, template_id, version_no, name, kind, stage, execution_target, input_schema, output_schema, applicability, body, user_prompt_template, status, source_file, source_heading, source_sha256)
@@ -109,10 +118,11 @@ export class PostgresPromptRepository {
     [record.templateVersionId, templateId, next.rows[0].version_no, record.name, record.kind, record.stage, record.executionTarget,
       JSON.stringify(record.inputSchema), JSON.stringify(record.outputSchema), JSON.stringify(record.applicability), record.body, record.userPromptTemplate ?? "",
       record.sourceFile, record.sourceHeading, record.sourceSha256, record.code]);
-    return inserted.rows[0];
+    return withPromptTemplateUsage(inserted.rows[0]);
   }
 
   async publishVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
+    if (!UUID_RE.test(versionId)) return null;
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -126,7 +136,7 @@ export class PostgresPromptRepository {
       await client.query("UPDATE prompt_library.prompt_templates SET published_version_id = $2 WHERE id = $1", [found.rows[0].template_id, versionId]);
       const result = await client.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns} FROM prompt_library.prompt_template_versions v JOIN prompt_library.prompt_templates t ON t.id = v.template_id WHERE v.id = $1`, [versionId]);
       await client.query("COMMIT");
-      return result.rows[0];
+      return withPromptTemplateUsage(result.rows[0]);
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -140,61 +150,99 @@ export class PostgresPromptRepository {
       FROM prompt_library.prompt_templates t JOIN prompt_library.prompt_template_versions v ON v.id = t.published_version_id
       WHERE t.lifecycle_status = 'active' AND v.status = 'published' AND ($1::text IS NULL OR v.stage = $1)
       ORDER BY v.name`, [stage ?? null]);
-    return result.rows;
+    return result.rows.map((row) => withPromptTemplateUsage(row));
+  }
+
+  async listTemplates(options: { stage?: PromptStage; status?: PromptVersionStatus | "all" } = {}): Promise<PromptTemplatePublic[]> {
+    const status = options.status ?? "published";
+    if (status === "published") return this.listPublished(options.stage);
+    if (status === "draft") {
+      const result = await this.pool.query<PromptTemplatePublic>(`
+        SELECT * FROM (
+          SELECT DISTINCT ON (t.id) ${publicColumns}
+          FROM prompt_library.prompt_templates t
+          JOIN prompt_library.prompt_template_versions v ON v.template_id = t.id
+          WHERE v.status = 'draft' AND ($1::text IS NULL OR v.stage = $1)
+          ORDER BY t.id, v.version_no DESC
+        ) latest
+        ORDER BY latest.name`, [options.stage ?? null]);
+      return result.rows.map((row) => withPromptTemplateUsage(row));
+    }
+    const result = await this.pool.query<PromptTemplatePublic>(`
+      SELECT * FROM (
+        SELECT DISTINCT ON (t.id) ${publicColumns}
+        FROM prompt_library.prompt_templates t
+        JOIN prompt_library.prompt_template_versions v ON v.template_id = t.id
+        WHERE ($1::text IS NULL OR v.stage = $1)
+        ORDER BY t.id,
+          CASE WHEN v.id = t.published_version_id AND t.lifecycle_status = 'active' AND v.status = 'published' THEN 0
+               WHEN v.status = 'published' AND t.lifecycle_status = 'active' THEN 1
+               WHEN v.status = 'draft' THEN 2
+               ELSE 3 END,
+          v.version_no DESC
+      ) latest
+      WHERE ($2::text = 'all' OR latest.status = $2)
+      ORDER BY latest.name`, [options.stage ?? null, status]);
+    return result.rows.map((row) => withPromptTemplateUsage(row));
   }
 
   async getPublishedVersion(versionId: string, expectedStage?: PromptStage): Promise<PromptTemplateRuntime | null> {
+    if (!UUID_RE.test(versionId)) return null;
     const result = await this.pool.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
       FROM prompt_library.prompt_templates t JOIN prompt_library.prompt_template_versions v ON v.id = t.published_version_id
       WHERE v.id = $1 AND v.status = 'published' AND t.lifecycle_status = 'active' AND ($2::text IS NULL OR v.stage = $2)`, [versionId, expectedStage ?? null]);
-    return result.rows[0] ?? null;
+    return result.rows[0] ? withPromptTemplateUsage(result.rows[0]) : null;
   }
 
   async listVersions(templateId: string): Promise<PromptTemplateRuntime[]> {
+    if (!UUID_RE.test(templateId)) return [];
     const result = await this.pool.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
       FROM prompt_library.prompt_template_versions v JOIN prompt_library.prompt_templates t ON t.id = v.template_id
       WHERE t.id = $1 ORDER BY v.version_no`, [templateId]);
-    return result.rows;
+    return result.rows.map((row) => withPromptTemplateUsage(row));
   }
 
   async getVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
+    if (!UUID_RE.test(versionId)) return null;
     const result = await this.pool.query<PromptTemplateRuntime>(`SELECT ${runtimeColumns}
       FROM prompt_library.prompt_template_versions v JOIN prompt_library.prompt_templates t ON t.id = v.template_id
       WHERE v.id = $1`, [versionId]);
-    return result.rows[0] ?? null;
+    return result.rows[0] ? withPromptTemplateUsage(result.rows[0]) : null;
   }
 
   async updateDraft(versionId: string, patch: Partial<Pick<PromptTemplateRuntime, "name" | "body" | "userPromptTemplate" | "inputSchema" | "outputSchema" | "applicability">>): Promise<PromptTemplateRuntime | null> {
     const current = await this.getVersion(versionId);
     if (!current || current.status !== "draft") return null;
-    const result = await this.pool.query<PromptTemplateRuntime>(`UPDATE prompt_library.prompt_template_versions SET
-      name=COALESCE($2,name), body=COALESCE($3,body), user_prompt_template=COALESCE($4,user_prompt_template),
-      input_schema=COALESCE($5,input_schema), output_schema=COALESCE($6,output_schema), applicability=COALESCE($7,applicability)
-      WHERE id=$1 AND status='draft'
+    const result = await this.pool.query<PromptTemplateRuntime>(`UPDATE prompt_library.prompt_template_versions v SET
+      name=COALESCE($2,v.name), body=COALESCE($3,v.body), user_prompt_template=COALESCE($4,v.user_prompt_template),
+      input_schema=COALESCE($5,v.input_schema), output_schema=COALESCE($6,v.output_schema), applicability=COALESCE($7,v.applicability)
+      FROM prompt_library.prompt_templates t
+      WHERE v.id=$1 AND v.template_id=t.id AND v.status='draft'
       RETURNING ${runtimeColumns}`, [versionId, patch.name ?? null, patch.body ?? null, patch.userPromptTemplate ?? null,
       patch.inputSchema ? JSON.stringify(patch.inputSchema) : null, patch.outputSchema ? JSON.stringify(patch.outputSchema) : null,
       patch.applicability ? JSON.stringify(patch.applicability) : null]);
-    return result.rows[0] ?? null;
+    return result.rows[0] ? withPromptTemplateUsage(result.rows[0]) : null;
   }
 
   async copyVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
     const source = await this.getVersion(versionId);
     if (!source) return null;
     const next = await this.pool.query<{ version_no: number }>("SELECT COALESCE(MAX(version_no),0)+1 AS version_no FROM prompt_library.prompt_template_versions WHERE template_id=$1", [source.templateId]);
-    const result = await this.pool.query<PromptTemplateRuntime>(`INSERT INTO prompt_library.prompt_template_versions
+    const result = await this.pool.query<{ id: string }>(`INSERT INTO prompt_library.prompt_template_versions
       (id, template_id, version_no, name, kind, stage, execution_target, input_schema, output_schema, applicability, body, user_prompt_template, status, source_file, source_heading, source_sha256)
       VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft','manual',$12,$13)
-      RETURNING ${runtimeColumns}`, [source.templateId, next.rows[0].version_no, source.name, source.kind, source.stage, source.executionTarget,
+      RETURNING id`, [source.templateId, next.rows[0].version_no, source.name, source.kind, source.stage, source.executionTarget,
       JSON.stringify(source.inputSchema), JSON.stringify(source.outputSchema), JSON.stringify(source.applicability), source.body, source.userPromptTemplate,
-      `copy:${source.name}`, `${source.sourceSha256}:${next.rows[0].version_no}`]);
-    return result.rows[0] ?? null;
+      `copy:${source.name}`, createHash("sha256").update(`${source.sourceSha256}:${next.rows[0].version_no}`).digest("hex")]);
+    return result.rows[0] ? this.getVersion(result.rows[0].id) : null;
   }
 
   async retireVersion(versionId: string): Promise<PromptTemplateRuntime | null> {
+    if (!UUID_RE.test(versionId)) return null;
     const result = await this.pool.query<PromptTemplateRuntime>(`UPDATE prompt_library.prompt_template_versions v SET status='retired'
       FROM prompt_library.prompt_templates t WHERE v.id=$1 AND v.template_id=t.id
       RETURNING ${runtimeColumns}`, [versionId]);
     if (result.rows[0]) await this.pool.query("UPDATE prompt_library.prompt_templates SET published_version_id=NULL WHERE published_version_id=$1", [versionId]);
-    return result.rows[0] ?? null;
+    return result.rows[0] ? withPromptTemplateUsage(result.rows[0]) : null;
   }
 }

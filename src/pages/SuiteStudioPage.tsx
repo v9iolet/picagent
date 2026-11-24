@@ -3,7 +3,11 @@ import { modelSettingsApi, suiteApi, type ApiImage, type ApiPlatformProfile } fr
 import { defaultImageOptions } from "../../shared/model-settings";
 import { productNameFor } from "../../shared/product-name";
 import { AppShell } from "../components/AppShell";
-import { createTools } from "../features/create/tool-registry";
+import {
+  GenerationHistoryDrawer,
+  type GenerationHistoryFeedItem,
+} from "../components/generation-history/GenerationHistoryDrawer";
+import { CreateToolsNav } from "../features/create/CreateToolsNav";
 import { ConfigPanel } from "../components/suite-studio/ConfigPanel";
 import { BatchResults } from "../components/suite-studio/BatchResults";
 import {
@@ -15,7 +19,6 @@ import {
   type Config,
   type StudioState,
 } from "../components/suite-studio/studio";
-import { Icon } from "./shared";
 import "../components/suite-studio/studio.css";
 
 function EmptyStudio() {
@@ -45,27 +48,6 @@ function EmptyStudio() {
 
 const LAST_SUITE_STORAGE_KEY = "picagent:suite-studio:last-suite-id";
 const POLL_INTERVAL_MS = 2500;
-const FEED_STATE_CONCURRENCY = 3;
-
-async function loadStatesWithConcurrency(
-  ids: readonly string[],
-  concurrency: number,
-  load: (id: string) => Promise<StudioState>,
-): Promise<PromiseSettledResult<StudioState>[]> {
-  const results: PromiseSettledResult<StudioState>[] = new Array(ids.length);
-  let nextIndex = 0;
-  const workerCount = Math.min(Math.max(1, concurrency), ids.length);
-  await Promise.allSettled(
-    Array.from({ length: workerCount }, async () => {
-      while (nextIndex < ids.length) {
-        const current = nextIndex++;
-        const [settled] = await Promise.allSettled([load(ids[current])]);
-        results[current] = settled;
-      }
-    }),
-  );
-  return results;
-}
 
 function readLastSuiteId(): string | null {
   try {
@@ -109,17 +91,20 @@ export function SuiteStudioPage({
     [clone, setClone] = useState(false),
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState("");
-  const [states, setStates] = useState<Record<string, StudioState>>({}),
-    [hasMore, setMore] = useState(false),
-    [loadingFeed, setLoadingFeed] = useState(true),
+  const [currentState, setCurrentState] = useState<StudioState | null>(null),
+    [loadingBatch, setLoadingBatch] = useState(true),
+    [batchError, setBatchError] = useState(""),
+    [reloadTick, setReloadTick] = useState(0),
+    [historyOpen, setHistoryOpen] = useState(false),
     [active, setActive] = useState<string | undefined>(() => suiteId ?? readLastSuiteId() ?? undefined);
+
   const hydrated = useRef<string | undefined>(undefined),
-    offset = useRef(0),
-    feedLock = useRef(false),
+    skipDefaultFeed = useRef(false),
     requestSeq = useRef(0),
-    appliedSeq = useRef<Record<string, number>>({}),
-    inFlightStates = useRef<Map<string, Promise<StudioState>>>(new Map()),
-    end = useRef<HTMLButtonElement>(null);
+    appliedSeq = useRef(0),
+    currentBatchIdRef = useRef<string | undefined>(undefined),
+    inFlightStates = useRef<Map<string, Promise<StudioState>>>(new Map());
+
   const fetchStudioState = useCallback((id: string) => {
     const existing = inFlightStates.current.get(id);
     if (existing) return existing;
@@ -129,68 +114,31 @@ export function SuiteStudioPage({
     inFlightStates.current.set(id, pending);
     return pending;
   }, []);
-  const putMany = useCallback((items: StudioState[], seq: number) => {
-    setStates((prev) => {
-      let next: Record<string, StudioState> | null = null;
-      for (const s of items) {
-        const id = s.suite.id;
-        const last = appliedSeq.current[id] ?? 0;
-        if (seq < last) continue;
-        appliedSeq.current[id] = seq;
-        if (!next) next = { ...prev };
-        next[id] = s;
-      }
-      return next ?? prev;
-    });
-  }, []);
-  const put = useCallback((s: StudioState, seq?: number) => {
-    putMany([s], seq ?? ++requestSeq.current);
-  }, [putMany]);
-  const refresh = useCallback(async (id: string) => {
-    const seq = ++requestSeq.current;
-    put(await studioApi.state(id), seq);
-  }, [put]);
-  const loadPage = useCallback(async () => {
-    if (feedLock.current) return;
-    feedLock.current = true;
-    setLoadingFeed(true);
-    const seq = ++requestSeq.current;
-    try {
-      const page = await studioApi.feed(offset.current);
-      const ids = page.items.map((i) => i.suite.id);
-      const toFetch = ids.filter((id) => !(id === hydrated.current && appliedSeq.current[id]));
-      const settled = await loadStatesWithConcurrency(toFetch, FEED_STATE_CONCURRENCY, fetchStudioState);
-      const items: StudioState[] = [];
-      let firstError: unknown;
-      for (const result of settled) {
-        if (result.status === "fulfilled") items.push(result.value);
-        else if (firstError === undefined) firstError = result.reason;
-      }
-      if (items.length) putMany(items, seq);
-      const alreadyHydratedCount = ids.length - toFetch.length;
-      if (page.items.length > 0 && items.length + alreadyHydratedCount === 0 && firstError !== undefined) {
-        setNotice(message(firstError));
-      }
-      offset.current += page.items.length;
-      setMore(offset.current < page.total);
-    } catch (e) {
-      setNotice(message(e));
-    } finally {
-      feedLock.current = false;
-      setLoadingFeed(false);
+
+  const applyState = useCallback((state: StudioState | null, seq?: number) => {
+    if (state === null) {
+      const nextSeq = ++requestSeq.current;
+      appliedSeq.current = nextSeq;
+      currentBatchIdRef.current = undefined;
+      setCurrentState(null);
+      return;
     }
-  }, [fetchStudioState, putMany]);
-  useEffect(() => {
-    void loadPage();
-  }, [loadPage]);
-  useEffect(() => {
-    if (!hasMore || !end.current) return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) void loadPage();
-    });
-    observer.observe(end.current);
-    return () => observer.disconnect();
-  }, [hasMore, loadPage, loadingFeed]);
+    const nextSeq = seq ?? ++requestSeq.current;
+    if (nextSeq < appliedSeq.current) return;
+    appliedSeq.current = nextSeq;
+    currentBatchIdRef.current = state.suite.id;
+    setCurrentState(state);
+  }, []);
+
+  const refresh = useCallback(
+    async (id: string) => {
+      const seq = ++requestSeq.current;
+      const next = await studioApi.state(id);
+      applyState(next, seq);
+    },
+    [applyState],
+  );
+
   useEffect(() => {
     let live = true;
     Promise.all([suiteApi.listPlatforms(), modelSettingsApi.get()])
@@ -207,6 +155,7 @@ export function SuiteStudioPage({
       live = false;
     };
   }, []);
+
   const patch = (update: Partial<Config>) => setConfig((c) => ({ ...c, ...update }));
   // Options are model-specific; never submit a stale size/ratio restored from another channel.
   const effective: Config = {
@@ -217,115 +166,183 @@ export function SuiteStudioPage({
       ? config.aspectRatio
       : options.aspectRatios[0],
   };
-  const hydrate = (s: StudioState) => {
+
+  const hydrate = useCallback((s: StudioState) => {
     setImages(s.inputImages);
     setConfig(fromRun(s.pipeline));
     setClone(!!s.pipeline || s.cards.length > 0);
-  };
+  }, []);
+
   const currentSuiteId = suiteId ?? active;
+
   useEffect(() => {
     const savedId = suiteId ? null : readLastSuiteId();
     const targetId = suiteId ?? savedId ?? undefined;
     setActive(targetId);
-    if (targetId === hydrated.current) {
-      if (targetId) saveLastSuiteId(targetId);
-      if (!suiteId && targetId) navigate(`/create/suite/${targetId}`, { replace: true });
+
+    if (targetId && targetId === hydrated.current) {
+      saveLastSuiteId(targetId);
+      if (!suiteId) navigate(`/create/suite/${targetId}`, { replace: true });
+      setLoadingBatch(false);
       return;
     }
+
+    if (!targetId && skipDefaultFeed.current) {
+      skipDefaultFeed.current = false;
+      hydrated.current = undefined;
+      applyState(null);
+      setLoadingBatch(false);
+      setBusy(false);
+      return;
+    }
+
     let live = true;
     setNotice("");
+    setBatchError("");
     setImages([]);
     setConfig(initialConfig);
     setClone(false);
+
+    async function loadDefaultLatest(seq: number) {
+      try {
+        const page = await studioApi.feed({ origin: "suite_studio", limit: 1, offset: 0 });
+        if (!live) return;
+        const latest = page.items[0];
+        if (!latest) {
+          applyState(null);
+          return;
+        }
+        try {
+          const state = await fetchStudioState(latest.suite.id);
+          if (!live) return;
+          applyState(state, seq);
+        } catch {
+          if (live) applyState(null);
+        }
+      } catch (e) {
+        if (live) {
+          applyState(null);
+          setNotice(message(e));
+        }
+      }
+    }
+
     if (targetId) {
       setBusy(true);
+      setLoadingBatch(true);
       const seq = ++requestSeq.current;
-      fetchStudioState(targetId)
+      void fetchStudioState(targetId)
         .then((s) => {
           if (!live) return;
-          put(s, seq);
+          applyState(s, seq);
           hydrate(s);
           hydrated.current = s.suite.id;
           setActive(s.suite.id);
           saveLastSuiteId(s.suite.id);
           if (!suiteId) navigate(`/create/suite/${s.suite.id}`, { replace: true });
         })
-        .catch((e) => {
+        .catch(async (e) => {
           if (!live) return;
           if (!suiteId) {
             clearLastSuiteId();
             hydrated.current = undefined;
             setActive(undefined);
+            applyState(null);
+            await loadDefaultLatest(++requestSeq.current);
           } else {
             if (readLastSuiteId() === suiteId) clearLastSuiteId();
-            setNotice(message(e));
+            hydrated.current = undefined;
+            applyState(null);
+            setBatchError(message(e));
           }
         })
         .finally(() => {
-          if (live) setBusy(false);
+          if (live) {
+            setBusy(false);
+            setLoadingBatch(false);
+          }
         });
     } else {
       hydrated.current = undefined;
       setBusy(false);
+      setLoadingBatch(true);
+      const seq = ++requestSeq.current;
+      void loadDefaultLatest(seq).finally(() => {
+        if (live) setLoadingBatch(false);
+      });
     }
+
     return () => {
       live = false;
     };
-  }, [suiteId, navigate, put, fetchStudioState]);
-  const runningIdsKey = Object.values(states)
-    .filter(isBatchPolling)
-    .map((s) => s.suite.id)
-    .sort()
-    .join(",");
+  }, [suiteId, reloadTick, navigate, applyState, fetchStudioState, hydrate]);
+
+  const currentBatch = currentState && (currentState.cards.length || currentState.pipeline) ? currentState : null;
+  const pollingSuiteId = currentBatch && isBatchPolling(currentBatch) ? currentBatch.suite.id : undefined;
+
   useEffect(() => {
-    if (!runningIdsKey) return;
-    const ids = runningIdsKey.split(",");
+    if (!pollingSuiteId) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function poll() {
       const seq = ++requestSeq.current;
-      const settled = await Promise.allSettled(ids.map((id) => studioApi.state(id)));
-      if (!live) return;
-      const updates: StudioState[] = [];
-      let firstError: unknown;
-      for (const result of settled) {
-        if (result.status === "fulfilled") updates.push(result.value);
-        else if (firstError === undefined) firstError = result.reason;
+      try {
+        const next = await studioApi.state(pollingSuiteId!);
+        if (!live || currentBatchIdRef.current !== pollingSuiteId) return;
+        applyState(next, seq);
+        if (isBatchPolling(next)) {
+          timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
+        }
+      } catch (e) {
+        if (!live || currentBatchIdRef.current !== pollingSuiteId) return;
+        setNotice(message(e));
+        timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
       }
-      if (updates.length) putMany(updates, seq);
-      if (firstError !== undefined) setNotice(message(firstError));
-      const updatedById = new Map(updates.map((s) => [s.suite.id, s]));
-      const stillRunning = ids.some((id) => {
-        const next = updatedById.get(id);
-        return next ? isBatchPolling(next) : true;
-      });
-      if (live && stillRunning) timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
     }
     timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
     return () => {
       live = false;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [runningIdsKey, putMany]);
+  }, [pollingSuiteId, applyState]);
+
   const route = (id: string) => {
     hydrated.current = id;
     setActive(id);
     saveLastSuiteId(id);
     if (id !== suiteId) navigate(`/create/suite/${id}`);
   };
+
   const startNewSuite = () => {
     clearLastSuiteId();
-    if (suiteId) {
+    hydrated.current = undefined;
+    setActive(undefined);
+    applyState(null);
+    setLoadingBatch(false);
+    setBatchError("");
+    setNotice("");
+    setImages([]);
+    setConfig(initialConfig);
+    setClone(false);
+    if (suiteId || window.location.pathname !== "/create/suite" || window.location.search) {
+      if (suiteId) skipDefaultFeed.current = true;
       navigate("/create/suite");
-    } else {
-      hydrated.current = undefined;
-      setActive(undefined);
-      setNotice("");
-      setImages([]);
-      setConfig(initialConfig);
-      setClone(false);
     }
   };
+
+  const handleSelectHistory = (id: string) => {
+    setHistoryOpen(false);
+    setBatchError("");
+    skipDefaultFeed.current = false;
+    hydrated.current = undefined;
+    if (id === suiteId) {
+      setReloadTick((n) => n + 1);
+      return;
+    }
+    saveLastSuiteId(id);
+    navigate(`/create/suite/${id}`);
+  };
+
   const upload = async (files: File[]) => {
     if (busy || clone || !files.length) return;
     setBusy(true);
@@ -337,6 +354,7 @@ export function SuiteStudioPage({
       let id = currentSuiteId;
       if (!id) {
         id = (await suiteApi.create(productNameFor(undefined, files[0].name))).id;
+        applyState(null);
         route(id);
       }
       for (const [i, file] of files.entries()) {
@@ -349,6 +367,7 @@ export function SuiteStudioPage({
       setBusy(false);
     }
   };
+
   const generate = async () => {
     if (!currentSuiteId || !images.length || busy) return;
     setBusy(true);
@@ -364,7 +383,7 @@ export function SuiteStudioPage({
       setClone(true);
       const seq = ++requestSeq.current;
       const latest = await studioApi.state(result.suiteId);
-      put(latest, seq);
+      applyState(latest, seq);
       setImages(latest.inputImages);
     } catch (e) {
       setNotice(message(e));
@@ -372,10 +391,19 @@ export function SuiteStudioPage({
       setBusy(false);
     }
   };
-  const toIso = (v: unknown) => (v instanceof Date ? v.toISOString() : String(v ?? ""));
-  const batches = Object.values(states)
-    .filter((s) => s.cards.length || s.pipeline)
-    .sort((a, b) => toIso(b.suite.createdAt).localeCompare(toIso(a.suite.createdAt)));
+
+  const renderHistoryMeta = useCallback(
+    (item: GenerationHistoryFeedItem) => {
+      const platformCode = typeof item.pipeline?.config?.platform === "string" ? item.pipeline.config.platform : "";
+      if (!platformCode) return null;
+      const label = profiles.find((p) => p.code === platformCode)?.name ?? platformCode;
+      return <span className="gh-meta-tag">{label}</span>;
+    },
+    [profiles],
+  );
+
+  const displayedSuiteId = currentBatch?.suite.id ?? currentSuiteId;
+
   return (
     <AppShell
       activeNav="create"
@@ -387,24 +415,7 @@ export function SuiteStudioPage({
       statusTone={busy ? "running" : "pass"}
     >
       <div className="ss-layout">
-        <nav className="ss-tools" aria-label="创作功能">
-          {createTools.map((t) => (
-            <a
-              key={t.id}
-              href={t.path}
-              aria-current={t.id === "suite" ? "page" : undefined}
-              onClick={(e) => {
-                if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-                  e.preventDefault();
-                  navigate(t.path);
-                }
-              }}
-            >
-              <Icon name={t.icon} />
-              {t.label}
-            </a>
-          ))}
-        </nav>
+        <CreateToolsNav activeTool="suite" navigate={navigate} />
         <ConfigPanel
           config={effective}
           update={patch}
@@ -434,11 +445,16 @@ export function SuiteStudioPage({
               <div className="ss-eyebrow">WORKSPACE / RESULTS</div>
               <h2>生成结果</h2>
             </div>
-            {currentSuiteId && (
-              <button disabled={busy} onClick={startNewSuite}>
-                ＋ 新建套图
+            <div className="ss-results-actions">
+              <button type="button" onClick={() => setHistoryOpen(true)}>
+                生成记录
               </button>
-            )}
+              {(currentSuiteId || currentBatch) && (
+                <button type="button" disabled={busy} onClick={startNewSuite}>
+                  ＋ 新建套图
+                </button>
+              )}
+            </div>
           </div>
           {notice && (
             <div className="ss-note" role="alert">
@@ -448,11 +464,29 @@ export function SuiteStudioPage({
               </button>
             </div>
           )}
-          {!batches.length && (loadingFeed ? <p>正在读取批次…</p> : <EmptyStudio />)}
-          {batches.map((s) => (
+          {!currentBatch &&
+            (loadingBatch ? (
+              <p>正在读取批次…</p>
+            ) : batchError ? (
+              <div className="ss-batch-error" data-batch-error>
+                <p>{batchError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBatchError("");
+                    setReloadTick((n) => n + 1);
+                  }}
+                >
+                  重试加载
+                </button>
+              </div>
+            ) : (
+              <EmptyStudio />
+            ))}
+          {currentBatch && (
             <BatchResults
-              key={s.suite.id}
-              state={s}
+              key={currentBatch.suite.id}
+              state={currentBatch}
               profiles={profiles}
               sizes={options.sizes}
               refresh={refresh}
@@ -461,28 +495,27 @@ export function SuiteStudioPage({
               onEdit={(s) => {
                 hydrate(s);
                 route(s.suite.id);
+                applyState(s);
                 setNotice("已载入同款配置，生成后将创建新批次。");
               }}
               onDelete={(id) => {
-                setStates((prev) => {
-                  const next = { ...prev };
-                  delete next[id];
-                  return next;
-                });
-                delete appliedSeq.current[id];
-                offset.current = Math.max(0, offset.current - 1);
                 if (readLastSuiteId() === id) clearLastSuiteId();
-                if (currentSuiteId === id) startNewSuite();
+                if (currentBatch.suite.id === id || currentSuiteId === id) {
+                  startNewSuite();
+                }
               }}
             />
-          ))}
-          {hasMore && (
-            <button ref={end} onClick={() => void loadPage()} disabled={loadingFeed}>
-              加载更多历史批次
-            </button>
           )}
         </main>
       </div>
+      <GenerationHistoryDrawer
+        origin="suite_studio"
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onSelect={handleSelectHistory}
+        currentSuiteId={displayedSuiteId}
+        renderMeta={renderHistoryMeta}
+      />
     </AppShell>
   );
 }
