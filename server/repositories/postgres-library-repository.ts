@@ -317,39 +317,40 @@ export class PostgresLibraryRepository implements LibraryRepository {
       const result = await this.pool.query<any>(
         `WITH RECURSIVE edit_lineage AS (
           SELECT
-            c.id AS leaf_child_task_id,
             c.id AS current_child_task_id,
-            c.source_card_id,
+            CASE
+              WHEN c.source_card_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+              THEN c.source_card_id::uuid
+              ELSE NULL
+            END AS source_card_uuid,
             (c.status = 'archived') AS any_child_archived,
             ARRAY[c.id] AS visited
-          FROM suite_workbench.image_edit_child_tasks c
-          WHERE c.id = (SELECT child_task_id FROM suite_workbench.image_edit_versions WHERE id = $1::uuid)
+          FROM suite_workbench.image_edit_versions ev0
+          JOIN suite_workbench.image_edit_child_tasks c ON c.id = ev0.child_task_id
+          WHERE ev0.id = $1::uuid
           UNION ALL
           SELECT
-            l.leaf_child_task_id,
             parent.id AS current_child_task_id,
-            parent.source_card_id,
+            CASE
+              WHEN parent.source_card_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+              THEN parent.source_card_id::uuid
+              ELSE NULL
+            END AS source_card_uuid,
             (l.any_child_archived OR parent.status = 'archived') AS any_child_archived,
             l.visited || parent.id
           FROM edit_lineage l
           JOIN suite_workbench.image_edit_child_tasks parent
-            ON parent.id::text = l.source_card_id
-          WHERE NOT (parent.id = ANY(l.visited))
+            ON parent.id = l.source_card_uuid
+          WHERE l.source_card_uuid IS NOT NULL
+            AND NOT (parent.id = ANY(l.visited))
         ),
-        edit_roots AS (
-          SELECT DISTINCT ON (l.leaf_child_task_id)
-            l.leaf_child_task_id,
-            t.id AS root_task_id,
-            t.suite_id,
-            t.title AS task_title,
-            t.image_type,
-            t.origin_kind,
-            t.status AS root_task_status,
+        deepest AS (
+          SELECT
+            l.source_card_uuid,
             l.any_child_archived
           FROM edit_lineage l
-          LEFT JOIN suite_workbench.suite_tasks t
-            ON t.id::text = l.source_card_id
-          ORDER BY l.leaf_child_task_id, (t.id IS NULL), array_length(l.visited, 1) DESC
+          ORDER BY array_length(l.visited, 1) DESC
+          LIMIT 1
         )
         SELECT
           ev.id AS version_id,
@@ -371,18 +372,19 @@ export class PostgresLibraryRepository implements LibraryRepository {
           s.operations_json,
           a.command_json,
           a.provider_json,
-          r.root_task_id,
-          r.suite_id,
-          r.task_title,
-          r.image_type,
-          r.origin_kind,
-          r.root_task_status,
-          r.any_child_archived
+          t.id AS root_task_id,
+          t.suite_id,
+          t.title AS task_title,
+          t.image_type,
+          t.origin_kind,
+          t.status AS root_task_status,
+          d.any_child_archived
         FROM suite_workbench.image_edit_versions ev
         JOIN suite_workbench.image_edit_child_tasks c ON c.id = ev.child_task_id
         JOIN suite_workbench.image_edit_attempts a ON a.id = ev.attempt_id
         JOIN suite_workbench.image_edit_snapshots s ON s.id = c.snapshot_id
-        LEFT JOIN edit_roots r ON r.leaf_child_task_id = c.id
+        LEFT JOIN deepest d ON true
+        LEFT JOIN suite_workbench.suite_tasks t ON t.id = d.source_card_uuid
         WHERE ev.id = $1::uuid`,
         [parsed.uuid],
       );
@@ -608,40 +610,47 @@ export class PostgresLibraryRepository implements LibraryRepository {
     }
     if (!query.resourceType || query.resourceType === "task_image_version") {
       const result = await this.pool.query<any>(
-        `WITH RECURSIVE edit_lineage AS (
+        `WITH RECURSIVE edit_tree AS (
           SELECT
-            c.id AS leaf_child_task_id,
-            c.id AS current_child_task_id,
+            c.id AS child_task_id,
             c.source_card_id,
-            (c.status = 'archived') AS any_child_archived,
-            ARRAY[c.id] AS visited
-          FROM suite_workbench.image_edit_child_tasks c
-          UNION ALL
-          SELECT
-            l.leaf_child_task_id,
-            parent.id AS current_child_task_id,
-            parent.source_card_id,
-            (l.any_child_archived OR parent.status = 'archived') AS any_child_archived,
-            l.visited || parent.id
-          FROM edit_lineage l
-          JOIN suite_workbench.image_edit_child_tasks parent
-            ON parent.id::text = l.source_card_id
-          WHERE NOT (parent.id = ANY(l.visited))
-        ),
-        edit_roots AS (
-          SELECT DISTINCT ON (l.leaf_child_task_id)
-            l.leaf_child_task_id,
+            c.source_version_id,
+            c.parent_version_id,
+            c.snapshot_id,
+            c.summary AS edit_summary,
+            c.status AS child_status,
             t.id AS root_task_id,
             t.suite_id,
             t.title AS task_title,
             t.image_type,
             t.origin_kind,
-            t.status AS root_task_status,
-            l.any_child_archived
-          FROM edit_lineage l
-          LEFT JOIN suite_workbench.suite_tasks t
-            ON t.id::text = l.source_card_id
-          ORDER BY l.leaf_child_task_id, (t.id IS NULL), array_length(l.visited, 1) DESC
+            ARRAY[c.id] AS visited
+          FROM suite_workbench.suite_tasks t
+          JOIN suite_workbench.image_edit_child_tasks c
+            ON c.source_card_id = t.id::text
+          WHERE ($1::uuid IS NULL OR t.suite_id = $1)
+            AND t.status <> 'archived'
+            AND c.status <> 'archived'
+          UNION ALL
+          SELECT
+            child.id AS child_task_id,
+            child.source_card_id,
+            child.source_version_id,
+            child.parent_version_id,
+            child.snapshot_id,
+            child.summary AS edit_summary,
+            child.status AS child_status,
+            tree.root_task_id,
+            tree.suite_id,
+            tree.task_title,
+            tree.image_type,
+            tree.origin_kind,
+            tree.visited || child.id
+          FROM edit_tree tree
+          JOIN suite_workbench.image_edit_child_tasks child
+            ON child.source_card_id = tree.child_task_id::text
+          WHERE child.status <> 'archived'
+            AND NOT (child.id = ANY(tree.visited))
         )
         SELECT
           ev.id AS version_id,
@@ -653,33 +662,31 @@ export class PostgresLibraryRepository implements LibraryRepository {
           ev.height,
           ev.mime_type,
           ev.created_at,
-          c.source_card_id,
-          c.source_version_id,
-          c.parent_version_id,
-          c.snapshot_id,
-          c.summary AS edit_summary,
-          c.status AS child_status,
+          tree.source_card_id,
+          tree.source_version_id,
+          tree.parent_version_id,
+          tree.snapshot_id,
+          tree.edit_summary,
+          tree.child_status,
           s.source_prompt,
           s.operations_json,
           a.command_json,
           a.provider_json,
-          r.root_task_id,
-          r.suite_id,
-          r.task_title,
-          r.image_type,
-          r.origin_kind,
-          r.root_task_status,
-          r.any_child_archived
-        FROM suite_workbench.image_edit_versions ev
-        JOIN suite_workbench.image_edit_child_tasks c ON c.id = ev.child_task_id
+          tree.root_task_id,
+          tree.suite_id,
+          tree.task_title,
+          tree.image_type,
+          tree.origin_kind
+        FROM edit_tree tree
+        JOIN suite_workbench.image_edit_versions ev ON ev.child_task_id = tree.child_task_id
         JOIN suite_workbench.image_edit_attempts a ON a.id = ev.attempt_id
-        JOIN suite_workbench.image_edit_snapshots s ON s.id = c.snapshot_id
-        LEFT JOIN edit_roots r ON r.leaf_child_task_id = c.id
-        WHERE ($1::uuid IS NULL OR r.suite_id = $1)
-          AND ($2::text IS NULL OR COALESCE(r.task_title, '') ILIKE $2 OR c.summary ILIKE $2 OR COALESCE(a.command_json->>'prompt', '') ILIKE $2)
-          AND COALESCE(r.root_task_status, '') <> 'archived'
-          AND COALESCE(r.any_child_archived, false) = false
-          AND c.status <> 'archived'
+        JOIN suite_workbench.image_edit_snapshots s ON s.id = tree.snapshot_id
+        WHERE ($2::text IS NULL
+            OR COALESCE(tree.task_title, '') ILIKE $2
+            OR tree.edit_summary ILIKE $2
+            OR COALESCE(a.command_json->>'prompt', '') ILIKE $2
+            OR concat(COALESCE(NULLIF(btrim(tree.task_title), ''), NULLIF(btrim(tree.edit_summary), ''), '图片编辑'), ' · 编辑版本 ', ev.version_number) ILIKE $2
+            OR concat('编辑生成 · ', CASE WHEN tree.origin_kind = 'replica' THEN '爆品图复刻' WHEN tree.image_type = 'main' THEN '主图' ELSE '详情页' END, ' · ', ev.width, ' × ', ev.height) ILIKE $2)
           AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'edit-version:' || ev.id::text)
         ORDER BY ev.created_at DESC`,
         [suiteId, needle],

@@ -322,7 +322,10 @@ export class MemoryLibraryRepository implements LibraryRepository {
         if (query.scope === "image" && resource.resourceType === "prompt_template") return false;
         if (query.resourceType && resource.resourceType !== query.resourceType) return false;
         if (query.stage && resource.stage !== query.stage) return false;
-        if (query.suiteId && resource.suiteId !== query.suiteId && resource.suiteId !== null) return false;
+        if (query.suiteId) {
+          const allowGlobalNull = resource.resourceType === "reverse_reference_asset" || resource.resourceType === "prompt_template";
+          if (resource.suiteId !== query.suiteId && !(allowGlobalNull && resource.suiteId === null)) return false;
+        }
         if (query.status && resource.status !== query.status) return false;
         if (needle) {
           const editSummary = typeof resource.source.editSummary === "string" ? resource.source.editSummary : "";

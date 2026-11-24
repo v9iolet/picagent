@@ -1515,7 +1515,7 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
   });
 });
 
-test("037 adds image_edit indexes; PG library excludes archived tasks' images & exposes editor-derived images with soft-delete, total, preview, and references", { skip }, async () => {
+test("037 adds source_card_id index and drops created_at index idempotently; PG library excludes archived tasks' images & exposes editor-derived images with search, soft-delete, total, preview, and references", { skip }, async () => {
   await withMigratedSchemas(async ({ pool, schemas }) => {
     const idxCheck = await pool.query<{ indexname: string }>(
       `SELECT indexname FROM pg_indexes
@@ -1525,9 +1525,21 @@ test("037 adds image_edit indexes; PG library excludes archived tasks' images & 
     );
     assert.deepEqual(
       idxCheck.rows.map((r) => r.indexname),
-      ["image_edit_child_tasks_source_card_id_idx", "image_edit_versions_created_at_idx"],
+      ["image_edit_child_tasks_source_card_id_idx"],
     );
+    // Simulate a dev DB where the legacy image_edit_versions_created_at_idx existed, then replay migrations -> must drop it cleanly
+    await pool.query(`CREATE INDEX IF NOT EXISTS image_edit_versions_created_at_idx ON suite_workbench.image_edit_versions (created_at DESC)`);
     await runMigrations(pool);
+    const idxAfterReplay = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = $1 AND indexname IN ('image_edit_child_tasks_source_card_id_idx', 'image_edit_versions_created_at_idx')
+       ORDER BY indexname`,
+      [schemas[0]],
+    );
+    assert.deepEqual(
+      idxAfterReplay.rows.map((r) => r.indexname),
+      ["image_edit_child_tasks_source_card_id_idx"],
+    );
 
     const suites = new PostgresSuiteRepository(pool);
     const tasks = new PostgresTaskRepository(pool);
@@ -1718,6 +1730,14 @@ test("037 adds image_edit indexes; PG library excludes archived tasks' images & 
     assert.equal(edit1Res.source.rootTaskId, task1.id);
     assert.equal(edit1Res.suiteId, suite.id);
     assert.match(edit1Res.summary, /编辑生成/);
+
+    // 1b. PG search matches synthesized title ("编辑版本 1") and summary ("编辑生成") consistent with Memory
+    const byOriginSearch = await library.listResources({ scope: "image", query: "编辑生成", suiteId: suite.id });
+    assert.equal(byOriginSearch.total, 2);
+    assert.deepEqual(new Set(byOriginSearch.items.map((item) => item.id)), new Set([edit1Id, edit2Id]));
+    const byVersionTitleSearch = await library.listResources({ scope: "image", query: "编辑版本 1", suiteId: suite.id });
+    assert.equal(byVersionTitleSearch.total, 2);
+    assert.deepEqual(new Set(byVersionTitleSearch.items.map((item) => item.id)), new Set([edit1Id, edit2Id]));
 
     // 2. edit-version can be referenced (bound) to task2 in the same suite
     const bound = await library.createReference({

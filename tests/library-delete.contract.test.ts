@@ -741,4 +741,26 @@ test("archiving a task hides its generated and editor-derived images from librar
   assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(edit1Id)}`)).status, 200);
   const afterRestore = await app.request("GET", `/api/library/resources?scope=image&resourceType=task_image_version&status=published&suiteId=${suite.id}`);
   assert.equal((afterRestore.body as any).data.total, 3);
+
+  // Align suiteId: null behavior with PG: non-reverse/non-prompt resources with suiteId=null are excluded when suiteId is specified
+  library.addResource(
+    makeResource({
+      id: "input:orphan-null-suite",
+      resourceType: "input_image",
+      title: "无方案原图",
+      suiteId: null,
+    }),
+  );
+  const reverseNullSuite = await library.createReverseReferenceAsset({
+    suiteId: null,
+    title: "全局反推参考",
+    summary: "无方案反推",
+    objectKey: "reverse/global-null.png",
+    mimeType: "image/png",
+    promptSnapshot: { prompt: "global" },
+  });
+  const scopedInputs = await app.request("GET", `/api/library/resources?resourceType=input_image&suiteId=${suite.id}`);
+  assert.equal((scopedInputs.body as any).data.items.some((item: any) => item.id === "input:orphan-null-suite"), false);
+  const scopedReverse = await app.request("GET", `/api/library/resources?resourceType=reverse_reference_asset&suiteId=${suite.id}`);
+  assert.equal((scopedReverse.body as any).data.items.some((item: any) => item.id === reverseNullSuite.id), true);
 });
