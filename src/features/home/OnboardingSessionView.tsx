@@ -72,6 +72,7 @@ export function OnboardingSessionView({
 
   const draftVersionRef = useRef(0);
   const savedVersionRef = useRef(0);
+  const savingVersionRef = useRef(0);
   const imagesDirtyRef = useRef(false);
   const debounceTimerRef = useRef<number | null>(null);
   const inFlightSaveRef = useRef<Promise<boolean> | null>(null);
@@ -80,6 +81,9 @@ export function OnboardingSessionView({
   sessionIdRef.current = sessionId;
   const sessionStatusRef = useRef(session?.status ?? "draft");
   sessionStatusRef.current = session?.status ?? "draft";
+  const initialSessionRef = useRef(initialSession);
+  initialSessionRef.current = initialSession;
+  const seededSessionIdRef = useRef<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -90,6 +94,24 @@ export function OnboardingSessionView({
       if (debounceTimerRef.current !== null) {
         window.clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
+      }
+      if (
+        sessionStatusRef.current === "draft" &&
+        draftVersionRef.current > Math.max(savedVersionRef.current, savingVersionRef.current)
+      ) {
+        const activeSessionId = sessionIdRef.current;
+        const fields = draftFieldsRef.current;
+        const images = draftImagesRef.current;
+        const includeImages = imagesDirtyRef.current;
+        savingVersionRef.current = draftVersionRef.current;
+        void productOnboardingApi
+          .saveDraft(activeSessionId, {
+            draftCard: fields,
+            ...(includeImages
+              ? { supplierImages: toUpdateSupplierImagePayloads(images) }
+              : {}),
+          })
+          .catch(() => undefined);
       }
     };
   }, []);
@@ -102,20 +124,29 @@ export function OnboardingSessionView({
     draftImagesRef.current = supplierImagesFromSession(loaded);
     draftVersionRef.current += 1;
     savedVersionRef.current = draftVersionRef.current;
+    savingVersionRef.current = draftVersionRef.current;
     imagesDirtyRef.current = false;
     setDraftSaveState("idle");
     setDraftSaveError("");
   }, []);
 
   useEffect(() => {
-    if (matchedInitial) {
-      hydrateFromSession(matchedInitial);
-      setLoading(false);
-      setLoadError("");
-      onConsumeInitialSession?.();
-      return;
+    if (reloadTick === 0) {
+      if (seededSessionIdRef.current === sessionId) {
+        return;
+      }
+      const initial = initialSessionRef.current;
+      if (initial && initial.id === sessionId) {
+        seededSessionIdRef.current = sessionId;
+        hydrateFromSession(initial);
+        setLoading(false);
+        setLoadError("");
+        onConsumeInitialSession?.();
+        return;
+      }
     }
 
+    seededSessionIdRef.current = null;
     let active = true;
     setLoading(true);
     setLoadError("");
@@ -137,7 +168,7 @@ export function OnboardingSessionView({
     return () => {
       active = false;
     };
-  }, [sessionId, reloadTick, matchedInitial, hydrateFromSession, onConsumeInitialSession]);
+  }, [sessionId, reloadTick, hydrateFromSession, onConsumeInitialSession]);
 
   // Scroll message list to bottom when messages change or sending starts
   useEffect(() => {
@@ -166,6 +197,7 @@ export function OnboardingSessionView({
     const fieldsAtSend = draftFieldsRef.current;
     const imagesAtSend = draftImagesRef.current;
     const includeImages = imagesDirtyRef.current;
+    savingVersionRef.current = Math.max(savingVersionRef.current, versionAtSend);
 
     if (mountedRef.current) {
       setDraftSaveState("saving");
@@ -180,10 +212,10 @@ export function OnboardingSessionView({
             ? { supplierImages: toUpdateSupplierImagePayloads(imagesAtSend) }
             : {}),
         });
+        savedVersionRef.current = Math.max(savedVersionRef.current, versionAtSend);
         if (!mountedRef.current || sessionIdRef.current !== activeSessionId) {
           return true;
         }
-        savedVersionRef.current = Math.max(savedVersionRef.current, versionAtSend);
         setSession((prev) =>
           prev
             ? {
@@ -208,6 +240,9 @@ export function OnboardingSessionView({
         }
         return true;
       } catch (cause) {
+        if (savingVersionRef.current === versionAtSend) {
+          savingVersionRef.current = savedVersionRef.current;
+        }
         if (mountedRef.current && sessionIdRef.current === activeSessionId) {
           setDraftSaveState("error");
           setDraftSaveError(cause instanceof Error ? cause.message : "草稿保存失败，请重试");
@@ -244,7 +279,7 @@ export function OnboardingSessionView({
   );
 
   const handleDraftFieldsChange = (next: ProductCardFields) => {
-    if (session?.status === "completed") return;
+    if (session?.status === "completed" || sendingMessage || publishing) return;
     draftFieldsRef.current = next;
     setDraftFields(next);
     draftVersionRef.current += 1;
@@ -252,7 +287,7 @@ export function OnboardingSessionView({
   };
 
   const handleDraftImagesChange = (next: ProductCardSupplierImageDraft[]) => {
-    if (session?.status === "completed") return;
+    if (session?.status === "completed" || sendingMessage || publishing) return;
     draftImagesRef.current = next;
     setDraftImages(next);
     imagesDirtyRef.current = true;
@@ -260,11 +295,24 @@ export function OnboardingSessionView({
     scheduleDraftSave(120);
   };
 
-  const handleNavigateBackHome = async () => {
-    if (session?.status === "draft" && draftVersionRef.current > savedVersionRef.current) {
-      await flushDraftSave();
-    }
-    navigate("/");
+  const handleShellNavigate = useCallback(
+    (to: string, options?: { replace?: boolean }) => {
+      if (
+        sessionStatusRef.current === "draft" &&
+        draftVersionRef.current > savedVersionRef.current
+      ) {
+        void flushDraftSave().finally(() => {
+          navigate(to, options);
+        });
+        return;
+      }
+      navigate(to, options);
+    },
+    [flushDraftSave, navigate],
+  );
+
+  const handleNavigateBackHome = () => {
+    handleShellNavigate("/");
   };
 
   const handleSendReply = async () => {
@@ -415,7 +463,7 @@ export function OnboardingSessionView({
   return (
     <AppShell
       activeNav="home"
-      navigate={navigate}
+      navigate={handleShellNavigate}
       fullHeight
       crumbs={[
         { label: "首页", to: "/" },
@@ -696,6 +744,7 @@ export function OnboardingSessionView({
                     onSubmit={handlePublish}
                     submitLabel="保存到商品库"
                     submitting={publishing}
+                    disabled={sendingMessage}
                     readOnly={isCompleted}
                     highlightMissing={!isCompleted}
                     externalMissingFields={isCompleted ? undefined : session.missingRequiredFields}

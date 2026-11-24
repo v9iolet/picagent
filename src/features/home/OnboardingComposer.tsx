@@ -1,4 +1,4 @@
-import { useRef, useState, type DragEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
 import { productCardCharLength } from "../../../shared/product-card";
 import {
   PRODUCT_ONBOARDING_MAX_MESSAGE_CHARS,
@@ -13,6 +13,22 @@ import {
   readTxtAttachmentFiles,
   type PendingTxtAttachment,
 } from "./onboarding-attachments";
+
+function countUniqueSupplierImages(
+  existing: ProductCardSupplierImageDraft[],
+  pending: ProductCardSupplierImageDraft[],
+): number {
+  const seenHashes = new Set<string>();
+  let count = 0;
+  for (const image of [...existing, ...pending]) {
+    if (image.sha256) {
+      if (seenHashes.has(image.sha256)) continue;
+      seenHashes.add(image.sha256);
+    }
+    count += 1;
+  }
+  return count;
+}
 
 export interface OnboardingComposerProps {
   variant: "hero" | "reply";
@@ -49,11 +65,40 @@ export function OnboardingComposer({
 }: OnboardingComposerProps) {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const txtInputRef = useRef<HTMLInputElement | null>(null);
+  const mountedRef = useRef(true);
+  const sendingRef = useRef(sending);
+  const pendingImagesRef = useRef(pendingImages);
+  const pendingTxtFilesRef = useRef(pendingTxtFiles);
+  const existingSessionImagesRef = useRef(existingSessionImages);
+  const onPendingImagesChangeRef = useRef(onPendingImagesChange);
+  const onPendingTxtFilesChangeRef = useRef(onPendingTxtFilesChange);
+
+  sendingRef.current = sending;
+  pendingImagesRef.current = pendingImages;
+  pendingTxtFilesRef.current = pendingTxtFiles;
+  existingSessionImagesRef.current = existingSessionImages;
+  onPendingImagesChangeRef.current = onPendingImagesChange;
+  onPendingTxtFilesChangeRef.current = onPendingTxtFilesChange;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const [validationError, setValidationError] = useState("");
   const [dragging, setDragging] = useState(false);
 
-  const totalImages = existingSessionImages.length + pendingImages.length;
-  const remainingImageSlots = Math.max(0, PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES - totalImages);
+  const totalUniqueImages = useMemo(
+    () => countUniqueSupplierImages(existingSessionImages, pendingImages),
+    [existingSessionImages, pendingImages],
+  );
+  const tooManyImages = totalUniqueImages > PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES;
+  const remainingImageSlots = Math.max(
+    0,
+    PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES - totalUniqueImages,
+  );
   const remainingTxtSlots = Math.max(
     0,
     PRODUCT_ONBOARDING_MAX_TXT_FILES_PER_MESSAGE - pendingTxtFiles.length,
@@ -63,46 +108,107 @@ export function OnboardingComposer({
   const messageTooLong = charCount > PRODUCT_ONBOARDING_MAX_MESSAGE_CHARS;
   const hasPayload =
     message.trim().length > 0 || pendingImages.length > 0 || pendingTxtFiles.length > 0;
-  const canSubmit = hasPayload && !messageTooLong && !sending;
+  const canSubmit = hasPayload && !messageTooLong && !tooManyImages && !sending;
+
+  const mergeAddedImages = (
+    added: ProductCardSupplierImageDraft[],
+    initialErrors: string[],
+  ): string[] => {
+    const latestPending = pendingImagesRef.current;
+    const latestExisting = existingSessionImagesRef.current;
+    const latestHashes = new Set<string>(
+      [...latestExisting, ...latestPending]
+        .map((item) => item.sha256)
+        .filter((hash): hash is string => Boolean(hash)),
+    );
+    const currentUniqueCount = countUniqueSupplierImages(latestExisting, latestPending);
+    const remainingSlots = Math.max(0, PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES - currentUniqueCount);
+    const nextErrors = [...initialErrors];
+    const safeAdded: ProductCardSupplierImageDraft[] = [];
+
+    for (const item of added) {
+      if (item.sha256 && latestHashes.has(item.sha256)) {
+        nextErrors.push(`「${item.filename}」与已有图片重复，已自动去重`);
+        continue;
+      }
+      if (safeAdded.length >= remainingSlots) {
+        nextErrors.push(
+          `同一建档会话最多累计上传 ${PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES} 张供应商参考图`,
+        );
+        break;
+      }
+      if (item.sha256) latestHashes.add(item.sha256);
+      safeAdded.push(item);
+    }
+
+    if (safeAdded.length > 0) {
+      const merged = [...latestPending, ...safeAdded];
+      pendingImagesRef.current = merged;
+      onPendingImagesChangeRef.current(merged);
+    }
+    return nextErrors;
+  };
+
+  const mergeAddedTxtFiles = (
+    added: PendingTxtAttachment[],
+    initialErrors: string[],
+  ): string[] => {
+    const latestTxt = pendingTxtFilesRef.current;
+    const remainingSlots = Math.max(
+      0,
+      PRODUCT_ONBOARDING_MAX_TXT_FILES_PER_MESSAGE - latestTxt.length,
+    );
+    const nextErrors = [...initialErrors];
+    const safeAdded = added.slice(0, remainingSlots);
+    if (added.length > remainingSlots) {
+      nextErrors.push(
+        `单次发送最多上传 ${PRODUCT_ONBOARDING_MAX_TXT_FILES_PER_MESSAGE} 个 .txt 文件`,
+      );
+    }
+    if (safeAdded.length > 0) {
+      const merged = [...latestTxt, ...safeAdded];
+      pendingTxtFilesRef.current = merged;
+      onPendingTxtFilesChangeRef.current(merged);
+    }
+    return nextErrors;
+  };
 
   const handleImageFiles = async (files: FileList | File[] | null) => {
-    if (!files || files.length === 0 || sending) return;
+    if (!files || files.length === 0 || sendingRef.current) return;
     setValidationError("");
     const { added, errors } = await readComposerSupplierImages(
       files,
-      pendingImages,
-      existingSessionImages,
+      pendingImagesRef.current,
+      existingSessionImagesRef.current,
     );
-    if (added.length > 0) {
-      onPendingImagesChange([...pendingImages, ...added]);
-    }
-    if (errors.length > 0) {
-      setValidationError(errors.join("；"));
-    }
     if (imageInputRef.current) {
       imageInputRef.current.value = "";
+    }
+    if (!mountedRef.current || sendingRef.current) return;
+    const finalErrors = mergeAddedImages(added, errors);
+    if (finalErrors.length > 0) {
+      setValidationError(finalErrors.join("；"));
     }
   };
 
   const handleTxtFiles = async (files: FileList | File[] | null) => {
-    if (!files || files.length === 0 || sending) return;
+    if (!files || files.length === 0 || sendingRef.current) return;
     setValidationError("");
-    const { added, errors } = await readTxtAttachmentFiles(files, pendingTxtFiles);
-    if (added.length > 0) {
-      onPendingTxtFilesChange([...pendingTxtFiles, ...added]);
-    }
-    if (errors.length > 0) {
-      setValidationError(errors.join("；"));
-    }
+    const { added, errors } = await readTxtAttachmentFiles(files, pendingTxtFilesRef.current);
     if (txtInputRef.current) {
       txtInputRef.current.value = "";
+    }
+    if (!mountedRef.current || sendingRef.current) return;
+    const finalErrors = mergeAddedTxtFiles(added, errors);
+    if (finalErrors.length > 0) {
+      setValidationError(finalErrors.join("；"));
     }
   };
 
   const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(false);
-    if (sending) return;
+    if (sendingRef.current) return;
     const dropped = Array.from(event.dataTransfer.files);
     if (dropped.length === 0) return;
 
@@ -127,17 +233,18 @@ export function OnboardingComposer({
     if (imageCandidates.length > 0) {
       const res = await readComposerSupplierImages(
         imageCandidates,
-        pendingImages,
-        existingSessionImages,
+        pendingImagesRef.current,
+        existingSessionImagesRef.current,
       );
-      if (res.added.length > 0) onPendingImagesChange([...pendingImages, ...res.added]);
-      combinedErrors.push(...res.errors);
+      if (!mountedRef.current || sendingRef.current) return;
+      combinedErrors.push(...mergeAddedImages(res.added, res.errors));
     }
     if (txtCandidates.length > 0) {
-      const res = await readTxtAttachmentFiles(txtCandidates, pendingTxtFiles);
-      if (res.added.length > 0) onPendingTxtFilesChange([...pendingTxtFiles, ...res.added]);
-      combinedErrors.push(...res.errors);
+      const res = await readTxtAttachmentFiles(txtCandidates, pendingTxtFilesRef.current);
+      if (!mountedRef.current || sendingRef.current) return;
+      combinedErrors.push(...mergeAddedTxtFiles(res.added, res.errors));
     }
+    if (!mountedRef.current || sendingRef.current) return;
     setValidationError(combinedErrors.join("；"));
   };
 
@@ -228,13 +335,15 @@ export function OnboardingComposer({
         </div>
       )}
 
-      {(validationError || messageTooLong) && (
+      {(validationError || messageTooLong || tooManyImages) && (
         <div className="home-composer-error" role="alert">
           <Icon name="alert" />
           <span>
             {messageTooLong
               ? `单条消息不能超过 ${PRODUCT_ONBOARDING_MAX_MESSAGE_CHARS} 字（当前 ${charCount} 字）`
-              : validationError}
+              : tooManyImages
+                ? `同一建档会话最多累计上传 ${PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES} 张供应商参考图（当前去重后 ${totalUniqueImages} 张），请移除多余图片后再发送`
+                : validationError}
           </span>
         </div>
       )}
@@ -265,7 +374,9 @@ export function OnboardingComposer({
             <Icon name="image" />
             <span>
               ＋ 供应商图
-              {totalImages > 0 ? ` (${totalImages}/${PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES})` : ""}
+              {totalUniqueImages > 0
+                ? ` (${totalUniqueImages}/${PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES})`
+                : ""}
             </span>
           </button>
 

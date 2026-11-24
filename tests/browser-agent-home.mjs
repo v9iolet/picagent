@@ -126,6 +126,7 @@ async function startOfflineHomeApp(t, llmHandler) {
 
 test("HomePage Agent onboarding: default / landing, upload supplier image + .txt, merged follow-up, manual draft edit, draft resume/delete, publish read-only & quick jumps", async (t) => {
   let shouldFailNextReply = false;
+  let pendingReplyGate = null;
 
   const { baseUrl, browser, api, llmCalls, apiCalls } = await startOfflineHomeApp(
     t,
@@ -133,6 +134,12 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
       if (shouldFailNextReply) {
         shouldFailNextReply = false;
         throw new Error("LLM_TIMEOUT");
+      }
+
+      if (pendingReplyGate) {
+        const gate = pendingReplyGate;
+        pendingReplyGate = null;
+        await gate.promise;
       }
 
       if (callIndex === 1) {
@@ -288,37 +295,48 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   assert.equal(await publishBtn.isDisabled(), true, "Publish button must be disabled when 3 required fields are missing");
   assert.match(await cardPane.locator('[data-testid="pc-disable-reason"]').innerText(), /尚缺 3 项必填/);
 
-  // 4. Return to "/" mid-way -> see draft session in "未完成建档草稿" and click to resume
-  await page.getByRole("button", { name: "返回首页" }).click();
+  // Regression assertion 1: entering /?session=<id> from POST /sessions must NOT trigger a redundant GET
+  await page.waitForTimeout(150);
+  const redundantSessionGets = apiCalls.filter(
+    (c) => c.method === "GET" && c.path === `/api/product-onboarding/sessions/${sessionId}`,
+  );
+  assert.equal(
+    redundantSessionGets.length,
+    0,
+    "Initial session transition from POST /sessions must not fire redundant GET /sessions/:id",
+  );
+
+  // 4. Regression assertion 2: edit name on right form and IMMEDIATELY click .pa-brand (<500ms) ->
+  // must flush PATCH /draft before leaving and display updated name in "未完成建档草稿"
+  await cardPane.locator(`#onboarding-${sessionId}-name`).fill("星河真空保温随行杯 500ml（旗舰版）");
+  await page.locator(".pa-brand").click();
   await page.waitForFunction(
     () => window.location.pathname === "/" && !new URLSearchParams(window.location.search).get("session"),
+  );
+  assert.ok(
+    apiCalls.some((c) => c.method === "PATCH" && c.path === `/api/product-onboarding/sessions/${sessionId}/draft`),
+    "Navigating via .pa-brand immediately after editing must flush PATCH /draft",
   );
 
   const draftCard = page.locator(`.home-draft-card[data-draft-session-id="${sessionId}"]`);
   await draftCard.waitFor({ state: "visible" });
   const draftCardText = await draftCard.innerText();
-  assert.match(draftCardText, /真空保温随行杯 500ml/);
+  assert.match(draftCardText, /星河真空保温随行杯 500ml（旗舰版）/);
   assert.match(draftCardText, /待补 3 项必填/);
 
-  // Resume draft session
+  // Resume draft session and confirm persisted manual edit is restored
   await draftCard.getByRole("button", { name: "继续建档" }).click();
   await page.waitForFunction(
     (id) => window.location.pathname === "/" && new URLSearchParams(window.location.search).get("session") === id,
     sessionId,
   );
   await cardPane.locator(`#onboarding-${sessionId}-name`).waitFor({ state: "visible" });
-
-  // 5. Manually edit product name on right form -> verify debounced PATCH /draft persists
-  await cardPane.locator(`#onboarding-${sessionId}-name`).fill("星河真空保温随行杯 500ml（旗舰版）");
-  await page.waitForFunction(
-    () => document.querySelector(".home-draft-save-status.is-saved")?.textContent?.includes("已自动保存"),
-  );
-  assert.ok(
-    apiCalls.some((c) => c.method === "PATCH" && c.path === `/api/product-onboarding/sessions/${sessionId}/draft`),
-    "Manual edit must persist via PATCH /draft",
+  assert.equal(
+    await cardPane.locator(`#onboarding-${sessionId}-name`).inputValue(),
+    "星河真空保温随行杯 500ml（旗舰版）",
   );
 
-  // 6. Test error + retry flow in left chat without losing input, then complete required fields
+  // 5. Test error + retry flow in left chat without losing input, and verify right form is locked during delayed POST /messages
   shouldFailNextReply = true;
   await page
     .getByLabel("补充商品信息输入框")
@@ -328,11 +346,38 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   assert.match(await page.locator(".home-chat-error").innerText(), /超时|重试/);
   assert.match(await page.getByLabel("补充商品信息输入框").inputValue(), /316L/);
 
-  // Retry succeeds -> all 7 required fields filled & publish button enabled
-  await page.getByRole("button", { name: "重试发送" }).click();
+  // Regression assertion 3: during delayed POST /messages, right form inputs & publish button are disabled
+  // while publish button text remains "保存到商品库"
+  const replyGate = Promise.withResolvers();
+  pendingReplyGate = replyGate;
+  try {
+    await page.getByRole("button", { name: "重试发送" }).click();
+    await page.locator(".home-msg.is-loading").waitFor({ state: "visible" });
+    assert.equal(
+      await cardPane.locator(`#onboarding-${sessionId}-name`).isDisabled(),
+      true,
+      "Right form inputs must be disabled while POST /messages is in flight",
+    );
+    assert.equal(
+      await publishBtn.isDisabled(),
+      true,
+      "Publish button must be disabled while POST /messages is in flight",
+    );
+    assert.equal(
+      (await publishBtn.innerText()).trim(),
+      "保存到商品库",
+      "Publish button label must stay '保存到商品库' during chat follow-up",
+    );
+  } finally {
+    pendingReplyGate = null;
+    replyGate.resolve();
+  }
+
+  // Wait for retried reply -> all 7 required fields filled & publish button enabled
   await page.waitForFunction(
     () => document.querySelectorAll('.home-msg[data-message-role="assistant"]').length === 2,
   );
+  assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).isDisabled(), false);
   assert.equal(await cardPane.locator(".pc-field.is-missing").count(), 0);
   assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).inputValue(), "星河真空保温随行杯 500ml（旗舰版）");
   assert.equal(await publishBtn.isDisabled(), false, "Publish button must be enabled when all 7 required fields are filled");
