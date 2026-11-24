@@ -386,12 +386,12 @@ test("下游接入商品信息卡：首页跳套图+归档快照可读、复刻�
   page.on("pageerror", (error) => pageErrors.push(error));
 
   // =========================================================================
-  // 链路 1：首页已发布卡「去生成套图」→ 空白套图预绑定 → 生成套图含上架文案 → 归档后仍可读快照
+  // 链路 1：首页已发布卡「去套图」→ 空白套图预绑定 → 生成套图含上架文案 → 归档后仍可读快照
   // =========================================================================
   await page.goto(`${ctx.baseUrl}/`);
   const recentCard = page.locator(`[data-recent-card-id="${ctx.tumblerCard.id}"]`);
   await recentCard.waitFor();
-  await recentCard.getByRole("button", { name: "去生成套图", exact: true }).click();
+  await recentCard.getByRole("button", { name: "去套图", exact: true }).click();
 
   await page.waitForURL(new RegExp(`/create/suite\\?productCardId=${ctx.tumblerCard.id}`));
   // Empty new suite state

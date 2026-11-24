@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type DragEvent,
+  type KeyboardEvent,
+} from "react";
 import { productCardCharLength } from "../../../shared/product-card";
 import {
   PRODUCT_ONBOARDING_MAX_MESSAGE_CHARS,
@@ -60,11 +68,13 @@ export function OnboardingComposer({
   onSubmit,
   placeholder,
   submitLabel,
-  sendingLabel = "分析提取中…",
+  sendingLabel = "提取中…",
   ariaLabel = "商品建档输入框",
 }: OnboardingComposerProps) {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const txtInputRef = useRef<HTMLInputElement | null>(null);
+  const plusWrapRef = useRef<HTMLDivElement | null>(null);
+  const plusBtnRef = useRef<HTMLButtonElement | null>(null);
   const mountedRef = useRef(true);
   const sendingRef = useRef(sending);
   const pendingImagesRef = useRef(pendingImages);
@@ -89,6 +99,35 @@ export function OnboardingComposer({
 
   const [validationError, setValidationError] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (sending && menuOpen) {
+      setMenuOpen(false);
+    }
+  }, [sending, menuOpen]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && plusWrapRef.current?.contains(target)) return;
+      setMenuOpen(false);
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setMenuOpen(false);
+      plusBtnRef.current?.focus({ preventScroll: true });
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [menuOpen]);
 
   const totalUniqueImages = useMemo(
     () => countUniqueSupplierImages(existingSessionImages, pendingImages),
@@ -106,6 +145,8 @@ export function OnboardingComposer({
 
   const charCount = productCardCharLength(message.trim());
   const messageTooLong = charCount > PRODUCT_ONBOARDING_MAX_MESSAGE_CHARS;
+  const showCharCount =
+    messageTooLong || charCount >= Math.ceil(PRODUCT_ONBOARDING_MAX_MESSAGE_CHARS * 0.85);
   const hasPayload =
     message.trim().length > 0 || pendingImages.length > 0 || pendingTxtFiles.length > 0;
   const canSubmit = hasPayload && !messageTooLong && !tooManyImages && !sending;
@@ -205,18 +246,15 @@ export function OnboardingComposer({
     }
   };
 
-  const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setDragging(false);
-    if (sendingRef.current) return;
-    const dropped = Array.from(event.dataTransfer.files);
-    if (dropped.length === 0) return;
+  const handleMixedFiles = async (files: File[]) => {
+    if (files.length === 0 || sendingRef.current) return;
+    setValidationError("");
 
     const txtCandidates: File[] = [];
     const imageCandidates: File[] = [];
     const unsupported: string[] = [];
 
-    for (const file of dropped) {
+    for (const file of files) {
       if (/\.txt$/i.test(file.name) || file.type === "text/plain") {
         txtCandidates.push(file);
       } else if (
@@ -225,7 +263,7 @@ export function OnboardingComposer({
       ) {
         imageCandidates.push(file);
       } else {
-        unsupported.push(`「${file.name}」不支持，仅支持 JPG/PNG/WebP 图片或 .txt 纯文本`);
+        unsupported.push(`「${file.name || "未命名文件"}」不支持，仅支持 JPG/PNG/WebP 图片或 .txt 纯文本`);
       }
     }
 
@@ -248,6 +286,32 @@ export function OnboardingComposer({
     setValidationError(combinedErrors.join("；"));
   };
 
+  const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragging(false);
+    if (sendingRef.current) return;
+    const dropped = Array.from(event.dataTransfer.files);
+    await handleMixedFiles(dropped);
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    if (sendingRef.current) return;
+    const clipboardFiles: File[] = [];
+    if (event.clipboardData?.files?.length) {
+      clipboardFiles.push(...Array.from(event.clipboardData.files));
+    } else if (event.clipboardData?.items?.length) {
+      for (const item of Array.from(event.clipboardData.items)) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) clipboardFiles.push(file);
+        }
+      }
+    }
+    if (clipboardFiles.length === 0) return;
+    event.preventDefault();
+    void handleMixedFiles(clipboardFiles);
+  };
+
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey) return;
     if (event.nativeEvent.isComposing) return;
@@ -260,10 +324,29 @@ export function OnboardingComposer({
   const handleTriggerSubmit = () => {
     if (!canSubmit) return;
     setValidationError("");
+    setMenuOpen(false);
     void onSubmit();
   };
 
+  const handlePickImages = () => {
+    setMenuOpen(false);
+    imageInputRef.current?.click();
+  };
+
+  const handlePickTxt = () => {
+    setMenuOpen(false);
+    txtInputRef.current?.click();
+  };
+
   const hasAttachments = pendingImages.length > 0 || pendingTxtFiles.length > 0;
+  const imageSubtext =
+    totalUniqueImages > 0
+      ? `JPG/PNG/WebP，已传 ${totalUniqueImages}/${PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES} 张`
+      : `JPG/PNG/WebP，最多 ${PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES} 张`;
+  const txtSubtext =
+    pendingTxtFiles.length > 0
+      ? `.txt，≤200KB（已选 ${pendingTxtFiles.length}/${PRODUCT_ONBOARDING_MAX_TXT_FILES_PER_MESSAGE}）`
+      : ".txt，≤200KB";
 
   return (
     <div
@@ -274,18 +357,8 @@ export function OnboardingComposer({
       }}
       onDragLeave={() => setDragging(false)}
       onDrop={(event) => void handleDrop(event)}
+      onPaste={handlePaste}
     >
-      <textarea
-        className="home-composer-textarea"
-        aria-label={ariaLabel}
-        rows={variant === "hero" ? 4 : 3}
-        value={message}
-        disabled={sending}
-        placeholder={placeholder}
-        onChange={(event) => onMessageChange(event.target.value)}
-        onKeyDown={handleKeyDown}
-      />
-
       {hasAttachments && (
         <div className="home-composer-attachments" aria-label="待发送附件">
           {pendingImages.map((img) => (
@@ -311,12 +384,12 @@ export function OnboardingComposer({
           {pendingTxtFiles.map((txt) => (
             <div className="home-pending-txt" key={txt.localId} data-pending-txt={txt.filename}>
               <Icon name="files" />
-              <div className="home-pending-txt-meta">
-                <strong title={txt.filename}>{txt.filename}</strong>
-                <span>
-                  {txt.charCount} 字 · {formatByteSize(txt.byteLength)}
-                </span>
-              </div>
+              <span className="home-pending-txt-name" title={txt.filename}>
+                {txt.filename}
+              </span>
+              <span className="home-pending-txt-size">
+                {txt.charCount} 字 · {formatByteSize(txt.byteLength)}
+              </span>
               <button
                 type="button"
                 className="home-pending-remove"
@@ -335,6 +408,17 @@ export function OnboardingComposer({
         </div>
       )}
 
+      <textarea
+        className="home-composer-textarea"
+        aria-label={ariaLabel}
+        rows={variant === "hero" ? 5 : 2}
+        value={message}
+        disabled={sending}
+        placeholder={placeholder}
+        onChange={(event) => onMessageChange(event.target.value)}
+        onKeyDown={handleKeyDown}
+      />
+
       {(validationError || messageTooLong || tooManyImages) && (
         <div className="home-composer-error" role="alert">
           <Icon name="alert" />
@@ -349,7 +433,7 @@ export function OnboardingComposer({
       )}
 
       <div className="home-composer-toolbar">
-        <div className="home-composer-tools">
+        <div className="home-plus-menu-wrap" ref={plusWrapRef}>
           <input
             ref={imageInputRef}
             type="file"
@@ -360,26 +444,6 @@ export function OnboardingComposer({
             disabled={sending || remainingImageSlots <= 0}
             onChange={(event) => void handleImageFiles(event.target.files)}
           />
-          <button
-            type="button"
-            className="home-tool-btn"
-            disabled={sending || remainingImageSlots <= 0}
-            title={
-              remainingImageSlots <= 0
-                ? `已达 ${PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES} 张供应商参考图上限`
-                : `添加供应商参考图（还可添加 ${remainingImageSlots} 张）`
-            }
-            onClick={() => imageInputRef.current?.click()}
-          >
-            <Icon name="image" />
-            <span>
-              ＋ 供应商图
-              {totalUniqueImages > 0
-                ? ` (${totalUniqueImages}/${PRODUCT_ONBOARDING_MAX_SUPPLIER_IMAGES})`
-                : ""}
-            </span>
-          </button>
-
           <input
             ref={txtInputRef}
             type="file"
@@ -390,39 +454,75 @@ export function OnboardingComposer({
             disabled={sending || remainingTxtSlots <= 0}
             onChange={(event) => void handleTxtFiles(event.target.files)}
           />
+
           <button
+            ref={plusBtnRef}
             type="button"
-            className="home-tool-btn"
-            disabled={sending || remainingTxtSlots <= 0}
-            title={
-              remainingTxtSlots <= 0
-                ? `单次最多上传 ${PRODUCT_ONBOARDING_MAX_TXT_FILES_PER_MESSAGE} 个 .txt 文件`
-                : `上传 UTF-8 纯文本说明（单文件 ≤ 200 KB，最多 ${PRODUCT_ONBOARDING_MAX_TXT_FILES_PER_MESSAGE} 个）`
-            }
-            onClick={() => txtInputRef.current?.click()}
+            className={`home-plus-trigger ${menuOpen ? "is-open" : ""}`}
+            aria-label="添加附件"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            disabled={sending}
+            onClick={() => setMenuOpen((prev) => !prev)}
           >
-            <Icon name="files" />
-            <span>
-              上传 .txt
-              {pendingTxtFiles.length > 0
-                ? ` (${pendingTxtFiles.length}/${PRODUCT_ONBOARDING_MAX_TXT_FILES_PER_MESSAGE})`
-                : ""}
-            </span>
+            <Icon name="plus" />
           </button>
+
+          {menuOpen && (
+            <div className="home-plus-popover" role="menu" aria-label="上传附件菜单">
+              <button
+                type="button"
+                className="home-plus-menu-item"
+                role="menuitem"
+                disabled={sending || remainingImageSlots <= 0}
+                onClick={handlePickImages}
+              >
+                <span className="home-plus-menu-icon">
+                  <Icon name="image" />
+                </span>
+                <span className="home-plus-menu-copy">
+                  <strong>上传供应商参考图</strong>
+                  <span>{imageSubtext}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="home-plus-menu-item"
+                role="menuitem"
+                disabled={sending || remainingTxtSlots <= 0}
+                onClick={handlePickTxt}
+              >
+                <span className="home-plus-menu-icon">
+                  <Icon name="files" />
+                </span>
+                <span className="home-plus-menu-copy">
+                  <strong>上传文本资料</strong>
+                  <span>{txtSubtext}</span>
+                </span>
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="home-composer-submit-group">
-          <span className={`home-composer-hint ${messageTooLong ? "is-over" : ""}`}>
-            {charCount > 0 ? `${charCount}/${PRODUCT_ONBOARDING_MAX_MESSAGE_CHARS}` : "Enter 发送 · Shift+Enter 换行"}
-          </span>
+          {showCharCount && (
+            <span className={`home-composer-count ${messageTooLong ? "is-over" : ""}`}>
+              {charCount}/{PRODUCT_ONBOARDING_MAX_MESSAGE_CHARS}
+            </span>
+          )}
           <button
             type="button"
-            className="btn btn-primary home-composer-send-btn"
+            className={`home-send-icon-btn ${sending ? "is-loading" : ""}`}
             disabled={!canSubmit}
+            aria-label={sending ? sendingLabel : submitLabel}
+            title={sending ? sendingLabel : submitLabel}
             onClick={handleTriggerSubmit}
           >
-            <Icon name="send" />
-            <span>{sending ? sendingLabel : submitLabel}</span>
+            {sending ? (
+              <span className="home-send-spinner" aria-hidden="true" />
+            ) : (
+              <Icon name="arrow-up" />
+            )}
           </button>
         </div>
       </div>

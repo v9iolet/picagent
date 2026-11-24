@@ -83,22 +83,31 @@ async function startOfflineProductLibraryApp(t) {
   return { baseUrl, browser, api, productCardRepository };
 }
 
-test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload supplier images, search, edit, ?selected, archive/restore/delete", async (t) => {
+test("ProductLibraryPage full lifecycle: clean layout + InfoTip, flat form + on-demand char counters + optional fold, supplier images, live selling-point search, edit, archive/restore/delete", async (t) => {
   const { baseUrl, browser, api } = await startOfflineProductLibraryApp(t);
-  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 760 } });
   const pageErrors = [];
   page.on("pageerror", (err) => pageErrors.push(err.message));
 
-  // 1. Visit /products and verify navigation placement & initial empty state
+  // 1. Visit /products and verify navigation placement, removed clutter copy, & left status InfoTip
   await page.goto(`${baseUrl}/products`, { waitUntil: "networkidle" });
   const navLabels = await page.locator(".pa-rail-item span").allInnerTexts();
   assert.deepEqual(navLabels, ["首页", "创建", "商品库", "图片库", "模板库", "配置"]);
   await page.locator('.pa-rail-item.is-active[href="/products"]').waitFor({ state: "visible" });
   assert.match(await page.locator(".pa-breadcrumbs").innerText(), /商品库/);
-  assert.match(await page.locator(".style-filter-note").innerText(), /供应商参考图仅用于商品库认款展示与建档识别/);
+  assert.equal(await page.locator(".style-filter-note").count(), 0, "Legacy .style-filter-note must be removed");
+  assert.equal(await page.locator(".style-boundary").count(), 0, "Redundant count banner must be removed");
 
-  // 2. Open manual create modal and verify missing-field highlighting + disabled submit reason
-  await page.locator(".product-library-header-actions button", { hasText: "手动新建商品卡" }).click();
+  const filterInfoBtn = page.getByRole("button", { name: "状态与快照说明" });
+  await filterInfoBtn.click();
+  const filterTip = page.locator("#" + (await filterInfoBtn.getAttribute("aria-controls")));
+  await filterTip.waitFor({ state: "visible" });
+  assert.match(await filterTip.innerText(), /不影响历史套图与复刻批次已冻结的商品快照/);
+  await page.keyboard.press("Escape");
+  await filterTip.waitFor({ state: "hidden" });
+
+  // 2. Open manual create modal and verify missing-field highlighting + disabled submit reason + on-demand counter
+  await page.locator(".product-library-header-actions button", { hasText: "新建商品卡" }).click();
   const createModal = page.locator(".product-create-modal");
   await createModal.waitFor({ state: "visible" });
 
@@ -108,10 +117,20 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   assert.match(initialReason, /尚缺 6 项必填/);
   assert.equal(await createModal.locator(".pc-field.is-missing").count(), 6);
 
-  // Fill 5 of the 6 required fields
-  await createModal.locator("#create-product-card-name").fill("钛合金保温随行杯 480ml");
+  // Verify on-demand char counter hidden at rest, shown on focus, hidden on blur
+  const createNameInput = createModal.locator("#create-product-card-name");
+  const createNameCounter = createModal.locator('[data-char-counter="name"]');
+  assert.equal(await createNameCounter.isVisible(), false);
+  await createNameInput.focus();
+  await createNameCounter.waitFor({ state: "visible" });
+  await createNameInput.fill("钛合金保温随行杯 480ml");
+  assert.match(await createNameCounter.innerText(), /^14\/120$/);
+  await createNameInput.blur();
+  await createNameCounter.waitFor({ state: "hidden" });
+
+  // Fill remaining required fields (5 of 6)
   await createModal.getByLabel("核心卖点 1").fill("纯钛内胆不串味，泡咖啡茶饮更纯净");
-  await createModal.getByRole("button", { name: "添加核心卖点" }).click();
+  await createModal.getByRole("button", { name: "添加卖点" }).click();
   await createModal.getByLabel("核心卖点 2").fill("整杯净重 195g，超轻便携适合通勤露营");
   await createModal.locator("#create-product-card-specifications").fill("容量 480ml，高度 208mm，杯底直径 66mm，净重 195g");
   await createModal.locator("#create-product-card-materialsCraft").fill("TA1 纯钛内胆 + 304 不锈钢外壳，磨砂喷塑工艺");
@@ -121,36 +140,46 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   assert.equal(await createSubmitBtn.isDisabled(), true);
   assert.match(await createModal.locator('[data-testid="pc-disable-reason"]').innerText(), /尚缺 1 项必填：包装清单 \/ 配件说明/);
 
-  // Use quick-fill button for packageContents
-  await createModal.getByRole("button", { name: "无额外配件快捷填入" }).click();
+  // Use quick-fill chip for packageContents
+  await createModal.getByRole("button", { name: "填入无额外配件" }).click();
   assert.equal(
     await createModal.locator("#create-product-card-packageContents").inputValue(),
     PRODUCT_CARD_NO_EXTRA_ACCESSORIES_TEXT,
   );
   assert.equal(await createSubmitBtn.isDisabled(), false, "Submit button should be enabled once all 6 required fields are filled");
 
-  // Expand extended optional section and fill certifications
-  await createModal.locator(".pc-collapse-toggle").click();
+  // Expand collapsed extended optional section and fill certifications
+  const optTrigger = createModal.locator(".pc-optional-fold-trigger");
+  assert.equal(await optTrigger.getAttribute("aria-expanded"), "false");
+  await optTrigger.click();
+  assert.equal(await optTrigger.getAttribute("aria-expanded"), "true");
   await createModal
     .locator("#create-product-card-certificationsProhibitions")
     .fill("通过 LFGB 食品接触检测；禁用医疗保健功效宣传");
 
-  // Verify supplier image notice and upload 2 supplier images
-  assert.match(
-    await createModal.locator(".pc-supplier-notice").innerText(),
-    /仅用于商品库认款展示与建档识别，生图实拍原图请在创作页上传/,
-  );
+  // Verify supplier image InfoTip opens inside modal and Escape closes only InfoTip (not parent modal)
+  const modalSupplierTipBtn = createModal.getByRole("button", { name: "供应商参考图边界说明" });
+  await modalSupplierTipBtn.click();
+  const modalSupplierTip = page.locator("#" + (await modalSupplierTipBtn.getAttribute("aria-controls")));
+  await modalSupplierTip.waitFor({ state: "visible" });
+  assert.match(await modalSupplierTip.innerText(), /仅用于认款展示与建档识别，不流入创作页生图原图区/);
+  await page.keyboard.press("Escape");
+  await modalSupplierTip.waitFor({ state: "hidden" });
+  assert.equal(await createModal.isVisible(), true, "Escape must close only InfoTip, keeping create modal open");
+
+  // Upload 2 supplier images
   const imgA = path.resolve("public/assets/gan65-product.jpg");
   const imgB = path.resolve("public/assets/tokyo-desk-v3.jpg");
   await createModal.locator('input[type="file"]').setInputFiles([imgA, imgB]);
   await createModal.locator(".pc-supplier-card").nth(1).waitFor({ state: "visible" });
   assert.equal(await createModal.locator(".pc-supplier-card").count(), 2);
   assert.equal(await createModal.locator(".pc-supplier-card").first().locator(".pc-cover-badge").innerText(), "封面");
-  assert.equal(await createModal.locator(".pc-supplier-card").first().locator(".pc-supplier-name").innerText(), "gan65-product.jpg");
+  assert.equal(await createModal.locator(".pc-supplier-card").first().getAttribute("data-supplier-filename"), "gan65-product.jpg");
 
-  // Reorder: move second image left to become cover
+  // Reorder: hover second image and move left to become cover
+  await createModal.locator(".pc-supplier-card").nth(1).hover();
   await createModal.getByRole("button", { name: "左移 tokyo-desk-v3.jpg" }).click();
-  assert.equal(await createModal.locator(".pc-supplier-card").first().locator(".pc-supplier-name").innerText(), "tokyo-desk-v3.jpg");
+  assert.equal(await createModal.locator(".pc-supplier-card").first().getAttribute("data-supplier-filename"), "tokyo-desk-v3.jpg");
 
   // Submit create
   await createSubmitBtn.click();
@@ -165,8 +194,16 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   assert.match(cardText, /钛合金保温随行杯 480ml/);
   assert.match(cardText, /纯钛内胆不串味/);
   assert.match(cardText, /整杯净重 195g/);
-  assert.match(cardText, /去生成套图/);
-  assert.match(cardText, /去爆品图复刻/);
+  assert.match(cardText, /去套图/);
+  assert.match(cardText, /去复刻/);
+
+  // Verify inspector auto-expanded optional section because certificationsProhibitions has value
+  const inspector = page.locator(".product-library-inspector");
+  assert.equal(
+    await inspector.locator(".pc-optional-fold-trigger").getAttribute("aria-expanded"),
+    "true",
+    "Optional section must auto-expand when any optional field is non-empty",
+  );
 
   // Verify cover thumbnail actually loads from /api/product-cards/:id/images/:imageId/preview/thumbnail
   const thumbLoaded = await createdCard.locator(".product-card-thumb img").evaluate(async (img) => {
@@ -185,7 +222,7 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   assert.equal(libRes.status, 200);
   assert.equal(libRes.body.data.items.length, 0, "Supplier images must not appear in image library");
 
-  // 3. Seed a second card via API to test search & ?selected=<id>
+  // 3. Seed a second card via API (with empty optional fields) to test search & ?selected=<id>
   const secondRes = await api.request("POST", "/api/product-cards", {
     body: {
       name: "氮化镓 65W 折叠快充头",
@@ -207,10 +244,10 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
     "钛合金保温随行杯 480ml",
   );
 
-  // 4. Search by selling point and by name
+  // 4. Search by selling point (both live/button and Enter)
   const searchInput = page.getByLabel("搜索商品信息卡");
   await searchInput.fill("纯钛内胆");
-  await page.getByRole("button", { name: "搜索" }).click();
+  await page.getByRole("button", { name: "搜索", exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll(".product-card-item").length === 1);
   assert.match(await page.locator(".product-card-item").first().innerText(), /钛合金保温随行杯 480ml/);
 
@@ -227,13 +264,13 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
 
   // 5. Right inspector edit & save -> verify revision bumps to v2
   await page.locator(`.product-card-item[data-product-card-id="${createdCardId}"]`).click();
-  const inspector = page.locator(".product-library-inspector");
   await inspector.locator('[data-testid="product-revision-badge"]').waitFor({ state: "visible" });
   assert.equal(await inspector.locator('[data-testid="product-revision-badge"]').innerText(), "v1");
 
   const nameInput = inspector.locator(`#edit-${createdCardId}-name`);
   await nameInput.fill("钛合金保温随行杯 480ml 升级款");
   // Remove one supplier image in right inspector
+  await inspector.locator('.pc-supplier-card[data-supplier-filename="gan65-product.jpg"]').hover();
   await inspector.getByRole("button", { name: "移除 gan65-product.jpg" }).click();
   assert.equal(await inspector.locator(".pc-supplier-card").count(), 1);
 
@@ -249,7 +286,7 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   // Verify quick jump buttons navigate with ?productCardId=<id>
   await page
     .locator(`.product-card-item[data-product-card-id="${createdCardId}"]`)
-    .getByRole("button", { name: "去生成套图" })
+    .getByRole("button", { name: "去套图", exact: true })
     .click();
   await page.waitForFunction(
     (id) => window.location.pathname === "/create/suite" && new URLSearchParams(window.location.search).get("productCardId") === id,
@@ -259,7 +296,7 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   await page.goto(`${baseUrl}/products?selected=${encodeURIComponent(createdCardId)}`, { waitUntil: "networkidle" });
   await page
     .locator(`.product-card-item[data-product-card-id="${createdCardId}"]`)
-    .getByRole("button", { name: "去爆品图复刻" })
+    .getByRole("button", { name: "去复刻", exact: true })
     .click();
   await page.waitForFunction(
     (id) => window.location.pathname === "/create/replica" && new URLSearchParams(window.location.search).get("productCardId") === id,
@@ -270,7 +307,7 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   await page.goto(`${baseUrl}/products?selected=${encodeURIComponent(createdCardId)}`, { waitUntil: "networkidle" });
   await page.waitForFunction(() => document.querySelectorAll(".product-card-item").length === 2);
 
-  await inspector.getByRole("button", { name: "归档" }).click();
+  await inspector.getByRole("button", { name: "归档", exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll(".product-card-item").length === 1);
   assert.equal(
     await page.locator(`.product-card-item[data-product-card-id="${createdCardId}"]`).count(),
@@ -279,26 +316,33 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   );
 
   // Switch to archived filter
-  await page.locator(".style-filter-panel label", { hasText: "已归档" }).click();
+  await page.locator('[data-status-filter="archived"]').click();
   await page.waitForFunction(
     (id) => Boolean(document.querySelector(`.product-card-item[data-product-card-id="${id}"]`)),
     createdCardId,
   );
   const archivedCardEl = page.locator(`.product-card-item[data-product-card-id="${createdCardId}"]`);
-  assert.equal(await archivedCardEl.getByRole("button", { name: "去生成套图" }).count(), 0);
-  assert.equal(await archivedCardEl.getByRole("button", { name: "去爆品图复刻" }).count(), 0);
+  assert.equal(await archivedCardEl.getByRole("button", { name: "去套图" }).count(), 0);
+  assert.equal(await archivedCardEl.getByRole("button", { name: "去复刻" }).count(), 0);
 
   // Restore to published
-  await inspector.getByRole("button", { name: "恢复在用" }).click();
+  await inspector.getByRole("button", { name: "恢复在用", exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll(".product-card-item").length === 0);
 
   // Switch back to published -> both cards back
-  await page.locator(".style-filter-panel label", { hasText: "在用" }).click();
+  await page.locator('[data-status-filter="published"]').click();
   await page.waitForFunction(() => document.querySelectorAll(".product-card-item").length === 2);
 
-  // Delete card with secondary confirmation dialog
+  // Select second card (empty optional fields) -> verify optional fold defaults collapsed
   await page.locator(`.product-card-item[data-product-card-id="${secondCardId}"]`).click();
   await inspector.locator(`#edit-${secondCardId}-name`).waitFor({ state: "visible" });
+  assert.equal(
+    await inspector.locator(".pc-optional-fold-trigger").getAttribute("aria-expanded"),
+    "false",
+    "Optional section must default collapsed when all optional fields are empty",
+  );
+
+  // Delete card with secondary confirmation dialog
   await inspector.getByRole("button", { name: "删除", exact: true }).click();
   const deleteDialog = page.locator(".style-delete-confirm-modal");
   await deleteDialog.waitFor({ state: "visible" });
@@ -307,17 +351,17 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   await deleteDialog.waitFor({ state: "hidden" });
 
   // Switch to "全部" filter and verify only 1 card remains
-  await page.locator(".style-filter-panel label", { hasText: "全部" }).click();
+  await page.locator('[data-status-filter="all"]').click();
   await page.waitForFunction(() => document.querySelectorAll(".product-card-item").length === 1);
   assert.equal(
     await page.locator(`.product-card-item[data-product-card-id="${secondCardId}"]`).count(),
     0,
   );
 
-  // 7. Verify "AI 对话建档" button navigates cleanly to "/" HomePage
-  await page.locator(".product-library-header-actions button", { hasText: "AI 对话建档" }).click();
+  // 7. Verify "AI 建档" button navigates cleanly to "/" HomePage
+  await page.locator(".product-library-header-actions button", { hasText: "AI 建档" }).click();
   await page.waitForFunction(() => window.location.pathname === "/");
-  await page.getByRole("heading", { name: "新品商品信息建档" }).waitFor({ state: "visible" });
+  await page.getByRole("heading", { name: "新品信息建档", exact: true }).waitFor({ state: "visible" });
   await page.locator('.pa-rail-item.is-active[href="/"]').waitFor({ state: "visible" });
 
   assert.deepEqual(pageErrors, [], `Expected no uncaught page errors, got: ${pageErrors.join("; ")}`);
