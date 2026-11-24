@@ -195,6 +195,7 @@ export interface ProductCardEditorFormProps {
   onSubmit?: () => void | Promise<void>;
   submitLabel?: string;
   submitting?: boolean;
+  disabled?: boolean;
   readOnly?: boolean;
   highlightMissing?: boolean;
   externalMissingFields?: ProductCardRequiredField[];
@@ -211,6 +212,7 @@ export function ProductCardEditorForm({
   onSubmit,
   submitLabel = "保存商品信息卡",
   submitting = false,
+  disabled = false,
   readOnly = false,
   highlightMissing = true,
   externalMissingFields,
@@ -220,12 +222,15 @@ export function ProductCardEditorForm({
 }: ProductCardEditorFormProps) {
   const autoId = useId();
   const prefix = idPrefix ?? `pc-${autoId}`;
+  const isLocked = readOnly || submitting || disabled;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const mountedRef = useRef(true);
   const prefixRef = useRef(prefix);
+  const lockedRef = useRef(isLocked);
   const supplierImagesRef = useRef(supplierImages);
   const onSupplierImagesChangeRef = useRef(onSupplierImagesChange);
   prefixRef.current = prefix;
+  lockedRef.current = isLocked;
   supplierImagesRef.current = supplierImages;
   onSupplierImagesChangeRef.current = onSupplierImagesChange;
 
@@ -283,7 +288,7 @@ export function ProductCardEditorForm({
   };
 
   const updateField = <K extends keyof ProductCardFields>(key: K, value: ProductCardFields[K]) => {
-    if (readOnly) return;
+    if (isLocked) return;
     onFieldsChange({ ...fields, [key]: value });
   };
 
@@ -297,19 +302,19 @@ export function ProductCardEditorForm({
   );
 
   const handleSellingPointChange = (index: number, value: string) => {
-    if (readOnly) return;
+    if (isLocked) return;
     const next = [...sellingPointRows];
     next[index] = value;
     onFieldsChange({ ...fields, sellingPoints: next });
   };
 
   const handleAddSellingPoint = () => {
-    if (readOnly || sellingPointRows.length >= PRODUCT_CARD_FIELD_LIMITS.sellingPoints.maxItems) return;
+    if (isLocked || sellingPointRows.length >= PRODUCT_CARD_FIELD_LIMITS.sellingPoints.maxItems) return;
     onFieldsChange({ ...fields, sellingPoints: [...sellingPointRows, ""] });
   };
 
   const handleRemoveSellingPoint = (index: number) => {
-    if (readOnly) return;
+    if (isLocked) return;
     if (sellingPointRows.length <= 1) {
       onFieldsChange({ ...fields, sellingPoints: [] });
       return;
@@ -319,12 +324,12 @@ export function ProductCardEditorForm({
   };
 
   const handleSupplierFiles = async (fileList: FileList | File[] | null) => {
-    if (readOnly || !fileList || fileList.length === 0) return;
+    if (isLocked || !fileList || fileList.length === 0) return;
     const startPrefix = prefixRef.current;
     const initialImages = supplierImagesRef.current;
     setImageError("");
     const { added, errors } = await readSupplierImageFiles(fileList, initialImages);
-    if (!mountedRef.current || prefixRef.current !== startPrefix) return;
+    if (!mountedRef.current || prefixRef.current !== startPrefix || lockedRef.current) return;
 
     const latestImages = supplierImagesRef.current;
     const latestHashes = new Set<string>(
@@ -359,7 +364,7 @@ export function ProductCardEditorForm({
   };
 
   const handleMoveImage = (index: number, delta: -1 | 1) => {
-    if (readOnly) return;
+    if (isLocked) return;
     const target = index + delta;
     if (target < 0 || target >= supplierImages.length) return;
     const next = [...supplierImages];
@@ -369,7 +374,7 @@ export function ProductCardEditorForm({
   };
 
   const handleRemoveImage = (localId: string) => {
-    if (readOnly) return;
+    if (isLocked) return;
     setImageError("");
     onSupplierImagesChange(supplierImages.filter((item) => item.localId !== localId));
   };
@@ -377,13 +382,13 @@ export function ProductCardEditorForm({
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDraggingFiles(false);
-    if (readOnly || supplierImages.length >= PRODUCT_CARD_MAX_SUPPLIER_IMAGES) return;
+    if (isLocked || supplierImages.length >= PRODUCT_CARD_MAX_SUPPLIER_IMAGES) return;
     void handleSupplierFiles(event.dataTransfer.files);
   };
 
   const handleFormSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (readOnly || !validation.ok || submitting || !onSubmit) return;
+    if (isLocked || !validation.ok || !onSubmit) return;
     void onSubmit();
   };
 
@@ -448,7 +453,7 @@ export function ProductCardEditorForm({
               className="pc-input"
               type="text"
               value={fields.name}
-              disabled={readOnly || submitting}
+              disabled={isLocked}
               placeholder="例如：双层真空不锈钢保温杯 500ml"
               onChange={(event) => updateField("name", event.target.value)}
             />
@@ -473,7 +478,7 @@ export function ProductCardEditorForm({
               className="pc-input mono"
               type="text"
               value={fields.skuCode}
-              disabled={readOnly || submitting}
+              disabled={isLocked}
               placeholder="例如：SKU-CUP-500W"
               onChange={(event) => updateField("skuCode", event.target.value)}
             />
@@ -500,7 +505,7 @@ export function ProductCardEditorForm({
             className="pc-input"
             type="text"
             value={fields.category}
-            disabled={readOnly || submitting}
+            disabled={isLocked}
             placeholder="例如：水杯水具 / 3C 数码配件 / 便携小家电"
             onChange={(event) => updateField("category", event.target.value)}
           />
@@ -553,7 +558,7 @@ export function ProductCardEditorForm({
                       type="text"
                       aria-label={`核心卖点 ${index + 1}`}
                       value={point}
-                      disabled={submitting}
+                      disabled={isLocked}
                       placeholder={`填写第 ${index + 1} 条核心卖点（1–200 字）`}
                       onChange={(event) => handleSellingPointChange(index, event.target.value)}
                     />
@@ -564,7 +569,7 @@ export function ProductCardEditorForm({
                       type="button"
                       className="pc-point-remove"
                       aria-label={`删除第 ${index + 1} 条卖点`}
-                      disabled={submitting || (sellingPointRows.length <= 1 && !point)}
+                      disabled={isLocked || (sellingPointRows.length <= 1 && !point)}
                       onClick={() => handleRemoveSellingPoint(index)}
                       title="删除此卖点"
                     >
@@ -576,7 +581,7 @@ export function ProductCardEditorForm({
               <button
                 type="button"
                 className="pc-point-add-btn"
-                disabled={submitting || sellingPointRows.length >= PRODUCT_CARD_FIELD_LIMITS.sellingPoints.maxItems}
+                disabled={isLocked || sellingPointRows.length >= PRODUCT_CARD_FIELD_LIMITS.sellingPoints.maxItems}
                 onClick={handleAddSellingPoint}
               >
                 <Icon name="plus" />
@@ -618,7 +623,7 @@ export function ProductCardEditorForm({
             className="pc-textarea"
             rows={3}
             value={fields.specifications}
-            disabled={readOnly || submitting}
+            disabled={isLocked}
             placeholder="填写容量、功率、尺寸、重量、接口参数等客观数值"
             onChange={(event) => updateField("specifications", event.target.value)}
           />
@@ -648,7 +653,7 @@ export function ProductCardEditorForm({
             className="pc-textarea"
             rows={2}
             value={fields.materialsCraft}
-            disabled={readOnly || submitting}
+            disabled={isLocked}
             placeholder="填写主体材质、表面处理工艺、结构细节"
             onChange={(event) => updateField("materialsCraft", event.target.value)}
           />
@@ -678,7 +683,7 @@ export function ProductCardEditorForm({
             className="pc-textarea"
             rows={2}
             value={fields.audienceScenarios}
-            disabled={readOnly || submitting}
+            disabled={isLocked}
             placeholder="填写目标使用人群与典型生活/工作使用场景"
             onChange={(event) => updateField("audienceScenarios", event.target.value)}
           />
@@ -702,7 +707,7 @@ export function ProductCardEditorForm({
                 <button
                   type="button"
                   className="pc-quick-fill-btn"
-                  disabled={submitting}
+                  disabled={isLocked}
                   onClick={() => updateField("packageContents", PRODUCT_CARD_NO_EXTRA_ACCESSORIES_TEXT)}
                 >
                   无额外配件快捷填入
@@ -720,7 +725,7 @@ export function ProductCardEditorForm({
             className="pc-textarea"
             rows={2}
             value={fields.packageContents}
-            disabled={readOnly || submitting}
+            disabled={isLocked}
             placeholder="例如：主机 ×1、Type-C 充电线 ×1、说明书 ×1；无配件可点右上角快捷填入"
             onChange={(event) => updateField("packageContents", event.target.value)}
           />
@@ -747,7 +752,7 @@ export function ProductCardEditorForm({
         {!readOnly && (
           <div
             className={`pc-supplier-dropzone ${draggingFiles ? "is-dragging" : ""} ${
-              supplierImages.length >= PRODUCT_CARD_MAX_SUPPLIER_IMAGES || submitting ? "is-disabled" : ""
+              supplierImages.length >= PRODUCT_CARD_MAX_SUPPLIER_IMAGES || isLocked ? "is-disabled" : ""
             }`}
             onDragOver={(event) => {
               event.preventDefault();
@@ -763,7 +768,7 @@ export function ProductCardEditorForm({
               aria-label="上传供应商参考图"
               accept="image/jpeg,image/png,image/webp"
               multiple
-              disabled={submitting || supplierImages.length >= PRODUCT_CARD_MAX_SUPPLIER_IMAGES}
+              disabled={isLocked || supplierImages.length >= PRODUCT_CARD_MAX_SUPPLIER_IMAGES}
               onChange={(event) => void handleSupplierFiles(event.target.files)}
             />
             <Icon name="upload" />
@@ -804,7 +809,7 @@ export function ProductCardEditorForm({
                       className="pc-supplier-ctrl-btn"
                       aria-label={`左移 ${image.filename}`}
                       title="左移"
-                      disabled={submitting || index === 0}
+                      disabled={isLocked || index === 0}
                       onClick={() => handleMoveImage(index, -1)}
                     >
                       <Icon name="arrow-left" />
@@ -814,7 +819,7 @@ export function ProductCardEditorForm({
                       className="pc-supplier-ctrl-btn"
                       aria-label={`右移 ${image.filename}`}
                       title="右移"
-                      disabled={submitting || index === supplierImages.length - 1}
+                      disabled={isLocked || index === supplierImages.length - 1}
                       onClick={() => handleMoveImage(index, 1)}
                     >
                       <Icon name="arrow-right" />
@@ -824,7 +829,7 @@ export function ProductCardEditorForm({
                       className="pc-supplier-ctrl-btn is-danger"
                       aria-label={`移除 ${image.filename}`}
                       title="移除"
-                      disabled={submitting}
+                      disabled={isLocked}
                       onClick={() => handleRemoveImage(image.localId)}
                     >
                       <Icon name="trash" />
@@ -878,7 +883,7 @@ export function ProductCardEditorForm({
                 className="pc-textarea"
                 rows={2}
                 value={fields.painPointsComparison}
-                disabled={readOnly || submitting}
+                disabled={isLocked}
                 placeholder="仅填写新旧款、使用前后或自身规格间客观对比数据，禁用竞品对比"
                 onChange={(event) => updateField("painPointsComparison", event.target.value)}
               />
@@ -909,7 +914,7 @@ export function ProductCardEditorForm({
                 className="pc-textarea"
                 rows={2}
                 value={fields.usageDemoHighlights}
-                disabled={readOnly || submitting}
+                disabled={isLocked}
                 placeholder="填写关键使用步骤、维护方式或适合动态演示的功能亮点"
                 onChange={(event) => updateField("usageDemoHighlights", event.target.value)}
               />
@@ -940,7 +945,7 @@ export function ProductCardEditorForm({
                 className="pc-textarea"
                 rows={2}
                 value={fields.certificationsProhibitions}
-                disabled={readOnly || submitting}
+                disabled={isLocked}
                 placeholder="例如：通过 FCC/CE/FDA 认证；不可承诺医疗功效，避免出现绝对化用语"
                 onChange={(event) => updateField("certificationsProhibitions", event.target.value)}
               />
@@ -965,7 +970,7 @@ export function ProductCardEditorForm({
             <button
               className="btn btn-primary"
               type="submit"
-              disabled={!validation.ok || submitting}
+              disabled={!validation.ok || isLocked}
               title={!validation.ok ? disableReason : undefined}
             >
               {submitting ? "保存中…" : submitLabel}

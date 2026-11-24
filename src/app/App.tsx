@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { HomePage } from "../pages/HomePage";
 import { ModelSettingsPage } from "../pages/ModelSettingsPage";
 import { SuiteStudioPage } from "../pages/SuiteStudioPage";
 import { BoardPage } from "../pages/BoardPage";
@@ -34,13 +35,17 @@ export function App() {
   const canonical = legacyBoard ? `/create/canvas/${legacyBoard[1]}`
     : legacy && legacy[1] !== "new" ? `/create/suite/${legacy[1]}`
     : legacyReverseRoot ? "/create/replica"
-    : legacy || legacyListing || path === "/" ? "/create/suite" : path;
+    : legacy || legacyListing ? "/create/suite" : path;
   useEffect(() => {
     if (path === canonical) return;
     window.history.replaceState({}, "", canonical + search + window.location.hash);
     setLocation(readLocation());
   }, [path, canonical, search]);
 
+  if (path === "/") {
+    const sessionId = new URLSearchParams(search).get("session")?.trim() || undefined;
+    return <HomePage sessionId={sessionId} navigate={navigate} />;
+  }
   if (path === "/settings" || path === "/settings/preferences") return <ModelSettingsPage preferences={path.endsWith("/preferences")} navigate={navigate} />;
   if (/^\/create\/canvas\/?$/.test(canonical)) return <CanvasListPage navigate={navigate} />;
   const canvasId = canonical.match(/^\/create\/canvas\/([^/]+)\/?$/)?.[1];

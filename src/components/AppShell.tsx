@@ -2,7 +2,7 @@ import type { MouseEvent, ReactNode } from "react";
 import { Icon } from "../pages/shared";
 import "./AppShell.css";
 
-export type AppNavSection = "create" | "products" | "assets" | "templates" | "settings";
+export type AppNavSection = "home" | "create" | "products" | "assets" | "templates" | "settings";
 
 export interface AppCrumb {
   label: string;
@@ -39,6 +39,7 @@ export function AppShell({
   };
 
   const navItems: Array<{ key: AppNavSection; label: string; to: string; icon: string }> = [
+    { key: "home", label: "首页", to: "/", icon: "home" },
     { key: "create", label: "创建", to: "/create/suite", icon: "sparkles" },
     { key: "products", label: "商品库", to: "/products", icon: "box" },
     { key: "assets", label: "图片库", to: "/assets", icon: "image" },
@@ -50,7 +51,7 @@ export function AppShell({
     <div className={`pa-shell ${fullHeight ? "pa-shell-full" : ""} ${className}`}>
       <header className="pa-topbar">
         <div className="pa-topbar-left">
-          <a className="pa-brand" href="/create/suite" onClick={linkTo("/create/suite")} title="PicAgent 工作台首页">
+          <a className="pa-brand" href="/" onClick={linkTo("/")} title="PicAgent 首页">
             <img src="/logo.png" alt="" width={28} height={28} />
             <strong>PicAgent</strong>
           </a>
