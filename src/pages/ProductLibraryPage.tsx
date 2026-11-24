@@ -77,6 +77,8 @@ export function ProductLibraryPage({
 
   const listSequence = useRef(0);
   const detailSequence = useRef(0);
+  const selectedIdRef = useRef<string | null>(selectedId);
+  selectedIdRef.current = selectedId;
   const pinnedSelectionRef = useRef<string | null>(initialSelectedId ?? null);
   const toastTimerRef = useRef<number | null>(null);
 
@@ -275,17 +277,20 @@ export function ProductLibraryPage({
 
   const handleEditSubmit = async () => {
     if (!selectedDetail || savingEdit) return;
+    const targetId = selectedDetail.id;
     setSavingEdit(true);
     setError("");
     try {
-      const updated = await productCardsApi.update(selectedDetail.id, {
+      const updated = await productCardsApi.update(targetId, {
         ...editFields,
         supplierImages: toUpdateSupplierImagePayloads(editImages),
       });
-      setSelectedDetail(updated);
-      setEditFields(productCardFieldsFromCard(updated));
-      setEditImages(supplierImagesFromCard(updated));
-      pinnedSelectionRef.current = updated.id;
+      if (selectedIdRef.current === targetId) {
+        setSelectedDetail(updated);
+        setEditFields(productCardFieldsFromCard(updated));
+        setEditImages(supplierImagesFromCard(updated));
+        pinnedSelectionRef.current = updated.id;
+      }
       setReloadTick((n) => n + 1);
       notify(`商品信息卡已保存（v${updated.revision}）`);
     } catch (cause) {
@@ -297,16 +302,19 @@ export function ProductLibraryPage({
 
   const handleToggleArchive = async (card: ApiProductCard) => {
     if (mutatingStatus) return;
+    const targetId = card.id;
     setMutatingStatus(true);
     setError("");
     try {
       const updated =
         card.status === "published"
-          ? await productCardsApi.archive(card.id)
-          : await productCardsApi.restore(card.id);
-      setSelectedDetail(updated);
-      setEditFields(productCardFieldsFromCard(updated));
-      setEditImages(supplierImagesFromCard(updated));
+          ? await productCardsApi.archive(targetId)
+          : await productCardsApi.restore(targetId);
+      if (selectedIdRef.current === targetId) {
+        setSelectedDetail(updated);
+        setEditFields(productCardFieldsFromCard(updated));
+        setEditImages(supplierImagesFromCard(updated));
+      }
       notify(updated.status === "archived" ? "商品信息卡已归档" : "商品信息卡已恢复在用");
       setReloadTick((n) => n + 1);
     } catch (cause) {

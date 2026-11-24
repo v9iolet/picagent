@@ -8,6 +8,22 @@
   }
 }
 
+@media (max-width: 900px) {
+  .product-library-workarea {
+    grid-template-columns: 1fr;
+  }
+  .product-library-center {
+    grid-template-rows: auto auto 42px minmax(0, 1fr) auto;
+  }
+  .product-library-results {
+    overflow: visible;
+  }
+  .product-card-grid {
+    grid-template-columns: 1fr;
+    padding: 12px;
+  }
+}
+
 .product-library-center {
   display: grid;
   grid-template-rows: 58px auto 42px minmax(0, 1fr) auto;

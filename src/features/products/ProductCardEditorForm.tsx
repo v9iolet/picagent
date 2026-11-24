@@ -221,6 +221,21 @@ export function ProductCardEditorForm({
   const autoId = useId();
   const prefix = idPrefix ?? `pc-${autoId}`;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const mountedRef = useRef(true);
+  const prefixRef = useRef(prefix);
+  const supplierImagesRef = useRef(supplierImages);
+  const onSupplierImagesChangeRef = useRef(onSupplierImagesChange);
+  prefixRef.current = prefix;
+  supplierImagesRef.current = supplierImages;
+  onSupplierImagesChangeRef.current = onSupplierImagesChange;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [imageError, setImageError] = useState("");
   const hasExtendedContent = Boolean(
@@ -237,15 +252,23 @@ export function ProductCardEditorForm({
   const validation = useMemo(() => validateProductCardFields(fields), [fields]);
 
   const missingSet = useMemo(() => {
+    const isLocallyEmpty = (key: ProductCardRequiredField): boolean => {
+      if (key === "sellingPoints") {
+        return !fields.sellingPoints.some((item) => item.trim().length > 0);
+      }
+      return fields[key].trim().length === 0;
+    };
     const set = new Set<ProductCardRequiredField>();
     if (!validation.ok) {
       for (const key of validation.missingFields) set.add(key);
     }
     if (externalMissingFields) {
-      for (const key of externalMissingFields) set.add(key);
+      for (const key of externalMissingFields) {
+        if (isLocallyEmpty(key)) set.add(key);
+      }
     }
     return set;
-  }, [validation, externalMissingFields]);
+  }, [fields, validation, externalMissingFields]);
 
   const fieldErrors = validation.ok ? {} : validation.fieldErrors;
 
@@ -297,13 +320,38 @@ export function ProductCardEditorForm({
 
   const handleSupplierFiles = async (fileList: FileList | File[] | null) => {
     if (readOnly || !fileList || fileList.length === 0) return;
+    const startPrefix = prefixRef.current;
+    const initialImages = supplierImagesRef.current;
     setImageError("");
-    const { added, errors } = await readSupplierImageFiles(fileList, supplierImages);
-    if (added.length > 0) {
-      onSupplierImagesChange([...supplierImages, ...added]);
+    const { added, errors } = await readSupplierImageFiles(fileList, initialImages);
+    if (!mountedRef.current || prefixRef.current !== startPrefix) return;
+
+    const latestImages = supplierImagesRef.current;
+    const latestHashes = new Set<string>(
+      latestImages.map((item) => item.sha256).filter((item): item is string => Boolean(item)),
+    );
+    const remainingSlots = Math.max(0, PRODUCT_CARD_MAX_SUPPLIER_IMAGES - latestImages.length);
+    const nextErrors = [...errors];
+    const safeAdded: ProductCardSupplierImageDraft[] = [];
+
+    for (const item of added) {
+      if (safeAdded.length >= remainingSlots) {
+        nextErrors.push(`供应商参考图最多上传 ${PRODUCT_CARD_MAX_SUPPLIER_IMAGES} 张`);
+        break;
+      }
+      if (item.sha256 && latestHashes.has(item.sha256)) {
+        nextErrors.push(`「${item.filename}」与已有图片重复，已自动去重`);
+        continue;
+      }
+      if (item.sha256) latestHashes.add(item.sha256);
+      safeAdded.push(item);
     }
-    if (errors.length > 0) {
-      setImageError(errors.join("；"));
+
+    if (safeAdded.length > 0) {
+      onSupplierImagesChangeRef.current([...latestImages, ...safeAdded]);
+    }
+    if (nextErrors.length > 0) {
+      setImageError(nextErrors.join("；"));
     }
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
