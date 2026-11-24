@@ -10,21 +10,28 @@ export const IMAGE_EDITOR_OPERATION_BODY_MAX_BYTES = 4 * 1024 * 1024;
 export const SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES = 16 * 1024 * 1024;
 // 单张图片最大 12 MiB，Base64 编码后约 16 MiB；复刻接口单次最多携带 6 张参考图 + 6 张产品图 = 12 张（192 MiB），预留 8 MiB JSON 元数据与字段余量，总上限 200 MiB。
 export const REPLICA_REQUEST_BODY_MAX_BYTES = (12 * 16 + 8) * 1024 * 1024;
+// 商品信息卡写接口单次最多携带 6 张供应商参考图（单张 12 MiB，Base64 约 16 MiB，共 96 MiB），预留 4 MiB JSON 字段余量，总上限 100 MiB。
+export const PRODUCT_CARD_WRITE_BODY_MAX_BYTES = (6 * 16 + 4) * 1024 * 1024;
 
 const SUITE_INPUT_IMAGE_UPLOAD_RE = /^\/api\/suites\/[^/]+\/input-images$/;
 const LISTING_INPUT_IMAGE_UPLOAD_RE = /^\/api\/listing-copies\/[^/]+\/input-images$/;
 const IMAGE_EDITOR_OPERATION_RE = /^\/api\/image-editor\/sessions\/[^/]+\/operations$/;
+const PRODUCT_CARD_ITEM_RE = /^\/api\/product-cards\/[^/]+$/;
 
 export function resolveRequestBodyLimit(method: string | undefined, pathname: string): number {
   const upperMethod = (method ?? "GET").toUpperCase();
   if (upperMethod === "POST") {
     if (pathname === "/api/replicas") return REPLICA_REQUEST_BODY_MAX_BYTES;
+    if (pathname === "/api/product-cards") return PRODUCT_CARD_WRITE_BODY_MAX_BYTES;
     if (SUITE_INPUT_IMAGE_UPLOAD_RE.test(pathname) || LISTING_INPUT_IMAGE_UPLOAD_RE.test(pathname)) {
       return SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES;
     }
     if (IMAGE_EDITOR_OPERATION_RE.test(pathname)) {
       return IMAGE_EDITOR_OPERATION_BODY_MAX_BYTES;
     }
+  }
+  if (upperMethod === "PATCH" && PRODUCT_CARD_ITEM_RE.test(pathname)) {
+    return PRODUCT_CARD_WRITE_BODY_MAX_BYTES;
   }
   return DEFAULT_REQUEST_BODY_MAX_BYTES;
 }

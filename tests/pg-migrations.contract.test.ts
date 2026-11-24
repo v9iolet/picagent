@@ -2113,3 +2113,264 @@ test("037 adds source_card_id index and drops created_at index idempotently; PG 
     assert.ok(await library.getResource(edit2Id));
   });
 });
+
+test("038 migration enforces product library and onboarding constraints, cascades, and PostgresProductCardRepository CRUD", { skip }, async () => {
+  const { PostgresProductCardRepository } = await import(
+    "../server/repositories/postgres-product-card-repository.js"
+  );
+
+  await withMigratedSchemas(async ({ pool }) => {
+    const repo = new PostgresProductCardRepository(pool);
+    const expectSqlError = async (sql: string, values: unknown[]) => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await assert.rejects(client.query(sql, values));
+      } finally {
+        await client.query("ROLLBACK");
+        client.release();
+      }
+    };
+
+    // 1. product_cards CHECK constraints reject invalid status, blank required fields, empty/oversized selling points
+    const badCardId = randomUUID();
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'draft', '商品名', '类目', '["卖点1"]'::jsonb, '规格', '材质', '人群', '清单')`,
+      [badCardId],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'published', '   ', '类目', '["卖点1"]'::jsonb, '规格', '材质', '人群', '清单')`,
+      [badCardId],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'published', '商品名', '类目', '[]'::jsonb, '规格', '材质', '人群', '清单')`,
+      [badCardId],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'published', '商品名', '类目', '["1","2","3","4","5","6","7","8","9","10","11"]'::jsonb, '规格', '材质', '人群', '清单')`,
+      [badCardId],
+    );
+
+    // 2. Create card + 2 supplier images through PostgresProductCardRepository
+    const cardId = randomUUID();
+    const img1Id = randomUUID();
+    const img2Id = randomUUID();
+    const created = await repo.create({
+      id: cardId,
+      status: "published",
+      fields: {
+        name: "100% 纯棉重磅T恤",
+        category: "男装_上衣",
+        sellingPoints: ["260g 高克重纯棉", "领口双针加固不易变形"],
+        specifications: "尺码 M-XXL，衣长 70-76cm，克重 260g/m²",
+        materialsCraft: "100% 新疆长绒棉，活性染色工艺",
+        audienceScenarios: "春夏日常通勤与休闲穿搭",
+        packageContents: "单品本体 ×1，无额外配件",
+        skuCode: "TEE-COTTON_100%",
+        painPointsComparison: "",
+        usageDemoHighlights: "",
+        certificationsProhibitions: "",
+      },
+      sourceSessionId: null,
+      revision: 1,
+      images: [
+        {
+          id: img1Id,
+          productCardId: cardId,
+          ordinal: 1,
+          originalObjectKey: `product-cards/${cardId}/images/${img1Id}/original`,
+          thumbnailObjectKey: `product-cards/${cardId}/images/${img1Id}/thumbnail`,
+          sha256: "1".repeat(64),
+          width: 800,
+          height: 800,
+          mimeType: "image/png",
+          originalFilename: "front.png",
+          createdAt: timestamp,
+        },
+        {
+          id: img2Id,
+          productCardId: cardId,
+          ordinal: 2,
+          originalObjectKey: `product-cards/${cardId}/images/${img2Id}/original`,
+          thumbnailObjectKey: `product-cards/${cardId}/images/${img2Id}/thumbnail`,
+          sha256: "2".repeat(64),
+          width: 800,
+          height: 600,
+          mimeType: "image/jpeg",
+          originalFilename: "detail.jpg",
+          createdAt: timestamp,
+        },
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    assert.equal(created.revision, 1);
+    assert.equal(created.supplierImages.length, 2);
+    assert.equal(created.coverThumbnailUrl, `/api/product-cards/${cardId}/images/${img1Id}/preview/thumbnail`);
+
+    // 3. product_card_images CHECK & UNIQUE constraints reject bad prefix, bad ordinal, duplicate ordinal/sha256
+    const badImgId = randomUUID();
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_card_images
+        (id, product_card_id, ordinal, original_object_key, thumbnail_object_key, sha256, width, height, mime_type, original_filename)
+       VALUES ($1, $2, 3, $3, $4, $5, 100, 100, 'image/png', 'wrong-prefix.png')`,
+      [
+        badImgId,
+        cardId,
+        `suites/${cardId}/inputs/${badImgId}/original`,
+        `suites/${cardId}/inputs/${badImgId}/thumbnail`,
+        "3".repeat(64),
+      ],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_card_images
+        (id, product_card_id, ordinal, original_object_key, thumbnail_object_key, sha256, width, height, mime_type, original_filename)
+       VALUES ($1, $2, 7, $3, $4, $5, 100, 100, 'image/png', 'bad-ordinal.png')`,
+      [
+        badImgId,
+        cardId,
+        `product-cards/${cardId}/images/${badImgId}/original`,
+        `product-cards/${cardId}/images/${badImgId}/thumbnail`,
+        "4".repeat(64),
+      ],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_card_images
+        (id, product_card_id, ordinal, original_object_key, thumbnail_object_key, sha256, width, height, mime_type, original_filename)
+       VALUES ($1, $2, 3, $3, $4, $5, 100, 100, 'image/png', 'dup-sha.png')`,
+      [
+        badImgId,
+        cardId,
+        `product-cards/${cardId}/images/${badImgId}/original`,
+        `product-cards/${cardId}/images/${badImgId}/thumbnail`,
+        "1".repeat(64),
+      ],
+    );
+
+    // 4. LIKE wildcard characters (% and _) in keyword search are escaped literally
+    const literalMatch = await repo.list({ status: "published", keyword: "100%" });
+    assert.equal(literalMatch.total, 1);
+    assert.equal(literalMatch.items[0].id, cardId);
+    const nonMatchingPercent = await repo.list({ status: "published", keyword: "99%" });
+    assert.equal(nonMatchingPercent.total, 0);
+
+    // 5. Update reorders images cleanly without ordinal unique collision and increments revision
+    const updated = await repo.update(cardId, {
+      fields: {
+        name: "100% 纯棉重磅T恤 升级款",
+        category: "男装_上衣",
+        sellingPoints: ["280g 重磅纯棉"],
+        specifications: "尺码 M-XXL",
+        materialsCraft: "100% 新疆长绒棉",
+        audienceScenarios: "日常通勤",
+        packageContents: "单品本体 ×1，无额外配件",
+        skuCode: "TEE-COTTON_100%",
+        painPointsComparison: "相比 220g 普通棉更挺括",
+        usageDemoHighlights: "",
+        certificationsProhibitions: "",
+      },
+      images: [
+        {
+          id: img2Id,
+          productCardId: cardId,
+          ordinal: 1,
+          originalObjectKey: `product-cards/${cardId}/images/${img2Id}/original`,
+          thumbnailObjectKey: `product-cards/${cardId}/images/${img2Id}/thumbnail`,
+          sha256: "2".repeat(64),
+          width: 800,
+          height: 600,
+          mimeType: "image/jpeg",
+          originalFilename: "detail.jpg",
+          createdAt: timestamp,
+        },
+        {
+          id: img1Id,
+          productCardId: cardId,
+          ordinal: 2,
+          originalObjectKey: `product-cards/${cardId}/images/${img1Id}/original`,
+          thumbnailObjectKey: `product-cards/${cardId}/images/${img1Id}/thumbnail`,
+          sha256: "1".repeat(64),
+          width: 800,
+          height: 800,
+          mimeType: "image/png",
+          originalFilename: "front.png",
+          createdAt: timestamp,
+        },
+      ],
+      updatedAt: "2026-01-01T00:05:00.000Z",
+    });
+    assert.ok(updated);
+    assert.equal(updated.revision, 2);
+    assert.equal(updated.supplierImages[0].id, img2Id);
+    assert.equal(updated.supplierImages[1].id, img1Id);
+    assert.equal((await repo.getImage(cardId, img2Id))?.ordinal, 1);
+
+    // 6. Archive & restore status transitions
+    const archived = await repo.setStatus(cardId, "archived", "2026-01-01T00:06:00.000Z");
+    assert.equal(archived?.status, "archived");
+    assert.equal((await repo.list({ status: "published" })).total, 0);
+    assert.equal((await repo.list({ status: "archived" })).total, 1);
+    const restored = await repo.setStatus(cardId, "published", "2026-01-01T00:07:00.000Z");
+    assert.equal(restored?.status, "published");
+
+    // 7. Onboarding session + messages constraints, ON DELETE SET NULL on product_card_id, ON DELETE CASCADE on messages
+    const sessionId = randomUUID();
+    await pool.query(
+      `INSERT INTO suite_workbench.product_onboarding_sessions
+        (id, title, status, draft_card_json, draft_images_json, missing_required_fields_json, product_card_id)
+       VALUES ($1, 'T恤建档', 'completed', '{}'::jsonb, '[]'::jsonb, '[]'::jsonb, $2)`,
+      [sessionId, cardId],
+    );
+    const msg1Id = randomUUID();
+    await pool.query(
+      `INSERT INTO suite_workbench.product_onboarding_messages
+        (id, session_id, ordinal, role, content, attachments_json)
+       VALUES ($1, $2, 1, 'user', '这是一件重磅T恤', '[]'::jsonb)`,
+      [msg1Id, sessionId],
+    );
+    // Reject invalid role and duplicate message ordinal
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_onboarding_messages (id, session_id, ordinal, role, content)
+       VALUES ($1, $2, 2, 'system', 'invalid')`,
+      [randomUUID(), sessionId],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_onboarding_messages (id, session_id, ordinal, role, content)
+       VALUES ($1, $2, 1, 'assistant', 'dup ordinal')`,
+      [randomUUID(), sessionId],
+    );
+
+    // Deleting product_card cascades to product_card_images and sets session.product_card_id = NULL
+    const deleted = await repo.delete(cardId);
+    assert.ok(deleted);
+    assert.equal(deleted.supplierImages.length, 2);
+    const remainingImages = await pool.query<{ cnt: number }>(
+      "SELECT count(*)::int AS cnt FROM suite_workbench.product_card_images WHERE product_card_id = $1",
+      [cardId],
+    );
+    assert.equal(remainingImages.rows[0]?.cnt, 0);
+    const sessionAfterCardDelete = await pool.query<{ product_card_id: string | null }>(
+      "SELECT product_card_id FROM suite_workbench.product_onboarding_sessions WHERE id = $1",
+      [sessionId],
+    );
+    assert.equal(sessionAfterCardDelete.rows.length, 1);
+    assert.equal(sessionAfterCardDelete.rows[0]?.product_card_id, null);
+
+    // Deleting onboarding session cascades to product_onboarding_messages
+    await pool.query("DELETE FROM suite_workbench.product_onboarding_sessions WHERE id = $1", [sessionId]);
+    const remainingMessages = await pool.query<{ cnt: number }>(
+      "SELECT count(*)::int AS cnt FROM suite_workbench.product_onboarding_messages WHERE session_id = $1",
+      [sessionId],
+    );
+    assert.equal(remainingMessages.rows[0]?.cnt, 0);
+  });
+});
+

@@ -1,5 +1,12 @@
 import type { ListingConfigInput } from "../shared/listing-config.js";
 import type { ModelChannelSnapshot } from "../shared/model-settings.js";
+import type {
+  ProductCard,
+  ProductCardFields,
+  ProductCardStatus,
+  ProductCardSummary,
+  ProductCardSupplierImage,
+} from "../shared/product-card.js";
 import type { PromptStage } from "./prompt-library.js";
 
 export type SuiteStatus = "draft" | "in_progress";
@@ -623,4 +630,59 @@ export interface ReplicaRepository {
   getReference(suiteId: string, referenceId: string): Promise<ReplicaReference | null>;
   saveProductImages(suiteId: string, products: ReplicaProductImage[]): Promise<ReplicaProductImage[]>;
   listProductImages(suiteId: string): Promise<ReplicaProductImage[]>;
+}
+
+export interface ProductCardListQuery {
+  status?: ProductCardStatus | "all";
+  keyword?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ProductCardListResult {
+  items: ProductCardSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface StoredProductCardImage {
+  id: string;
+  productCardId: string;
+  ordinal: number;
+  originalObjectKey: string;
+  thumbnailObjectKey: string;
+  sha256: string;
+  width: number;
+  height: number;
+  mimeType: string;
+  originalFilename: string;
+  createdAt: string;
+}
+
+export interface CreateProductCardRecordInput {
+  id: string;
+  status: ProductCardStatus;
+  fields: ProductCardFields;
+  sourceSessionId: string | null;
+  revision: number;
+  images: StoredProductCardImage[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpdateProductCardRecordInput {
+  fields: ProductCardFields;
+  images: StoredProductCardImage[];
+  updatedAt: string;
+}
+
+export interface ProductCardRepository {
+  list(query?: ProductCardListQuery): Promise<ProductCardListResult>;
+  get(id: string): Promise<ProductCard | null>;
+  create(input: CreateProductCardRecordInput): Promise<ProductCard>;
+  update(id: string, input: UpdateProductCardRecordInput): Promise<ProductCard | null>;
+  setStatus(id: string, status: ProductCardStatus, updatedAt: string): Promise<ProductCard | null>;
+  delete(id: string): Promise<ProductCard | null>;
+  getImage(cardId: string, imageId: string): Promise<ProductCardSupplierImage | null>;
 }
