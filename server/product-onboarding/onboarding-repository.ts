@@ -100,7 +100,6 @@ function cloneFields(fields: Partial<ProductCardFields> | null | undefined): Pro
   if (!fields || typeof fields !== "object") return base;
   return {
     name: typeof fields.name === "string" ? fields.name : "",
-    category: typeof fields.category === "string" ? fields.category : "",
     sellingPoints: Array.isArray(fields.sellingPoints)
       ? fields.sellingPoints.filter((item): item is string => typeof item === "string")
       : [],
@@ -108,7 +107,6 @@ function cloneFields(fields: Partial<ProductCardFields> | null | undefined): Pro
     materialsCraft: typeof fields.materialsCraft === "string" ? fields.materialsCraft : "",
     audienceScenarios: typeof fields.audienceScenarios === "string" ? fields.audienceScenarios : "",
     packageContents: typeof fields.packageContents === "string" ? fields.packageContents : "",
-    skuCode: typeof fields.skuCode === "string" ? fields.skuCode : "",
     painPointsComparison:
       typeof fields.painPointsComparison === "string" ? fields.painPointsComparison : "",
     usageDemoHighlights:

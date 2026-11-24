@@ -16,6 +16,9 @@ import {
   createProductCardSnapshot,
   formatProductCardFacts,
   PRODUCT_CARD_NO_EXTRA_ACCESSORIES_TEXT,
+  PRODUCT_CARD_OPTIONAL_FIELDS,
+  PRODUCT_CARD_REQUIRED_FIELDS,
+  readProductCardSnapshot,
   type ProductCard,
   type ProductCardSummary,
 } from "../shared/product-card.js";
@@ -55,7 +58,6 @@ async function makeTestImageBase64(
 function validCardPayload(overrides: Record<string, unknown> = {}) {
   return {
     name: "双层真空不锈钢保温杯 500ml",
-    category: "水杯水具",
     sellingPoints: [
       "316L 医用级不锈钢内胆，耐酸碱更安心",
       "12 小时保温保冷，通勤户外皆适用",
@@ -82,8 +84,11 @@ function createTestContext() {
   return { app, storage, libraryRepository, productCardRepository };
 }
 
-test("validates 7 required fields, lengths, explicit no-accessories text, and 4 optional fields", async () => {
+test("validates 6 required fields, lengths, explicit no-accessories text, 3 optional fields, and legacy snapshot compatibility", async () => {
   const { app } = createTestContext();
+
+  assert.equal(PRODUCT_CARD_REQUIRED_FIELDS.length, 6);
+  assert.equal(PRODUCT_CARD_OPTIONAL_FIELDS.length, 3);
 
   // Missing required fields
   const emptyRes = await app.request("POST", "/api/product-cards", { body: {} });
@@ -107,7 +112,6 @@ test("validates 7 required fields, lengths, explicit no-accessories text, and 4 
   // Over-length required fields rejected
   const tooLongCases = [
     validCardPayload({ name: "a".repeat(121) }),
-    validCardPayload({ category: "a".repeat(61) }),
     validCardPayload({ sellingPoints: Array.from({ length: 11 }, (_, i) => `卖点 ${i + 1}`) }),
     validCardPayload({ sellingPoints: ["a".repeat(201)] }),
     validCardPayload({ specifications: "a".repeat(1001) }),
@@ -115,7 +119,6 @@ test("validates 7 required fields, lengths, explicit no-accessories text, and 4 
     validCardPayload({ audienceScenarios: "a".repeat(801) }),
     validCardPayload({ packageContents: "a".repeat(601) }),
     // Over-length optional fields rejected
-    validCardPayload({ skuCode: "S".repeat(81) }),
     validCardPayload({ painPointsComparison: "p".repeat(1001) }),
     validCardPayload({ usageDemoHighlights: "u".repeat(1001) }),
     validCardPayload({ certificationsProhibitions: "c".repeat(801) }),
@@ -127,9 +130,13 @@ test("validates 7 required fields, lengths, explicit no-accessories text, and 4 
     assert.equal("error" in res.body && res.body.error.code, "PRODUCT_CARD_VALIDATION_FAILED");
   }
 
-  // Explicit no-extra-accessories confirmation passes with empty optional fields
+  // Explicit no-extra-accessories confirmation passes with empty optional fields; legacy category/skuCode ignored
   const minimalRes = await app.request("POST", "/api/product-cards", {
-    body: validCardPayload({ packageContents: PRODUCT_CARD_NO_EXTRA_ACCESSORIES_TEXT }),
+    body: validCardPayload({
+      packageContents: PRODUCT_CARD_NO_EXTRA_ACCESSORIES_TEXT,
+      category: "水杯水具",
+      skuCode: "LEGACY-SKU-01",
+    }),
   });
   assert.equal(minimalRes.status, 201);
   assert.ok("data" in minimalRes.body);
@@ -137,17 +144,17 @@ test("validates 7 required fields, lengths, explicit no-accessories text, and 4 
   assert.equal(minimalCard.status, "published");
   assert.equal(minimalCard.revision, 1);
   assert.equal(minimalCard.packageContents, PRODUCT_CARD_NO_EXTRA_ACCESSORIES_TEXT);
-  assert.equal(minimalCard.skuCode, "");
+  assert.equal("category" in minimalCard, false);
+  assert.equal("skuCode" in minimalCard, false);
   assert.equal(minimalCard.painPointsComparison, "");
   assert.equal(minimalCard.usageDemoHighlights, "");
   assert.equal(minimalCard.certificationsProhibitions, "");
   assert.deepEqual(minimalCard.supplierImages, []);
   assert.equal(minimalCard.coverThumbnailUrl, null);
 
-  // All 4 optional fields filled passes
+  // All 3 optional fields filled passes
   const fullRes = await app.request("POST", "/api/product-cards", {
     body: validCardPayload({
-      skuCode: "CUP-316-500-BLK",
       painPointsComparison: "相比旧款单层不锈钢，保温时长提升 6 小时，杯身减重 15%",
       usageDemoHighlights: "单手按压弹盖开合演示，倒置晃动无漏水",
       certificationsProhibitions: "通过 FDA 食品接触检测；禁用“永不生锈”“医疗保健”等表述",
@@ -156,21 +163,43 @@ test("validates 7 required fields, lengths, explicit no-accessories text, and 4 
   assert.equal(fullRes.status, 201);
   assert.ok("data" in fullRes.body);
   const fullCard = fullRes.body.data as ProductCard;
-  assert.equal(fullCard.skuCode, "CUP-316-500-BLK");
   assert.match(fullCard.certificationsProhibitions, /FDA/);
 
-  // formatProductCardFacts omits empty optional fields and includes populated ones
+  // formatProductCardFacts omits empty optional fields, never emits category/skuCode, and includes populated ones
   const minimalFacts = formatProductCardFacts(createProductCardSnapshot(minimalCard));
   assert.match(minimalFacts, /商品名称：双层真空不锈钢保温杯 500ml/);
   assert.match(minimalFacts, /单品本体 ×1，无额外配件/);
-  assert.doesNotMatch(minimalFacts, /内部 SKU/);
+  assert.doesNotMatch(minimalFacts, /内部 SKU|商品类目/);
   assert.doesNotMatch(minimalFacts, /认证资质/);
 
   const fullFacts = formatProductCardFacts(createProductCardSnapshot(fullCard));
-  assert.match(fullFacts, /内部 SKU \/ 款号：CUP-316-500-BLK/);
+  assert.doesNotMatch(fullFacts, /内部 SKU|商品类目/);
   assert.match(fullFacts, /用户痛点与自身对比数据：/);
   assert.match(fullFacts, /使用方法 \/ 动态演示亮点：/);
   assert.match(fullFacts, /认证资质与宣传禁忌：/);
+
+  // readProductCardSnapshot stays backward-compatible with historical snapshots containing category/skuCode
+  const legacySnapshot = readProductCardSnapshot({
+    cardId: minimalCard.id,
+    revision: 1,
+    name: minimalCard.name,
+    category: "水杯水具",
+    skuCode: "LEGACY-SKU-99",
+    sellingPoints: minimalCard.sellingPoints,
+    specifications: minimalCard.specifications,
+    materialsCraft: minimalCard.materialsCraft,
+    audienceScenarios: minimalCard.audienceScenarios,
+    packageContents: minimalCard.packageContents,
+    painPointsComparison: "",
+    usageDemoHighlights: "",
+    certificationsProhibitions: "",
+    coverThumbnailUrl: null,
+    snapshotAt: "2026-01-01T00:00:00.000Z",
+  });
+  assert.ok(legacySnapshot);
+  assert.equal(legacySnapshot.name, minimalCard.name);
+  assert.equal("category" in legacySnapshot, false);
+  assert.equal("skuCode" in legacySnapshot, false);
 });
 
 test("supports 0 and 1-6 supplier images, dedup, reorder, replacement, >6 rejection, preview, and library isolation", async () => {
@@ -301,15 +330,14 @@ test("supports 0 and 1-6 supplier images, dedup, reorder, replacement, >6 reject
   assert.equal("error" in patchUnknownImage.body && patchUnknownImage.body.error.code, "PRODUCT_CARD_IMAGE_NOT_FOUND");
 });
 
-test("supports keyword search (name/SKU/category), status filter, revision increment, archive/restore, and delete cleanup", async () => {
+test("supports keyword search (name/sellingPoints), status filter, revision increment, archive/restore, and delete cleanup", async () => {
   const { app, storage } = createTestContext();
   const img = await makeTestImageBase64(11, "png");
 
   const c1Res = await app.request("POST", "/api/product-cards", {
     body: validCardPayload({
       name: "极简陶瓷手冲咖啡壶",
-      category: "咖啡器具",
-      skuCode: "CF-POUR-800",
+      sellingPoints: ["高硼硅耐热玻璃搭配手工拉坯陶瓷滤杯", "V60 细口鹅颈控流精准萃取"],
       supplierImages: [img],
     }),
   });
@@ -319,14 +347,13 @@ test("supports keyword search (name/SKU/category), status filter, revision incre
   const c2Res = await app.request("POST", "/api/product-cards", {
     body: validCardPayload({
       name: "轻量折叠碳纤维登山杖",
-      category: "户外装备",
-      skuCode: "OUT-POLE-120",
+      sellingPoints: ["航空级 T700 碳纤维杖身，单支仅重 165g", "五节折叠收纳长度 36cm"],
     }),
   });
   assert.equal(c2Res.status, 201);
   const card2 = ("data" in c2Res.body ? c2Res.body.data : null) as ProductCard;
 
-  // Keyword matches name, SKU (case-insensitive), and category
+  // Keyword matches name and sellingPoints (case-insensitive)
   const byName = await app.request("GET", `/api/product-cards?keyword=${encodeURIComponent("咖啡壶")}`);
   assert.equal(byName.status, 200);
   const byNameData = ("data" in byName.body ? byName.body.data : null) as { items: ProductCardSummary[]; total: number };
@@ -334,29 +361,36 @@ test("supports keyword search (name/SKU/category), status filter, revision incre
   assert.equal(byNameData.items[0].id, card1.id);
   assert.equal(byNameData.items[0].supplierImageCount, 1);
   assert.equal(byNameData.items[0].coverThumbnailUrl, card1.coverThumbnailUrl);
+  assert.equal("category" in byNameData.items[0], false);
+  assert.equal("skuCode" in byNameData.items[0], false);
 
-  const bySku = await app.request("GET", "/api/product-cards?keyword=out-pole");
-  assert.equal(bySku.status, 200);
-  const bySkuData = ("data" in bySku.body ? bySku.body.data : null) as { items: ProductCardSummary[]; total: number };
-  assert.equal(bySkuData.total, 1);
-  assert.equal(bySkuData.items[0].id, card2.id);
+  const bySellingPointLower = await app.request("GET", "/api/product-cards?keyword=t700");
+  assert.equal(bySellingPointLower.status, 200);
+  const bySpData = ("data" in bySellingPointLower.body ? bySellingPointLower.body.data : null) as { items: ProductCardSummary[]; total: number };
+  assert.equal(bySpData.total, 1);
+  assert.equal(bySpData.items[0].id, card2.id);
 
-  const byCategory = await app.request("GET", `/api/product-cards?keyword=${encodeURIComponent("户外")}`);
-  assert.equal(byCategory.status, 200);
-  assert.equal((("data" in byCategory.body ? byCategory.body.data : null) as { total: number }).total, 1);
+  const bySellingPointZh = await app.request("GET", `/api/product-cards?keyword=${encodeURIComponent("鹅颈控流")}`);
+  assert.equal(bySellingPointZh.status, 200);
+  assert.equal((("data" in bySellingPointZh.body ? bySellingPointZh.body.data : null) as { total: number }).total, 1);
+
+  // JSON syntax characters do not falsely match sellingPoints array
+  const byJsonBracket = await app.request("GET", `/api/product-cards?keyword=${encodeURIComponent('["')}`);
+  assert.equal(byJsonBracket.status, 200);
+  assert.equal((("data" in byJsonBracket.body ? byJsonBracket.body.data : null) as { total: number }).total, 0);
 
   // PATCH increments revision and updates fields
   const patchRes = await app.request("PATCH", `/api/product-cards/${card1.id}`, {
     body: {
       name: "极简陶瓷手冲咖啡壶 Pro",
-      skuCode: "CF-POUR-800-PRO",
+      painPointsComparison: "相比旧款保温性能提升 20%",
     },
   });
   assert.equal(patchRes.status, 200);
   const patched = ("data" in patchRes.body ? patchRes.body.data : null) as ProductCard;
   assert.equal(patched.revision, 2);
   assert.equal(patched.name, "极简陶瓷手冲咖啡壶 Pro");
-  assert.equal(patched.skuCode, "CF-POUR-800-PRO");
+  assert.equal(patched.painPointsComparison, "相比旧款保温性能提升 20%");
   assert.equal(patched.supplierImages.length, 1);
 
   // Archive card1

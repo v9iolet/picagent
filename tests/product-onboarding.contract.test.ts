@@ -138,10 +138,9 @@ test("full first-turn onboarding completes, publishes idempotently, locks sessio
 
   const { app, storage, llmCalls } = await createOnboardingTestContext(async () => ({
     schemaVersion: PRODUCT_ONBOARDING_SCHEMA_VERSION,
-    reply: "核心 7 项必填信息已全部提取完整，请核对右侧商品信息卡后点击「保存到商品库」。",
+    reply: "核心 6 项必填信息已全部提取完整，请核对右侧商品信息卡后点击「保存到商品库」。",
     draftCard: {
       name: "双层真空不锈钢保温杯 500ml",
-      category: "水杯水具",
       sellingPoints: [
         "316L 医用级不锈钢内胆，耐酸碱不留异味",
         "12 小时保温保冷，满足全天饮水需求",
@@ -150,7 +149,6 @@ test("full first-turn onboarding completes, publishes idempotently, locks sessio
       materialsCraft: "316L 不锈钢内胆 + 304 不锈钢外壳，哑光静电喷塑工艺",
       audienceScenarios: "通勤上班族、学生、自驾及户外露营日常饮水",
       packageContents: "保温杯本体 ×1、食品级硅胶杯垫 ×1、说明书 ×1",
-      skuCode: "CUP-500-316L",
       painPointsComparison: "相比旧款 304 内胆更耐酸碱，杯身减重 15%",
       usageDemoHighlights: "一键按压弹盖，单手开合不漏水",
       certificationsProhibitions: "FDA / LFGB 食品接触认证；不可宣传医疗功效",
@@ -161,7 +159,7 @@ test("full first-turn onboarding completes, publishes idempotently, locks sessio
   const createRes = await app.request("POST", "/api/product-onboarding/sessions", {
     body: {
       message:
-        "新品：双层真空不锈钢保温杯 500ml，SKU CUP-500-316L，316L内胆+304外壳哑光喷塑，高215mm直径68mm重265g，12小时保温保冷，通勤露营适用，包装含杯体+硅胶杯垫+说明书，FDA认证不可宣传医疗功效。",
+        "新品：双层真空不锈钢保温杯 500ml，316L内胆+304外壳哑光喷塑，高215mm直径68mm重265g，12小时保温保冷，通勤露营适用，包装含杯体+硅胶杯垫+说明书，FDA认证不可宣传医疗功效。",
       supplierImages: [img1, img2, img1], // img1 duplicated -> deduplicated to 2
     },
   });
@@ -283,11 +281,10 @@ test("multi-turn with image + partial .txt, consolidated follow-up, manual PATCH
       return {
         schemaVersion: PRODUCT_ONBOARDING_SCHEMA_VERSION,
         reply:
-          "已从供应商图和说明文档提取商品名称与类目。请一次性补充以下缺失必填项：\n1. 核心卖点\n2. 规格参数与尺寸重量\n3. 材质与工艺细节\n4. 适用人群与使用场景\n5. 包装清单 / 配件说明",
+          "已从供应商图和说明文档提取商品名称。请一次性补充以下缺失必填项：\n1. 核心卖点\n2. 规格参数与尺寸重量\n3. 材质与工艺细节\n4. 适用人群与使用场景\n5. 包装清单 / 配件说明",
         draftCard: {
           ...emptyProductCardFields(),
           name: "重磅纯棉短袖T恤",
-          category: "男装上衣",
           specifications: "暂无", // Placeholder must be stripped by server
         },
         missingRequiredFields: ["sellingPoints", "materialsCraft"], // Model under-reported
@@ -298,7 +295,7 @@ test("multi-turn with image + partial .txt, consolidated follow-up, manual PATCH
       // and returns shorthand "无配件" for packageContents.
       return {
         schemaVersion: PRODUCT_ONBOARDING_SCHEMA_VERSION,
-        reply: "全部 7 项必填信息已补齐，请核对右侧卡片后保存到商品库。",
+        reply: "全部 6 项必填信息已补齐，请核对右侧卡片后保存到商品库。",
         draftCard: {
           ...input.currentDraftCard,
           name: "重磅纯棉短袖T恤", // Regression attempt (user manually edited this via PATCH /draft)
@@ -326,7 +323,7 @@ test("multi-turn with image + partial .txt, consolidated follow-up, manual PATCH
   // Turn 1: upload 1 supplier image + partial UTF-8 .txt
   const txt1 = makeTxtBase64(
     "product-brief.txt",
-    "品名：重磅纯棉短袖T恤\n类目：男装上衣\n说明：首批打样，参数待补。",
+    "品名：重磅纯棉短袖T恤\n说明：首批打样，参数待补。",
   );
   const turn1Res = await app.request("POST", "/api/product-onboarding/sessions", {
     body: {
@@ -454,7 +451,6 @@ test("validates .txt size/UTF-8/count, cumulative 6-image limit, unconfigured LL
       name: "便携蓝牙音箱",
     },
     missingRequiredFields: [
-      "category",
       "sellingPoints",
       "specifications",
       "materialsCraft",
@@ -629,7 +625,6 @@ test("validates .txt size/UTF-8/count, cumulative 6-image limit, unconfigured LL
   assert.ok("error" in publishIncomplete.body);
   assert.equal(publishIncomplete.body.error.code, "PRODUCT_CARD_REQUIRED_FIELDS_MISSING");
   assert.deepEqual(publishIncomplete.body.error.missingFields, [
-    "category",
     "sellingPoints",
     "specifications",
     "materialsCraft",
@@ -652,7 +647,7 @@ test("validates .txt size/UTF-8/count, cumulative 6-image limit, unconfigured LL
   );
 });
 
-test("product-onboarding normalized prompt, 039 seed sha256, and import-prompts idempotency", async () => {
+test("product-onboarding normalized prompt, 039/040 seed sha256, and import-prompts idempotency", async () => {
   const sourcePath = "prompt/normalized/product-onboarding.md";
   const markdown = await readFile(sourcePath, "utf8");
   assert.equal(isNormalizedPromptMarkdown(markdown), true);
@@ -663,21 +658,31 @@ test("product-onboarding normalized prompt, 039 seed sha256, and import-prompts 
   assert.equal(record.kind, "planner");
   assert.equal(record.executionTarget, "llm");
   assert.deepEqual(resolvePromptTemplateUsedBy(record), ["首页·商品信息建档"]);
-  assert.equal(
-    (record.outputSchema.properties as Record<string, { const?: string }>).schemaVersion?.const,
-    PRODUCT_ONBOARDING_SCHEMA_VERSION,
-  );
+  const outputProps = record.outputSchema.properties as Record<string, any>;
+  assert.equal(outputProps.schemaVersion?.const, PRODUCT_ONBOARDING_SCHEMA_VERSION);
+  assert.equal(outputProps.draftCard?.required?.length, 9);
+  assert.equal("category" in (outputProps.draftCard?.properties ?? {}), false);
+  assert.equal("skuCode" in (outputProps.draftCard?.properties ?? {}), false);
+  assert.equal(outputProps.missingRequiredFields?.items?.enum?.length, 6);
+  assert.equal(outputProps.missingRequiredFields?.items?.enum?.includes("category"), false);
+  assert.match(record.body, /6 项入库必填 \+ 3 项选填/);
+  assert.doesNotMatch(record.body, /skuCode|category/);
   assert.match(record.body, /单品本体 ×1，无额外配件/);
   assert.match(record.body, /严禁编造/);
   assert.match(record.body, /按编号.*一次性合并追问全部剩余缺失必填项/);
 
-  // 039 SQL migration contains exact sha256 matching import-prompts calculation
-  const migrationSql = await readFile("db/migrations/039_product_onboarding_template.sql", "utf8");
-  assert.match(migrationSql, /'product_onboarding'/);
-  assert.match(migrationSql, /'product\.onboarding'/);
+  // 039 & 040 SQL migrations contain exact sha256 matching import-prompts calculation
+  const migration039Sql = await readFile("db/migrations/039_product_onboarding_template.sql", "utf8");
+  assert.match(migration039Sql, /'product_onboarding'/);
+  assert.match(migration039Sql, /'product\.onboarding'/);
   assert.ok(
-    migrationSql.includes(`'${record.sourceSha256}'`),
+    migration039Sql.includes(`'${record.sourceSha256}'`),
     `039 migration source_sha256 must match ${record.sourceSha256}`,
+  );
+  const migration040Sql = await readFile("db/migrations/040_drop_product_card_category_and_sku.sql", "utf8");
+  assert.ok(
+    migration040Sql.includes(`'${record.sourceSha256}'`),
+    `040 migration source_sha256 must match ${record.sourceSha256}`,
   );
 
   // Re-importing via importPromptRecordsWithPolicy after seeded v1 produces no v2 draft

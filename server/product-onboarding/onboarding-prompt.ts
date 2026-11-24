@@ -72,13 +72,11 @@ const CORRECTION_CUE_PATTERN =
 
 const FIELD_KEYWORDS: Record<ProductCardFieldKey, RegExp> = {
   name: /(?:商品名|商品名称|产品名|品名|名称|标题)/,
-  category: /(?:类目|品类|分类|类别)/,
   sellingPoints: /(?:卖点|核心卖点|特点|亮点)/,
   specifications: /(?:规格|参数|尺寸|重量|容量|功率|大小|尺码|克重|长宽|型号)/,
   materialsCraft: /(?:材质|材料|面料|工艺|做工|表面处理|成分)/,
   audienceScenarios: /(?:人群|受众|场景|用途|适用|场合)/,
   packageContents: /(?:包装|清单|配件|赠品|内含|附件|箱内|单品)/,
-  skuCode: /(?:sku|款号|货号|编码)/i,
   painPointsComparison: /(?:痛点|对比|升级|区别|差异)/,
   usageDemoHighlights: /(?:使用|用法|操作|演示|步骤|保养|维护)/,
   certificationsProhibitions: /(?:认证|资质|禁忌|禁语|合规|fcc|ce|fda|rohs)/i,
@@ -137,7 +135,6 @@ export function normalizeDraftCardFields(input: unknown): ProductCardFields {
   if (!isPlainObject(input)) return result;
 
   result.name = cleanExtractedText(input.name, PRODUCT_CARD_FIELD_LIMITS.name.max);
-  result.category = cleanExtractedText(input.category, PRODUCT_CARD_FIELD_LIMITS.category.max);
   result.sellingPoints = cleanExtractedSellingPoints(input.sellingPoints);
   result.specifications = cleanExtractedText(
     input.specifications,
@@ -155,7 +152,6 @@ export function normalizeDraftCardFields(input: unknown): ProductCardFields {
     input.packageContents,
     PRODUCT_CARD_FIELD_LIMITS.packageContents.max,
   );
-  result.skuCode = cleanExtractedText(input.skuCode, PRODUCT_CARD_FIELD_LIMITS.skuCode.max);
   result.painPointsComparison = cleanExtractedText(
     input.painPointsComparison,
     PRODUCT_CARD_FIELD_LIMITS.painPointsComparison.max,

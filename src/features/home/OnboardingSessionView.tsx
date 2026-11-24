@@ -615,7 +615,7 @@ export function OnboardingSessionView({
                         <strong>商品建档 Agent</strong>
                         <span>处理中</span>
                       </div>
-                      <div className="home-msg-text">正在提取商品客观事实并核对 7 项必填字段…</div>
+                      <div className="home-msg-text">正在提取商品客观事实并核对 6 项必填字段…</div>
                     </article>
                   )}
                   <div ref={messagesEndRef} />
@@ -688,8 +688,8 @@ export function OnboardingSessionView({
                       data-testid="required-progress-pill"
                     >
                       {localMissingFields.length === 0
-                        ? "7/7 必填已齐"
-                        : `已填 ${completedRequiredCount}/7 必填`}
+                        ? "6/6 必填已齐"
+                        : `已填 ${completedRequiredCount}/6 必填`}
                     </span>
                   </div>
                   <div className="home-card-header-right">

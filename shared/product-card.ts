@@ -3,7 +3,6 @@ export type ProductCardStatus = (typeof PRODUCT_CARD_STATUSES)[number];
 
 export const PRODUCT_CARD_REQUIRED_FIELDS = [
   "name",
-  "category",
   "sellingPoints",
   "specifications",
   "materialsCraft",
@@ -13,7 +12,6 @@ export const PRODUCT_CARD_REQUIRED_FIELDS = [
 export type ProductCardRequiredField = (typeof PRODUCT_CARD_REQUIRED_FIELDS)[number];
 
 export const PRODUCT_CARD_OPTIONAL_FIELDS = [
-  "skuCode",
   "painPointsComparison",
   "usageDemoHighlights",
   "certificationsProhibitions",
@@ -31,13 +29,11 @@ export const PRODUCT_CARD_NO_EXTRA_ACCESSORIES_TEXT = "单品本体 ×1，无额
 
 export const PRODUCT_CARD_FIELD_LABELS: Record<ProductCardFieldKey, string> = {
   name: "商品名称",
-  category: "商品类目",
   sellingPoints: "核心卖点",
   specifications: "规格参数与尺寸重量",
   materialsCraft: "材质与工艺细节",
   audienceScenarios: "适用人群与使用场景",
   packageContents: "包装清单 / 配件说明",
-  skuCode: "内部 SKU / 款号",
   painPointsComparison: "用户痛点与自身对比数据",
   usageDemoHighlights: "使用方法 / 动态演示亮点",
   certificationsProhibitions: "认证资质与宣传禁忌",
@@ -45,13 +41,11 @@ export const PRODUCT_CARD_FIELD_LABELS: Record<ProductCardFieldKey, string> = {
 
 export const PRODUCT_CARD_FIELD_LIMITS = {
   name: { min: 1, max: 120 },
-  category: { min: 1, max: 60 },
   sellingPoints: { minItems: 1, maxItems: 10, itemMin: 1, itemMax: 200 },
   specifications: { min: 1, max: 1000 },
   materialsCraft: { min: 1, max: 800 },
   audienceScenarios: { min: 1, max: 800 },
   packageContents: { min: 1, max: 600 },
-  skuCode: { min: 0, max: 80 },
   painPointsComparison: { min: 0, max: 1000 },
   usageDemoHighlights: { min: 0, max: 1000 },
   certificationsProhibitions: { min: 0, max: 800 },
@@ -65,13 +59,11 @@ export type ProductCardAllowedImageMime = (typeof PRODUCT_CARD_ALLOWED_IMAGE_MIM
 
 export interface ProductCardFields {
   name: string;
-  category: string;
   sellingPoints: string[];
   specifications: string;
   materialsCraft: string;
   audienceScenarios: string;
   packageContents: string;
-  skuCode: string;
   painPointsComparison: string;
   usageDemoHighlights: string;
   certificationsProhibitions: string;
@@ -108,8 +100,6 @@ export interface ProductCardSummary {
   id: string;
   status: ProductCardStatus;
   name: string;
-  category: string;
-  skuCode: string;
   sellingPoints: string[];
   revision: number;
   supplierImageCount: number;
@@ -143,13 +133,11 @@ export function productCardCharLength(value: string): number {
 export function emptyProductCardFields(): ProductCardFields {
   return {
     name: "",
-    category: "",
     sellingPoints: [],
     specifications: "",
     materialsCraft: "",
     audienceScenarios: "",
     packageContents: "",
-    skuCode: "",
     painPointsComparison: "",
     usageDemoHighlights: "",
     certificationsProhibitions: "",
@@ -172,13 +160,11 @@ export function createProductCardSnapshot(
     cardId: card.id,
     revision: card.revision,
     name: card.name,
-    category: card.category,
     sellingPoints: [...card.sellingPoints],
     specifications: card.specifications,
     materialsCraft: card.materialsCraft,
     audienceScenarios: card.audienceScenarios,
     packageContents: card.packageContents,
-    skuCode: card.skuCode,
     painPointsComparison: card.painPointsComparison,
     usageDemoHighlights: card.usageDemoHighlights,
     certificationsProhibitions: card.certificationsProhibitions,
@@ -210,7 +196,6 @@ export function getMissingRequiredProductCardFields(
 
 const REQUIRED_TEXT_FIELDS = [
   "name",
-  "category",
   "specifications",
   "materialsCraft",
   "audienceScenarios",
@@ -351,8 +336,6 @@ export function formatProductCardFacts(snapshot: ProductCardFields | ProductCard
   };
 
   pushLine(PRODUCT_CARD_FIELD_LABELS.name, snapshot.name);
-  pushLine(PRODUCT_CARD_FIELD_LABELS.skuCode, snapshot.skuCode);
-  pushLine(PRODUCT_CARD_FIELD_LABELS.category, snapshot.category);
 
   const sellingPoints = Array.isArray(snapshot.sellingPoints)
     ? snapshot.sellingPoints.map((item) => item.trim()).filter(Boolean)
@@ -391,7 +374,6 @@ export function readProductCardSnapshot(value: unknown): ProductCardSnapshot | n
     cardId: row.cardId,
     revision: row.revision,
     name: row.name,
-    category: typeof row.category === "string" ? row.category : "",
     sellingPoints: Array.isArray(row.sellingPoints)
       ? row.sellingPoints.filter((item): item is string => typeof item === "string")
       : [],
@@ -399,7 +381,6 @@ export function readProductCardSnapshot(value: unknown): ProductCardSnapshot | n
     materialsCraft: typeof row.materialsCraft === "string" ? row.materialsCraft : "",
     audienceScenarios: typeof row.audienceScenarios === "string" ? row.audienceScenarios : "",
     packageContents: typeof row.packageContents === "string" ? row.packageContents : "",
-    skuCode: typeof row.skuCode === "string" ? row.skuCode : "",
     painPointsComparison: typeof row.painPointsComparison === "string" ? row.painPointsComparison : "",
     usageDemoHighlights: typeof row.usageDemoHighlights === "string" ? row.usageDemoHighlights : "",
     certificationsProhibitions:

@@ -105,13 +105,11 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   const createSubmitBtn = createModal.getByRole("button", { name: "保存到商品库" });
   assert.equal(await createSubmitBtn.isDisabled(), true, "Submit button should be disabled when required fields are empty");
   const initialReason = await createModal.locator('[data-testid="pc-disable-reason"]').innerText();
-  assert.match(initialReason, /尚缺 7 项必填/);
-  assert.equal(await createModal.locator(".pc-field.is-missing").count(), 7);
+  assert.match(initialReason, /尚缺 6 项必填/);
+  assert.equal(await createModal.locator(".pc-field.is-missing").count(), 6);
 
-  // Fill 6 of the 7 required fields + SKU
+  // Fill 5 of the 6 required fields
   await createModal.locator("#create-product-card-name").fill("钛合金保温随行杯 480ml");
-  await createModal.locator("#create-product-card-skuCode").fill("SKU-TI-480");
-  await createModal.locator("#create-product-card-category").fill("户外水具");
   await createModal.getByLabel("核心卖点 1").fill("纯钛内胆不串味，泡咖啡茶饮更纯净");
   await createModal.getByRole("button", { name: "添加核心卖点" }).click();
   await createModal.getByLabel("核心卖点 2").fill("整杯净重 195g，超轻便携适合通勤露营");
@@ -129,7 +127,7 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
     await createModal.locator("#create-product-card-packageContents").inputValue(),
     PRODUCT_CARD_NO_EXTRA_ACCESSORIES_TEXT,
   );
-  assert.equal(await createSubmitBtn.isDisabled(), false, "Submit button should be enabled once all 7 required fields are filled");
+  assert.equal(await createSubmitBtn.isDisabled(), false, "Submit button should be enabled once all 6 required fields are filled");
 
   // Expand extended optional section and fill certifications
   await createModal.locator(".pc-collapse-toggle").click();
@@ -158,15 +156,13 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   await createSubmitBtn.click();
   await createModal.waitFor({ state: "hidden" });
 
-  // Verify card rendered in list with cover image, SKU badge, selling points, quick actions
+  // Verify card rendered in list with cover image, selling points, quick actions (no SKU/category badges)
   const createdCard = page.locator(".product-card-item").first();
   await createdCard.waitFor({ state: "visible" });
   const createdCardId = await createdCard.getAttribute("data-product-card-id");
   assert.ok(createdCardId, "Created card should have data-product-card-id");
   const cardText = await createdCard.innerText();
   assert.match(cardText, /钛合金保温随行杯 480ml/);
-  assert.match(cardText, /SKU-TI-480/);
-  assert.match(cardText, /户外水具/);
   assert.match(cardText, /纯钛内胆不串味/);
   assert.match(cardText, /整杯净重 195g/);
   assert.match(cardText, /去生成套图/);
@@ -193,8 +189,6 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   const secondRes = await api.request("POST", "/api/product-cards", {
     body: {
       name: "氮化镓 65W 折叠快充头",
-      skuCode: "SKU-GAN-65",
-      category: "3C 数码配件",
       sellingPoints: ["三口同时快充，支持 PD3.0/PPS"],
       specifications: "总功率 65W，尺寸 52x38x32mm，重量 112g",
       materialsCraft: "阻燃 PC 外壳，折叠国标插脚",
@@ -213,9 +207,9 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
     "钛合金保温随行杯 480ml",
   );
 
-  // 4. Search by SKU and by name
+  // 4. Search by selling point and by name
   const searchInput = page.getByLabel("搜索商品信息卡");
-  await searchInput.fill("SKU-TI-480");
+  await searchInput.fill("纯钛内胆");
   await page.getByRole("button", { name: "搜索" }).click();
   await page.waitForFunction(() => document.querySelectorAll(".product-card-item").length === 1);
   assert.match(await page.locator(".product-card-item").first().innerText(), /钛合金保温随行杯 480ml/);
@@ -223,7 +217,7 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   await page.getByRole("button", { name: "清除搜索" }).click();
   await page.waitForFunction(() => document.querySelectorAll(".product-card-item").length === 2);
 
-  await searchInput.fill("氮化镓");
+  await searchInput.fill("pd3.0");
   await searchInput.press("Enter");
   await page.waitForFunction(() => document.querySelectorAll(".product-card-item").length === 1);
   assert.match(await page.locator(".product-card-item").first().innerText(), /氮化镓 65W 折叠快充头/);

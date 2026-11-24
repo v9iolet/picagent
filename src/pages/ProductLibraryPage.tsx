@@ -428,7 +428,7 @@ export function ProductLibraryPage({
                 onKeyDown={(event) => {
                   if (event.key === "Enter") handleSearch();
                 }}
-                placeholder="搜索商品名称、内部 SKU / 款号或商品类目"
+                placeholder="搜索商品名称或核心卖点"
               />
             </div>
             <button className="btn" type="button" onClick={handleSearch}>
@@ -482,10 +482,6 @@ export function ProductLibraryPage({
                             <span className={`badge ${statusBadgeClass(item.status)}`}>
                               {statusLabel(item.status)}
                             </span>
-                            <span className="badge product-category-badge">{item.category}</span>
-                            {item.skuCode && (
-                              <span className="badge product-sku-badge">{item.skuCode}</span>
-                            )}
                           </div>
                           <h3 className="product-card-name" title={item.name}>
                             {item.name}
@@ -633,9 +629,6 @@ export function ProductLibraryPage({
                       <span className="badge mono" data-testid="product-revision-badge">
                         v{selectedDetail.revision}
                       </span>
-                      {selectedDetail.skuCode && (
-                        <span className="badge product-sku-badge">{selectedDetail.skuCode}</span>
-                      )}
                     </div>
                     <span className="product-inspector-meta-time">
                       更新于 {new Date(selectedDetail.updatedAt).toLocaleString("zh-CN")}
@@ -740,7 +733,7 @@ export function ProductLibraryPage({
               <div>
                 <span className="style-library-modal-kicker">NEW PRODUCT CARD</span>
                 <h2 id="product-create-modal-title">手动新建商品信息卡</h2>
-                <p>补齐 7 项必填客观商品事实后即可保存到商品库，供商品套图与爆品图复刻复用</p>
+                <p>补齐 6 项必填客观商品事实后即可保存到商品库，供商品套图与爆品图复刻复用</p>
               </div>
               <button
                 className="icon-btn"

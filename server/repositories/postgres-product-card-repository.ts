@@ -22,13 +22,11 @@ const CARD_COLS = `
   id,
   status,
   name,
-  category,
   selling_points_json AS "sellingPoints",
   specifications,
   materials_craft AS "materialsCraft",
   audience_scenarios AS "audienceScenarios",
   package_contents AS "packageContents",
-  sku_code AS "skuCode",
   pain_points_comparison AS "painPointsComparison",
   usage_demo_highlights AS "usageDemoHighlights",
   certifications_prohibitions AS "certificationsProhibitions",
@@ -56,13 +54,11 @@ interface CardRow {
   id: string;
   status: ProductCardStatus;
   name: string;
-  category: string;
   sellingPoints: string[];
   specifications: string;
   materialsCraft: string;
   audienceScenarios: string;
   packageContents: string;
-  skuCode: string;
   painPointsComparison: string;
   usageDemoHighlights: string;
   certificationsProhibitions: string;
@@ -76,8 +72,6 @@ interface SummaryRow {
   id: string;
   status: ProductCardStatus;
   name: string;
-  category: string;
-  skuCode: string;
   sellingPoints: string[];
   revision: number;
   sourceSessionId: string | null;
@@ -129,13 +123,11 @@ function assembleProductCard(row: CardRow, images: ProductCardSupplierImage[]): 
     id: row.id,
     status: row.status,
     name: row.name,
-    category: row.category,
     sellingPoints: Array.isArray(row.sellingPoints) ? [...row.sellingPoints] : [],
     specifications: row.specifications,
     materialsCraft: row.materialsCraft,
     audienceScenarios: row.audienceScenarios,
     packageContents: row.packageContents,
-    skuCode: row.skuCode ?? "",
     painPointsComparison: row.painPointsComparison ?? "",
     usageDemoHighlights: row.usageDemoHighlights ?? "",
     certificationsProhibitions: row.certificationsProhibitions ?? "",
@@ -196,7 +188,7 @@ export class PostgresProductCardRepository implements ProductCardRepository {
       params.push(`%${escapeLikePattern(keyword.toLowerCase())}%`);
       const idx = params.length;
       conditions.push(
-        `(lower(c.name) LIKE $${idx} ESCAPE '\\' OR lower(c.sku_code) LIKE $${idx} ESCAPE '\\' OR lower(c.category) LIKE $${idx} ESCAPE '\\')`,
+        `(lower(c.name) LIKE $${idx} ESCAPE '\\' OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(c.selling_points_json) AS sp(point) WHERE lower(sp.point) LIKE $${idx} ESCAPE '\\'))`,
       );
     }
 
@@ -217,8 +209,6 @@ export class PostgresProductCardRepository implements ProductCardRepository {
          c.id,
          c.status,
          c.name,
-         c.category,
-         c.sku_code AS "skuCode",
          c.selling_points_json AS "sellingPoints",
          c.revision,
          c.source_session_id AS "sourceSessionId",
@@ -237,8 +227,6 @@ export class PostgresProductCardRepository implements ProductCardRepository {
       id: row.id,
       status: row.status,
       name: row.name,
-      category: row.category,
-      skuCode: row.skuCode ?? "",
       sellingPoints: Array.isArray(row.sellingPoints) ? [...row.sellingPoints] : [],
       revision: row.revision,
       supplierImageCount: row.supplierImageCount ?? 0,
@@ -274,23 +262,21 @@ export class PostgresProductCardRepository implements ProductCardRepository {
       await client.query("BEGIN");
       const cardResult = await client.query<CardRow>(
         `INSERT INTO ${CARDS_TABLE} (
-          id, status, name, category, selling_points_json, specifications, materials_craft,
-          audience_scenarios, package_contents, sku_code, pain_points_comparison,
+          id, status, name, selling_points_json, specifications, materials_craft,
+          audience_scenarios, package_contents, pain_points_comparison,
           usage_demo_highlights, certifications_prohibitions, source_session_id,
           revision, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        ) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         RETURNING ${CARD_COLS}`,
         [
           input.id,
           input.status,
           input.fields.name,
-          input.fields.category,
           JSON.stringify(input.fields.sellingPoints),
           input.fields.specifications,
           input.fields.materialsCraft,
           input.fields.audienceScenarios,
           input.fields.packageContents,
-          input.fields.skuCode,
           input.fields.painPointsComparison,
           input.fields.usageDemoHighlights,
           input.fields.certificationsProhibitions,
@@ -328,30 +314,26 @@ export class PostgresProductCardRepository implements ProductCardRepository {
         `UPDATE ${CARDS_TABLE}
          SET
            name = $2,
-           category = $3,
-           selling_points_json = $4::jsonb,
-           specifications = $5,
-           materials_craft = $6,
-           audience_scenarios = $7,
-           package_contents = $8,
-           sku_code = $9,
-           pain_points_comparison = $10,
-           usage_demo_highlights = $11,
-           certifications_prohibitions = $12,
+           selling_points_json = $3::jsonb,
+           specifications = $4,
+           materials_craft = $5,
+           audience_scenarios = $6,
+           package_contents = $7,
+           pain_points_comparison = $8,
+           usage_demo_highlights = $9,
+           certifications_prohibitions = $10,
            revision = revision + 1,
-           updated_at = $13
+           updated_at = $11
          WHERE id = $1
          RETURNING ${CARD_COLS}`,
         [
           id,
           input.fields.name,
-          input.fields.category,
           JSON.stringify(input.fields.sellingPoints),
           input.fields.specifications,
           input.fields.materialsCraft,
           input.fields.audienceScenarios,
           input.fields.packageContents,
-          input.fields.skuCode,
           input.fields.painPointsComparison,
           input.fields.usageDemoHighlights,
           input.fields.certificationsProhibitions,

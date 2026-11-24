@@ -128,8 +128,6 @@ export function SelectedProductCardBar({
               ) : (
                 <ProductCardFactsView
                   name={detailData.name}
-                  category={detailData.category}
-                  skuCode={detailData.skuCode}
                   revision={detailData.revision}
                   coverThumbnailUrl={detailData.coverThumbnailUrl}
                   snapshotMode={readOnly}
@@ -172,10 +170,13 @@ export function SelectedProductCardBar({
               </span>
             )}
           </div>
-          <div className="pcp-badges">
-            {card.skuCode && <span className="pcp-badge is-sku">{card.skuCode}</span>}
-            {card.category && <span className="pcp-badge is-cat">{card.category}</span>}
-          </div>
+          {card.sellingPoints?.[0] && (
+            <div className="pcp-badges">
+              <span className="pcp-muted" title={card.sellingPoints[0]}>
+                {card.sellingPoints[0]}
+              </span>
+            </div>
+          )}
         </div>
         <div className="pcp-selected-actions">
           <button

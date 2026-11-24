@@ -294,8 +294,6 @@ async function createDownstreamFixture(options: {
     const res = await app.request("POST", "/api/product-cards", {
       body: {
         name: "极光双层真空保温杯 500ml",
-        category: "水杯水具",
-        skuCode: "JG-CUP-500",
         sellingPoints: [
           "316L 医用级不锈钢内胆，装咖啡果汁不易串味",
           "12 小时真空长效保温保冷",
@@ -697,7 +695,6 @@ test("快照不可变性：原卡编辑/归档/删除后，历史 studio-state�
   const editedRes = await f.app.request("PATCH", `/api/product-cards/${card.id}`, {
     body: {
       name: "二代重装保温杯 v2",
-      category: card.category,
       sellingPoints: ["二代新增卖点"],
       specifications: "二代参数：容量 1000ml，净重 500g",
       materialsCraft: card.materialsCraft,

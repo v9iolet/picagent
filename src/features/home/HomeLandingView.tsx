@@ -314,7 +314,7 @@ export function HomeLandingView({
                           <span
                             className={`home-pill ${missingCount > 0 ? "is-warn" : "is-pass"}`}
                           >
-                            {missingCount > 0 ? `待补 ${missingCount} 项必填` : "7 项必填已齐 · 待保存"}
+                            {missingCount > 0 ? `待补 ${missingCount} 项必填` : "6 项必填已齐 · 待保存"}
                           </span>
                           {draft.supplierImageCount > 0 && (
                             <span className="home-pill">{draft.supplierImageCount} 张参考图</span>
@@ -403,10 +403,6 @@ export function HomeLandingView({
                       )}
                     </div>
                     <div className="home-recent-card-head">
-                      <div className="home-recent-card-badges">
-                        {card.skuCode && <span className="badge product-sku-badge">{card.skuCode}</span>}
-                        {card.category && <span className="badge product-category-badge">{card.category}</span>}
-                      </div>
                       <h3>{card.name}</h3>
                     </div>
                   </div>

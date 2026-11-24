@@ -7,8 +7,6 @@ import type {
 export interface SelectedProductCardSummary {
   cardId: string;
   name: string;
-  category: string;
-  skuCode: string;
   revision: number;
   coverThumbnailUrl: string | null;
   sellingPoints?: string[];
@@ -35,8 +33,6 @@ export function toSelectedProductCardSummary(
   return {
     cardId,
     name: card.name,
-    category: card.category,
-    skuCode: card.skuCode,
     revision: card.revision,
     coverThumbnailUrl: card.coverThumbnailUrl ?? null,
     sellingPoints: [...card.sellingPoints],
@@ -76,8 +72,6 @@ export function sanitizeSelectedProductCardSummary(
   return {
     cardId,
     name,
-    category: typeof row.category === "string" ? row.category : "",
-    skuCode: typeof row.skuCode === "string" ? row.skuCode : "",
     revision,
     coverThumbnailUrl:
       typeof row.coverThumbnailUrl === "string" && row.coverThumbnailUrl.trim()

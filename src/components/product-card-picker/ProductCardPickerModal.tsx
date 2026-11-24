@@ -107,7 +107,7 @@ export function ProductCardPickerModal({
     };
   }, [open, activeKeyword, page, selectedCardId]);
 
-  // Fetch full 7+4 facts for highlighted card
+  // Fetch full 6+3 facts for highlighted card
   useEffect(() => {
     if (!open) return;
     if (!highlightedId) {
@@ -211,7 +211,7 @@ export function ProductCardPickerModal({
             <input
               type="search"
               aria-label="搜索商品信息卡"
-              placeholder="按商品名称、SKU / 款号或类目搜索…"
+              placeholder="搜索商品名称或核心卖点"
               value={keywordInput}
               onChange={(event) => setKeywordInput(event.target.value)}
               autoFocus
@@ -252,7 +252,7 @@ export function ProductCardPickerModal({
                 <strong>{activeKeyword ? "未找到匹配的在用商品卡" : "暂无在用商品信息卡"}</strong>
                 <small>
                   {activeKeyword
-                    ? "请尝试更换品名、SKU 或类目关键词。"
+                    ? "请尝试更换商品名称或核心卖点关键词。"
                     : "可先在「首页」建档或在「商品库」手动新建商品卡。"}
                 </small>
               </div>
@@ -276,12 +276,11 @@ export function ProductCardPickerModal({
                         />
                         <div className="pcp-card-option-info">
                           <strong title={item.name}>{item.name}</strong>
-                          <div className="pcp-badges">
-                            {item.skuCode && <span className="pcp-badge is-sku">{item.skuCode}</span>}
-                            {item.category && (
-                              <span className="pcp-badge is-cat">{item.category}</span>
-                            )}
-                          </div>
+                          {item.sellingPoints[0] && (
+                            <span className="pcp-muted" title={item.sellingPoints[0]}>
+                              {item.sellingPoints[0]}
+                            </span>
+                          )}
                         </div>
                         <span className="pcp-check-mark" aria-hidden="true">
                           {isActive ? "✓" : ""}
@@ -323,7 +322,7 @@ export function ProductCardPickerModal({
           <div className="pcp-preview-col" aria-label="商品信息卡事实预览">
             {loadingDetail ? (
               <p className="pcp-state" role="status">
-                正在读取完整 7+4 项商品事实…
+                正在读取完整 6+3 项商品事实…
               </p>
             ) : detailError ? (
               <p className="pcp-state is-error" role="alert">
@@ -332,8 +331,6 @@ export function ProductCardPickerModal({
             ) : previewCard ? (
               <ProductCardFactsView
                 name={previewCard.name}
-                category={previewCard.category}
-                skuCode={previewCard.skuCode}
                 revision={previewCard.revision}
                 coverThumbnailUrl={previewCard.coverThumbnailUrl}
                 fields={previewCard}
@@ -342,7 +339,7 @@ export function ProductCardPickerModal({
               <div className="pcp-empty">
                 <Icon name="box" />
                 <strong>选择左侧商品卡预览详情</strong>
-                <small>可在此核对 7 项必填事实与 4 项选填信息，确认后绑定到当前批次。</small>
+                <small>可在此核对 6 项必填事实与 3 项选填信息，确认后绑定到当前批次。</small>
               </div>
             )}
           </div>

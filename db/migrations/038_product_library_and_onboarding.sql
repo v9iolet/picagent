@@ -27,12 +27,24 @@ CREATE INDEX IF NOT EXISTS product_cards_status_updated_idx
 CREATE INDEX IF NOT EXISTS product_cards_updated_idx
   ON suite_workbench.product_cards (updated_at DESC, id);
 
-CREATE INDEX IF NOT EXISTS product_cards_sku_lower_idx
-  ON suite_workbench.product_cards (lower(sku_code))
-  WHERE sku_code <> '';
-
-CREATE INDEX IF NOT EXISTS product_cards_category_lower_idx
-  ON suite_workbench.product_cards (lower(category));
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'suite_workbench' AND table_name = 'product_cards' AND column_name = 'sku_code'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS product_cards_sku_lower_idx
+      ON suite_workbench.product_cards (lower(sku_code))
+      WHERE sku_code <> '';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'suite_workbench' AND table_name = 'product_cards' AND column_name = 'category'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS product_cards_category_lower_idx
+      ON suite_workbench.product_cards (lower(category));
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS suite_workbench.product_card_images (
   id uuid PRIMARY KEY,

@@ -42,13 +42,11 @@ function toProductCard(record: StoredCardRecord): ProductCard {
     id: record.id,
     status: record.status,
     name: record.fields.name,
-    category: record.fields.category,
     sellingPoints: [...record.fields.sellingPoints],
     specifications: record.fields.specifications,
     materialsCraft: record.fields.materialsCraft,
     audienceScenarios: record.fields.audienceScenarios,
     packageContents: record.fields.packageContents,
-    skuCode: record.fields.skuCode,
     painPointsComparison: record.fields.painPointsComparison,
     usageDemoHighlights: record.fields.usageDemoHighlights,
     certificationsProhibitions: record.fields.certificationsProhibitions,
@@ -68,8 +66,6 @@ function toSummary(record: StoredCardRecord): ProductCardSummary {
     id: record.id,
     status: record.status,
     name: record.fields.name,
-    category: record.fields.category,
-    skuCode: record.fields.skuCode,
     sellingPoints: [...record.fields.sellingPoints],
     revision: record.revision,
     supplierImageCount: ordered.length,
@@ -110,8 +106,7 @@ export class MemoryProductCardRepository implements ProductCardRepository {
         if (!keyword) return true;
         return (
           record.fields.name.toLowerCase().includes(keyword) ||
-          record.fields.skuCode.toLowerCase().includes(keyword) ||
-          record.fields.category.toLowerCase().includes(keyword)
+          record.fields.sellingPoints.some((point) => point.toLowerCase().includes(keyword))
         );
       })
       .sort(compareDesc);
