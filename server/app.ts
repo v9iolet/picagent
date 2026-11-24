@@ -165,43 +165,6 @@ function parseJsonLike(value: unknown): unknown {
   try { return JSON.parse(text); } catch { return value; }
 }
 
-function normalizePlanOutput(value: unknown): { schemaVersion: "suite-plan-v1"; items: Array<{ itemId: string; imageType: "main" | "detail"; ordinal: number; title: string; purpose: string; prompt: string }> } | null {
-  let parsed = parseJsonLike(value);
-  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-    const object = parsed as Record<string, unknown>;
-    if (typeof object.items === "string") parsed = parseJsonLike(object.items);
-  }
-  const object = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
-  const candidates: Array<{ value: unknown; imageType?: "main" | "detail" }> = Array.isArray(parsed)
-    ? parsed.map((value) => ({ value }))
-    : object
-      ? ["items", "plans", "imagePlans", "image_plans", "mainImages", "detailImages", "images", "cards", "prompts", "图片计划", "主图生图提示词", "详情页生图提示词"].flatMap((key) => {
-        const candidate = parseJsonLike(object[key]);
-        if (!Array.isArray(candidate)) return [];
-        const imageType = ["detailImages", "详情页生图提示词"].includes(key) ? "detail" as const
-          : ["mainImages", "主图生图提示词"].includes(key) ? "main" as const : undefined;
-        return candidate.map((value) => ({ value, imageType }));
-      })
-      : [];
-  if (!candidates.length && object && (object.title || object.name || object.prompt || object["提示词"])) candidates.push({ value: object });
-  const items = candidates.map(({ value, imageType: wrapperImageType }, index) => {
-    const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
-    const prompt = String(source.prompt ?? source.text ?? source.body ?? source["提示词"] ?? "").trim();
-    const title = String(source.title ?? source.name ?? source.heading ?? source["产品专属职责"] ?? source["职责"] ?? `图片 ${index + 1}`).trim();
-    const purpose = String(source.purpose ?? source.reason ?? source.description ?? source["为什么需要这张图"] ?? "完成本套图中的独立图片职责").trim();
-    if (!prompt) return null;
-    return {
-      itemId: String(source.itemId ?? source.id ?? `item-${index + 1}`),
-      imageType: source.imageType === "detail" ? "detail" as const : wrapperImageType ?? "main" as const,
-      ordinal: typeof source.ordinal === "number" && Number.isInteger(source.ordinal) ? source.ordinal : index + 1,
-      title,
-      purpose,
-      prompt,
-    };
-  }).filter((item): item is NonNullable<typeof item> => Boolean(item));
-  return items.length ? { schemaVersion: "suite-plan-v1", items } : null;
-}
-
 function summarizeOutput(value: unknown, extra: Record<string, unknown> = {}): Record<string, unknown> {
   const serialized = JSON.stringify(value) ?? "";
   return { sha256: (awaitableHash(serialized)), byteLength: Buffer.byteLength(serialized), itemCount: value && typeof value === "object" && Array.isArray((value as Record<string, unknown>).items) ? ((value as Record<string, unknown>).items as unknown[]).length : 0, ...extra };
@@ -389,18 +352,6 @@ function categoryRequestView(request: CategoryPromptRequest) {
     createdAt: request.createdAt,
     completedAt: request.completedAt,
   };
-}
-
-export function planOutputMatchesRequestedCounts(output: { items: Array<{ imageType: "main" | "detail" }> }, dynamicInput: Record<string, unknown>): boolean {
-  const outputMode = dynamicInput.output_mode;
-  const expectations = [
-    { imageType: "main" as const, enabled: outputMode !== "detail_only", mode: dynamicInput.main_image_count_mode, count: dynamicInput.main_image_count },
-    { imageType: "detail" as const, enabled: outputMode !== "main_only", mode: dynamicInput.detail_image_count_mode, count: dynamicInput.detail_image_count },
-  ];
-  return expectations.every(({ imageType, enabled, mode, count }) => {
-    if (!enabled || mode !== "fixed" || typeof count !== "number") return true;
-    return output.items.filter((item) => item.imageType === imageType).length === count;
-  });
 }
 
 function llmSource(client: LlmClient) {
@@ -1569,70 +1520,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const [attempt, snapshot] = await Promise.all([deps.planRepository.getLatestAttempt(planMatch[1]), deps.planRepository.getLatestSnapshot(planMatch[1])]);
       return ok({ attempt: attempt ? planAttemptView(attempt, attempt.snapshotId === snapshot?.id ? snapshot : null) : null, snapshot: snapshot ? planSnapshotView(snapshot) : null });
     }
-    if (method === "POST" && planMatch) {
-      if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
-      if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
-      if (!deps.promptRepository) return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
-      if (!deps.ragClient) return fail("RAG_NOT_CONFIGURED", 503);
-      const llmClient = await resolveVision();
-      if (!llmClient) return fail("LLM_NOT_CONFIGURED", 503);
-      const suite = await deps.repository.getSuite(planMatch[1]);
-      if (!suite) return fail("INVALID_SUITE_ID", 404);
-      const body = asRecord(options.body);
-      const templateVersionId = typeof body.templateVersionId === "string" ? body.templateVersionId : "";
-      const template = await observedPromptLoad(deps.promptRepository, templateVersionId, "plan");
-      if (!template) return fail("PLAN_TEMPLATE_NOT_FOUND", 404);
-      const validated = validateDynamicInput(template.inputSchema, body.dynamicInput);
-      if (!validated.ok) return fail("PROMPT_INPUT_INVALID", 400, validated.message);
-      const platformValue = typeof validated.value.platform === "string" ? validated.value.platform.trim() : "";
-      const platformProfile = platformValue && deps.platformRepository ? await deps.platformRepository.find(platformValue) : null;
-      if (platformValue && deps.platformRepository && !platformProfile) return fail("PLATFORM_NOT_FOUND");
-      const humanInput = asRecord(body.humanInput);
-      const refs = Array.isArray(body.selectedChunks) ? body.selectedChunks.flatMap((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).version === "string" ? [{ id: (item as { id: string }).id, version: (item as { version: string }).version }] : []) : [];
-      const chunks = await deps.ragClient.getByIds(refs);
-      for (const ref of refs) {
-        const chunk = chunks.find((item) => item.id === ref.id);
-        if (!chunk || !chunk.published) return fail("RAG_CHUNK_NOT_FOUND", 409);
-        if (chunk.version !== ref.version) return fail("RAG_CHUNK_VERSION_DRIFT", 409);
-      }
-      const images = await deps.repository.getInputImages(suite.id);
-      const visionImages = [];
-      for (const image of images) {
-        let sourceKind: "base" | "original" = "original";
-        let sourceVersionId: string | null = null;
-        let sourceObjectKey = image.originalObjectKey;
-        let source = null;
-        if (image.currentBaseVersionId) {
-          const base = await deps.repository.getBaseImageVersion(suite.id, image.id, image.currentBaseVersionId);
-          if (base) { sourceKind = "base"; sourceVersionId = base.id; sourceObjectKey = base.objectKey; }
-        }
-        if (sourceKind === "original") {
-          const generationInputKey = image.originalObjectKey.replace(/\/original$/, "/generation-input.jpg");
-          if (generationInputKey !== image.originalObjectKey) source = await deps.storage.get(generationInputKey);
-          if (source) sourceObjectKey = generationInputKey;
-        }
-        source ??= await deps.storage.get(sourceObjectKey);
-        if (!source) return fail("PLAN_INPUT_IMAGE_NOT_FOUND", 409);
-        visionImages.push({ id: image.id, sourceKind, sourceVersionId, mimeType: source.contentType, bytes: source.bytes });
-      }
-      const createdAt = new Date().toISOString();
-      const attempt: PlanAttempt = { id: randomUUID(), suiteId: suite.id, idempotencyKey, status: "running", templateVersionId, dynamicInput: validated.value, humanInput, selectedChunks: refs, inputImageIds: images.map((item) => item.id), baseVersionIds: images.flatMap((item) => item.currentBaseVersionId ? [item.currentBaseVersionId] : []), provider: llmSource(llmClient), errorCode: null, errorMessage: null, outputSummary: null, snapshotId: null, createdAt, completedAt: null };
-      const reservation = await deps.planRepository.beginAttempt(attempt);
-      if (reservation.duplicate) return ok({ attemptId: reservation.attempt.id, status: reservation.attempt.status }, reservation.attempt.status === "running" ? 202 : 200);
-      void (async () => {
-        let raw: unknown;
-        try { raw = await llmClient.generatePlan({ requestId: attempt.id, templateVersionId, templateBody: template.body, userPromptTemplate: template.userPromptTemplate, dynamicInput: validated.value, humanInput, chunks, inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, visionImages, platformProfile: platformProfile ?? undefined }); }
-        catch (error) { const code = error instanceof Error && error.message === "LLM_TIMEOUT" ? "LLM_TIMEOUT" : "LLM_PROVIDER_FAILED"; await deps.planRepository!.failAttempt(attempt.id, code, errorMessages[code]); return; }
-        const normalizedOutput = normalizePlanOutput(raw);
-        if (!normalizedOutput || !validPlanOutput(normalizedOutput, template.outputSchema)) { await deps.planRepository!.failAttempt(attempt.id, "LLM_OUTPUT_SCHEMA_INVALID", errorMessages.LLM_OUTPUT_SCHEMA_INVALID, summarizeOutput(raw)); return; }
-        if (!planOutputMatchesRequestedCounts(normalizedOutput, validated.value)) { await deps.planRepository!.failAttempt(attempt.id, "LLM_OUTPUT_COUNT_MISMATCH", errorMessages.LLM_OUTPUT_COUNT_MISMATCH, summarizeOutput(raw)); return; }
-        const latest = await deps.planRepository!.getLatestSnapshot(suite.id);
-        const output = normalizedOutput;
-        const snapshot: PlanSnapshot = { id: randomUUID(), suiteId: suite.id, revisionNumber: (latest?.revisionNumber ?? 0) + 1, revisionKind: "llm", parentSnapshotId: latest?.id ?? null, templateVersionId, dynamicInput: validated.value, humanInput, chunks: chunks.map((chunk) => ({ sourceChunkId: chunk.id, sourceVersion: chunk.version, title: chunk.title, content: chunk.content, fieldValues: chunk.fieldValues, sourceKind: chunk.sourceKind, sourceAssetPaths: chunk.sourceAssetPaths, contentSha256: chunk.contentSha256 })), inputImageIds: attempt.inputImageIds, baseVersionIds: attempt.baseVersionIds, provider: attempt.provider, requestSummary: { dynamicFieldCount: Object.keys(validated.value).length, chunkCount: chunks.length, inputImageCount: attempt.inputImageIds.length, templateVersionId }, rawOutputSummary: summarizeOutput(raw), schemaVersion: output.schemaVersion, items: output.items.map((item, index) => ({ id: randomUUID(), ordinal: index + 1, imageType: item.imageType ?? "main", title: item.title, purpose: item.purpose, prompt: item.prompt })), createdAt: new Date().toISOString() };
-        await deps.planRepository!.completeAttempt(attempt.id, snapshot);
-      })().catch((error) => deps.planRepository!.failAttempt(attempt.id, error instanceof Error && error.message === "LLM_TIMEOUT" ? "LLM_TIMEOUT" : "LLM_PROVIDER_FAILED", error instanceof Error && error.message === "LLM_TIMEOUT" ? errorMessages.LLM_TIMEOUT : errorMessages.LLM_PROVIDER_FAILED).catch(() => undefined));
-      return ok({ attemptId: attempt.id, status: "running" }, 202);
-    }
+    if (method === "POST" && planMatch) return fail("LEGACY_ENDPOINT_GONE", 410);
     if (method === "PATCH" && planMatch) {
       if (!deps.planRepository) return fail("PLAN_REPOSITORY_NOT_CONFIGURED", 503);
       const latest = await deps.planRepository.getLatestSnapshot(planMatch[1]);

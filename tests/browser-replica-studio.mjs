@@ -12,6 +12,7 @@ import { MemoryLibraryRepository } from "../server/repositories/memory-library-r
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemoryReplicaRepository } from "../server/repositories/memory-replica-repository.js";
+import { MemoryReverseRepository } from "../server/repositories/memory-reverse-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
@@ -27,6 +28,7 @@ async function offlineReplicaStudio(t, gates = {}) {
   const taskRepository = new MemoryTaskRepository();
   const pipelineRepository = new MemoryPipelineRepository();
   const replicaRepository = new MemoryReplicaRepository();
+  const reverseRepository = new MemoryReverseRepository();
   const libraryRepository = new MemoryLibraryRepository();
   const editorRepository = new MemoryImageEditorRepository();
 
@@ -115,6 +117,7 @@ async function offlineReplicaStudio(t, gates = {}) {
     taskRepository,
     pipelineRepository,
     replicaRepository,
+    reverseRepository,
     libraryRepository,
     imageRetryDelayMs: 0,
     llmClient: {
@@ -196,11 +199,14 @@ async function offlineReplicaStudio(t, gates = {}) {
               for await (const chunk of req) chunks.push(chunk);
               const payload = Buffer.concat(chunks);
               const libPreview = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
+              const reversePreview = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
               const versionPreview = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
               const editedPreview = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
               let result;
               if (libPreview) {
                 result = await api.previewLibraryResource(libPreview[1]);
+              } else if (reversePreview) {
+                result = await api.previewReverseReference(reversePreview[1], reversePreview[2], reversePreview[3] ?? "thumbnail");
               } else if (versionPreview) {
                 result = await api.previewTaskVersion(versionPreview[1], versionPreview[2]);
               } else if (editedPreview) {
@@ -244,7 +250,7 @@ async function offlineReplicaStudio(t, gates = {}) {
   const url = vite.resolvedUrls.local[0];
   const page = await browser.newPage({ viewport: { width: 1480, height: 960 }, acceptDownloads: true });
   page.setDefaultTimeout(10000);
-  return { api, browser, calls, url, page };
+  return { api, browser, calls, url, page, reverseRepository, storage, sampleProduct };
 }
 
 test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与批次操作、生成记录与新建清空", async (t) => {
@@ -605,7 +611,72 @@ test("爆品图复刻：失败单卡展示错误原因并支持单卡重新生�
 });
 
 test("爆品图复刻：无产品图风格示意角标尺寸正常且 /reverse/:id 只读页仍可访问", async (t) => {
-  const { url, page } = await offlineReplicaStudio(t);
+  const { url, page, reverseRepository, storage, sampleProduct } = await offlineReplicaStudio(t);
+
+  // Seed a historical reverse plan to verify full read-only rendering on /reverse/:id
+  const legacyPlanId = "legacy-reverse-plan-readonly";
+  const legacyRefId = "legacy-reverse-ref-1";
+  const legacyPromptId = "legacy-reverse-prompt-1";
+  const legacyOrigKey = `reverse-plans/${legacyPlanId}/references/${legacyRefId}/original`;
+  const legacyThumbKey = `reverse-plans/${legacyPlanId}/references/${legacyRefId}/thumbnail`;
+  await storage.put({ key: legacyOrigKey, bytes: sampleProduct, contentType: "image/jpeg" });
+  await storage.put({ key: legacyThumbKey, bytes: sampleProduct, contentType: "image/jpeg" });
+  await reverseRepository.savePlan({
+    id: legacyPlanId,
+    mode: "main",
+    status: "draft",
+    baselineReferenceId: null,
+    createdAt: "2026-10-01T08:00:00.000Z",
+    updatedAt: "2026-10-01T08:00:00.000Z",
+    references: [
+      {
+        id: legacyRefId,
+        planId: legacyPlanId,
+        ordinal: 1,
+        filename: "legacy-ref.jpg",
+        mimeType: "image/jpeg",
+        sha256: "a".repeat(64),
+        width: 800,
+        height: 800,
+        objectKey: legacyOrigKey,
+        thumbnailObjectKey: legacyThumbKey,
+        templateVersionId: "legacy-tpl-v1",
+        effectivePromptVersionId: legacyPromptId,
+        attempts: [
+          {
+            id: "legacy-attempt-1",
+            referenceId: legacyRefId,
+            status: "succeeded",
+            retryOfAttemptId: null,
+            templateVersionId: "legacy-tpl-v1",
+            mode: "main",
+            baselineReferenceId: null,
+            requestSummary: {},
+            rawOutput: null,
+            errorCode: null,
+            errorMessage: null,
+            promptVersionId: legacyPromptId,
+            createdAt: "2026-10-01T08:00:00.000Z",
+            completedAt: "2026-10-01T08:00:00.000Z",
+          },
+        ],
+        promptVersions: [
+          {
+            id: legacyPromptId,
+            referenceId: legacyRefId,
+            kind: "model",
+            prompt: "历史反推只读提示词：保持产品真实外观，复用棚拍俯拍构图。",
+            rawOutput: null,
+            templateVersionId: "legacy-tpl-v1",
+            mode: "main",
+            provider: { name: "qwen", model: "qwen-vl-max", isFake: true },
+            createdAt: "2026-10-01T08:00:00.000Z",
+          },
+        ],
+        createdAt: "2026-10-01T08:00:00.000Z",
+      },
+    ],
+  });
 
   await page.goto(url + "create/replica");
   await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
@@ -646,7 +717,17 @@ test("爆品图复刻：无产品图风格示意角标尺寸正常且 /reverse/:
     `sketch tag must stay inside .ss-photo`,
   );
 
-  // Verify /reverse/:id remains routed to the read-only reverse page (not redirected to /create/replica)
+  // Verify /reverse/:id renders historical read-only plan with reference image, read-only prompt, and no write controls
+  await page.goto(url + `reverse/${legacyPlanId}`);
+  assert.equal(new URL(page.url()).pathname, `/reverse/${legacyPlanId}`);
+  await page.locator(".reverse-upgrade-banner").waitFor({ state: "visible" });
+  const readonlyPrompt = page.locator("textarea[readonly]");
+  await readonlyPrompt.waitFor({ state: "visible" });
+  assert.match(await readonlyPrompt.inputValue(), /历史反推只读提示词/);
+  assert.equal(await page.locator('input[type="file"]').count(), 0);
+  assert.equal(await page.getByRole("button", { name: /重新反推/ }).count(), 0);
+
+  // Verify /reverse/:id for a missing plan remains routed to the read-only reverse page
   await page.goto(url + "reverse/missing-plan-id");
   assert.equal(new URL(page.url()).pathname, "/reverse/missing-plan-id");
   await page.getByRole("heading", { name: "旧反推方案（只读）", exact: true }).waitFor();
