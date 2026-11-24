@@ -306,24 +306,19 @@ test("生成记录抽屉：单批次首屏、4 图拼图、20 条滚动分页、
     cardCount: 3,
   });
 
-  // 1. Default landing loads only the most recent 1 suite_studio batch via feed limit=1.
+  // 1. Cold entry with completed latest batch displays empty showcase state (does not auto-mount historical completed batch).
   await page.goto(url + "create/suite");
   const batchRegion = page.getByRole("region", { name: "生成批次" });
-  await batchRegion.getByRole("heading", { name: latestBatch.name, exact: true }).waitFor();
-  assert.equal(await batchRegion.count(), 1);
+  await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
+  assert.equal(await batchRegion.count(), 0);
   assert.equal(await page.getByRole("button", { name: "加载更多历史批次" }).count(), 0);
   assert.ok(
     calls.some((c) => c.method === "GET" && c.path.includes("/api/suites/feed?") && c.path.includes("limit=1")),
-    "首屏应调用 feed limit=1 获取最近一个批次",
+    "首屏应调用 feed limit=1 检查是否存在运行中批次",
   );
 
-  // Verify "生成记录" button sits to the left of "＋ 新建套图".
-  const historyBtn = page.getByRole("button", { name: "生成记录", exact: true });
-  const newBtn = page.getByRole("button", { name: "＋ 新建套图", exact: true });
-  const [historyBox, newBox] = await Promise.all([historyBtn.boundingBox(), newBtn.boundingBox()]);
-  assert.ok(historyBox && newBox && historyBox.x < newBox.x, "「生成记录」应在「＋ 新建套图」左侧");
-
   // 2. Error + retry on initial drawer open.
+  const historyBtn = page.getByRole("button", { name: "生成记录", exact: true });
   failNextFeed = true;
   await historyBtn.click();
   const drawer = page.getByRole("dialog", { name: "生成记录" });
@@ -331,13 +326,12 @@ test("生成记录抽屉：单批次首屏、4 图拼图、20 条滚动分页、
   await drawer.getByText("历史服务临时异常", { exact: true }).waitFor();
   await drawer.getByRole("button", { name: "重试", exact: true }).click();
 
-  // 3. First page loads 20 items, highlights current batch, renders 4-thumb collage, statuses, platform meta, excludes replica.
+  // 3. First page loads 20 items, renders 4-thumb collage, statuses, platform meta, excludes replica.
   await drawer.getByText("共 23 条", { exact: true }).waitFor();
   assert.equal(await drawer.locator("[data-history-item]").count(), 20);
   assert.equal(await drawer.getByText("复刻隔离批次").count(), 0);
 
   const latestItem = drawer.locator(`[data-history-item="${latestBatch.id}"]`);
-  assert.equal(await latestItem.getAttribute("data-current"), "true");
   assert.equal(await latestItem.locator(".gh-collage img").count(), 4, "5 张卡批次应最多展示 4 张缩略图拼图");
   assert.match(await latestItem.innerText(), /Amazon/);
   assert.match(await latestItem.innerText(), /5 张/);
@@ -349,6 +343,23 @@ test("生成记录抽屉：单批次首屏、4 图拼图、20 条滚动分页、
 
   const pausedItem = drawer.locator(`[data-history-item="${pausedBatch.id}"]`);
   assert.match(await pausedItem.innerText(), /暂停/);
+
+  // Selecting latestBatch mounts it, verifies button ordering, and highlights currentSuiteId in drawer.
+  await latestItem.click();
+  await drawer.waitFor({ state: "hidden" });
+  await page.waitForURL(`**/create/suite/${latestBatch.id}`);
+  await batchRegion.getByRole("heading", { name: latestBatch.name, exact: true }).waitFor();
+  const newBtn = page.getByRole("button", { name: "＋ 新建套图", exact: true });
+  const [historyBox, newBox] = await Promise.all([historyBtn.boundingBox(), newBtn.boundingBox()]);
+  assert.ok(historyBox && newBox && historyBox.x < newBox.x, "「生成记录」应在「＋ 新建套图」左侧");
+
+  await historyBtn.click();
+  await drawer.waitFor({ state: "visible" });
+  await drawer.getByText("共 23 条", { exact: true }).waitFor();
+  assert.equal(
+    await drawer.locator(`[data-history-item="${latestBatch.id}"]`).getAttribute("data-current"),
+    "true",
+  );
 
   // 4. Scroll drawer body to trigger IntersectionObserver and load page 2 (remaining 3 items).
   await drawer.locator(".gh-body").evaluate((el) => {
@@ -399,14 +410,15 @@ test("生成记录抽屉：单批次首屏、4 图拼图、20 条滚动分页、
   await page.goto(`${url}create/suite/?suite=%20${seeded[0].id}%20`);
   await batchRegion.getByRole("heading", { name: seeded[0].name, exact: true }).waitFor();
 
-  // Whitespace-only ?suite= is treated as unspecified and falls back to default latest batch.
-  await page.evaluate(() => window.sessionStorage.removeItem("picagent:suite-studio:last-suite-id"));
-  await page.goto(`${url}create/suite?suite=%20%20`);
-  await batchRegion.getByRole("heading", { name: latestBatch.name, exact: true }).waitFor();
-
   // 8. Clicking "＋ 新建套图" clears current batch and shows empty state.
   await page.getByRole("button", { name: "＋ 新建套图", exact: true }).click();
   await page.waitForURL(url + "create/suite");
+  await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
+  assert.equal(await batchRegion.count(), 0);
+
+  // Whitespace-only ?suite= with cleared sessionStorage displays empty state when latest batch is completed.
+  await page.evaluate(() => window.sessionStorage.removeItem("picagent:suite-studio:last-suite-id"));
+  await page.goto(`${url}create/suite?suite=%20%20`);
   await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
   assert.equal(await batchRegion.count(), 0);
 });

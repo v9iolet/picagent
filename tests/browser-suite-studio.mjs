@@ -251,6 +251,30 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.goto(fixture.url + "suites/new");
   await page.waitForURL("**/create/suite");
   await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
+  const showcaseBoard = page.locator(".ss-showcase-board");
+  await showcaseBoard.waitFor({ state: "visible" });
+  const showcaseBadges = await showcaseBoard.locator(".ss-showcase-badge").allTextContents();
+  assert.deepEqual(showcaseBadges, [
+    "01 主图（白底/合规）",
+    "02 场景展示",
+    "03 模特场景图",
+    "04 细节说明",
+    "05 卖点详解",
+  ]);
+  await page.waitForFunction(
+    () => {
+      const imgs = Array.from(document.querySelectorAll(".ss-showcase-board img"));
+      return (
+        imgs.length === 5 &&
+        imgs.every(
+          (img) =>
+            img.getAttribute("src")?.endsWith(".webp") && img.complete && img.naturalWidth > 0,
+        )
+      );
+    },
+    undefined,
+    { timeout: 8000 },
+  );
   const rootTokens = await page.evaluate(() => {
     const s = getComputedStyle(document.documentElement);
     return {
