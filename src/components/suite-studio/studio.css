@@ -30,23 +30,25 @@
   cursor: pointer;
   color: inherit;
   border: 1px solid var(--pa-border);
-  border-radius: 7px;
+  border-radius: var(--pa-radius-md, 8px);
   background: var(--pa-surface);
   padding: 5px 10px;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 .ss-layout button:hover:not(:disabled),
 .ss-dialog button:hover:not(:disabled) {
-  border-color: var(--pa-accent);
-  color: var(--pa-accent);
+  border-color: var(--pa-border-strong);
+  background: var(--pa-surface-soft);
+  color: var(--pa-ink);
 }
 .ss-layout button:disabled,
 .ss-dialog button:disabled {
   cursor: not-allowed;
-  opacity: 0.5;
+  opacity: 0.45;
 }
 .ss-layout :focus-visible,
 .ss-dialog :focus-visible {
-  outline: 2px solid var(--pa-accent);
+  outline: 2px solid var(--pa-ink);
   outline-offset: 2px;
 }
 .ss-tools,
@@ -55,35 +57,41 @@
   border-right: 1px solid var(--pa-border);
 }
 .ss-tools {
-  padding: 14px 4px;
+  padding: 12px 5px;
   display: flex;
   align-items: stretch;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 .ss-tools a {
   white-space: nowrap;
   text-align: center;
-  padding: 10px 0;
-  border-radius: 8px;
+  padding: 9px 0;
+  border-radius: var(--pa-radius-md, 8px);
   display: grid;
   justify-items: center;
   gap: 4px;
   color: var(--pa-muted);
   font-size: 10px;
+  font-weight: 500;
   text-decoration: none;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 .ss-tools svg {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.6;
+  stroke-width: 1.7;
 }
-.ss-tools a[aria-current],
-.ss-tools a:hover {
-  background: var(--pa-accent-soft);
-  color: var(--pa-accent);
+.ss-tools a:hover:not([aria-current]) {
+  background: var(--pa-surface-soft);
+  color: var(--pa-ink);
+}
+.ss-tools a[aria-current] {
+  background: var(--pa-primary);
+  color: #FFFFFF;
+  font-weight: 600;
 }
 .ss-panel {
   display: flex;
@@ -131,18 +139,29 @@
 .ss-selling-points-heading {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 11px;
+  gap: 6px;
+  margin-bottom: 10px;
 }
 .ss-selling-points-heading h2 {
   margin: 0;
 }
-.ss-layout .ss-selling-points-heading button {
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border-radius: 50%;
+.ss-field-wrap {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.ss-field-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
   color: var(--pa-muted);
+}
+.ss-field-head label {
+  display: inline;
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
 }
 .ss-panel > footer {
   padding: 13px 20px;
@@ -152,16 +171,18 @@
 .ss-layout .ss-primary,
 .ss-dialog .ss-primary {
   width: 100%;
-  padding: 11px 14px;
-  background: var(--pa-accent);
-  color: #fff;
-  font-weight: 650;
-  border-color: transparent;
+  padding: 10px 14px;
+  background: var(--pa-primary);
+  color: #FFFFFF;
+  font-weight: 600;
+  border-color: var(--pa-primary);
+  border-radius: var(--pa-radius-md, 8px);
 }
 .ss-layout .ss-primary:hover:not(:disabled),
 .ss-dialog .ss-primary:hover:not(:disabled) {
-  color: white;
-  filter: brightness(0.95);
+  background: var(--pa-primary-hover);
+  border-color: var(--pa-primary-hover);
+  color: #FFFFFF;
 }
 .ss-upload {
   display: flex;
@@ -286,20 +307,26 @@
   left: 17px;
 }
 .ss-segments {
-  background: var(--pa-bg);
-  border-radius: 8px;
+  background: var(--pa-surface-soft);
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-md, 8px);
   padding: 3px;
   display: flex;
+  gap: 2px;
 }
 .ss-segments button {
   flex: 1;
   background: transparent;
   border-color: transparent;
+  border-radius: var(--pa-radius-sm, 6px);
+  color: var(--pa-muted);
+  font-weight: 500;
 }
 .ss-segments button[aria-pressed="true"] {
   background: var(--pa-surface);
-  box-shadow: var(--pa-shadow-sm);
-  color: var(--pa-accent);
+  box-shadow: var(--pa-shadow-xs);
+  color: var(--pa-ink);
+  font-weight: 600;
 }
 .ss-help,
 .ss-counter {
@@ -434,11 +461,11 @@
 }
 .ss-status[data-status="completed"] {
   background: var(--pa-success-soft);
-  color: var(--pa-success);
+  color: #047857;
 }
 .ss-status[data-status="running"] {
-  background: var(--pa-accent-soft);
-  color: var(--pa-accent);
+  background: var(--pa-warn-soft);
+  color: var(--pa-warn-ink);
 }
 .ss-status[data-status="failed"],
 .ss-status[data-status="partial_failed"] {
@@ -464,12 +491,12 @@
   border-color: transparent;
 }
 .ss-layout .ss-copy-status[data-copy-status="running"] {
-  background: var(--pa-accent-soft);
-  color: var(--pa-accent);
+  background: var(--pa-warn-soft);
+  color: var(--pa-warn-ink);
 }
 .ss-layout .ss-copy-status[data-copy-status="succeeded"] {
   background: var(--pa-success-soft);
-  color: var(--pa-success);
+  color: #047857;
 }
 .ss-layout .ss-copy-status[data-copy-status="failed"] {
   background: var(--pa-danger-soft);

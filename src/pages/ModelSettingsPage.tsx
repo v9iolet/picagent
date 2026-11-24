@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { capabilityLabels, defaultImageOptions, type ImageOptions, type ModelCapability, type ModelChannel, type ModelChannelInput, type ModelPreferences, type ModelReference, type ModelSettingsView } from "../../shared/model-settings";
 import { modelSettingsApi } from "../api/client";
 import { Icon } from "./shared";
 import { AppShell } from "../components/AppShell";
+import { InfoTip } from "../components/ui/InfoTip";
 import "./ModelSettingsPage.css";
 
 const capabilities = ["image", "vision"] as const;
@@ -11,6 +12,7 @@ const choiceValue = (ref: ModelReference | null) => ref ? JSON.stringify([ref.ch
 
 function ImageOptionsFields({ options, onChange }: { options: ImageOptions; onChange: (options: ImageOptions) => void }) {
   const [ratios, setRatios] = useState(options.aspectRatios.join(", "));
+  const sizeModeId = useId();
   return <div className="settings-fields" role="group" aria-label="生图尺寸能力">
     <div>支持的分辨率档位<div className="settings-capabilities">{["1K", "2K", "4K"].map((size) => <label key={size}>
       <input type="checkbox" checked={options.sizes.includes(size)} onChange={(event) => onChange({ ...options, sizes: event.target.checked ? [...options.sizes, size] : options.sizes.filter((item) => item !== size) })} />{size}
@@ -19,10 +21,20 @@ function ImageOptionsFields({ options, onChange }: { options: ImageOptions; onCh
       setRatios(event.target.value);
       onChange({ ...options, aspectRatios: event.target.value.split(/[,，\s]+/).filter(Boolean) });
     }} /></label>
-    <label>尺寸模式<select value={options.sizeMode} onChange={(event) => onChange({ ...options, sizeMode: event.target.value as ImageOptions["sizeMode"] })}>
-      <option value="tier">档位（tier）</option><option value="pixels">像素（pixels）</option>
-    </select></label>
-    <small>{options.sizeMode === "tier" ? "比例由模型尽量遵循。" : "按比例和档位换算像素；请仅配置当前渠道支持的比例。"}账号分组上限需自行确认，4K 出图更慢、费用更高。</small>
+    <div className="settings-fields" style={{ gap: 6 }}>
+      <div className="settings-field-head">
+        <label htmlFor={sizeModeId}>尺寸模式</label>
+        <InfoTip
+          label="尺寸换算说明"
+          title="尺寸模式与费用边界"
+          align="start"
+          content={`${options.sizeMode === "tier" ? "档位模式：比例由模型尽量遵循。" : "像素模式：按比例和档位换算像素，请仅配置当前渠道支持的比例。"}账号分组上限需自行确认，4K 出图更慢、费用更高。`}
+        />
+      </div>
+      <select id={sizeModeId} value={options.sizeMode} onChange={(event) => onChange({ ...options, sizeMode: event.target.value as ImageOptions["sizeMode"] })}>
+        <option value="tier">档位（tier）</option><option value="pixels">像素（pixels）</option>
+      </select>
+    </div>
   </div>;
 }
 
@@ -222,6 +234,7 @@ function ChannelDrawer({ channel, onClose, onSave }: {
 function Preferences({ settings, onSave }: { settings: ModelSettingsView; onSave: (patch: Partial<ModelPreferences>) => Promise<void> }) {
   const [draft, setDraft] = useState(settings.preferences);
   const [saving, setSaving] = useState(false);
+  const baseId = useId();
   const changed = capabilities.filter((capability) => choiceValue(draft[capability]) !== choiceValue(settings.preferences[capability]));
   const options = (capability: ModelCapability) => settings.channels.flatMap((channel) => channel.models
     .filter((model) => model.capabilities.includes(capability))
@@ -237,13 +250,22 @@ function Preferences({ settings, onSave }: { settings: ModelSettingsView; onSave
     <fieldset disabled={saving} className="settings-fields">
       {capabilities.map((capability) => {
         const choices = options(capability);
-        return <label key={capability}>默认{capabilityLabels[capability]}模型
-          <select value={choiceValue(draft[capability])} onChange={(event) => setDraft({ ...draft, [capability]: choices.find(({ ref }) => choiceValue(ref) === event.target.value)?.ref ?? null })}>
+        const selectId = `${baseId}-${capability}`;
+        return <div key={capability} className="settings-fields" style={{ gap: 6 }}>
+          <div className="settings-field-head">
+            <label htmlFor={selectId}>默认{capabilityLabels[capability]}模型</label>
+            <InfoTip
+              label={`${capabilityLabels[capability]}适用范围说明`}
+              title="适用范围"
+              align="start"
+              content={capability === "image" ? "用于白底精修、创作板生图与图片编辑。" : "用于商品建档、套图规划、爆品图复刻与 OCR。"}
+            />
+          </div>
+          <select id={selectId} value={choiceValue(draft[capability])} onChange={(event) => setDraft({ ...draft, [capability]: choices.find(({ ref }) => choiceValue(ref) === event.target.value)?.ref ?? null })}>
             <option value="">未设置</option>
             {choices.map(({ ref, label }) => <option key={choiceValue(ref)} value={choiceValue(ref)}>{label}</option>)}
           </select>
-          <small>{capability === "image" ? "用于白底精修、创作板生图和图片编辑。" : "用于套图规划、爆品图反推和 OCR。"}</small>
-        </label>;
+        </div>;
       })}
     </fieldset>
     <button type="submit" className="settings-button settings-primary" disabled={saving || !changed.length}>{saving ? "保存中…" : "保存偏好"}</button>
@@ -307,7 +329,15 @@ export function ModelSettingsPage({ preferences, navigate }: { preferences: bool
         : preferences ? <Preferences key={JSON.stringify(settings.preferences)} settings={settings} onSave={savePreferences} />
         : <section aria-labelledby="channels-title">
           <header className="settings-section-head">
-            <div><h2 id="channels-title">模型渠道</h2><p>同一工作台实例共用这些渠道。</p></div>
+            <div className="settings-heading-with-tip">
+              <h2 id="channels-title">模型渠道</h2>
+              <InfoTip
+                label="模型渠道说明"
+                title="实例共用渠道"
+                align="start"
+                content="同一工作台实例共用这些模型渠道；新增渠道后可在「偏好设置」中选择默认模型。"
+              />
+            </div>
             <button type="button" className="settings-button settings-primary" disabled={busy} onClick={() => setDrawer(null)}>新增渠道</button>
           </header>
           {settings.channels.length ? <ul className="settings-channels">{settings.channels.map((channel) => <li key={channel.id}>

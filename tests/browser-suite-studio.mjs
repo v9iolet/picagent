@@ -256,11 +256,16 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.waitForURL(/\/create\/suite\/[^/]+$/);
   const suiteId = new URL(page.url()).pathname.split("/").pop();
   const platform = page.getByLabel("平台", { exact: true });
+  const platformTip = page.getByRole("button", { name: "主图背景规范说明" });
   const refine = page.getByRole("checkbox", { name: "白底精修", exact: true });
   const overseasHint = page.getByText("国际站主图将按纯白背景规范生成，数量以主图配置为准。", { exact: true });
   await platform.selectOption({ label: "Amazon" });
   assert.equal(await refine.count(), 0);
+  assert.equal(await overseasHint.count(), 0);
+  await platformTip.click();
   await overseasHint.waitFor({ state: "visible" });
+  await page.keyboard.press("Escape");
+  await overseasHint.waitFor({ state: "hidden" });
   const sellingPoints = page.getByRole("textbox", { name: "商品卖点与生成要求" });
   assert.equal(await sellingPoints.getAttribute("rows"), "6");
   assert.equal(
@@ -372,10 +377,17 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   );
   await platform.selectOption({ label: "淘宝" });
   assert.equal(await refine.count(), 0);
-  await page.getByText("国内站主图按场景策略生成，不强制白底。", { exact: true }).waitFor({ state: "visible" });
+  await platformTip.click();
+  const domesticHint = page.getByText("国内站主图按场景策略生成，不强制白底。", { exact: true });
+  await domesticHint.waitFor({ state: "visible" });
+  await page.keyboard.press("Escape");
+  await domesticHint.waitFor({ state: "hidden" });
   assert.equal(await page.getByLabel("主图张数", { exact: true }).textContent(), "1");
   await platform.selectOption({ label: "eBay" });
+  await platformTip.click();
   await overseasHint.waitFor({ state: "visible" });
+  await page.keyboard.press("Escape");
+  await overseasHint.waitFor({ state: "hidden" });
   assert.equal(await page.getByLabel("白底主图张数", { exact: true }).textContent(), "1");
   await batch.getByRole("button", { name: "批次菜单" }).click();
   await batch.getByRole("button", { name: "货架预览导出" }).click();

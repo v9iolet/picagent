@@ -1,8 +1,9 @@
-import { useState, type DragEvent } from "react";
+import { useId, useState, type DragEvent } from "react";
 import type { ImageOptions } from "../../../shared/model-settings";
 import { ProductCardPickerModal } from "../../components/product-card-picker/ProductCardPickerModal";
 import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
 import { toSelectedProductCardSummary } from "../../components/product-card-picker/types";
+import { InfoTip } from "../../components/ui/InfoTip";
 import { Icon } from "../../pages/shared";
 import {
   allowedReplicaSizes,
@@ -63,6 +64,7 @@ export function ReplicaConfigPanel({
   const [dragRefIndex, setDragRefIndex] = useState<number | null>(null);
   const [hoveredLevel, setHoveredLevel] = useState<string | null>(null);
   const [productCardPickerOpen, setProductCardPickerOpen] = useState(false);
+  const styleUnifiedId = useId();
 
   const validRefCount = references.filter((item) => item.status === "ready").length;
   const validProductCount = products.filter((item) => item.status === "ready").length;
@@ -409,7 +411,19 @@ export function ReplicaConfigPanel({
               </button>
             </div>
           )}
-          <h2>{hasProductCard ? "补充商品信息（选填）" : "商品信息（选填）"}</h2>
+          <div className="rp-heading-with-tip">
+            <h2>{hasProductCard ? "补充商品信息（选填）" : "商品信息（选填）"}</h2>
+            <InfoTip
+              label="事实来源说明"
+              title="商品事实来源"
+              align="start"
+              content={
+                hasProductCard
+                  ? "客观商品事实由所选商品信息卡自动注入，并与此处补充说明合并作为本批次唯一事实来源。"
+                  : "作为本批次新文案中参数、卖点、规格的唯一事实来源，未填写的参数不会编造。"
+              }
+            />
+          </div>
           <textarea
             rows={3}
             aria-label="商品信息"
@@ -421,25 +435,30 @@ export function ReplicaConfigPanel({
             value={config.productInfo}
             onChange={(event) => onUpdateConfig({ productInfo: event.target.value })}
           />
-          <small>
-            {hasProductCard
-              ? "客观商品事实由所选商品信息卡自动注入，并与此处补充说明合并作为本批次唯一事实来源。"
-              : "作为本批次新文案中参数、卖点、规格的唯一事实来源，未填写的参数不会编造。"}
-          </small>
         </section>
 
         {showStyleUnified && (
           <section>
-            <label className="ss-switch rp-style-switch">
-              输出风格保持一致
-              <input
-                type="checkbox"
-                aria-label="输出风格保持一致"
-                checked={config.styleUnified}
-                onChange={(event) => onUpdateConfig({ styleUnified: event.target.checked })}
-              />
-            </label>
-            <small>开启后整组参考图共享统一的配色与视觉调性。</small>
+            <div className="rp-style-switch-row">
+              <span className="rp-style-switch-label">
+                <label htmlFor={styleUnifiedId}>输出风格保持一致</label>
+                <InfoTip
+                  label="风格统一说明"
+                  title="多图统一调性"
+                  align="start"
+                  content="开启后整组参考图共享统一的配色与视觉调性。"
+                />
+              </span>
+              <label className="ss-switch rp-style-switch">
+                <input
+                  id={styleUnifiedId}
+                  type="checkbox"
+                  aria-label="输出风格保持一致"
+                  checked={config.styleUnified}
+                  onChange={(event) => onUpdateConfig({ styleUnified: event.target.checked })}
+                />
+              </label>
+            </div>
           </section>
         )}
 

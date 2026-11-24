@@ -14,6 +14,7 @@ import { Icon } from "../../pages/shared";
 import { ProductCardPickerModal } from "../product-card-picker/ProductCardPickerModal";
 import { SelectedProductCardBar } from "../product-card-picker/SelectedProductCardBar";
 import { toSelectedProductCardSummary } from "../product-card-picker/types";
+import { InfoTip } from "../ui/InfoTip";
 import { totalImages, type Config } from "./studio";
 import { SellingPointLayoutModal } from "./SellingPointLayoutModal";
 
@@ -52,9 +53,9 @@ export function ConfigPanel({
   generate,
 }: Props) {
   const [drag, setDrag] = useState(false);
-  const [showSellingPointsHelp, setShowSellingPointsHelp] = useState(false);
   const [showLayouts, setShowLayouts] = useState(false);
   const [showProductCardPicker, setShowProductCardPicker] = useState(false);
+  const platformSelectId = useId();
   const sellingPointsHelpId = useId();
   const layoutsHelpId = useId();
   const layoutCountId = useId();
@@ -139,9 +140,24 @@ export function ConfigPanel({
         <section>
           <h2>生成设置</h2>
           <div className="ss-fields">
-            <label>
-              平台
+            <div className="ss-field-wrap">
+              <div className="ss-field-head">
+                <label htmlFor={platformSelectId}>平台</label>
+                {profile && (
+                  <InfoTip
+                    label="主图背景规范说明"
+                    title="平台主图规范"
+                    align="start"
+                    content={
+                      pureWhiteMain
+                        ? "国际站主图将按纯白背景规范生成，数量以主图配置为准。"
+                        : "国内站主图按场景策略生成，不强制白底。"
+                    }
+                  />
+                )}
+              </div>
               <select
+                id={platformSelectId}
                 aria-label="平台"
                 value={c.platform}
                 onChange={(e) => update({ platform: e.target.value })}
@@ -152,7 +168,7 @@ export function ConfigPanel({
                   </option>
                 ))}
               </select>
-            </label>
+            </div>
             {select("目标市场", "targetMarket", ["美国", "中国", "英国", "德国", "法国", "日本", "其他"])}
             {select("语言", "outputLanguage", SUPPORTED_OUTPUT_LANGUAGES)}
             {select("比例", "aspectRatio", options.aspectRatios)}
@@ -160,13 +176,6 @@ export function ConfigPanel({
             {select("视觉风格", "visualStyle", VISUAL_STYLES.map(({ id, name }) => ({ value: id, label: name })))}
           </div>
           <ResolutionCostNote size={c.size} className="ss-note" />
-          {profile && (
-            <small>
-              {pureWhiteMain
-                ? "国际站主图将按纯白背景规范生成，数量以主图配置为准。"
-                : "国内站主图按场景策略生成，不强制白底。"}
-            </small>
-          )}
         </section>
         <section>
           {hasProductCard && c.productCardSummary ? (
@@ -201,25 +210,21 @@ export function ConfigPanel({
           )}
           <div className="ss-selling-points-heading">
             <h2>{hasProductCard ? "补充卖点 & 本次生成要求（选填）" : "商品卖点 & 生成要求"}</h2>
-            <button
-              type="button"
-              aria-label="商品卖点填写说明"
-              aria-expanded={showSellingPointsHelp}
-              aria-controls={sellingPointsHelpId}
-              onClick={() => setShowSellingPointsHelp((open) => !open)}
-            >
-              ?
-            </button>
+            <InfoTip
+              id={sellingPointsHelpId}
+              label="商品卖点填写说明"
+              title={hasProductCard ? "商品卡自动注入说明" : "填写说明"}
+              align="start"
+              content={
+                hasProductCard
+                  ? "客观商品事实已由所选商品信息卡自动注入；此处仅填写本次画面的侧重点、构图色调偏好或额外说明。"
+                  : "建议逐行填写产品名称、核心卖点、适用人群、期望场景和具体参数。请填写已确认的商品事实，不确定的信息可留空。"
+              }
+            />
           </div>
-          <p id={sellingPointsHelpId} className="ss-note" hidden={!showSellingPointsHelp}>
-            {hasProductCard
-              ? "客观商品事实已由所选商品信息卡自动注入；此处仅填写本次画面的侧重点、构图色调偏好或额外说明。"
-              : "建议逐行填写产品名称、核心卖点、适用人群、期望场景和具体参数。请填写已确认的商品事实，不确定的信息可留空。"}
-          </p>
           <textarea
             rows={6}
             aria-label="商品卖点与生成要求"
-            aria-describedby={showSellingPointsHelp ? sellingPointsHelpId : undefined}
             placeholder={hasProductCard ? supplementalSellingPointsPlaceholder : sellingPointsPlaceholder}
             value={c.sellingPoints}
             onChange={(e) => update({ sellingPoints: e.target.value })}
@@ -326,7 +331,6 @@ export function ConfigPanel({
               onChange={(e) => update({ listingCopy: e.target.checked })}
             />
           </label>
-          <small>根据所选平台规范，智能生成符合上架要求的商品文案</small>
         </section>
       </fieldset>
       {showLayouts && (

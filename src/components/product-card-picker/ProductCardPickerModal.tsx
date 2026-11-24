@@ -6,6 +6,7 @@ import {
   type ApiProductCardSummary,
 } from "../../api/client";
 import { Icon } from "../../pages/shared";
+import { InfoTip } from "../ui/InfoTip";
 import { ProductCardFactsView, ProductCardThumb } from "./ProductCardFactsView";
 import "./product-card-picker.css";
 
@@ -190,10 +191,14 @@ export function ProductCardPickerModal({
         data-product-card-picker-modal
       >
         <header className="pcp-modal-head">
-          <div>
-            <span className="pcp-eyebrow">PRODUCT CARD LIBRARY</span>
+          <div className="pcp-modal-title-row">
             <h3>{title}</h3>
-            <small>仅展示在用（published）商品信息卡，单批次最多绑定 1 张；供应商参考图不流入生图原图区。</small>
+            <InfoTip
+              label="商品信息卡选择说明"
+              title="绑定规则"
+              align="start"
+              content="仅展示在用商品信息卡，单批次最多绑定 1 张；供应商参考图仅用于认款展示，不流入生图原图区。"
+            />
           </div>
           <button
             type="button"
