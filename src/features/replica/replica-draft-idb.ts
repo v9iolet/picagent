@@ -2,12 +2,14 @@ export const REPLICA_DRAFT_IDB_NAME = "picagent-replica-draft";
 export const REPLICA_DRAFT_IDB_VERSION = 1;
 export const REPLICA_DRAFT_BLOB_STORE = "blobs";
 
+export type KeepBlobKeysInput = ReadonlySet<string> | (() => ReadonlySet<string> | null);
+
 export interface ReplicaDraftBlobStorage {
   putBlob(key: string, blob: Blob): Promise<boolean>;
   getBlobs(keys: readonly string[]): Promise<Map<string, Blob>>;
   deleteBlob(key: string): Promise<void>;
   clearBlobs(): Promise<void>;
-  pruneBlobs(keepKeys: ReadonlySet<string>): Promise<void>;
+  pruneBlobs(keepKeys: KeepBlobKeysInput): Promise<void>;
 }
 
 function isBlobLike(value: unknown): value is Blob {
@@ -22,18 +24,23 @@ function isBlobLike(value: unknown): value is Blob {
 export function createIndexedDbBlobStorage(
   dbName = REPLICA_DRAFT_IDB_NAME,
   storeName = REPLICA_DRAFT_BLOB_STORE,
+  idbFactory?: IDBFactory | null,
 ): ReplicaDraftBlobStorage {
   let dbPromise: Promise<IDBDatabase | null> | null = null;
 
   function openDb(): Promise<IDBDatabase | null> {
     if (dbPromise) return dbPromise;
-    dbPromise = new Promise<IDBDatabase | null>((resolve) => {
-      let idb: IDBFactory | undefined;
-      try {
-        idb = globalThis.indexedDB;
-      } catch {
-        resolve(null);
-        return;
+    const pending = new Promise<IDBDatabase | null>((resolve) => {
+      let idb: IDBFactory | null | undefined;
+      if (idbFactory !== undefined) {
+        idb = idbFactory;
+      } else {
+        try {
+          idb = globalThis.indexedDB;
+        } catch {
+          resolve(null);
+          return;
+        }
       }
       if (!idb) {
         resolve(null);
@@ -63,29 +70,28 @@ export function createIndexedDbBlobStorage(
         const db = request.result;
         db.onversionchange = () => {
           db.close();
-          dbPromise = null;
+          if (dbPromise === pending) dbPromise = null;
         };
         db.onclose = () => {
-          dbPromise = null;
+          if (dbPromise === pending) dbPromise = null;
         };
         resolve(db);
       };
 
       request.onerror = () => {
-        dbPromise = null;
         resolve(null);
       };
 
       request.onblocked = () => {
-        dbPromise = null;
         resolve(null);
       };
-    });
-
-    return dbPromise.then((db) => {
-      if (!db) dbPromise = null;
+    }).then((db) => {
+      if (!db && dbPromise === pending) dbPromise = null;
       return db;
     });
+
+    dbPromise = pending;
+    return pending;
   }
 
   return {
@@ -164,11 +170,7 @@ export function createIndexedDbBlobStorage(
       });
     },
 
-    async pruneBlobs(keepKeys: ReadonlySet<string>): Promise<void> {
-      if (keepKeys.size === 0) {
-        await this.clearBlobs();
-        return;
-      }
+    async pruneBlobs(keepKeys: KeepBlobKeysInput): Promise<void> {
       const db = await openDb();
       if (!db) return;
       await new Promise<void>((resolve) => {
@@ -177,8 +179,10 @@ export function createIndexedDbBlobStorage(
           const store = tx.objectStore(storeName);
           const keysReq = store.getAllKeys();
           keysReq.onsuccess = () => {
+            const keep = typeof keepKeys === "function" ? keepKeys() : keepKeys;
+            if (!keep) return;
             for (const key of keysReq.result) {
-              if (typeof key === "string" && !keepKeys.has(key)) {
+              if (typeof key === "string" && !keep.has(key)) {
                 store.delete(key);
               }
             }

@@ -10,6 +10,7 @@ import {
   REPLICA_ACCEPTED_MIME_TYPES,
   REPLICA_CLONE_LEVEL_LABELS,
   REPLICA_LANGUAGE_OPTIONS,
+  REPLICA_MAX_IMAGE_BYTES,
   REPLICA_MAX_PRODUCTS,
   REPLICA_MAX_REFERENCES,
   REPLICA_SCENE_LABELS,
@@ -105,6 +106,10 @@ export function clearLastReplicaSuiteId(): void {
 
 const VALID_LANGUAGES = new Set<string>(REPLICA_LANGUAGE_OPTIONS.map((item) => item.value));
 const VALID_MIME_TYPES = new Set<string>(REPLICA_ACCEPTED_MIME_TYPES);
+
+function isSafeRelativePreviewUrl(url: string): boolean {
+  return url.startsWith("/") && !url.startsWith("//");
+}
 
 function sanitizeConfigDraft(raw: unknown): ReplicaConfigDraft {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -233,10 +238,11 @@ function sanitizePersistedProducts(raw: unknown): PersistedReplicaProductMeta[] 
         data.resourceType === "base_image" || data.resourceType === "input_image"
           ? data.resourceType
           : undefined;
-      const previewUrl =
-        typeof data.previewUrl === "string" && data.previewUrl.trim()
-          ? data.previewUrl.trim()
-          : `/api/library/resources/${encodeURIComponent(libraryResourceId)}/preview`;
+      const defaultPreviewUrl = `/api/library/resources/${encodeURIComponent(libraryResourceId)}/preview`;
+      const rawPreviewUrl = typeof data.previewUrl === "string" ? data.previewUrl.trim() : "";
+      const previewUrl = isSafeRelativePreviewUrl(rawPreviewUrl)
+        ? rawPreviewUrl
+        : defaultPreviewUrl;
       items.push({
         localId,
         sourceKind: "library",
@@ -293,6 +299,27 @@ function readPersistedDraft(
     }
   }
   return null;
+}
+
+function readLiveStorageBlobKeys(storage: StorageLike | null): Set<string> | null {
+  if (!storage) return new Set<string>();
+  try {
+    const raw = storage.getItem(REPLICA_DRAFT_STORAGE_KEY);
+    if (!raw) return new Set<string>();
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const keys = new Set<string>();
+    for (const ref of sanitizePersistedReferences(parsed.references)) {
+      keys.add(ref.blobKey);
+    }
+    for (const product of sanitizePersistedProducts(parsed.products)) {
+      if (product.sourceKind === "upload") keys.add(product.blobKey);
+    }
+    return keys;
+  } catch {
+    // Prefer skipping orphan deletion over deleting active blobs if storage cannot be read safely.
+    return null;
+  }
 }
 
 function reorderList<T>(items: readonly T[], fromIndex: number, toIndex: number): T[] {
@@ -465,7 +492,17 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
     objectUrls.clear();
   }
 
+  function clearLegacySessionConfig(): void {
+    if (!legacySessionStorage) return;
+    try {
+      legacySessionStorage.removeItem(REPLICA_DRAFT_CONFIG_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors.
+    }
+  }
+
   function persistDraftMetadata(): void {
+    clearLegacySessionConfig();
     if (!storage) return;
     const references: PersistedReplicaReferenceMeta[] = [];
     for (const item of snapshot.references) {
@@ -534,17 +571,14 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
         // Ignore storage errors.
       }
     }
-    if (legacySessionStorage) {
-      try {
-        legacySessionStorage.removeItem(REPLICA_DRAFT_CONFIG_STORAGE_KEY);
-      } catch {
-        // Ignore storage errors.
-      }
-    }
+    clearLegacySessionConfig();
   }
 
-  function collectActiveBlobKeys(): Set<string> {
-    const keys = new Set<string>(persistedBlobKeys.values());
+  function collectActiveBlobKeys(): Set<string> | null {
+    const liveStorageKeys = readLiveStorageBlobKeys(storage);
+    if (!liveStorageKeys) return null;
+    const keys = new Set<string>(liveStorageKeys);
+    for (const key of persistedBlobKeys.values()) keys.add(key);
     for (const key of inFlightBlobKeys) keys.add(key);
     return keys;
   }
@@ -557,7 +591,7 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
 
     if (keysToFetch.length === 0) {
       if (blobStorage && gen === draftGeneration) {
-        await blobStorage.pruneBlobs(collectActiveBlobKeys());
+        await blobStorage.pruneBlobs(() => collectActiveBlobKeys());
       }
       return;
     }
@@ -584,7 +618,13 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
     const createdUrls: string[] = [];
 
     const decodeBlob = async (blob: Blob, fallbackMimeType: string, existingSha256: string) => {
+      if (typeof blob.size === "number" && (blob.size <= 0 || blob.size > REPLICA_MAX_IMAGE_BYTES)) {
+        return null;
+      }
       const buffer = await blob.arrayBuffer();
+      if (buffer.byteLength <= 0 || buffer.byteLength > REPLICA_MAX_IMAGE_BYTES) {
+        return null;
+      }
       const [bytesBase64, sha256] = await Promise.all([
         Promise.resolve(arrayBufferToBase64(buffer)),
         existingSha256 ? Promise.resolve(existingSha256) : computeSha256Hex(buffer),
@@ -600,7 +640,8 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
       const current = snapshot.references.find((item) => item.localId === localId);
       if (!blob || !current) continue;
       try {
-        restoredRefs.set(localId, await decodeBlob(blob, current.mimeType, current.sha256));
+        const decoded = await decodeBlob(blob, current.mimeType, current.sha256);
+        if (decoded) restoredRefs.set(localId, decoded);
       } catch {
         // Ignore corrupted blob; drop item gracefully below.
       }
@@ -618,7 +659,8 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
       );
       if (!blob || !current) continue;
       try {
-        restoredProducts.set(localId, await decodeBlob(blob, current.mimeType, current.sha256));
+        const decoded = await decodeBlob(blob, current.mimeType, current.sha256);
+        if (decoded) restoredProducts.set(localId, decoded);
       } catch {
         // Ignore corrupted blob; drop item gracefully below.
       }
@@ -704,17 +746,26 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
     }
 
     if (blobStorage && gen === draftGeneration) {
-      await blobStorage.pruneBlobs(collectActiveBlobKeys());
+      await blobStorage.pruneBlobs(() => collectActiveBlobKeys());
     }
   }
 
-  const hydrationPromise = hydrateFromStorage().catch(() => {
-    // Hydration is strictly best-effort and must never surface unhandled rejections.
-  });
+  // Defer IndexedDB hydration & orphan pruning until ReplicaStudioPage subscribes (or waitForHydration is called)
+  // so visiting unrelated routes (/assets, /templates, /create/suite) neither decodes blobs nor prunes shared IDB.
+  let hydrationPromise: Promise<void> | null = null;
+  function ensureHydrated(): Promise<void> {
+    if (!hydrationPromise) {
+      hydrationPromise = hydrateFromStorage().catch(() => {
+        // Hydration is strictly best-effort and must never surface unhandled rejections.
+      });
+    }
+    return hydrationPromise;
+  }
 
   return {
     subscribe(listener: () => void): () => void {
       listeners.add(listener);
+      void ensureHydrated();
       return () => {
         listeners.delete(listener);
       };
@@ -725,7 +776,7 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
     },
 
     waitForHydration(): Promise<void> {
-      return hydrationPromise;
+      return ensureHydrated();
     },
 
     addReferences(files: File[]): void {

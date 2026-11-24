@@ -765,7 +765,7 @@ test("爆品图复刻：切换功能保留草稿（参考图、产品图、顺�
   assert.equal(await page.locator("[data-product-item]").count(), 2);
   assert.equal(await page.getByLabel("统一复刻要求", { exact: true }).inputValue(), "保持参考图构图与暖色调");
 
-  // Full page reload restores text/select configs from sessionStorage
+  // Full page reload restores text/select configs from localStorage
   await page.reload();
   await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
   assert.equal(await page.getByRole("radio", { name: "服饰电商图", exact: true }).getAttribute("aria-checked"), "true");
