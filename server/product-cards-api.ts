@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import {
+  createProductCardSnapshot,
   PRODUCT_CARD_ALL_FIELDS,
   PRODUCT_CARD_MAX_IMAGE_BASE64_CHARS,
   PRODUCT_CARD_MAX_SUPPLIER_IMAGES,
   PRODUCT_CARD_STATUSES,
   validateProductCardFields,
   type ProductCard,
+  type ProductCardSnapshot,
   type ProductCardStatus,
   type ProductCardSupplierImage,
 } from "../shared/product-card.js";
@@ -41,6 +43,41 @@ type PreparedImageEntry = PreparedNewUpload | PreparedExistingImage;
 function normalizeUuid(value: string): string | null {
   const trimmed = value.trim();
   return UUID_RE.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+export async function resolvePublishedProductCardSnapshot(
+  rawProductCardId: unknown,
+  productCards: ProductCardRepository | undefined,
+  snapshotAt = now(),
+): Promise<
+  | { ok: true; snapshot: ProductCardSnapshot | null }
+  | { ok: false; response: AppResponse }
+> {
+  if (rawProductCardId === undefined || rawProductCardId === null) {
+    return { ok: true, snapshot: null };
+  }
+  if (typeof rawProductCardId !== "string") {
+    return { ok: false, response: fail("PRODUCT_CARD_NOT_AVAILABLE", 400) };
+  }
+  const trimmed = rawProductCardId.trim();
+  if (!trimmed) {
+    return { ok: true, snapshot: null };
+  }
+  const normalizedId = normalizeUuid(trimmed);
+  if (!normalizedId) {
+    return { ok: false, response: fail("PRODUCT_CARD_NOT_AVAILABLE", 400) };
+  }
+  const card = productCards ? await productCards.get(normalizedId) : null;
+  if (!card) {
+    return { ok: false, response: fail("PRODUCT_CARD_NOT_AVAILABLE", 404) };
+  }
+  if (card.status !== "published") {
+    return { ok: false, response: fail("PRODUCT_CARD_NOT_AVAILABLE", 400) };
+  }
+  return {
+    ok: true,
+    snapshot: createProductCardSnapshot(card, snapshotAt),
+  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

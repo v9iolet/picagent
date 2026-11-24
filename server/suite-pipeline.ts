@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { requiresPureWhiteMainImage } from "../shared/platform-main-background.js";
+import { mergeProductCardFacts, readProductCardSnapshot } from "../shared/product-card.js";
 import { productNameFor } from "../shared/product-name.js";
 import { SUITE_CATEGORY_GROUPS, SMART_SUITE_STRUCTURE_PRESET } from "../shared/suite-categories.js";
 import { resolveSellingPointLayouts, resolveVisualStyle } from "../shared/selling-point-layouts.js";
@@ -7,6 +8,7 @@ import { resolveDeliverySlots, type DeliveryEditChildLike } from "../shared/work
 import { errorMessages, fail } from "./api-errors.js";
 import { ok, asRecord, dataOf, now, type AppResponse } from "./api-response.js";
 import type { ListingRepository } from "./listing-copy.js";
+import { resolvePublishedProductCardSnapshot } from "./product-cards-api.js";
 import { buildReplicaReferencePreviewUrl } from "./replica/replica-pipeline.js";
 import type {
   InputImage,
@@ -14,6 +16,7 @@ import type {
   PlanRepository,
   PlanSnapshot,
   PlatformRepository,
+  ProductCardRepository,
   PromptRepository,
   ReplicaRepository,
   StorageAdapter,
@@ -40,6 +43,7 @@ interface SuitePipelineDependencies {
   planRepository?: PlanRepository;
   taskRepository?: TaskRepository;
   replicaRepository?: ReplicaRepository;
+  productCardRepository?: ProductCardRepository;
   pipelineRepository: PipelineRepository;
   listingRepository: ListingRepository;
   hasPlanningModel(): boolean;
@@ -123,6 +127,27 @@ const buildCategoryGroups = (config: SuitePipelineRun["config"]) => {
     other: group(other, value("other", other.defaultCount)),
   };
 };
+
+const DEFAULT_SUITE_PLACEHOLDER_NAMES = new Set([
+  "",
+  "未命名",
+  "未命名套图",
+  "未命名商品套图",
+  "未命名方案",
+  "新建套图",
+  "新建商品套图",
+  "商品套图",
+]);
+
+function isDefaultSuitePlaceholderName(suiteName: string, firstImageFilename?: string): boolean {
+  const trimmed = suiteName.trim();
+  if (DEFAULT_SUITE_PLACEHOLDER_NAMES.has(trimmed)) return true;
+  if (firstImageFilename) {
+    const derivedFromFilename = productNameFor(undefined, firstImageFilename).trim();
+    if (derivedFromFilename && trimmed === derivedFromFilename) return true;
+  }
+  return false;
+}
 
 function normalizeVisualConfig(config: SuitePipelineRun["config"]): SuitePipelineRun["config"] {
   const { count } = buildCategoryGroups(config).selling_points;
@@ -234,13 +259,25 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         const details = Object.values(groups)
           .filter((group) => group.categories[0] !== "main")
           .reduce((sum, group) => sum + group.count, 0);
+        const productCardSnapshot = readProductCardSnapshot(config.productCardSnapshot);
+        const rawSellingPoints = typeof config.sellingPoints === "string" ? config.sellingPoints : "";
+        const trimmedSellingPoints = rawSellingPoints.trim();
+        const productName = productCardSnapshot
+          ? productCardSnapshot.name
+          : productNameFor(config.sellingPoints, images[0]?.originalFilename);
+        const humanSupplement = productCardSnapshot
+          ? mergeProductCardFacts(productCardSnapshot, trimmedSellingPoints)
+          : rawSellingPoints;
+        const emphasisRequirements = productCardSnapshot
+          ? trimmedSellingPoints
+          : rawSellingPoints;
         const dynamicInput: Record<string, unknown> = {
           platform: config.platform ?? "",
           target_market_country: config.targetMarket ?? "",
           output_language: config.outputLanguage ?? "中文",
-          product_name: productNameFor(config.sellingPoints, images[0]?.originalFilename),
-          human_supplement: typeof config.sellingPoints === "string" ? config.sellingPoints : "",
-          emphasis_requirements: typeof config.sellingPoints === "string" ? config.sellingPoints : "",
+          product_name: productName,
+          human_supplement: humanSupplement,
+          emphasis_requirements: emphasisRequirements,
           aspect_ratio: config.aspectRatio ?? "1:1",
           visual_style: visualStyle,
           ...(layouts.length > 0 && { selling_point_layouts: JSON.stringify(layouts) }),
@@ -479,7 +516,9 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
   async function startRun(idempotencyKey: string | undefined, payload: unknown) {
     if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
     const body = asRecord(payload);
-    const config = normalizeVisualConfig(asRecord(body.config));
+    const rawConfig = asRecord(body.config);
+    const { productCardId: rawProductCardId, productCardSnapshot: _ignoredSnapshot, ...restConfig } = rawConfig;
+    const config = normalizeVisualConfig(restConfig);
     const cloneSpec =
       body.cloneFrom && typeof body.cloneFrom === "object" && !Array.isArray(body.cloneFrom)
         ? (body.cloneFrom as Record<string, unknown>)
@@ -498,7 +537,28 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       const latest = suite && (await pipelineRepository.getLatestRun(suite.id));
       return latest?.status === "running" ? fail("PIPELINE_ALREADY_RUNNING", 409) : fail("INVALID_PIPELINE_START");
     }
-    if (typeof body.cloneFrom === "string" || cloneSpec) {
+    const isClone = typeof body.cloneFrom === "string" || Boolean(cloneSpec);
+    if (suite && !isClone) {
+      const existing = (await pipelineRepository.listRuns(suite.id)).find(
+        (item) => item.idempotencyKey === idempotencyKey,
+      );
+      if (existing) {
+        return ok({ suiteId: suite.id, pipeline: existing }, existing.status === "running" ? 202 : 200);
+      }
+    }
+    const createdAt = now();
+    const cardResult = await resolvePublishedProductCardSnapshot(
+      rawProductCardId,
+      deps.productCardRepository,
+      createdAt,
+    );
+    if (!cardResult.ok) return cardResult.response;
+    const productCardSnapshot = cardResult.snapshot;
+    if (productCardSnapshot) {
+      config.productCardId = productCardSnapshot.cardId;
+      config.productCardSnapshot = productCardSnapshot;
+    }
+    if (isClone) {
       const source = suite!;
       const imageIds =
         cloneSpec && Array.isArray(cloneSpec.imageIds)
@@ -506,7 +566,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           : undefined;
       const originals = (await deps.repository.getInputImages(source.id)).filter((image) => !imageIds || imageIds.has(image.id));
       suite = await deps.repository.createSuite(
-        productNameFor(config.sellingPoints, originals[0]?.originalFilename),
+        productCardSnapshot?.name || productNameFor(config.sellingPoints, originals[0]?.originalFilename),
         `${idempotencyKey}:suite`,
         "suite_studio",
       );
@@ -514,8 +574,11 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         await cloneSuiteInputs(originals, suite.id);
     }
     if (!suite)
-      suite = await deps.repository.createSuite(productNameFor(config.sellingPoints), `${idempotencyKey}:suite`, "suite_studio");
-    const createdAt = now();
+      suite = await deps.repository.createSuite(
+        productCardSnapshot?.name || productNameFor(config.sellingPoints),
+        `${idempotencyKey}:suite`,
+        "suite_studio",
+      );
     try {
       const { run, duplicate } = await pipelineRepository.createRun({
         id: randomUUID(),
@@ -535,7 +598,16 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
         updatedAt: createdAt,
         completedAt: null,
       });
-      if (!duplicate) void executePipeline(run);
+      if (!duplicate) {
+        if (!isClone && productCardSnapshot && deps.repository.renameSuite) {
+          const images = await deps.repository.getInputImages(suite.id);
+          if (isDefaultSuitePlaceholderName(suite.name, images[0]?.originalFilename)) {
+            const renamed = await deps.repository.renameSuite(suite.id, productCardSnapshot.name);
+            if (renamed) suite = renamed;
+          }
+        }
+        void executePipeline(run);
+      }
       return ok({ suiteId: suite.id, pipeline: run }, run.status === "running" ? 202 : 200);
     } catch (error) {
       if (error instanceof Error && error.message === "PIPELINE_ALREADY_RUNNING") return fail(error.message, 409);
@@ -763,6 +835,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       ...(isReplica
         ? {
             styleSketch,
+            productCardSnapshot: readProductCardSnapshot(pipeline?.config?.productCardSnapshot),
             replicaReferences: replicaReferences.map((ref) => ({
               ...ref,
               thumbnailPreviewUrl: buildReplicaReferencePreviewUrl(suite.id, ref.id, "thumbnail"),
