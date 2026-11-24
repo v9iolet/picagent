@@ -1,0 +1,142 @@
+.pig-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 11px;
+}
+
+.pig-heading-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ss-scroll .pig-heading-row h2,
+.ss-layout .pig-heading-row h2,
+.pig-heading-row h2 {
+  margin: 0;
+}
+
+.pig-heading-row > small {
+  flex-shrink: 0;
+  font-weight: 400;
+}
+
+.pa-info-popover.pig-popover {
+  width: 348px;
+  max-width: calc(100vw - 24px);
+  padding: 16px 18px;
+  border-radius: 16px;
+  background: #FFFFFF;
+  border: 1px solid var(--pa-border, #E4E4E7);
+  box-shadow: 0 16px 40px -8px rgba(24, 24, 27, 0.14), 0 4px 12px rgba(24, 24, 27, 0.06);
+}
+
+.pa-info-popover.pig-popover,
+.pa-info-popover.pig-popover * {
+  box-sizing: border-box;
+}
+
+.pa-info-popover.pig-popover::before {
+  background: #FFFFFF;
+}
+
+.pa-info-popover.pig-popover[data-placement="bottom"]::before {
+  border-left-color: var(--pa-border, #E4E4E7);
+  border-top-color: var(--pa-border, #E4E4E7);
+}
+
+.pa-info-popover.pig-popover[data-placement="top"]::before {
+  border-right-color: var(--pa-border, #E4E4E7);
+  border-bottom-color: var(--pa-border, #E4E4E7);
+}
+
+.pig-rules {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.58;
+  color: var(--pa-ink, #18181B);
+}
+
+.pig-rules p {
+  margin: 0;
+}
+
+.pig-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.pig-tile {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #F4F5F7;
+  border: 1px solid rgba(24, 24, 27, 0.05);
+}
+
+.pig-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.pig-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #FFFFFF;
+  box-shadow: 0 1px 3px rgba(24, 24, 27, 0.16);
+}
+
+.pig-badge svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+
+.pig-badge.is-valid {
+  background: #22C55E;
+}
+
+.pig-badge.is-invalid {
+  background: #EF4444;
+}
+
+.pig-tag {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  max-width: calc(100% - 10px);
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(24, 24, 27, 0.46);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  color: #FFFFFF;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.pig-tag.is-wide {
+  left: 5px;
+  right: 5px;
+  padding: 2px 6px;
+  font-size: 10.5px;
+}

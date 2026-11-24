@@ -3,6 +3,7 @@ import type { ImageOptions } from "../../../shared/model-settings";
 import { ProductCardPickerModal } from "../../components/product-card-picker/ProductCardPickerModal";
 import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
 import { toSelectedProductCardSummary } from "../../components/product-card-picker/types";
+import { ProductImageGuideTip } from "../../components/product-image-guide/ProductImageGuideTip";
 import { InfoTip } from "../../components/ui/InfoTip";
 import { Icon } from "../../pages/shared";
 import {
@@ -218,9 +219,13 @@ export function ReplicaConfigPanel({
         </section>
 
         <section>
-          <h2>
-            产品原图（选填） <small>{products.length} / {REPLICA_MAX_PRODUCTS}</small>
-          </h2>
+          <div className="pig-heading-row">
+            <div className="pig-heading-left">
+              <h2>产品原图（选填）</h2>
+              <ProductImageGuideTip label="产品原图上传说明" />
+            </div>
+            <small>{products.length} / {REPLICA_MAX_PRODUCTS}</small>
+          </div>
           <div
             className={`ss-upload rp-product-upload${productDragging ? " dragging" : ""}`}
             onDragOver={(event) => {
@@ -287,9 +292,6 @@ export function ReplicaConfigPanel({
                 />
               </label>
             )}
-          </div>
-          <div className="rp-product-bar">
-            <small>同一商品多角度，本地拖拽或点击上传，整批共用（最多 6 张）</small>
           </div>
           {productNotice && (
             <p className="rp-inline-notice" role="status">
