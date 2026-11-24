@@ -43,13 +43,11 @@ export type ProductCardSupplierImageDraft =
 export function productCardFieldsFromCard(card: ProductCard): ProductCardFields {
   return {
     name: card.name,
-    category: card.category,
     sellingPoints: [...card.sellingPoints],
     specifications: card.specifications,
     materialsCraft: card.materialsCraft,
     audienceScenarios: card.audienceScenarios,
     packageContents: card.packageContents,
-    skuCode: card.skuCode,
     painPointsComparison: card.painPointsComparison,
     usageDemoHighlights: card.usageDemoHighlights,
     certificationsProhibitions: card.certificationsProhibitions,
@@ -407,8 +405,6 @@ export function ProductCardEditorForm({
     (fields.certificationsProhibitions.trim() ? 1 : 0);
 
   const nameLen = productCardCharLength(fields.name.trim());
-  const skuLen = productCardCharLength(fields.skuCode.trim());
-  const categoryLen = productCardCharLength(fields.category.trim());
   const specLen = productCardCharLength(fields.specifications.trim());
   const matLen = productCardCharLength(fields.materialsCraft.trim());
   const audLen = productCardCharLength(fields.audienceScenarios.trim());
@@ -430,86 +426,33 @@ export function ProductCardEditorForm({
       <section className="pc-form-group" aria-label="基础信息与核心卖点">
         <div className="pc-form-group-head">
           <h3>基础信息与核心卖点</h3>
-          <span className="pc-form-group-sub">必填 1–3 · SKU 置顶选填</span>
-        </div>
-
-        <div className="pc-form-row-2">
-          <div
-            className={`pc-field ${isMissing("name") ? "is-missing" : ""} ${nonMissingError("name") ? "is-invalid" : ""}`}
-            data-field="name"
-          >
-            <div className="pc-field-label-row">
-              <label className="pc-field-label" htmlFor={`${prefix}-name`}>
-                <span>{PRODUCT_CARD_FIELD_LABELS.name}</span>
-                <span className="pc-req-mark" aria-hidden="true">*</span>
-                {isMissing("name") && <span className="pc-field-tag is-missing">待补全</span>}
-              </label>
-              <span className={`pc-char-count ${nameLen > PRODUCT_CARD_FIELD_LIMITS.name.max ? "is-over" : ""}`}>
-                {nameLen}/{PRODUCT_CARD_FIELD_LIMITS.name.max}
-              </span>
-            </div>
-            <input
-              id={`${prefix}-name`}
-              className="pc-input"
-              type="text"
-              value={fields.name}
-              disabled={isLocked}
-              placeholder="例如：双层真空不锈钢保温杯 500ml"
-              onChange={(event) => updateField("name", event.target.value)}
-            />
-            {nonMissingError("name") && <span className="pc-field-error">{nonMissingError("name")}</span>}
-          </div>
-
-          <div
-            className={`pc-field ${nonMissingError("skuCode") ? "is-invalid" : ""}`}
-            data-field="skuCode"
-          >
-            <div className="pc-field-label-row">
-              <label className="pc-field-label" htmlFor={`${prefix}-skuCode`}>
-                <span>{PRODUCT_CARD_FIELD_LABELS.skuCode}</span>
-                <span className="pc-field-tag is-optional">选填</span>
-              </label>
-              <span className={`pc-char-count ${skuLen > PRODUCT_CARD_FIELD_LIMITS.skuCode.max ? "is-over" : ""}`}>
-                {skuLen}/{PRODUCT_CARD_FIELD_LIMITS.skuCode.max}
-              </span>
-            </div>
-            <input
-              id={`${prefix}-skuCode`}
-              className="pc-input mono"
-              type="text"
-              value={fields.skuCode}
-              disabled={isLocked}
-              placeholder="例如：SKU-CUP-500W"
-              onChange={(event) => updateField("skuCode", event.target.value)}
-            />
-            {nonMissingError("skuCode") && <span className="pc-field-error">{nonMissingError("skuCode")}</span>}
-          </div>
+          <span className="pc-form-group-sub">必填 1–2</span>
         </div>
 
         <div
-          className={`pc-field ${isMissing("category") ? "is-missing" : ""} ${nonMissingError("category") ? "is-invalid" : ""}`}
-          data-field="category"
+          className={`pc-field ${isMissing("name") ? "is-missing" : ""} ${nonMissingError("name") ? "is-invalid" : ""}`}
+          data-field="name"
         >
           <div className="pc-field-label-row">
-            <label className="pc-field-label" htmlFor={`${prefix}-category`}>
-              <span>{PRODUCT_CARD_FIELD_LABELS.category}</span>
+            <label className="pc-field-label" htmlFor={`${prefix}-name`}>
+              <span>{PRODUCT_CARD_FIELD_LABELS.name}</span>
               <span className="pc-req-mark" aria-hidden="true">*</span>
-              {isMissing("category") && <span className="pc-field-tag is-missing">待补全</span>}
+              {isMissing("name") && <span className="pc-field-tag is-missing">待补全</span>}
             </label>
-            <span className={`pc-char-count ${categoryLen > PRODUCT_CARD_FIELD_LIMITS.category.max ? "is-over" : ""}`}>
-              {categoryLen}/{PRODUCT_CARD_FIELD_LIMITS.category.max}
+            <span className={`pc-char-count ${nameLen > PRODUCT_CARD_FIELD_LIMITS.name.max ? "is-over" : ""}`}>
+              {nameLen}/{PRODUCT_CARD_FIELD_LIMITS.name.max}
             </span>
           </div>
           <input
-            id={`${prefix}-category`}
+            id={`${prefix}-name`}
             className="pc-input"
             type="text"
-            value={fields.category}
+            value={fields.name}
             disabled={isLocked}
-            placeholder="例如：水杯水具 / 3C 数码配件 / 便携小家电"
-            onChange={(event) => updateField("category", event.target.value)}
+            placeholder="例如：双层真空不锈钢保温杯 500ml"
+            onChange={(event) => updateField("name", event.target.value)}
           />
-          {nonMissingError("category") && <span className="pc-field-error">{nonMissingError("category")}</span>}
+          {nonMissingError("name") && <span className="pc-field-error">{nonMissingError("name")}</span>}
         </div>
 
         <div
@@ -599,7 +542,7 @@ export function ProductCardEditorForm({
       <section className="pc-form-group" aria-label="商品客观事实详情">
         <div className="pc-form-group-head">
           <h3>商品客观事实详情</h3>
-          <span className="pc-form-group-sub">必填 4–7 · 供套图与上架文案准确引用</span>
+          <span className="pc-form-group-sub">必填 3–6 · 供套图与上架文案准确引用</span>
         </div>
 
         <div

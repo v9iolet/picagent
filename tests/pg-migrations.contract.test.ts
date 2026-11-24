@@ -2194,26 +2194,26 @@ test("038 migration enforces product library and onboarding constraints, cascade
     const badCardId = randomUUID();
     await expectSqlError(
       `INSERT INTO suite_workbench.product_cards
-        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
-       VALUES ($1, 'draft', '商品名', '类目', '["卖点1"]'::jsonb, '规格', '材质', '人群', '清单')`,
+        (id, status, name, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'draft', '商品名', '["卖点1"]'::jsonb, '规格', '材质', '人群', '清单')`,
       [badCardId],
     );
     await expectSqlError(
       `INSERT INTO suite_workbench.product_cards
-        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
-       VALUES ($1, 'published', '   ', '类目', '["卖点1"]'::jsonb, '规格', '材质', '人群', '清单')`,
+        (id, status, name, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'published', '   ', '["卖点1"]'::jsonb, '规格', '材质', '人群', '清单')`,
       [badCardId],
     );
     await expectSqlError(
       `INSERT INTO suite_workbench.product_cards
-        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
-       VALUES ($1, 'published', '商品名', '类目', '[]'::jsonb, '规格', '材质', '人群', '清单')`,
+        (id, status, name, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'published', '商品名', '[]'::jsonb, '规格', '材质', '人群', '清单')`,
       [badCardId],
     );
     await expectSqlError(
       `INSERT INTO suite_workbench.product_cards
-        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
-       VALUES ($1, 'published', '商品名', '类目', '["1","2","3","4","5","6","7","8","9","10","11"]'::jsonb, '规格', '材质', '人群', '清单')`,
+        (id, status, name, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'published', '商品名', '["1","2","3","4","5","6","7","8","9","10","11"]'::jsonb, '规格', '材质', '人群', '清单')`,
       [badCardId],
     );
 
@@ -2226,13 +2226,11 @@ test("038 migration enforces product library and onboarding constraints, cascade
       status: "published",
       fields: {
         name: "100% 纯棉重磅T恤",
-        category: "男装_上衣",
-        sellingPoints: ["260g 高克重纯棉", "领口双针加固不易变形"],
+        sellingPoints: ["260g 高克重纯棉", "领口双针加固_不易变形", "透气率提升 50%"],
         specifications: "尺码 M-XXL，衣长 70-76cm，克重 260g/m²",
         materialsCraft: "100% 新疆长绒棉，活性染色工艺",
         audienceScenarios: "春夏日常通勤与休闲穿搭",
         packageContents: "单品本体 ×1，无额外配件",
-        skuCode: "TEE-COTTON_100%",
         painPointsComparison: "",
         usageDemoHighlights: "",
         certificationsProhibitions: "",
@@ -2313,24 +2311,33 @@ test("038 migration enforces product library and onboarding constraints, cascade
       ],
     );
 
-    // 4. LIKE wildcard characters (% and _) in keyword search are escaped literally
+    // 4. LIKE wildcard characters (% and _) in keyword search are escaped literally, and sellingPoints match case-insensitively
     const literalMatch = await repo.list({ status: "published", keyword: "100%" });
     assert.equal(literalMatch.total, 1);
     assert.equal(literalMatch.items[0].id, cardId);
     const nonMatchingPercent = await repo.list({ status: "published", keyword: "99%" });
     assert.equal(nonMatchingPercent.total, 0);
+    const spCaseMatch = await repo.list({ status: "published", keyword: "260G 高克重" });
+    assert.equal(spCaseMatch.total, 1);
+    assert.equal(spCaseMatch.items[0].id, cardId);
+    const spLiteralUnderscore = await repo.list({ status: "published", keyword: "加固_不易" });
+    assert.equal(spLiteralUnderscore.total, 1);
+    const spLiteralUnderscoreMiss = await repo.list({ status: "published", keyword: "加固X不易" });
+    assert.equal(spLiteralUnderscoreMiss.total, 0);
+    const spLiteralPercent = await repo.list({ status: "published", keyword: "50%" });
+    assert.equal(spLiteralPercent.total, 1);
+    const jsonSyntaxNoMatch = await repo.list({ status: "published", keyword: '["' });
+    assert.equal(jsonSyntaxNoMatch.total, 0);
 
     // 5. Update reorders images cleanly without ordinal unique collision and increments revision
     const updated = await repo.update(cardId, {
       fields: {
         name: "100% 纯棉重磅T恤 升级款",
-        category: "男装_上衣",
         sellingPoints: ["280g 重磅纯棉"],
         specifications: "尺码 M-XXL",
         materialsCraft: "100% 新疆长绒棉",
         audienceScenarios: "日常通勤",
         packageContents: "单品本体 ×1，无额外配件",
-        skuCode: "TEE-COTTON_100%",
         painPointsComparison: "相比 220g 普通棉更挺括",
         usageDemoHighlights: "",
         certificationsProhibitions: "",
@@ -2502,13 +2509,11 @@ test("039 migration extends prompt stages, seeds product.onboarding idempotently
       title: "PG 保温杯建档",
       draftCard: {
         name: "PG 不锈钢保温杯",
-        category: "水杯水具",
         sellingPoints: ["316L 内胆"],
         specifications: "",
         materialsCraft: "",
         audienceScenarios: "",
         packageContents: "",
-        skuCode: "",
         painPointsComparison: "",
         usageDemoHighlights: "",
         certificationsProhibitions: "",
@@ -2628,5 +2633,185 @@ test("039 migration extends prompt stages, seeds product.onboarding idempotently
     assert.equal(await onboarding.get(sessionId), null);
     assert.ok(await productCards.get(cardId));
   });
+});
+
+test("040 migration upgrades legacy 001..039 database, drops category/sku_code, updates product.onboarding v1, and replays 001..040 idempotently", { skip }, async () => {
+  const { readdir } = await import("node:fs/promises");
+  const path = await import("node:path");
+  const { PostgresProductCardRepository } = await import(
+    "../server/repositories/postgres-product-card-repository.js"
+  );
+
+  const client = new Client({ ...loadPostgresConfig(), connectionTimeoutMillis: 10_000 });
+  const suffix = randomUUID().replaceAll("-", "");
+  const suiteSchema = `contract_suite_${suffix}`;
+  const promptSchema = `contract_prompt_${suffix}`;
+  let connected = false;
+
+  try {
+    await client.connect();
+    connected = true;
+    await client.query("BEGIN");
+    await client.query(`CREATE SCHEMA ${suiteSchema}`);
+    await client.query(`CREATE SCHEMA ${promptSchema}`);
+    await client.query(`SET LOCAL search_path TO ${suiteSchema}, ${promptSchema}`);
+    const extension = await client.query<{ schema: string }>(
+      `SELECT n.nspname AS schema FROM pg_catalog.pg_extension e
+       JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace WHERE e.extname=$1`,
+      ["pgcrypto"],
+    );
+    const cryptoSchema = escapeIdentifier(extension.rows[0]?.schema ?? suiteSchema);
+
+    function query<Row extends QueryResultRow>(sql: string, values?: unknown[]) {
+      assert.doesNotMatch(sql, /\bpublic\b"?\s*\.|\b(?:COMMIT|ROLLBACK|ABORT|END\s+(?:TRANSACTION|WORK)|SET\s+(?:LOCAL\s+|SESSION\s+)?search_path)\b|(?:^|;)\s*END\s*;/i);
+      return client.query<Row>(
+        sql
+          .replace(/\bsuite_workbench\b/g, suiteSchema)
+          .replace(/\bprompt_library\b/g, promptSchema)
+          .replace(
+            /\bFROM pg_constraint WHERE conname\b/gi,
+            `FROM pg_catalog.pg_constraint
+          WHERE connamespace IN (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = ANY(pg_catalog.current_schemas(false))) AND conname`,
+          )
+          .replace(
+            /\bCREATE EXTENSION IF NOT EXISTS pgcrypto\s*;/i,
+            `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA ${suiteSchema};`,
+          )
+          .replace(/\b(digest|gen_random_uuid)\(/g, (_match, fn: string) => `${cryptoSchema}.${fn}(`),
+        values,
+      );
+    }
+
+    let leased = false;
+    const pool = {
+      query,
+      async connect() {
+        assert.equal(leased, false);
+        leased = true;
+        return {
+          async query(sql: string, values?: unknown[]) {
+            switch (sql) {
+              case "BEGIN": return client.query("SAVEPOINT repo_transaction");
+              case "COMMIT": return client.query("RELEASE SAVEPOINT repo_transaction");
+              case "ROLLBACK":
+                await client.query("ROLLBACK TO SAVEPOINT repo_transaction");
+                return client.query("RELEASE SAVEPOINT repo_transaction");
+              default: return query(sql, values);
+            }
+          },
+          release() { leased = false; },
+        };
+      },
+    } as unknown as Pool;
+
+    // 1. Run migrations 001..039 only, then simulate legacy pre-040 product_cards row and legacy v1 prompt seed
+    const migrationDir = path.resolve("db/migrations");
+    const pre040Files = (await readdir(migrationDir))
+      .filter((file) => /^\d{3}_.+\.sql$/.test(file) && file < "040_")
+      .sort();
+    for (const file of pre040Files) {
+      await pool.query(await readFile(path.join(migrationDir, file), "utf8"));
+    }
+
+    const legacyCardId = randomUUID();
+    await pool.query(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents, sku_code)
+       VALUES ($1, 'published', '存量真空保温杯 500ml', '水杯水具', '["316L 医用级内胆", "12小时保冷"]'::jsonb, '500ml', '316L不锈钢', '通勤露营', '杯体×1', 'LEGACY-SKU-001')`,
+      [legacyCardId],
+    );
+
+    // Simulate pre-040 product.onboarding v1 row with old sha256
+    const legacySha256 = "4b12e4254750710d98a33801ff0e40fcb6b0458d79d51f38bffd2c0ca7b070bd";
+    await pool.query(`ALTER TABLE prompt_library.prompt_template_versions DISABLE TRIGGER protect_published_prompt_version`);
+    await pool.query(
+      `UPDATE prompt_library.prompt_template_versions v
+       SET body = 'legacy 7+4 body with category and skuCode',
+           output_schema = '{"type":"object","properties":{"schemaVersion":{"const":"product-onboarding-v1"}}}'::jsonb,
+           source_sha256 = $1
+       FROM prompt_library.prompt_templates t
+       WHERE v.template_id = t.id AND t.code = 'product.onboarding' AND v.version_no = 1`,
+      [legacySha256],
+    );
+    await pool.query(`ALTER TABLE prompt_library.prompt_template_versions ENABLE TRIGGER protect_published_prompt_version`);
+
+    // 2. Apply 040 migration on legacy 001..039 schema
+    const sql040 = await readFile(path.join(migrationDir, "040_drop_product_card_category_and_sku.sql"), "utf8");
+    await pool.query(sql040);
+
+    // Verify category and sku_code columns & old indexes are removed, and new indexes exist
+    const cols = await pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'suite_workbench' AND table_name = 'product_cards'`,
+    );
+    const colNames = new Set(cols.rows.map((row) => row.column_name));
+    assert.equal(colNames.has("category"), false);
+    assert.equal(colNames.has("sku_code"), false);
+
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = 'suite_workbench' AND tablename = 'product_cards'`,
+    );
+    const indexNames = new Set(indexes.rows.map((row) => row.indexname));
+    assert.equal(indexNames.has("product_cards_sku_lower_idx"), false);
+    assert.equal(indexNames.has("product_cards_category_lower_idx"), false);
+    assert.equal(indexNames.has("product_cards_name_lower_idx"), true);
+    assert.equal(indexNames.has("product_cards_selling_points_gin_idx"), true);
+
+    // Verify existing card survives and is searchable by selling point via PostgresProductCardRepository
+    const cardRepo = new PostgresProductCardRepository(pool);
+    const foundBySp = await cardRepo.list({ status: "published", keyword: "316l 医用级" });
+    assert.equal(foundBySp.total, 1);
+    assert.equal(foundBySp.items[0].id, legacyCardId);
+    assert.equal("category" in foundBySp.items[0], false);
+    assert.equal("skuCode" in foundBySp.items[0], false);
+
+    // Verify product.onboarding v1 was upgraded in-place to the latest 6+3 prompt & sha256
+    const prompts = new PostgresPromptRepository(pool);
+    const sourcePath = "prompt/normalized/product-onboarding.md";
+    const parsedRecord = parseNormalizedPromptMarkdown(await readFile(sourcePath, "utf8"), sourcePath);
+    const published = await prompts.listPublished("product_onboarding");
+    assert.equal(published.length, 1);
+    assert.equal(published[0].versionNo, 1);
+    const runtime = await prompts.getPublishedVersion(published[0].templateVersionId, "product_onboarding");
+    assert.ok(runtime);
+    assert.equal(runtime.sourceSha256, parsedRecord.sourceSha256);
+    assert.match(runtime.body, /6 项入库必填 \+ 3 项选填/);
+    assert.doesNotMatch(runtime.body, /skuCode|category/);
+
+    // Verify protect_published_prompt_version trigger is re-enabled after 040
+    const guardClient = await pool.connect();
+    try {
+      await guardClient.query("BEGIN");
+      await assert.rejects(
+        guardClient.query(
+          `UPDATE prompt_library.prompt_template_versions SET body = 'tampered' WHERE id = $1`,
+          [runtime.templateVersionId],
+        ),
+        /published prompt versions are immutable/,
+      );
+    } finally {
+      await guardClient.query("ROLLBACK");
+      guardClient.release();
+    }
+
+    // Verify import-prompts is idempotent after 040 upgrade (no v2 draft created)
+    const [reimported] = await importPromptRecordsWithPolicy(prompts, [parsedRecord], { publish: false });
+    assert.equal(reimported.templateVersionId, runtime.templateVersionId);
+    assert.equal(reimported.versionNo, 1);
+    assert.equal((await prompts.listVersions(runtime.templateId)).length, 1);
+
+    // 3. Replay full migrations 001..040 twice after upgrade -> strictly idempotent without errors
+    await runMigrations(pool);
+    await runMigrations(pool);
+    assert.equal((await prompts.listVersions(runtime.templateId)).length, 1);
+    assert.equal((await cardRepo.get(legacyCardId))?.name, "存量真空保温杯 500ml");
+  } finally {
+    try {
+      if (connected) await client.query("ROLLBACK");
+    } finally {
+      await client.end();
+    }
+  }
 });
 

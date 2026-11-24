@@ -655,14 +655,12 @@ test("复刻草稿持久化：仅选择商品信息卡时也会持久化到 loca
   });
 
   store1.updateConfig({
-    productCardId: "card-sku-100",
+    productCardId: "card-gan-100",
     productCardSummary: {
-      cardId: "card-sku-100",
+      cardId: "card-gan-100",
       name: "氮化镓 65W 折叠快充头",
-      category: "数码配件",
-      skuCode: "SKU-GAN-65W",
       revision: 2,
-      coverThumbnailUrl: "/api/product-cards/card-sku-100/images/img-1/preview/thumbnail",
+      coverThumbnailUrl: "/api/product-cards/card-gan-100/images/img-1/preview/thumbnail",
       sellingPoints: ["65W 双口快充", "折叠插脚便携"],
       specifications: "65W Max，52×36×36mm，112g",
       materialsCraft: "阻燃 PC 外壳",
@@ -684,9 +682,9 @@ test("复刻草稿持久化：仅选择商品信息卡时也会持久化到 loca
   await store2.waitForHydration();
 
   const snap2 = store2.getSnapshot();
-  assert.equal(snap2.config.productCardId, "card-sku-100");
+  assert.equal(snap2.config.productCardId, "card-gan-100");
   assert.equal(snap2.config.productCardSummary?.name, "氮化镓 65W 折叠快充头");
-  assert.equal(snap2.config.productCardSummary?.skuCode, "SKU-GAN-65W");
+  assert.deepEqual(snap2.config.productCardSummary?.sellingPoints, ["65W 双口快充", "折叠插脚便携"]);
   assert.equal(snap2.config.productCardSummary?.revision, 2);
 
   store2.clearDraft();

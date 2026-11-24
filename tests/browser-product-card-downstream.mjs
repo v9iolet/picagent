@@ -202,10 +202,10 @@ async function startOfflineDownstreamApp(t) {
     },
   });
 
-  // Seed 3 product cards: 2 published (1 with supplier image, 1 searchable by SKU) + 1 archived.
+  // Seed 3 product cards: 2 published (1 with supplier image, 1 searchable by selling point) + 1 archived.
   const createCard = async (payload) => {
     const res = await api.request("POST", "/api/product-cards", {
-      headers: { "idempotency-key": `seed-${payload.skuCode || payload.name}` },
+      headers: { "idempotency-key": `seed-${payload.name}` },
       body: payload,
     });
     assert.equal(res.status, 201, JSON.stringify(res.body));
@@ -214,8 +214,6 @@ async function startOfflineDownstreamApp(t) {
 
   const tumblerCard = await createCard({
     name: "真空保温随行杯 500ml",
-    category: "水杯水具",
-    skuCode: "SKU-TUMBLER-500",
     sellingPoints: ["316L 食品级不锈钢内胆", "12 小时真空长效保温保冷", "一键弹盖防漏安全锁"],
     specifications: "容量 500ml，高度 215mm，杯底直径 68mm，净重 265g",
     materialsCraft: "316L 不锈钢内胆 + 304 拉丝外壳 + 食品级硅胶密封圈",
@@ -235,8 +233,6 @@ async function startOfflineDownstreamApp(t) {
 
   const chargerCard = await createCard({
     name: "氮化镓 65W 三口折叠快充头",
-    category: "数码配件",
-    skuCode: "SKU-GAN-65W",
     sellingPoints: ["65W 双 Type-C + USB-A 三口同时快充", "90° 折叠插脚随身收纳不刮包"],
     specifications: "总输出 65W Max，尺寸 52×36×36mm，重量 112g",
     materialsCraft: "V0 级阻燃 PC 磨砂壳体 + 激光镭雕丝印",
@@ -249,8 +245,6 @@ async function startOfflineDownstreamApp(t) {
 
   const archivedCard = await createCard({
     name: "已下架旧款蓝牙音箱",
-    category: "音频设备",
-    skuCode: "SKU-ARCHIVED-01",
     sellingPoints: ["旧款清仓测试卖点"],
     specifications: "功率 10W，重量 420g",
     materialsCraft: "织布网罩 + ABS 机身",
@@ -383,7 +377,7 @@ async function startOfflineDownstreamApp(t) {
   };
 }
 
-test("下游接入商品信息卡：首页跳套图+归档快照可读、复刻按SKU选卡刷新保留、纯手填兼容与异常卡提示", async (t) => {
+test("下游接入商品信息卡：首页跳套图+归档快照可读、复刻按卖点选卡刷新保留、纯手填兼容与异常卡提示", async (t) => {
   const ctx = await startOfflineDownstreamApp(t);
   const page = await ctx.browser.newPage({ viewport: { width: 1500, height: 960 } });
   page.setDefaultTimeout(12000);
@@ -407,8 +401,7 @@ test("下游接入商品信息卡：首页跳套图+归档快照可读、复刻�
   const selectedBar = configPanel.locator("[data-selected-product-card-bar]");
   await selectedBar.waitFor();
   assert.ok((await selectedBar.textContent())?.includes(ctx.tumblerCard.name));
-  assert.ok((await selectedBar.textContent())?.includes("SKU-TUMBLER-500"));
-  assert.ok((await selectedBar.textContent())?.includes("水杯水具"));
+  assert.ok((await selectedBar.textContent())?.includes("316L 食品级不锈钢内胆"));
 
   // Heading switched to supplemental mode & supplier image did NOT populate suite input images
   await configPanel
@@ -522,7 +515,7 @@ test("下游接入商品信息卡：首页跳套图+归档快照可读、复刻�
   assert.equal(await replicaPanel.locator("[data-selected-product-card-bar]").count(), 0);
 
   // =========================================================================
-  // 链路 2：/create/replica 弹窗按 SKU 搜索选卡 → 刷新不丢 → 本地上传参考图与产品原图提交成功
+  // 链路 2：/create/replica 弹窗按核心卖点搜索选卡 → 刷新不丢 → 本地上传参考图与产品原图提交成功
   // =========================================================================
   await page.goto(`${ctx.baseUrl}/create/replica`);
   await replicaPanel.getByRole("heading", { name: "商品信息（选填）", exact: true }).waitFor();
@@ -535,13 +528,13 @@ test("下游接入商品信息卡：首页跳套图+归档快照可读、复刻�
   assert.equal(await pickerModal.getByText(ctx.archivedCard.name).count(), 0);
   assert.equal(await pickerModal.getByText(ctx.tumblerCard.name).count(), 0);
 
-  // Search by SKU
-  await pickerModal.getByLabel("搜索商品信息卡").fill("SKU-GAN-65W");
+  // Search by selling point (case-insensitive)
+  await pickerModal.getByLabel("搜索商品信息卡").fill("type-c");
   const chargerOption = pickerModal.locator(`[data-picker-card-id="${ctx.chargerCard.id}"]`);
   await chargerOption.waitFor();
   await chargerOption.click();
 
-  // Preview pane displays full 7+4 facts
+  // Preview pane displays full 6+3 facts
   const previewPane = pickerModal.locator(".pcp-preview-col");
   await previewPane.getByText("65W 双 Type-C + USB-A 三口同时快充").waitFor();
   await previewPane.getByText("单品本体 ×1，无额外配件").waitFor();
@@ -553,7 +546,7 @@ test("下游接入商品信息卡：首页跳套图+归档快照可读、复刻�
   const replicaSelectedBar = replicaPanel.locator("[data-selected-product-card-bar]");
   await replicaSelectedBar.waitFor();
   assert.ok((await replicaSelectedBar.textContent())?.includes(ctx.chargerCard.name));
-  assert.ok((await replicaSelectedBar.textContent())?.includes("SKU-GAN-65W"));
+  assert.ok((await replicaSelectedBar.textContent())?.includes("65W 双 Type-C + USB-A 三口同时快充"));
   await replicaPanel.getByRole("heading", { name: "补充商品信息（选填）", exact: true }).waitFor();
 
   // Reload page and confirm selected product card persists from replicaDraftStore

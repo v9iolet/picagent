@@ -7,8 +7,6 @@ import { useEffect, useState } from "react";
 
 export interface ProductCardFactsViewProps {
   name: string;
-  category: string;
-  skuCode: string;
   revision?: number;
   coverThumbnailUrl?: string | null;
   snapshotMode?: boolean;
@@ -59,8 +57,6 @@ const OPTIONAL_TEXT_ROWS = [
 
 export function ProductCardFactsView({
   name,
-  category,
-  skuCode,
   revision,
   coverThumbnailUrl,
   snapshotMode = false,
@@ -77,8 +73,6 @@ export function ProductCardFactsView({
         <ProductCardThumb src={coverThumbnailUrl} alt={name} className="is-large" />
         <div className="pcp-facts-hero-info">
           <div className="pcp-badges">
-            {skuCode && <span className="pcp-badge is-sku">{skuCode}</span>}
-            {category && <span className="pcp-badge is-cat">{category}</span>}
             {revision !== undefined && (
               <span className={`pcp-badge ${snapshotMode ? "is-snapshot" : "is-rev"}`}>
                 {snapshotMode ? `快照 v${revision}` : `v${revision}`}
@@ -95,15 +89,11 @@ export function ProductCardFactsView({
       </div>
 
       <div className="pcp-facts-group">
-        <div className="pcp-facts-group-title">核心商品事实（7 项必填）</div>
+        <div className="pcp-facts-group-title">核心商品事实（6 项必填）</div>
         <dl className="pcp-facts-list">
           <div className="pcp-fact-row">
             <dt>{PRODUCT_CARD_FIELD_LABELS.name}</dt>
             <dd>{name || "—"}</dd>
-          </div>
-          <div className="pcp-fact-row">
-            <dt>{PRODUCT_CARD_FIELD_LABELS.category}</dt>
-            <dd>{category || "—"}</dd>
           </div>
           <div className="pcp-fact-row">
             <dt>{PRODUCT_CARD_FIELD_LABELS.sellingPoints}</dt>
@@ -132,12 +122,8 @@ export function ProductCardFactsView({
       </div>
 
       <div className="pcp-facts-group">
-        <div className="pcp-facts-group-title">扩展商品事实（4 项选填）</div>
+        <div className="pcp-facts-group-title">扩展商品事实（3 项选填）</div>
         <dl className="pcp-facts-list">
-          <div className="pcp-fact-row">
-            <dt>{PRODUCT_CARD_FIELD_LABELS.skuCode}</dt>
-            <dd>{skuCode || <span className="pcp-muted">未填写</span>}</dd>
-          </div>
           {OPTIONAL_TEXT_ROWS.map((key) => {
             const value = typeof fields[key] === "string" ? fields[key]!.trim() : "";
             return (

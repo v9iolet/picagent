@@ -152,7 +152,6 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
             "已根据文字、附件与供应商图提取基础信息，请一次性补充以下 3 项剩余必填项：\n1. 材质与工艺细节\n2. 适用人群与使用场景\n3. 包装清单 / 配件说明",
           draftCard: {
             name: "真空保温随行杯 500ml",
-            category: "水杯水具",
             sellingPoints: [
               "12 小时真空保温保冷",
               "一键弹盖防漏锁扣设计",
@@ -161,7 +160,6 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
             materialsCraft: "",
             audienceScenarios: "",
             packageContents: "",
-            skuCode: "CUP-500-PRO",
             painPointsComparison: "",
             usageDemoHighlights: "",
             certificationsProhibitions: "",
@@ -176,19 +174,16 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
           reply: "请补充该新品的基础信息与规格参数。",
           draftCard: {
             name: "临时测试草稿商品",
-            category: "",
             sellingPoints: [],
             specifications: "",
             materialsCraft: "",
             audienceScenarios: "",
             packageContents: "",
-            skuCode: "",
             painPointsComparison: "",
             usageDemoHighlights: "",
             certificationsProhibitions: "",
           },
           missingRequiredFields: [
-            "category",
             "sellingPoints",
             "specifications",
             "materialsCraft",
@@ -207,7 +202,7 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
       return {
         schemaVersion: PRODUCT_ONBOARDING_SCHEMA_VERSION,
         reply:
-          "核心 7 项必填商品信息已全部齐备，请核对右侧商品信息卡后点击「保存到商品库」。",
+          "核心 6 项必填商品信息已全部齐备，请核对右侧商品信息卡后点击「保存到商品库」。",
         draftCard: {
           ...input.currentDraftCard,
           materialsCraft: "316L 医用级不锈钢内胆 + 304 外壳，哑光静电喷塑",
@@ -254,7 +249,7 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   const validTxt = {
     name: "supplier-spec.txt",
     mimeType: "text/plain",
-    buffer: Buffer.from("商品规格：容量 500ml，高度 215mm，净重 265g，SKU：CUP-500-PRO", "utf8"),
+    buffer: Buffer.from("商品规格：容量 500ml，高度 215mm，净重 265g", "utf8"),
   };
   await page.getByLabel("选择供应商参考图").setInputFiles(imgPath);
   await page.getByLabel("上传 .txt 文本附件").setInputFiles(validTxt);
@@ -287,7 +282,7 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
   // Verify right ProductCardEditorForm auto-filled extracted fields & highlights 3 missing fields
   const cardPane = page.locator(".home-card-pane");
   assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).inputValue(), "真空保温随行杯 500ml");
-  assert.equal(await cardPane.locator(`#onboarding-${sessionId}-skuCode`).inputValue(), "CUP-500-PRO");
+  assert.equal(await cardPane.locator('[data-testid="required-progress-pill"]').innerText(), "已填 3/6 必填");
   assert.equal(await cardPane.locator(".pc-field.is-missing").count(), 3);
   assert.equal(await cardPane.locator(".pc-supplier-card").count(), 1);
 
@@ -373,14 +368,15 @@ test("HomePage Agent onboarding: default / landing, upload supplier image + .txt
     replyGate.resolve();
   }
 
-  // Wait for retried reply -> all 7 required fields filled & publish button enabled
+  // Wait for retried reply -> all 6 required fields filled & publish button enabled
   await page.waitForFunction(
     () => document.querySelectorAll('.home-msg[data-message-role="assistant"]').length === 2,
   );
   assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).isDisabled(), false);
+  assert.equal(await cardPane.locator('[data-testid="required-progress-pill"]').innerText(), "6/6 必填已齐");
   assert.equal(await cardPane.locator(".pc-field.is-missing").count(), 0);
   assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).inputValue(), "星河真空保温随行杯 500ml（旗舰版）");
-  assert.equal(await publishBtn.isDisabled(), false, "Publish button must be enabled when all 7 required fields are filled");
+  assert.equal(await publishBtn.isDisabled(), false, "Publish button must be enabled when all 6 required fields are filled");
 
   // 7. Click "保存到商品库" -> transitions to completed read-only state + success banner with 4 actions
   await publishBtn.click();
