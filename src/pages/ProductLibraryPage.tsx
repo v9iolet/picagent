@@ -406,6 +406,10 @@ export function ProductLibraryPage({
               </div>
             </div>
             <div className="product-library-header-actions">
+              <button className="btn" type="button" onClick={() => navigate("/")}>
+                <Icon name="sparkles" />
+                <span>AI 对话建档</span>
+              </button>
               <button className="btn btn-primary" type="button" onClick={openCreateModal}>
                 <Icon name="plus" />
                 <span>手动新建商品卡</span>

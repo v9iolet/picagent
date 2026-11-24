@@ -92,7 +92,7 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
   // 1. Visit /products and verify navigation placement & initial empty state
   await page.goto(`${baseUrl}/products`, { waitUntil: "networkidle" });
   const navLabels = await page.locator(".pa-rail-item span").allInnerTexts();
-  assert.deepEqual(navLabels, ["创建", "商品库", "图片库", "模板库", "配置"]);
+  assert.deepEqual(navLabels, ["首页", "创建", "商品库", "图片库", "模板库", "配置"]);
   await page.locator('.pa-rail-item.is-active[href="/products"]').waitFor({ state: "visible" });
   assert.match(await page.locator(".pa-breadcrumbs").innerText(), /商品库/);
   assert.match(await page.locator(".style-filter-note").innerText(), /供应商参考图仅用于商品库认款展示与建档识别/);
@@ -319,6 +319,12 @@ test("ProductLibraryPage full lifecycle: create, validate, quick-fill, upload su
     await page.locator(`.product-card-item[data-product-card-id="${secondCardId}"]`).count(),
     0,
   );
+
+  // 7. Verify "AI 对话建档" button navigates cleanly to "/" HomePage
+  await page.locator(".product-library-header-actions button", { hasText: "AI 对话建档" }).click();
+  await page.waitForFunction(() => window.location.pathname === "/");
+  await page.getByRole("heading", { name: "新品商品信息建档" }).waitFor({ state: "visible" });
+  await page.locator('.pa-rail-item.is-active[href="/"]').waitFor({ state: "visible" });
 
   assert.deepEqual(pageErrors, [], `Expected no uncaught page errors, got: ${pageErrors.join("; ")}`);
 });
