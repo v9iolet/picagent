@@ -5,10 +5,13 @@ import http from "node:http";
 import test from "node:test";
 import sharp from "sharp";
 import { createSuiteStudioApp } from "../server/app.js";
+import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
+import { createImageEditorApi } from "../server/image-editor-api.js";
 import { dispatchInputImageUpload } from "../server/multipart.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import {
   DEFAULT_REQUEST_BODY_MAX_BYTES,
+  IMAGE_EDITOR_OPERATION_BODY_MAX_BYTES,
   readBoundedRequestBody,
   REPLICA_REQUEST_BODY_MAX_BYTES,
   resolveRequestBodyLimit,
@@ -81,6 +84,7 @@ async function startBoundedHttpServer(t: test.TestContext) {
   const pipelineRepository = new MemoryPipelineRepository();
   const replicaRepository = new MemoryReplicaRepository();
   const libraryRepository = new MemoryLibraryRepository();
+  const imageEditorRepository = new MemoryImageEditorRepository();
 
   for (const rel of ["prompt/normalized/replica-compose.md", "prompt/normalized/replica-high.md"]) {
     const md = await readFile(rel, "utf8");
@@ -92,6 +96,21 @@ async function startBoundedHttpServer(t: test.TestContext) {
     create: { width: 16, height: 16, channels: 3, background: { r: 240, g: 240, b: 240 } },
   }).png().toBuffer();
 
+  const imageEditorApi = createImageEditorApi(
+    new ImageEditorService(
+      imageEditorRepository,
+      {
+        name: "fake-editor",
+        version: "1",
+        capabilitiesVersion: "1",
+        capabilities: () => ({ imageToImage: true, addText: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
+        edit: async () => ({ bytes: tinyResult, mimeType: "image/png", width: 16, height: 16 }),
+      },
+      storage,
+      async () => ({ bytes: tinyResult, mimeType: "image/png", width: 16, height: 16, generationPrompt: "" }),
+    ),
+  );
+
   const app = createSuiteStudioApp({
     repository,
     storage,
@@ -100,6 +119,7 @@ async function startBoundedHttpServer(t: test.TestContext) {
     pipelineRepository,
     replicaRepository,
     libraryRepository,
+    imageEditorApi,
     imageRetryDelayMs: 0,
     llmClient: {
       provider: "fake-vision",
@@ -151,13 +171,19 @@ async function startBoundedHttpServer(t: test.TestContext) {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const address = server.address() as { port: number };
-  return { baseUrl: `http://127.0.0.1:${address.port}`, port: address.port, app };
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    port: address.port,
+    app,
+    replicaRepository,
+    pipelineRepository,
+  };
 }
 
 function sendRawHttp(
   port: number,
   options: { method: string; path: string; headers: Record<string, string>; chunks: Buffer[] },
-): Promise<{ status: number; body: any }> {
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: any }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       { host: "127.0.0.1", port, method: options.method, path: options.path, headers: options.headers },
@@ -168,7 +194,7 @@ function sendRawHttp(
           const text = Buffer.concat(parts).toString("utf8");
           let parsed: unknown = text;
           try { parsed = JSON.parse(text); } catch { /* keep raw */ }
-          resolve({ status: res.statusCode ?? 0, body: parsed });
+          resolve({ status: res.statusCode ?? 0, headers: res.headers, body: parsed });
         });
       },
     );
@@ -184,22 +210,23 @@ function sendRawHttp(
   });
 }
 
-test("resolveRequestBodyLimit scopes large limits strictly to replica and multipart image upload routes", () => {
+test("resolveRequestBodyLimit scopes large limits strictly to replica, image-editor operations, and multipart upload routes", () => {
   assert.equal(resolveRequestBodyLimit("POST", "/api/replicas"), REPLICA_REQUEST_BODY_MAX_BYTES);
   assert.equal(resolveRequestBodyLimit("POST", "/api/suites/abc-123/input-images"), SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES);
   assert.equal(resolveRequestBodyLimit("POST", "/api/listing-copies/draft/input-images"), SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES);
   assert.equal(resolveRequestBodyLimit("POST", "/api/listing-copies/job-1/input-images"), SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES);
+  assert.equal(resolveRequestBodyLimit("POST", "/api/image-editor/sessions/s1/operations"), IMAGE_EDITOR_OPERATION_BODY_MAX_BYTES);
 
   // Ordinary JSON routes and non-POST methods fall back to the 1 MiB default.
   assert.equal(resolveRequestBodyLimit("POST", "/api/suites"), DEFAULT_REQUEST_BODY_MAX_BYTES);
   assert.equal(resolveRequestBodyLimit("PATCH", "/api/suites/abc-123/workbench/layout"), DEFAULT_REQUEST_BODY_MAX_BYTES);
   assert.equal(resolveRequestBodyLimit("PATCH", "/api/prompt-templates/tpl-1"), DEFAULT_REQUEST_BODY_MAX_BYTES);
-  assert.equal(resolveRequestBodyLimit("POST", "/api/image-editor/sessions/s1/operations"), DEFAULT_REQUEST_BODY_MAX_BYTES);
+  assert.equal(resolveRequestBodyLimit("POST", "/api/image-editor/sessions/s1/submit"), DEFAULT_REQUEST_BODY_MAX_BYTES);
   assert.equal(resolveRequestBodyLimit("GET", "/api/replicas"), DEFAULT_REQUEST_BODY_MAX_BYTES);
   assert.equal(resolveRequestBodyLimit("POST", "/api/replicas/abc/resume"), DEFAULT_REQUEST_BODY_MAX_BYTES);
 });
 
-test("ordinary JSON endpoints accept normal payloads and reject payloads over 1 MiB with 413 PAYLOAD_TOO_LARGE", async (t) => {
+test("ordinary JSON endpoints accept normal payloads and reject payloads over 1 MiB with 413 PAYLOAD_TOO_LARGE and connection: close", async (t) => {
   const { port } = await startBoundedHttpServer(t);
 
   // Normal JSON payload (< 1 MiB) succeeds
@@ -213,7 +240,7 @@ test("ordinary JSON endpoints accept normal payloads and reject payloads over 1 
   assert.equal(okRes.status, 201);
   assert.equal(okRes.body.data.name, "正常套图方案");
 
-  // Oversized JSON payload (> 1 MiB) with explicit Content-Length returns 413
+  // Oversized JSON payload (> 1 MiB) with explicit Content-Length returns 413 with connection: close
   const oversized = Buffer.from(JSON.stringify({ name: "x".repeat(DEFAULT_REQUEST_BODY_MAX_BYTES + 1024) }), "utf8");
   assert.ok(oversized.length > DEFAULT_REQUEST_BODY_MAX_BYTES);
   const rejectedLength = await sendRawHttp(port, {
@@ -223,12 +250,13 @@ test("ordinary JSON endpoints accept normal payloads and reject payloads over 1 
     chunks: [oversized],
   });
   assert.equal(rejectedLength.status, 413);
+  assert.equal(rejectedLength.headers.connection, "close");
   assert.equal(rejectedLength.body.error.code, "PAYLOAD_TOO_LARGE");
   assert.equal(rejectedLength.body.error.message, "请求体超过大小限制");
   assert.equal(typeof rejectedLength.body.requestId, "string");
   assert.ok(rejectedLength.body.requestId.length > 0);
 
-  // Oversized JSON payload (> 1 MiB) streamed with chunked encoding (no Content-Length) also returns 413
+  // Oversized JSON payload (> 1 MiB) streamed with chunked encoding (no Content-Length) also returns 413 with connection: close
   const chunkSize = 256 * 1024;
   const chunks: Buffer[] = [];
   for (let offset = 0; offset < oversized.length; offset += chunkSize) {
@@ -241,7 +269,112 @@ test("ordinary JSON endpoints accept normal payloads and reject payloads over 1 
     chunks,
   });
   assert.equal(rejectedStreamed.status, 413);
+  assert.equal(rejectedStreamed.headers.connection, "close");
   assert.equal(rejectedStreamed.body.error.code, "PAYLOAD_TOO_LARGE");
+
+  // Unterminated oversized chunked stream still gets 413 + connection: close and server closes socket promptly
+  const stalledResult = await new Promise<{ status: number; connection?: string; closed: boolean; body: any }>((resolve, reject) => {
+    let status = 0;
+    let connection: string | undefined;
+    let body: any = null;
+    let closed = false;
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        agent: false,
+        method: "POST",
+        path: "/api/suites",
+        headers: { "content-type": "application/json", "transfer-encoding": "chunked" },
+      },
+      (res) => {
+        status = res.statusCode ?? 0;
+        connection = res.headers.connection;
+        const parts: Buffer[] = [];
+        res.on("data", (chunk) => parts.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on("end", () => {
+          try { body = JSON.parse(Buffer.concat(parts).toString("utf8")); } catch { body = null; }
+        });
+      },
+    );
+    req.on("error", () => { /* expected once server destroys socket */ });
+    req.on("close", () => {
+      closed = true;
+      resolve({ status, connection, closed, body });
+    });
+    const timer = setTimeout(() => reject(new Error("server did not close stalled oversized chunked stream")), 2000);
+    req.once("close", () => clearTimeout(timer));
+    // Write >1 MiB without calling req.end() to simulate a stalled oversized chunked client
+    for (const chunk of chunks) req.write(chunk);
+  });
+  assert.equal(stalledResult.status, 413);
+  assert.equal(stalledResult.connection, "close");
+  assert.equal(stalledResult.closed, true);
+  assert.equal(stalledResult.body?.error?.code, "PAYLOAD_TOO_LARGE");
+});
+
+test("image editor operations route accepts ~2 MiB brush strokes within 4 MiB limit and rejects >4 MiB with 413", async (t) => {
+  const { port } = await startBoundedHttpServer(t);
+  const sessionId = "session-large-strokes";
+
+  // Build a realistic ~2 MiB normalized stroke payload (> 1 MiB default, < 4 MiB operations limit)
+  const points = Array.from({ length: 52_000 }, (_, i) => ({
+    x: Number((((i * 13) % 1000) / 1000).toFixed(6)) + 0.000123456789,
+    y: Number((((i * 29) % 1000) / 1000).toFixed(6)) + 0.000987654321,
+  }));
+  const strokesBody = Buffer.from(
+    JSON.stringify({
+      summary: "长时蒙版涂抹局部重绘",
+      operation: {
+        operationId: "op-redraw-1",
+        type: "redraw",
+        order: 1,
+        sourceCardId: "card-1",
+        sourceVersionId: "ver-1",
+        parentVersionId: "ver-1",
+        summary: "局部重绘",
+        payload: {
+          prompt: "替换为浅色大理石台面",
+          feather: 0.1,
+          strokes: [{ mode: "draw", size: 0.04, points }],
+        },
+      },
+    }),
+    "utf8",
+  );
+  assert.ok(
+    strokesBody.length > 1.8 * 1024 * 1024 && strokesBody.length < IMAGE_EDITOR_OPERATION_BODY_MAX_BYTES,
+    `expected ~2 MiB strokes payload, got ${(strokesBody.length / (1024 * 1024)).toFixed(2)} MiB`,
+  );
+
+  const saved = await sendRawHttp(port, {
+    method: "POST",
+    path: `/api/image-editor/sessions/${sessionId}/operations`,
+    headers: {
+      "content-type": "application/json",
+      "content-length": String(strokesBody.length),
+      "idempotency-key": randomUUID(),
+    },
+    chunks: [strokesBody],
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.data.sessionId, sessionId);
+  assert.equal(saved.body.data.operations.length, 1);
+  assert.equal(saved.body.data.operations[0].payload.strokes[0].points.length, points.length);
+
+  // > 4 MiB on operations route returns 413 with connection: close
+  const rejected = await sendRawHttp(port, {
+    method: "POST",
+    path: `/api/image-editor/sessions/${sessionId}/operations`,
+    headers: {
+      "content-type": "application/json",
+      "content-length": String(IMAGE_EDITOR_OPERATION_BODY_MAX_BYTES + 1024),
+    },
+    chunks: [Buffer.from("{}")],
+  });
+  assert.equal(rejected.status, 413);
+  assert.equal(rejected.headers.connection, "close");
+  assert.equal(rejected.body.error.code, "PAYLOAD_TOO_LARGE");
 });
 
 test("single-image multipart upload allows >1 MiB images up to 16 MiB and rejects >16 MiB with 413", async (t) => {
@@ -276,7 +409,7 @@ test("single-image multipart upload allows >1 MiB images up to 16 MiB and reject
   });
   assert.equal(uploaded.status, 201);
 
-  // > 16 MiB declared Content-Length returns 413
+  // > 16 MiB declared Content-Length returns 413 with connection: close
   const rejectedUpload = await sendRawHttp(port, {
     method: "POST",
     path: `/api/suites/${suiteId}/input-images`,
@@ -287,13 +420,14 @@ test("single-image multipart upload allows >1 MiB images up to 16 MiB and reject
     chunks: [Buffer.from("x")],
   });
   assert.equal(rejectedUpload.status, 413);
+  assert.equal(rejectedUpload.headers.connection, "close");
   assert.equal(rejectedUpload.body.error.code, "PAYLOAD_TOO_LARGE");
 });
 
-test("POST /api/replicas accepts 12 images approaching the 200 MiB limit and rejects payloads above 200 MiB with 413", async (t) => {
-  const { port } = await startBoundedHttpServer(t);
+test("POST /api/replicas persists all 12 images (6 references + 6 products) approaching 200 MiB and rejects >200 MiB with 413", async (t) => {
+  const { port, replicaRepository, pipelineRepository } = await startBoundedHttpServer(t);
 
-  // 12 valid PNGs (6 references + 6 product images), each ~11 MiB raw (~14.7 MiB base64) -> ~176 MiB JSON body (< 200 MiB)
+  // 12 valid PNGs (6 references + 6 products), each ~11 MiB raw (~14.7 MiB base64) -> ~176 MiB JSON body (< 200 MiB)
   const perImageBytes = 11 * 1024 * 1024;
   const pngs = await Promise.all(Array.from({ length: 12 }, (_, index) => createPaddedPng(perImageBytes, index + 1)));
 
@@ -310,8 +444,7 @@ test("POST /api/replicas accepts 12 images approaching the 200 MiB limit and rej
       bytesBase64: bytes.toString("base64"),
       remark: `参考要求 ${index + 1}`,
     })),
-    productImages: pngs.slice(6, 12).map((bytes, index) => ({
-      sourceKind: "upload",
+    products: pngs.slice(6, 12).map((bytes, index) => ({
       filename: `prod-${index + 1}.png`,
       mimeType: "image/png",
       bytesBase64: bytes.toString("base64"),
@@ -335,10 +468,30 @@ test("POST /api/replicas accepts 12 images approaching the 200 MiB limit and rej
     chunks: [jsonBuffer],
   });
   assert.equal(submitted.status, 201, `expected 201 for 12-image replica submit, got ${submitted.status}: ${JSON.stringify(submitted.body)}`);
-  assert.ok(submitted.body.data.suiteId);
-  assert.ok(submitted.body.data.runId);
+  const suiteId = submitted.body.data.suiteId as string;
+  const runId = submitted.body.data.runId as string;
+  assert.ok(suiteId);
+  assert.ok(runId);
 
-  // Exceeding 200 MiB on POST /api/replicas still returns 413
+  // Verify all 6 references AND all 6 uploaded products were validated and persisted
+  const storedRefs = await replicaRepository.listReferences(suiteId);
+  const storedProducts = await replicaRepository.listProductImages(suiteId);
+  assert.equal(storedRefs.length, 6, "all 6 reference images must be persisted");
+  assert.equal(storedProducts.length, 6, "all 6 product images must be persisted");
+  assert.ok(storedProducts.every((item) => item.sourceKind === "upload" && item.objectKey.includes(suiteId)));
+
+  // Wait for async executePipeline to finish cleanly before tearing down the HTTP server
+  let run = await pipelineRepository.getRun(runId);
+  for (let i = 0; i < 100 && run?.status === "running"; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    run = await pipelineRepository.getRun(runId);
+  }
+  assert.equal(run?.status, "completed");
+  assert.equal(run?.config.hasProductImages, true);
+  assert.equal(run?.config.referenceCount, 6);
+  assert.equal(run?.config.productImageCount, 6);
+
+  // Exceeding 200 MiB on POST /api/replicas still returns 413 with connection: close
   const rejectedReplica = await sendRawHttp(port, {
     method: "POST",
     path: "/api/replicas",
@@ -350,5 +503,6 @@ test("POST /api/replicas accepts 12 images approaching the 200 MiB limit and rej
     chunks: [Buffer.from("{}")],
   });
   assert.equal(rejectedReplica.status, 413);
+  assert.equal(rejectedReplica.headers.connection, "close");
   assert.equal(rejectedReplica.body.error.code, "PAYLOAD_TOO_LARGE");
 });
