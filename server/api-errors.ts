@@ -119,6 +119,15 @@ export const errorMessages: Record<string, string> = {
   REPLICA_TEMPLATE_NOT_FOUND: "复刻提示词模板未发布或配置缺失",
   REPLICA_REFERENCE_NOT_FOUND: "复刻参考图不存在",
   REPLICA_ANALYSIS_FAILED: "复刻视觉分析失败，请重试",
+  PRODUCT_CARD_NOT_FOUND: "商品信息卡不存在",
+  PRODUCT_CARD_INVALID_STATUS: "商品信息卡状态参数无效",
+  PRODUCT_CARD_REQUIRED_FIELDS_MISSING: "请补齐必填商品信息",
+  PRODUCT_CARD_VALIDATION_FAILED: "商品信息卡字段不符合格式或长度要求",
+  PRODUCT_CARD_INVALID_IMAGES: "供应商参考图参数无效",
+  PRODUCT_CARD_TOO_MANY_IMAGES: "每张商品信息卡最多上传 6 张供应商参考图",
+  PRODUCT_CARD_IMAGE_NOT_FOUND: "供应商参考图不存在",
+  PRODUCT_CARD_NOT_AVAILABLE: "所选商品信息卡不存在或已归档",
+  INVALID_PAGINATION: "分页参数无效",
 };
 
 export function fail(code: string, status = 400, message?: string): AppResponse {

@@ -21,7 +21,9 @@ import { MemoryCategoryPromptRepository } from "./repositories/memory-category-p
 import { MemoryLibraryRepository } from "./repositories/memory-library-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { MemoryPipelineRepository } from "./repositories/memory-pipeline-repository.js";
+import { MemoryProductCardRepository } from "./repositories/memory-product-card-repository.js";
 import { MemoryReplicaRepository } from "./repositories/memory-replica-repository.js";
+import { createProductCardsApi } from "./product-cards-api.js";
 import { buildReplicaRolePrefix, createReplicaPipeline, resolveReplicaCloneLevel } from "./replica/replica-pipeline.js";
 import { buildProviderImagePrompt, materializeCategoryPlanItems } from "./suite-task-prompt.js";
 import {
@@ -67,6 +69,7 @@ import type {
   LibraryRepository,
   ReverseRepository, ReverseReference, ReversePromptVersion,
   PipelineRepository,
+  ProductCardRepository,
   ReplicaRepository,
 } from "./types.js";
 import { failObservation, finishObservation, startTool } from "./observability.js";
@@ -367,7 +370,7 @@ function safeDecodePathParam(value: string): string | null {
   }
 }
 
-export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>; clearFinalVersions?(childTaskIds: string[]): Promise<void>; setOnVersionCompleted?(listener: (childTask: { id: string; sourceCardId: string }) => Promise<void>): void }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
+export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; productCardRepository?: ProductCardRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>; clearFinalVersions?(childTaskIds: string[]): Promise<void>; setOnVersionCompleted?(listener: (childTask: { id: string; sourceCardId: string }) => Promise<void>): void }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
   const imageGenerationConcurrency = Math.max(1, Math.floor(Number.isFinite(deps.imageGenerationConcurrency) ? deps.imageGenerationConcurrency! : 3));
   const imageRetryDelayMs = Math.max(0, Math.floor(Number.isFinite(deps.imageRetryDelayMs) ? deps.imageRetryDelayMs! : 1500));
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
@@ -390,6 +393,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const categoryPromptRepository = deps.categoryPromptRepository ?? new MemoryCategoryPromptRepository();
   const pipelineRepository = deps.pipelineRepository ?? new MemoryPipelineRepository();
   const replicaRepository = deps.replicaRepository ?? new MemoryReplicaRepository();
+  const productCardRepository = deps.productCardRepository ?? new MemoryProductCardRepository();
+  const productCards = createProductCardsApi({ productCards: productCardRepository, storage: deps.storage });
   const listingRepository = deps.listingRepository ?? new MemoryListingRepository();
   const listing = createListingCopyApi({ jobs: listingRepository, suites: deps.repository, storage: deps.storage, pipelines: pipelineRepository, plans: deps.planRepository, platforms: deps.platformRepository, prompts: deps.promptRepository, vision: resolveVision });
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
@@ -920,6 +925,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
 
   async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
     if (/^\/api\/listing-copies(?:[/?]|$)/.test(path)) return listing.request(method, path, options.body);
+    if (/^\/api\/product-cards(?:[/?]|$)/.test(path)) return productCards.request(method, path, options.body);
     if (path === "/api/model-settings" || path.startsWith("/api/model-settings/")) return deps.modelSettings ? deps.modelSettings.request(method, path, options.body) : fail("NOT_FOUND", 404);
     if (method === "POST" && path === "/api/image-editor/translate-text") {
       const body = asRecord(options.body, { allowArrays: true });
