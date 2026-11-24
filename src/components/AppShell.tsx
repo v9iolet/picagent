@@ -2,7 +2,7 @@ import type { MouseEvent, ReactNode } from "react";
 import { Icon } from "../pages/shared";
 import "./AppShell.css";
 
-export type AppNavSection = "create" | "assets" | "templates" | "settings";
+export type AppNavSection = "create" | "products" | "assets" | "templates" | "settings";
 
 export interface AppCrumb {
   label: string;
@@ -40,6 +40,7 @@ export function AppShell({
 
   const navItems: Array<{ key: AppNavSection; label: string; to: string; icon: string }> = [
     { key: "create", label: "创建", to: "/create/suite", icon: "sparkles" },
+    { key: "products", label: "商品库", to: "/products", icon: "box" },
     { key: "assets", label: "图片库", to: "/assets", icon: "image" },
     { key: "templates", label: "模板库", to: "/templates", icon: "files" },
     { key: "settings", label: "配置", to: "/settings", icon: "sliders" },
