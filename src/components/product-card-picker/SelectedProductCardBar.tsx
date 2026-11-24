@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { productCardsApi, type ApiProductCard } from "../../api/client";
 import { Icon } from "../../pages/shared";
+import { InfoTip } from "../ui/InfoTip";
 import { ProductCardFactsView, ProductCardThumb } from "./ProductCardFactsView";
 import {
   hasFullProductCardFacts,
@@ -95,16 +96,18 @@ export function SelectedProductCardBar({
             data-product-card-detail-dialog
           >
             <header className="pcp-modal-head">
-              <div>
-                <span className="pcp-eyebrow">
-                  {readOnly ? "PRODUCT CARD SNAPSHOT" : "PRODUCT CARD"}
-                </span>
+              <div className="pcp-modal-title-row">
                 <h3>{readOnly ? "历史批次商品信息卡快照" : "已选商品信息卡详情"}</h3>
-                <small>
-                  {readOnly
-                    ? "该批次提交时已冻结商品卡事实快照，不受后续商品库编辑、归档或删除影响。"
-                    : "客观商品事实将在生成时自动注入；供应商参考图仅用于认款展示，不进入生图原图区。"}
-                </small>
+                <InfoTip
+                  label="商品信息卡快照说明"
+                  title={readOnly ? "快照隔离" : "自动注入说明"}
+                  align="start"
+                  content={
+                    readOnly
+                      ? "该批次提交时已冻结商品卡事实快照，不受后续商品库编辑、归档或删除影响。"
+                      : "客观商品事实将在生成时自动注入；供应商参考图仅用于认款展示，不进入生图原图区。"
+                  }
+                />
               </div>
               <button
                 type="button"

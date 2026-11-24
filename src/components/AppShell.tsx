@@ -40,7 +40,7 @@ export function AppShell({
 
   const navItems: Array<{ key: AppNavSection; label: string; to: string; icon: string }> = [
     { key: "home", label: "首页", to: "/", icon: "home" },
-    { key: "create", label: "创建", to: "/create/suite", icon: "sparkles" },
+    { key: "create", label: "创建", to: "/create/suite", icon: "grid" },
     { key: "products", label: "商品库", to: "/products", icon: "box" },
     { key: "assets", label: "图片库", to: "/assets", icon: "image" },
     { key: "templates", label: "模板库", to: "/templates", icon: "files" },
@@ -52,7 +52,7 @@ export function AppShell({
       <header className="pa-topbar">
         <div className="pa-topbar-left">
           <a className="pa-brand" href="/" onClick={linkTo("/")} title="PicAgent 首页">
-            <img src="/logo.png" alt="" width={28} height={28} />
+            <img src="/logo.png" alt="" width={24} height={24} />
             <strong>PicAgent</strong>
           </a>
           <nav className="pa-breadcrumbs" aria-label="面包屑">

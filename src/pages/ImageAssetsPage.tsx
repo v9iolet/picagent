@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { suiteApi, type ApiLibraryResource, type ApiLibraryResourceType } from "../api/client";
 import { AppShell } from "../components/AppShell";
+import { InfoTip } from "../components/ui/InfoTip";
 import {
   dimensionsFor,
   promptSnapshotValue,
@@ -248,16 +249,21 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
       <main className="workarea styles-layout style-library-workarea">
         <section className="panel style-filter-panel">
           <header className="panel-header">
-            <div>
-              <strong className="panel-title">图片筛选</strong>
-              <div className="panel-subtitle">按图片类型与发布状态筛选</div>
-            </div>
+            <strong className="panel-title">图片筛选</strong>
             <span className="badge">{total} 项</span>
           </header>
           <div className="panel-scroll">
             <div className="style-filters">
               <div className="style-filter-group">
-                <h3>资产类型</h3>
+                <div className="style-filter-group-head">
+                  <h3>资产类型</h3>
+                  <InfoTip
+                    label="资产类型说明"
+                    title="图片沉淀范围"
+                    align="start"
+                    content="图片库仅沉淀 AI 生成与派生图片，每张保留对应提示词快照；历史引用保持稳定，不受后续删除影响。"
+                  />
+                </div>
                 {([
                   ["all", "全部生成图"],
                   ["task_image_version", "AI 生成结果"],
@@ -285,20 +291,13 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
                   </label>
                 ))}
               </div>
-              <div className="style-filter-note">
-                <Icon name="image" />
-                <p>图片库仅沉淀 AI 生成与派生图片，每张图片都保留对应提示词快照。</p>
-              </div>
             </div>
           </div>
         </section>
 
         <section className="styles-center style-library-center style-assets-center">
           <header className="panel-header style-catalog-toolbar">
-            <div>
-              <strong className="panel-title">图片资产</strong>
-              <div className="panel-subtitle">浏览 AI 生成图、白底底图、过程图与爆品反推资产，单击卡片在右侧查看详情</div>
-            </div>
+            <strong className="panel-title">图片资产</strong>
           </header>
           <div className="style-library-toolbar">
             <div className="search-wrap">
@@ -406,10 +405,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
 
         <aside className="panel right style-inspector">
           <header className="panel-header">
-            <div>
-              <strong className="panel-title">图片详情</strong>
-              <div className="panel-subtitle">查看生成参数、提示词快照与快捷复用</div>
-            </div>
+            <strong className="panel-title">图片详情</strong>
             {selected && <button className="icon-btn" type="button" aria-label="清除详情" onClick={() => setSelected(null)}><Icon name="x" /></button>}
           </header>
           {selected ? (
@@ -496,13 +492,6 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
                   </button>
                 </div>
               </section>
-              <div className="resource-selection">
-                <Icon name="sparkles" />
-                <div>
-                  <strong>历史引用保持稳定</strong>
-                  <span>资源版本和提示词快照会随引用一起保存，不覆盖已有请求。</span>
-                </div>
-              </div>
             </div>
           ) : (
             <div className="style-library-inspector-empty">
