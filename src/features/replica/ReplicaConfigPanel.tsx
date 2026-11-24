@@ -167,7 +167,7 @@ export function ReplicaConfigPanel({
                       {item.previewUrl ? (
                         <img src={item.previewUrl} alt={item.filename} />
                       ) : (
-                        <span className="rp-ref-fallback">!</span>
+                        <span className="rp-ref-fallback">{item.status === "reading" ? "…" : "!"}</span>
                       )}
                       <span className="rp-ordinal">{index + 1}</span>
                     </div>
@@ -260,7 +260,7 @@ export function ReplicaConfigPanel({
                   {item.previewUrl ? (
                     <img alt={title} src={item.previewUrl} />
                   ) : (
-                    <span className="rp-ref-fallback">!</span>
+                    <span className="rp-ref-fallback">{item.status === "reading" ? "…" : "!"}</span>
                   )}
                   <span className="rp-product-source">
                     {item.sourceKind === "library" ? "资源库" : "本地"}
