@@ -19,23 +19,31 @@ async function fixture() {
   const suite = await suites.createSuite("资源库契约");
   library.addResource(resource());
   library.addResource(resource({ id: "prompt:task-v1", title: "单卡模板", templateVersionId: "task-v1", resourceVersionId: "task-v1", stage: "task_image" }));
-  library.addResource(resource({ id: "input:image-1", resourceType: "input_image", title: "鼠标原图", summary: "商品实拍", suiteId: suite.id, templateVersionId: null, resourceVersionId: "image-1", stage: null, source: { objectKey: "input/image-1" }, previewUrl: "/api/library/resources/input:image-1/preview" }));
+  library.addResource(resource({ id: "input:image-1", resourceType: "input_image", title: "鼠标原图", summary: "商品实拍", suiteId: suite.id, templateVersionId: null, resourceVersionId: "image-1", stage: null, source: { objectKey: "input/image-1" }, previewUrl: "/api/library/resources/input:image-1/preview", status: "published" }));
+  library.addResource(resource({ id: "base:image-1", resourceType: "base_image", title: "白底底图 · 版本 1", summary: "鼠标白底图", suiteId: suite.id, baseVersionId: "base-1", templateVersionId: null, resourceVersionId: "base-1", stage: null, source: { objectKey: "base/image-1" }, previewUrl: "/api/library/resources/base:image-1/preview", status: "published" }));
   await storage.put({ key: "input/image-1", bytes: Buffer.from("preview"), contentType: "image/png" });
+  await storage.put({ key: "base/image-1", bytes: Buffer.from("base-preview"), contentType: "image/png" });
   const api = createSuiteStudioApp({ repository: suites, storage, libraryRepository: library });
   return { api, suite, library };
 }
 
-test("resource listing filters published stage resources and never uses fixture data", async () => {
+test("resource listing filters published stage resources and excludes input_image from library listings", async () => {
   const { api } = await fixture();
   const plan = await api.request("GET", "/api/library/resources?resourceType=prompt_template&stage=plan");
   assert.equal(plan.status, 200); assert.equal((plan.body as any).data.items.length, 1); assert.equal((plan.body as any).data.items[0].templateVersionId, "plan-v1");
   const task = await api.request("GET", "/api/library/resources?stage=task_image");
   assert.equal((task.body as any).data.items[0].resourceType, "prompt_template");
+  const images = await api.request("GET", "/api/library/resources?scope=image");
+  assert.equal(images.status, 200);
+  assert.deepEqual((images.body as any).data.items.map((item: any) => item.id), ["base:image-1"]);
+  const inputs = await api.request("GET", "/api/library/resources?resourceType=input_image");
+  assert.equal(inputs.status, 200);
+  assert.deepEqual((inputs.body as any).data.items, []);
   const invalid = await api.request("GET", "/api/library/resources?stage=unknown");
   assert.equal(invalid.status, 400); assert.equal((invalid.body as any).error.code, "INVALID_PROMPT_STAGE");
 });
 
-test("resource detail and preview stay behind the API proxy", async () => {
+test("resource detail and preview stay behind the API proxy including historical input_image read-only resolution", async () => {
   const { api } = await fixture();
   const detail = await api.request("GET", "/api/library/resources/input:image-1");
   assert.equal(detail.status, 200); assert.equal((detail.body as any).data.source.objectKey, "input/image-1");
@@ -43,7 +51,7 @@ test("resource detail and preview stay behind the API proxy", async () => {
   assert.equal(preview.status, 200); assert.equal(preview.headers?.["content-type"], "image/png"); assert.deepEqual(preview.raw, Buffer.from("preview"));
 });
 
-test("plan and task references enforce stage, freeze a version snapshot, and are idempotent", async () => {
+test("plan and task references enforce stage, reject input_image, freeze a base_image version snapshot, and are idempotent", async () => {
   const { api, suite } = await fixture();
   const missing = await api.request("POST", `/api/suites/${suite.id}/library/references`, { headers: { "idempotency-key": "missing" }, body: { resourceId: "prompt:task-v1", targetType: "plan", targetId: "draft" } });
   assert.equal(missing.status, 409); assert.equal((missing.body as any).error.code, "LIBRARY_STAGE_MISMATCH");
@@ -51,17 +59,20 @@ test("plan and task references enforce stage, freeze a version snapshot, and are
   const first = await api.request("POST", `/api/suites/${suite.id}/library/references`, { headers: { "idempotency-key": "ref-plan" }, body: { resourceId: "prompt:plan-v1", targetType: "plan", targetId: "draft" } });
   assert.equal(first.status, 201);
 
-  const input = await api.request("POST", `/api/suites/${suite.id}/library/references`, { headers: { "idempotency-key": "ref-input" }, body: { resourceId: "input:image-1", targetType: "task", targetId: "task-1" } });
-  assert.equal(input.status, 201); assert.equal((input.body as any).data.resourceVersionId, "image-1");
-  const duplicate = await api.request("POST", `/api/suites/${suite.id}/library/references`, { headers: { "idempotency-key": "ref-input" }, body: { resourceId: "input:image-1", targetType: "task", targetId: "task-1" } });
-  assert.equal(duplicate.status, 200); assert.equal((duplicate.body as any).data.id, (input.body as any).data.id);
+  const rejectedInput = await api.request("POST", `/api/suites/${suite.id}/library/references`, { headers: { "idempotency-key": "ref-input" }, body: { resourceId: "input:image-1", targetType: "task", targetId: "task-1" } });
+  assert.equal(rejectedInput.status, 403); assert.equal((rejectedInput.body as any).error.code, "LIBRARY_RESOURCE_FORBIDDEN");
+
+  const base = await api.request("POST", `/api/suites/${suite.id}/library/references`, { headers: { "idempotency-key": "ref-base" }, body: { resourceId: "base:image-1", targetType: "task", targetId: "task-1" } });
+  assert.equal(base.status, 201); assert.equal((base.body as any).data.resourceVersionId, "base-1");
+  const duplicate = await api.request("POST", `/api/suites/${suite.id}/library/references`, { headers: { "idempotency-key": "ref-base" }, body: { resourceId: "base:image-1", targetType: "task", targetId: "task-1" } });
+  assert.equal(duplicate.status, 200); assert.equal((duplicate.body as any).data.id, (base.body as any).data.id);
   const restored = await api.request("GET", `/api/suites/${suite.id}/library/references?targetType=task&targetId=task-1`);
-  assert.equal((restored.body as any).data.length, 1); assert.equal((restored.body as any).data[0].snapshot.resourceVersionId, "image-1");
+  assert.equal((restored.body as any).data.length, 1); assert.equal((restored.body as any).data[0].snapshot.resourceVersionId, "base-1");
 });
 
 test("archiving a reference keeps the immutable audit row but removes it from active restore", async () => {
   const { api, suite } = await fixture();
-  const created = await api.request("POST", `/api/suites/${suite.id}/library/references`, { headers: { "idempotency-key": "ref-archive" }, body: { resourceId: "input:image-1", targetType: "task", targetId: "task-1" } });
+  const created = await api.request("POST", `/api/suites/${suite.id}/library/references`, { headers: { "idempotency-key": "ref-archive" }, body: { resourceId: "base:image-1", targetType: "task", targetId: "task-1" } });
   const archived = await api.request("DELETE", `/api/suites/${suite.id}/library/references/${created.body.data.id}`);
   assert.equal(archived.status, 200); assert.ok((archived.body as any).data.archivedAt);
   const active = await api.request("GET", `/api/suites/${suite.id}/library/references?targetType=task&targetId=task-1`);
@@ -90,7 +101,8 @@ test("workbench exposes separate image assets and prompt templates navigation pa
   assert.match(imagesPage, /图片资产/);
   assert.match(imagesPage, /listLibraryResources/);
   assert.match(imagesPage, /process_image/);
-  assert.match(imagesPage, /原始输入图不适用生成提示词/);
+  assert.match(imagesPage, /全部生成图/);
+  assert.doesNotMatch(imagesPage, /商品实拍原图/);
   assert.match(templatesPage, /提示词模板/);
   assert.match(templatesPage, /listLibraryResources/);
   assert.match(templatesPage, /base_refine/);

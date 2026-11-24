@@ -433,23 +433,46 @@ test("startup recovery fails running pipelines and listing jobs and increments t
   });
 });
 
-test("PG library binds a published input_image from another suite to a canvas task", { skip }, async () => {
+test("PG library excludes input_image from listing, rejects binding input_image, and binds published base_image across suites", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const suites = new PostgresSuiteRepository(pool);
     const library = new PostgresLibraryRepository(pool);
-    const source = await suites.createSuite("原图来源");
+    const source = await suites.createSuite("底图来源");
     const canvas = await suites.createSuite("资源画布", undefined, "canvas");
     const id = randomUUID();
     const prefix = `suites/${source.id}/inputs/${id}/`;
     await suites.createInputImage({ id, suiteId: source.id, ordinal: 1, originalObjectKey: prefix + "original",
       thumbnailObjectKey: prefix + "thumbnail", sha256: "1".repeat(64), width: 1, height: 1, mimeType: "image/png",
       originalFilename: "product.png", currentBaseVersionId: null, createdAt: timestamp });
+    const baseVersionId = randomUUID();
+    const attemptId = randomUUID();
+    await suites.beginBaseGeneration({
+      id: attemptId, suiteId: source.id, inputImageId: id, baseVersionId, idempotencyKey: "pg-base-gen-1",
+      model: "gpt-image-2", endpoint: "/v1/images/edits", prompt: "生成纯白底图", promptTemplateVersionId: null,
+      dynamicInput: {}, size: "1K", quality: "medium", n: 1, responseFormat: "b64_json", createdAt: timestamp,
+    });
+    await suites.completeBaseGeneration({
+      attemptId, objectKey: `${prefix}base/${baseVersionId}/v1.png`, sha256: "2".repeat(64), width: 1024, height: 1024, mimeType: "image/png", completedAt: timestamp,
+    });
     const { task } = await new PostgresTaskRepository(pool).createCustomTask({ suiteId: canvas.id, planSnapshotId: null,
       imageType: "detail", title: "细节", purpose: "展示细节", promptDraft: "展示商品", sourceInputImageId: null, generationParams: {} });
-    const { reference } = await library.createReference({ suiteId: canvas.id, resourceId: `input:${id}`,
-      targetType: "task", targetId: task.id, idempotencyKey: "bind-input" });
-    assert.equal(reference.resourceType, "input_image");
-    assert.equal(reference.resourceVersionId, id);
+
+    // input_image is excluded from image listings, still readable by direct ID/preview, and forbidden for new references
+    const listedAll = await library.listResources({ scope: "image", suiteId: source.id });
+    assert.equal(listedAll.items.some((item) => item.resourceType === "input_image"), false);
+    assert.deepEqual(listedAll.items.map((item) => item.id), [`base:${baseVersionId}`]);
+    const listedInputs = await library.listResources({ resourceType: "input_image", suiteId: source.id });
+    assert.deepEqual(listedInputs.items, []);
+    assert.deepEqual(await library.getPreviewObject(`input:${id}`), { objectKey: prefix + "original" });
+    await assert.rejects(
+      library.createReference({ suiteId: canvas.id, resourceId: `input:${id}`, targetType: "task", targetId: task.id, idempotencyKey: "bind-input" }),
+      { message: "LIBRARY_RESOURCE_FORBIDDEN" },
+    );
+
+    const { reference } = await library.createReference({ suiteId: canvas.id, resourceId: `base:${baseVersionId}`,
+      targetType: "task", targetId: task.id, idempotencyKey: "bind-base" });
+    assert.equal(reference.resourceType, "base_image");
+    assert.equal(reference.resourceVersionId, baseVersionId);
     assert.equal(reference.snapshot.suiteId, source.id);
     assert.deepEqual(await library.listReferences(canvas.id, "task", task.id), [reference]);
   });
@@ -1303,6 +1326,36 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
       createdAt: timestamp,
     });
 
+    const baseVersionId = randomUUID();
+    const baseAttemptId = randomUUID();
+    await suites.beginBaseGeneration({
+      id: baseAttemptId,
+      suiteId: suite.id,
+      inputImageId: inputId,
+      baseVersionId,
+      idempotencyKey: "pg-del-base-gen-1",
+      model: "gpt-image-2",
+      endpoint: "/v1/images/edits",
+      prompt: "生成纯白底图",
+      promptTemplateVersionId: null,
+      dynamicInput: {},
+      size: "1K",
+      quality: "medium",
+      n: 1,
+      responseFormat: "b64_json",
+      createdAt: timestamp,
+    });
+    const baseObjectKey = `${inputPrefix}base/${baseVersionId}/v1.png`;
+    await suites.completeBaseGeneration({
+      attemptId: baseAttemptId,
+      objectKey: baseObjectKey,
+      sha256: "9".repeat(64),
+      width: 512,
+      height: 512,
+      mimeType: "image/png",
+      completedAt: timestamp,
+    });
+
     const { task } = await tasks.createCustomTask({
       suiteId: suite.id,
       planSnapshotId: null,
@@ -1314,15 +1367,15 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
       generationParams: {},
     });
 
-    // Bind input resource to task before deleting
+    // Bind base_image resource to task before deleting
     const { reference } = await library.createReference({
       suiteId: suite.id,
-      resourceId: `input:${inputId}`,
+      resourceId: `base:${baseVersionId}`,
       targetType: "task",
       targetId: task.id,
       idempotencyKey: "pg-ref-before-delete",
     });
-    assert.equal(reference.resourceId, `input:${inputId}`);
+    assert.equal(reference.resourceId, `base:${baseVersionId}`);
 
     // Create task version with a process image
     const batchId = randomUUID();
@@ -1398,29 +1451,32 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
       source: { origin: "replica" },
     });
 
-    const inputResourceId = `input:${inputId}`;
+    const baseResourceId = `base:${baseVersionId}`;
     const taskVersionResourceId = `task-version:${version.id}`;
     const processResourceId = `process:${version.id}:0`;
 
     // Invalid / malformed IDs return null cleanly without throwing PG 22P02
-    assert.equal(await library.deleteResource("input:not-a-uuid"), null);
+    assert.equal(await library.deleteResource("base:not-a-uuid"), null);
     assert.equal(await library.getResource("reverse:not-a-uuid"), null);
 
     // Single delete + idempotency
-    const del1 = await library.deleteResource(inputResourceId);
+    const del1 = await library.deleteResource(baseResourceId);
     assert.ok(del1);
     assert.equal(del1.alreadyDeleted, false);
-    const del2 = await library.deleteResource(inputResourceId);
+    const del2 = await library.deleteResource(baseResourceId);
     assert.ok(del2);
     assert.equal(del2.alreadyDeleted, true);
     assert.equal(del2.deletedAt, del1.deletedAt);
 
-    // Deleted input is hidden from list & default getResource, but still resolvable for frozen preview
-    assert.equal(await library.getResource(inputResourceId), null);
-    assert.ok(await library.getResource(inputResourceId, { includeDeleted: true }));
-    assert.deepEqual(await library.getPreviewObject(inputResourceId), { objectKey: inputPrefix + "original" });
+    // Deleted base image is hidden from list & default getResource, but still resolvable for frozen preview
+    assert.equal(await library.getResource(baseResourceId), null);
+    assert.ok(await library.getResource(baseResourceId, { includeDeleted: true }));
+    assert.deepEqual(await library.getPreviewObject(baseResourceId), { objectKey: baseObjectKey });
+    const listedBases = await library.listResources({ resourceType: "base_image", suiteId: suite.id });
+    assert.equal(listedBases.items.some((item) => item.id === baseResourceId), false);
+    // Uploaded input_image is never returned by listResources even without deletion
     const listedInputs = await library.listResources({ resourceType: "input_image", suiteId: suite.id });
-    assert.equal(listedInputs.items.some((item) => item.id === inputResourceId), false);
+    assert.deepEqual(listedInputs.items, []);
 
     // Frozen reference and underlying input_image / task_image_versions rows remain intact
     assert.equal((await library.listReferences(suite.id, "task", task.id)).length, 1);
@@ -1436,17 +1492,17 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
     assert.equal(archivedDbBefore.rows[0]?.status, "archived");
     assert.ok(archivedDbBefore.rows[0]?.archived_at);
 
-    // Batch delete task version, process image, reverse asset + already deleted input + nonexistent ID
+    // Batch delete task version, process image, reverse asset + already deleted base + nonexistent ID
     const batch = await library.deleteResources([
       taskVersionResourceId,
       processResourceId,
       reverseAsset.id,
-      inputResourceId,
-      "input:not-a-uuid",
+      baseResourceId,
+      "base:not-a-uuid",
     ]);
     assert.deepEqual(batch.deletedIds, [taskVersionResourceId, processResourceId, reverseAsset.id]);
-    assert.deepEqual(batch.alreadyDeletedIds, [inputResourceId]);
-    assert.deepEqual(batch.notFoundIds, ["input:not-a-uuid"]);
+    assert.deepEqual(batch.alreadyDeletedIds, [baseResourceId]);
+    assert.deepEqual(batch.notFoundIds, ["base:not-a-uuid"]);
     assert.equal(batch.deletedCount, 3);
 
     // Repeat batch delete is idempotent
@@ -1511,7 +1567,7 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
 
     // Re-running migrations preserves deletion rows cleanly
     await runMigrations(pool);
-    assert.equal(await library.getResource(inputResourceId), null);
+    assert.equal(await library.getResource(baseResourceId), null);
   });
 });
 

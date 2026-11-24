@@ -340,18 +340,13 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await page.getByRole("button", { name: "上移参考图 2", exact: true }).click();
   assert.equal(await page.getByLabel("单张参考要求 1", { exact: true }).inputValue(), "顶部留白便于放主标题");
 
-  // 5. Product images: upload local + select from library picker (max = 5 remaining) -> hides warning
-  await page.getByLabel("上传产品原图", { exact: true }).setInputFiles("public/assets/gan65-product-tight.jpg");
+  // 5. Product images: local upload only (no resource library picker button) -> hides warning
+  assert.equal(await page.getByRole("button", { name: "从资源库选择", exact: true }).count(), 0);
+  await page.getByLabel("上传产品原图", { exact: true }).setInputFiles([
+    "public/assets/gan65-product-tight.jpg",
+    "public/assets/tokyo-desk-v3.jpg",
+  ]);
   await noProductWarn.waitFor({ state: "hidden" });
-  assert.equal(await page.locator("[data-product-item]").count(), 1);
-
-  await page.getByRole("button", { name: "从资源库选择", exact: true }).click();
-  const picker = page.getByRole("dialog", { name: "从资源库选择产品原图" });
-  await picker.waitFor();
-  await picker.getByText(/最多选择 5 张/).waitFor();
-  await picker.getByRole("button", { name: /已发布白底产品图\.jpg/ }).click();
-  await picker.getByRole("button", { name: "确认选择", exact: true }).click();
-  await picker.waitFor({ state: "hidden" });
   assert.equal(await page.locator("[data-product-item]").count(), 2);
 
   // 6. Clone level hover schematic + toggle, unified requirement counter, product info, generation settings
@@ -409,7 +404,9 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   assert.equal(postCall.body.references[0].filename, "tokyo-desk-v3.jpg");
   assert.equal(postCall.body.references[0].remark, "顶部留白便于放主标题");
   assert.equal(postCall.body.products.length, 2);
-  assert.equal(postCall.body.products[1].libraryResourceId, "lib-base-001");
+  assert.equal(postCall.body.products[0].filename, "gan65-product-tight.jpg");
+  assert.equal(postCall.body.products[1].filename, "tokyo-desk-v3.jpg");
+  assert.equal(postCall.body.products[1].libraryResourceId, undefined);
   assert.equal(postCall.body.sceneType, "ecommerce_product");
   assert.equal(postCall.body.cloneLevel, "compose");
   assert.equal(postCall.body.styleUnified, true);
@@ -790,16 +787,14 @@ test("爆品图复刻：切换功能保留草稿（参考图、产品图、顺�
   await page.getByRole("button", { name: "上移参考图 2", exact: true }).click();
   assert.equal(await page.getByLabel("单张参考要求 1", { exact: true }).inputValue(), "参考图二顶部留白");
 
-  // Upload 1 local product + pick 1 library product, reorder so library is 1st
-  await page.getByLabel("上传产品原图", { exact: true }).setInputFiles("public/assets/gan65-product-tight.jpg");
-  await page.getByRole("button", { name: "从资源库选择", exact: true }).click();
-  const picker = page.getByRole("dialog", { name: "从资源库选择产品原图" });
-  await picker.waitFor();
-  await picker.getByRole("button", { name: /已发布白底产品图\.jpg/ }).click();
-  await picker.getByRole("button", { name: "确认选择", exact: true }).click();
-  await picker.waitFor({ state: "hidden" });
+  // Upload 2 local product images and reorder so 2nd is 1st
+  assert.equal(await page.getByRole("button", { name: "从资源库选择", exact: true }).count(), 0);
+  await page.getByLabel("上传产品原图", { exact: true }).setInputFiles([
+    "public/assets/gan65-product-tight.jpg",
+    "public/assets/tokyo-desk-v3.jpg",
+  ]);
   assert.equal(await page.locator("[data-product-item]").count(), 2);
-  await page.getByRole("button", { name: "左移产品图 已发布白底产品图.jpg", exact: true }).click();
+  await page.getByRole("button", { name: "左移产品图 tokyo-desk-v3.jpg", exact: true }).click();
 
   // Modify all config fields away from defaults
   await page.getByRole("radio", { name: "服饰电商图", exact: true }).click();
@@ -846,7 +841,9 @@ test("爆品图复刻：切换功能保留草稿（参考图、产品图、顺�
   // Verify product images, order, and naturalWidth > 0
   const productItems = page.locator("[data-product-item]");
   assert.equal(await productItems.count(), 2);
-  assert.equal(await productItems.nth(0).locator(".rp-product-source").textContent(), "资源库");
+  assert.equal(await productItems.nth(0).locator("img").getAttribute("alt"), "tokyo-desk-v3.jpg");
+  assert.equal(await productItems.nth(1).locator("img").getAttribute("alt"), "gan65-product-tight.jpg");
+  assert.equal(await productItems.nth(0).locator(".rp-product-source").textContent(), "本地");
   assert.equal(await productItems.nth(1).locator(".rp-product-source").textContent(), "本地");
   const productWidths = await productItems.locator("img").evaluateAll((imgs) =>
     Promise.all(
@@ -1307,7 +1304,7 @@ test("爆品图复刻：刷新页面后恢复已选参考图、产品图、顺�
   assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);
 });
 
-test("爆品图复刻：资源库产品图被删除后刷新自动剔除并提示；IndexedDB 不可用时正常降级不报错", async (t) => {
+test("爆品图复刻：旧草稿中的资源库产品图刷新后自动忽略且本地图保留；IndexedDB 不可用时正常降级不报错", async (t) => {
   const { browser, url, page } = await offlineReplicaStudio(t);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -1315,16 +1312,10 @@ test("爆品图复刻：资源库产品图被删除后刷新自动剔除并提�
   await page.goto(url + "create/replica");
   await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
 
-  // Upload 1 reference + 1 local product + pick 1 library product
+  // Upload 1 reference + 1 local product
   await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
   await page.getByLabel("上传产品原图", { exact: true }).setInputFiles("public/assets/gan65-product-tight.jpg");
-  await page.getByRole("button", { name: "从资源库选择", exact: true }).click();
-  const picker = page.getByRole("dialog", { name: "从资源库选择产品原图" });
-  await picker.waitFor();
-  await picker.getByRole("button", { name: /已发布白底产品图\.jpg/ }).click();
-  await picker.getByRole("button", { name: "确认选择", exact: true }).click();
-  await picker.waitFor({ state: "hidden" });
-  assert.equal(await page.locator("[data-product-item]").count(), 2);
+  assert.equal(await page.locator("[data-product-item]").count(), 1);
 
   await page.waitForFunction(() => {
     const btn = Array.from(document.querySelectorAll("button")).find((el) =>
@@ -1333,22 +1324,33 @@ test("爆品图复刻：资源库产品图被删除后刷新自动剔除并提�
     return Boolean(btn && !btn.disabled);
   });
 
-  // Delete the library product resource on the server, then reload
-  const delRes = await page.request.delete(url + "api/library/resources/lib-base-001");
-  assert.equal(delRes.status(), 200);
+  // Inject a legacy persisted library product entry into localStorage, then reload
+  await page.evaluate(() => {
+    const key = "picagent:replica-studio:draft-v1";
+    const parsed = JSON.parse(window.localStorage.getItem(key) || "{}");
+    parsed.products = [
+      ...(parsed.products || []),
+      {
+        localId: "lib-lib-base-001",
+        sourceKind: "library",
+        libraryResourceId: "lib-base-001",
+        resourceVersionId: "ver-base-001",
+        title: "已发布白底产品图.jpg",
+        previewUrl: "/api/library/resources/lib-base-001/preview",
+        resourceType: "base_image",
+      },
+    ];
+    window.localStorage.setItem(key, JSON.stringify(parsed));
+  });
 
   await page.reload();
-  await page.getByText("已移除 1 张已删除的图片", { exact: true }).waitFor();
   await page.getByRole("button", { name: "一键复刻（1张）", exact: true }).waitFor();
 
-  // Local product & reference image survive reload; deleted library product is pruned
+  // Local product & reference image survive reload; legacy library product is ignored cleanly
   const productItems = page.locator("[data-product-item]");
   assert.equal(await productItems.count(), 1);
   assert.equal(await productItems.nth(0).locator(".rp-product-source").textContent(), "本地");
-  const persistedAfterPrune = await page.evaluate(() =>
-    window.localStorage.getItem("picagent:replica-studio:draft-v1"),
-  );
-  assert.equal(persistedAfterPrune?.includes("lib-base-001"), false);
+  assert.equal(await page.getByRole("button", { name: "从资源库选择", exact: true }).count(), 0);
 
   // Verify IndexedDB unavailable fallback on a separate clean browser page
   const fallbackPage = await browser.newPage({ viewport: { width: 1480, height: 960 } });

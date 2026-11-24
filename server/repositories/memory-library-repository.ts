@@ -319,6 +319,7 @@ export class MemoryLibraryRepository implements LibraryRepository {
     const filtered = [...entries.values()]
       .filter(({ resource, archivedByTask }) => {
         if (this.deletedAt.has(resource.id) || archivedByTask) return false;
+        if (resource.resourceType === "input_image") return false;
         if (query.scope === "image" && resource.resourceType === "prompt_template") return false;
         if (query.resourceType && resource.resourceType !== query.resourceType) return false;
         if (query.stage && resource.stage !== query.stage) return false;

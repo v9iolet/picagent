@@ -113,16 +113,29 @@ async function publishedInput(f: ReturnType<typeof fixture>) {
   return f.library.addResource(resource);
 }
 
-test("white-resource binds and generates from published input_image on an ordinary canvas task", async () => {
+async function publishedBase(f: ReturnType<typeof fixture>) {
+  const sourceSuite = await f.create("底图来源");
+  const image = await f.upload(sourceSuite.id);
+  const baseId = `base-ver-${image.id}`;
+  const resource: LibraryResource = {
+    id: `base:${baseId}`, resourceType: "base_image", title: `白底底图 · 版本 1`, summary: "", mimeType: image.mimeType,
+    previewUrl: image.thumbnailPreviewUrl, suiteId: sourceSuite.id, taskId: null, imageVersionId: null, baseVersionId: baseId,
+    templateVersionId: null, resourceVersionId: baseId, stage: null, source: { objectKey: image.originalObjectKey },
+    status: "published", createdAt: image.createdAt, updatedAt: image.createdAt,
+  };
+  return f.library.addResource(resource);
+}
+
+test("white-resource binds and generates from published base_image on an ordinary canvas task", async () => {
   const f = fixture();
   const canvas = await f.create("资源画布", "canvas");
   const taskId = await f.addTask(canvas.id);
-  const resource = await publishedInput(f);
+  const resource = await publishedBase(f);
   const bind = (resourceId: string) => f.api.request("POST", `/api/suite-tasks/${taskId}/white-resource`, { headers: { "idempotency-key": `bind-${resourceId}` }, body: { resourceId } });
   const bound = await bind(resource.id);
   assert.equal(bound.status, 201);
   assert.equal((bound.body as any).data.task.status, "pending");
-  assert.equal((bound.body as any).data.reference.resourceType, "input_image");
+  assert.equal((bound.body as any).data.reference.resourceType, "base_image");
   const generated = await f.generate(taskId);
   assert.equal(generated.status, 202);
   const board = await f.waitForBatch(canvas.id, (generated.body as any).data.batchId);
@@ -130,18 +143,21 @@ test("white-resource binds and generates from published input_image on an ordina
   assert.equal(attempt.status, "succeeded");
   assert.equal(attempt.sourceKind, "library");
   assert.equal(attempt.sourceResourceVersionId, resource.resourceVersionId);
-  assert.equal(attempt.sourceBaseVersionId, null);
+  assert.equal(attempt.sourceBaseVersionId, resource.baseVersionId);
   assert.deepEqual(f.calls.map((call) => call.image), [png]);
 });
 
-test("white-resource rejects unpublished inputs and non-product resources even in the same suite", async () => {
+test("white-resource rejects input_image, unpublished bases, and non-product resources even in the same suite", async () => {
   const f = fixture();
   const canvas = await f.create("目标画布", "canvas");
   const taskId = await f.addTask(canvas.id);
   const input = await publishedInput(f);
+  const base = await publishedBase(f);
   const invalid = [
-    f.library.addResource({ ...input, id: "draft", status: "draft" }),
-    f.library.addResource({ ...input, id: "result", suiteId: canvas.id, resourceType: "task_image_version" }),
+    input,
+    f.library.addResource({ ...input, id: "input:same-suite", suiteId: canvas.id }),
+    f.library.addResource({ ...base, id: "base:draft", status: "draft" }),
+    f.library.addResource({ ...base, id: "result", suiteId: canvas.id, resourceType: "task_image_version" }),
   ];
   for (const { id: resourceId } of invalid) {
     const res = await f.api.request("POST", `/api/suite-tasks/${taskId}/white-resource`, {
@@ -154,22 +170,23 @@ test("white-resource rejects unpublished inputs and non-product resources even i
   assert.equal((await f.workbench(canvas.id)).tasks[0].status, "incomplete");
 });
 
-test("library references allow only published product images across suites", async () => {
+test("library references allow only published base_image across suites and reject input_image", async () => {
   const f = fixture();
   const canvas = await f.create("目标画布", "canvas");
   const targetId = await f.addTask(canvas.id);
   const input = await publishedInput(f);
+  const base = await publishedBase(f);
   const reference = (resourceId: string) => f.library.createReference({
     suiteId: canvas.id, targetId, targetType: "task", resourceId, idempotencyKey: resourceId,
   });
   for (const [resource, message] of [
-    [{ ...input, id: "template", resourceType: "prompt_template", stage: "task_image" }, "LIBRARY_RESOURCE_FORBIDDEN"],
-    [{ ...input, id: "draft", status: "draft" }, "LIBRARY_RESOURCE_NOT_PUBLISHED"],
+    [input, "LIBRARY_RESOURCE_FORBIDDEN"],
+    [{ ...input, id: "input:same-suite", suiteId: canvas.id }, "LIBRARY_RESOURCE_FORBIDDEN"],
+    [{ ...base, id: "template", resourceType: "prompt_template", stage: "task_image" }, "LIBRARY_RESOURCE_FORBIDDEN"],
+    [{ ...base, id: "draft", status: "draft" }, "LIBRARY_RESOURCE_NOT_PUBLISHED"],
   ] as const) {
     f.library.addResource(resource);
     await assert.rejects(reference(resource.id), { message });
   }
-  for (const resource of [input, f.library.addResource({ ...input, id: "base", resourceType: "base_image" })]) {
-    assert.equal((await reference(resource.id)).reference.resourceId, resource.id);
-  }
+  assert.equal((await reference(base.id)).reference.resourceId, base.id);
 });

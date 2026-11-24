@@ -387,8 +387,8 @@ test("POST /api/replicas validates parameters, duplicates, and library product r
       headers: { "Idempotency-Key": "val-lib-non-product" },
       body: { ...basePayload, products: [{ libraryResourceId: "task-version:1" }] },
     }),
-    403,
-    "LIBRARY_RESOURCE_FORBIDDEN",
+    400,
+    "REPLICA_LIBRARY_PRODUCTS_UNSUPPORTED",
   );
 
   expectError(
@@ -396,8 +396,20 @@ test("POST /api/replicas validates parameters, duplicates, and library product r
       headers: { "Idempotency-Key": "val-lib-draft" },
       body: { ...basePayload, products: [{ libraryResourceId: "base:draft-1" }] },
     }),
-    409,
-    "LIBRARY_RESOURCE_NOT_PUBLISHED",
+    400,
+    "REPLICA_LIBRARY_PRODUCTS_UNSUPPORTED",
+  );
+
+  expectError(
+    await f.app.request("POST", "/api/replicas", {
+      headers: { "Idempotency-Key": "val-lib-source-kind" },
+      body: {
+        ...basePayload,
+        products: [{ sourceKind: "library", filename: "a.png", mimeType: "image/png", bytesBase64: ref1.toString("base64") }],
+      },
+    }),
+    400,
+    "REPLICA_LIBRARY_PRODUCTS_UNSUPPORTED",
   );
 
   // Confirm validation failures did not create any suite
@@ -434,30 +446,9 @@ test("replica end-to-end flow: card count, input order, role prefix, ratio=refer
   // Reference 1: 3:4 portrait (120x160); Reference 2: 16:9 landscape (160x90)
   const ref1Bytes = await makePng(120, 160, { r: 10, g: 20, b: 30 });
   const ref2Bytes = await makeJpeg(160, 90, { r: 80, g: 40, b: 10 });
-  // Product 1: uploaded; Product 2: published library base_image
+  // Product 1 & Product 2: locally uploaded product images
   const prodUploadBytes = await makePng(80, 80, { r: 210, g: 210, b: 210 });
-  const prodLibraryBytes = await makePng(90, 90, { r: 245, g: 245, b: 245 });
-  const now = new Date().toISOString();
-  await f.storage.put({ key: "library/base-cup.png", bytes: prodLibraryBytes, contentType: "image/png" });
-  f.libraryRepository.addResource({
-    id: "base:published-cup",
-    resourceType: "base_image",
-    title: "保温杯白底图",
-    summary: "",
-    mimeType: "image/png",
-    previewUrl: null,
-    suiteId: "other-suite",
-    taskId: null,
-    imageVersionId: null,
-    baseVersionId: "base-v1",
-    templateVersionId: null,
-    resourceVersionId: "base-v1",
-    stage: null,
-    source: { objectKey: "library/base-cup.png" },
-    status: "published",
-    createdAt: now,
-    updatedAt: now,
-  });
+  const prodUpload2Bytes = await makePng(90, 90, { r: 245, g: 245, b: 245 });
 
   const created = await f.app.request("POST", "/api/replicas", {
     headers: { "Idempotency-Key": "e2e-replica-1" },
@@ -468,7 +459,7 @@ test("replica end-to-end flow: card count, input order, role prefix, ratio=refer
       ],
       products: [
         { filename: "cup-front.png", mimeType: "image/png", bytesBase64: prodUploadBytes.toString("base64") },
-        { libraryResourceId: "base:published-cup" },
+        { filename: "cup-side.png", mimeType: "image/png", bytesBase64: prodUpload2Bytes.toString("base64") },
       ],
       sceneType: "ecommerce_product",
       cloneLevel: "high",
@@ -527,10 +518,9 @@ test("replica end-to-end flow: card count, input order, role prefix, ratio=refer
       ["product_primary", "product_detail", "replica_reference"],
     );
     assert.equal(Buffer.compare(call.images![0].bytes, prodUploadBytes), 0);
-    assert.equal(Buffer.compare(call.images![1].bytes, prodLibraryBytes), 0);
+    assert.equal(Buffer.compare(call.images![1].bytes, prodUpload2Bytes), 0);
     assert.equal(call.images![0].filename, "cup-front.png");
-    // Library resource title ("保温杯白底图") has no extension; provider receives fallback filename with extension matching MIME
-    assert.equal(call.images![1].filename, "product-2.png");
+    assert.equal(call.images![1].filename, "cup-side.png");
     assert.match(
       call.prompt,
       /^第1–2张图为产品外观唯一依据；第3张图为构图与版式基准：保持其构图、元素位置、镜头与光影，只替换为目标商品和新文案，不得复制其中的品牌、Logo、文字与真人肖像。/,
@@ -1515,4 +1505,36 @@ test("encoded library resourceId paths (reverse%3A<id>) decode safely on detail,
   const item = (feedRes.body as any).data.items.find((entry: any) => entry.suite.id === suiteId);
   assert.ok(item);
   assert.equal(item.taskCount, 0);
+});
+
+test("studio-state keeps read-only compatibility for historical replica batches with library product images", async () => {
+  const f = await replicaFixture();
+  const suite = await f.repository.createSuite("历史复刻批次", "legacy-lib-suite", "replica");
+  const createdAt = new Date().toISOString();
+  await f.replicaRepository.saveProductImages(suite.id, [
+    {
+      id: "legacy-prod-1",
+      suiteId: suite.id,
+      ordinal: 1,
+      sourceKind: "library",
+      objectKey: "library/legacy-cup.png",
+      thumbnailObjectKey: null,
+      filename: "历史保温杯白底图",
+      mimeType: "image/png",
+      sha256: null,
+      width: null,
+      height: null,
+      libraryResourceId: "base:legacy-cup",
+      resourceVersionId: "legacy-ver-1",
+      createdAt,
+    },
+  ]);
+
+  const stateRes = await f.app.request("GET", `/api/suites/${suite.id}/studio-state`);
+  assert.equal(stateRes.status, 200);
+  const data = (stateRes.body as any).data;
+  assert.equal(data.styleSketch, false);
+  assert.equal(data.replicaProducts.length, 1);
+  assert.equal(data.replicaProducts[0].sourceKind, "library");
+  assert.equal(data.replicaProducts[0].libraryResourceId, "base:legacy-cup");
 });
