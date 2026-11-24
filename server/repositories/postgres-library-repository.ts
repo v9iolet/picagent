@@ -99,6 +99,77 @@ function mapProcessImageRow(row: any, objectKey: string, index: number): Library
   });
 }
 
+function mapEditVersionRow(row: any): LibraryResource {
+  const isReplica = row.origin_kind === "replica";
+  const taskStage = isReplica ? ("replica_prompt" as const) : ("task_image" as const);
+  const kindLabel = isReplica ? "爆品图复刻" : row.image_type === "main" ? "主图" : "详情页";
+  const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
+  const command = row.command_json && typeof row.command_json === "object" ? (row.command_json as Record<string, unknown>) : {};
+  const provider = row.provider_json && typeof row.provider_json === "object" ? (row.provider_json as Record<string, unknown>) : {};
+  const editPrompt = typeof command.prompt === "string" && command.prompt.trim()
+    ? command.prompt.trim()
+    : typeof row.edit_summary === "string" && row.edit_summary.trim()
+      ? row.edit_summary.trim()
+      : typeof row.source_prompt === "string"
+        ? row.source_prompt
+        : "";
+  const model = typeof provider.version === "string" && provider.version
+    ? provider.version
+    : typeof provider.name === "string" && provider.name
+      ? provider.name
+      : null;
+  const channel = provider.channel ?? null;
+  const baseTitle = typeof row.task_title === "string" && row.task_title.trim()
+    ? row.task_title.trim()
+    : typeof row.edit_summary === "string" && row.edit_summary.trim()
+      ? row.edit_summary.trim()
+      : "图片编辑";
+  return normalizeTimestamps({
+    id: `edit-version:${row.version_id}`,
+    resourceType: "task_image_version",
+    title: `${baseTitle} · 编辑版本 ${row.version_number}`,
+    summary: `编辑生成 · ${kindLabel} · ${row.width} × ${row.height}`,
+    mimeType: row.mime_type,
+    previewUrl: `/api/image-editor/tasks/${row.child_task_id}/versions/${row.version_id}/preview`,
+    suiteId: row.suite_id ?? null,
+    taskId: row.root_task_id ?? row.child_task_id,
+    imageVersionId: row.version_id,
+    baseVersionId: null,
+    templateVersionId: null,
+    resourceVersionId: row.version_id,
+    stage: taskStage,
+    source: {
+      objectKey: row.object_key,
+      generatedBy: "image_editor",
+      editChildTaskId: row.child_task_id,
+      editSnapshotId: row.snapshot_id,
+      sourceCardId: row.source_card_id,
+      sourceVersionId: row.source_version_id,
+      parentVersionId: row.parent_version_id,
+      rootTaskId: row.root_task_id ?? null,
+      editSummary: row.edit_summary ?? "",
+      versionNumber: row.version_number,
+      promptSummary: editPrompt.slice(0, 180),
+      model,
+      channel,
+      ...originMeta,
+    },
+    promptSnapshot: {
+      finalPrompt: editPrompt,
+      prompt: editPrompt,
+      sourcePrompt: typeof row.source_prompt === "string" ? row.source_prompt : "",
+      editSummary: row.edit_summary ?? "",
+      editSnapshotId: row.snapshot_id,
+      sourceVersionId: row.source_version_id,
+      operations: Array.isArray(row.operations_json) ? row.operations_json : [],
+      ...(model ? { model } : {}),
+    },
+    status: "published",
+    createdAt: row.created_at,
+    updatedAt: row.created_at,
+  });
+}
+
 function mapReverseRow(row: any): LibraryResource {
   const stage = (row.source?.origin === "replica" ? "replica_prompt" : "task_image") as "replica_prompt" | "task_image";
   return normalizeTimestamps({
@@ -128,6 +199,7 @@ type ParsedResourceId =
   | { kind: "input"; uuid: string }
   | { kind: "base"; uuid: string }
   | { kind: "task-version"; uuid: string }
+  | { kind: "edit-version"; uuid: string }
   | { kind: "process"; uuid: string; index: number }
   | { kind: "reverse"; uuid: string };
 
@@ -147,6 +219,10 @@ function parseResourceId(resourceId: string): ParsedResourceId | null {
   if (resourceId.startsWith("task-version:")) {
     const uuid = resourceId.slice("task-version:".length);
     return UUID_RE.test(uuid) ? { kind: "task-version", uuid } : null;
+  }
+  if (resourceId.startsWith("edit-version:")) {
+    const uuid = resourceId.slice("edit-version:".length);
+    return UUID_RE.test(uuid) ? { kind: "edit-version", uuid } : null;
   }
   if (resourceId.startsWith("process:")) {
     const rest = resourceId.slice("process:".length);
@@ -168,7 +244,7 @@ function parseResourceId(resourceId: string): ParsedResourceId | null {
 export class PostgresLibraryRepository implements LibraryRepository {
   constructor(private readonly pool: Pool) {}
 
-  private async findResourceRaw(resourceId: string): Promise<LibraryResource | null> {
+  private async findResourceWithMeta(resourceId: string): Promise<{ resource: LibraryResource; archivedByTask: boolean } | null> {
     const parsed = parseResourceId(resourceId);
     if (!parsed) return null;
     if (parsed.kind === "prompt") {
@@ -184,7 +260,7 @@ export class PostgresLibraryRepository implements LibraryRepository {
          WHERE v.id = $1::uuid`,
         [parsed.uuid],
       );
-      return result.rows[0] ? mapPromptTemplateRow(result.rows[0]) : null;
+      return result.rows[0] ? { resource: mapPromptTemplateRow(result.rows[0]), archivedByTask: false } : null;
     }
     if (parsed.kind === "input") {
       const result = await this.pool.query<any>(
@@ -198,7 +274,7 @@ export class PostgresLibraryRepository implements LibraryRepository {
          FROM suite_workbench.input_images i WHERE i.id = $1::uuid`,
         [parsed.uuid],
       );
-      return result.rows[0] ? normalizeTimestamps({ ...result.rows[0], status: "published" as const }) : null;
+      return result.rows[0] ? { resource: normalizeTimestamps({ ...result.rows[0], status: "published" as const }), archivedByTask: false } : null;
     }
     if (parsed.kind === "base") {
       const result = await this.pool.query<any>(
@@ -216,12 +292,12 @@ export class PostgresLibraryRepository implements LibraryRepository {
          WHERE b.id = $1::uuid`,
         [parsed.uuid],
       );
-      return result.rows[0] ? normalizeTimestamps({ ...result.rows[0], status: "published" as const }) : null;
+      return result.rows[0] ? { resource: normalizeTimestamps({ ...result.rows[0], status: "published" as const }), archivedByTask: false } : null;
     }
     if (parsed.kind === "task-version" || parsed.kind === "process") {
       const result = await this.pool.query<any>(
         `SELECT v.id AS version_id, v.task_id, v.object_key, v.process_object_keys_json, v.prompt_snapshot_json, a.model, v.context_snapshot_json->'channel' AS channel, v.mime_type, v.width, v.height, v.version_number, v.created_at,
-          t.suite_id, t.title AS task_title, t.image_type, t.prompt_draft, t.origin_kind
+          t.suite_id, t.title AS task_title, t.image_type, t.prompt_draft, t.origin_kind, t.status AS task_status
          FROM suite_workbench.task_image_versions v
          JOIN suite_workbench.suite_tasks t ON t.id = v.task_id
          JOIN suite_workbench.task_generation_attempts a ON a.id = v.attempt_id
@@ -230,11 +306,90 @@ export class PostgresLibraryRepository implements LibraryRepository {
       );
       const row = result.rows[0];
       if (!row) return null;
-      if (parsed.kind === "task-version") return mapTaskVersionRow(row);
+      const archivedByTask = row.task_status === "archived";
+      if (parsed.kind === "task-version") return { resource: mapTaskVersionRow(row), archivedByTask };
       if (!Array.isArray(row.process_object_keys_json) || parsed.index >= row.process_object_keys_json.length) return null;
       const objectKey = row.process_object_keys_json[parsed.index];
       if (typeof objectKey !== "string") return null;
-      return mapProcessImageRow(row, objectKey, parsed.index);
+      return { resource: mapProcessImageRow(row, objectKey, parsed.index), archivedByTask };
+    }
+    if (parsed.kind === "edit-version") {
+      const result = await this.pool.query<any>(
+        `WITH RECURSIVE edit_lineage AS (
+          SELECT
+            c.id AS leaf_child_task_id,
+            c.id AS current_child_task_id,
+            c.source_card_id,
+            (c.status = 'archived') AS any_child_archived,
+            ARRAY[c.id] AS visited
+          FROM suite_workbench.image_edit_child_tasks c
+          WHERE c.id = (SELECT child_task_id FROM suite_workbench.image_edit_versions WHERE id = $1::uuid)
+          UNION ALL
+          SELECT
+            l.leaf_child_task_id,
+            parent.id AS current_child_task_id,
+            parent.source_card_id,
+            (l.any_child_archived OR parent.status = 'archived') AS any_child_archived,
+            l.visited || parent.id
+          FROM edit_lineage l
+          JOIN suite_workbench.image_edit_child_tasks parent
+            ON parent.id::text = l.source_card_id
+          WHERE NOT (parent.id = ANY(l.visited))
+        ),
+        edit_roots AS (
+          SELECT DISTINCT ON (l.leaf_child_task_id)
+            l.leaf_child_task_id,
+            t.id AS root_task_id,
+            t.suite_id,
+            t.title AS task_title,
+            t.image_type,
+            t.origin_kind,
+            t.status AS root_task_status,
+            l.any_child_archived
+          FROM edit_lineage l
+          LEFT JOIN suite_workbench.suite_tasks t
+            ON t.id::text = l.source_card_id
+          ORDER BY l.leaf_child_task_id, (t.id IS NULL), array_length(l.visited, 1) DESC
+        )
+        SELECT
+          ev.id AS version_id,
+          ev.child_task_id,
+          ev.attempt_id,
+          ev.version_number,
+          ev.object_key,
+          ev.width,
+          ev.height,
+          ev.mime_type,
+          ev.created_at,
+          c.source_card_id,
+          c.source_version_id,
+          c.parent_version_id,
+          c.snapshot_id,
+          c.summary AS edit_summary,
+          c.status AS child_status,
+          s.source_prompt,
+          s.operations_json,
+          a.command_json,
+          a.provider_json,
+          r.root_task_id,
+          r.suite_id,
+          r.task_title,
+          r.image_type,
+          r.origin_kind,
+          r.root_task_status,
+          r.any_child_archived
+        FROM suite_workbench.image_edit_versions ev
+        JOIN suite_workbench.image_edit_child_tasks c ON c.id = ev.child_task_id
+        JOIN suite_workbench.image_edit_attempts a ON a.id = ev.attempt_id
+        JOIN suite_workbench.image_edit_snapshots s ON s.id = c.snapshot_id
+        LEFT JOIN edit_roots r ON r.leaf_child_task_id = c.id
+        WHERE ev.id = $1::uuid`,
+        [parsed.uuid],
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      const archivedByTask = row.root_task_status === "archived" || Boolean(row.any_child_archived) || row.child_status === "archived";
+      return { resource: mapEditVersionRow(row), archivedByTask };
     }
     const result = await this.pool.query<any>(
       `SELECT id, suite_id AS "suiteId", title, summary, mime_type AS "mimeType", object_key AS "objectKey",
@@ -242,7 +397,12 @@ export class PostgresLibraryRepository implements LibraryRepository {
        FROM suite_workbench.reverse_reference_assets WHERE id = $1::uuid`,
       [parsed.uuid],
     );
-    return result.rows[0] ? mapReverseRow(result.rows[0]) : null;
+    return result.rows[0] ? { resource: mapReverseRow(result.rows[0]), archivedByTask: false } : null;
+  }
+
+  private async findResourceRaw(resourceId: string): Promise<LibraryResource | null> {
+    const found = await this.findResourceWithMeta(resourceId);
+    return found ? found.resource : null;
   }
 
   private async findExistingIds(resourceIds: string[]): Promise<{ validIds: string[]; notFoundIds: string[]; hasPromptTemplate: boolean }> {
@@ -251,6 +411,7 @@ export class PostgresLibraryRepository implements LibraryRepository {
     const inputUuids: string[] = [];
     const baseUuids: string[] = [];
     const taskVersionUuids: string[] = [];
+    const editVersionUuids: string[] = [];
     const processEntries: Array<{ id: string; uuid: string; index: number }> = [];
     const reverseUuids: string[] = [];
 
@@ -261,6 +422,7 @@ export class PostgresLibraryRepository implements LibraryRepository {
         case "input": inputUuids.push(entry.parsed.uuid); break;
         case "base": baseUuids.push(entry.parsed.uuid); break;
         case "task-version": taskVersionUuids.push(entry.parsed.uuid); break;
+        case "edit-version": editVersionUuids.push(entry.parsed.uuid); break;
         case "process": processEntries.push({ id: entry.id, uuid: entry.parsed.uuid, index: entry.parsed.index }); break;
         case "reverse": reverseUuids.push(entry.parsed.uuid); break;
       }
@@ -317,6 +479,18 @@ export class PostgresLibraryRepository implements LibraryRepository {
           existing.add(proc.id);
         }
       }
+    }
+    if (editVersionUuids.length) {
+      const res = await this.pool.query<{ id: string }>(
+        `SELECT ev.id::text AS id
+         FROM suite_workbench.image_edit_versions ev
+         JOIN suite_workbench.image_edit_child_tasks c ON c.id = ev.child_task_id
+         JOIN suite_workbench.image_edit_attempts a ON a.id = ev.attempt_id
+         JOIN suite_workbench.image_edit_snapshots s ON s.id = c.snapshot_id
+         WHERE ev.id = ANY($1::uuid[])`,
+        [editVersionUuids],
+      );
+      for (const row of res.rows) existing.add(`edit-version:${row.id}`);
     }
     if (reverseUuids.length) {
       const res = await this.pool.query<{ id: string }>(
@@ -422,7 +596,8 @@ export class PostgresLibraryRepository implements LibraryRepository {
         t.suite_id, t.title AS task_title, t.image_type, t.prompt_draft, t.origin_kind
         FROM suite_workbench.task_image_versions v JOIN suite_workbench.suite_tasks t ON t.id = v.task_id
         JOIN suite_workbench.task_generation_attempts a ON a.id = v.attempt_id
-        WHERE ($1::uuid IS NULL OR t.suite_id = $1) AND ($2::text IS NULL OR t.title ILIKE $2 OR t.prompt_draft ILIKE $2)${taskVersionFilter}
+        WHERE ($1::uuid IS NULL OR t.suite_id = $1) AND ($2::text IS NULL OR t.title ILIKE $2 OR t.prompt_draft ILIKE $2)
+          AND t.status <> 'archived'${taskVersionFilter}
         ORDER BY v.created_at DESC`, [suiteId, needle]);
       for (const row of result.rows) {
         if (!query.resourceType || query.resourceType === "task_image_version") resources.push(mapTaskVersionRow(row));
@@ -430,6 +605,86 @@ export class PostgresLibraryRepository implements LibraryRepository {
           row.process_object_keys_json.forEach((objectKey: string, index: number) => resources.push(mapProcessImageRow(row, objectKey, index)));
         }
       }
+    }
+    if (!query.resourceType || query.resourceType === "task_image_version") {
+      const result = await this.pool.query<any>(
+        `WITH RECURSIVE edit_lineage AS (
+          SELECT
+            c.id AS leaf_child_task_id,
+            c.id AS current_child_task_id,
+            c.source_card_id,
+            (c.status = 'archived') AS any_child_archived,
+            ARRAY[c.id] AS visited
+          FROM suite_workbench.image_edit_child_tasks c
+          UNION ALL
+          SELECT
+            l.leaf_child_task_id,
+            parent.id AS current_child_task_id,
+            parent.source_card_id,
+            (l.any_child_archived OR parent.status = 'archived') AS any_child_archived,
+            l.visited || parent.id
+          FROM edit_lineage l
+          JOIN suite_workbench.image_edit_child_tasks parent
+            ON parent.id::text = l.source_card_id
+          WHERE NOT (parent.id = ANY(l.visited))
+        ),
+        edit_roots AS (
+          SELECT DISTINCT ON (l.leaf_child_task_id)
+            l.leaf_child_task_id,
+            t.id AS root_task_id,
+            t.suite_id,
+            t.title AS task_title,
+            t.image_type,
+            t.origin_kind,
+            t.status AS root_task_status,
+            l.any_child_archived
+          FROM edit_lineage l
+          LEFT JOIN suite_workbench.suite_tasks t
+            ON t.id::text = l.source_card_id
+          ORDER BY l.leaf_child_task_id, (t.id IS NULL), array_length(l.visited, 1) DESC
+        )
+        SELECT
+          ev.id AS version_id,
+          ev.child_task_id,
+          ev.attempt_id,
+          ev.version_number,
+          ev.object_key,
+          ev.width,
+          ev.height,
+          ev.mime_type,
+          ev.created_at,
+          c.source_card_id,
+          c.source_version_id,
+          c.parent_version_id,
+          c.snapshot_id,
+          c.summary AS edit_summary,
+          c.status AS child_status,
+          s.source_prompt,
+          s.operations_json,
+          a.command_json,
+          a.provider_json,
+          r.root_task_id,
+          r.suite_id,
+          r.task_title,
+          r.image_type,
+          r.origin_kind,
+          r.root_task_status,
+          r.any_child_archived
+        FROM suite_workbench.image_edit_versions ev
+        JOIN suite_workbench.image_edit_child_tasks c ON c.id = ev.child_task_id
+        JOIN suite_workbench.image_edit_attempts a ON a.id = ev.attempt_id
+        JOIN suite_workbench.image_edit_snapshots s ON s.id = c.snapshot_id
+        LEFT JOIN edit_roots r ON r.leaf_child_task_id = c.id
+        WHERE ($1::uuid IS NULL OR r.suite_id = $1)
+          AND ($2::text IS NULL OR COALESCE(r.task_title, '') ILIKE $2 OR c.summary ILIKE $2 OR COALESCE(a.command_json->>'prompt', '') ILIKE $2)
+          AND COALESCE(r.root_task_status, '') <> 'archived'
+          AND COALESCE(r.any_child_archived, false) = false
+          AND c.status <> 'archived'
+          AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'edit-version:' || ev.id::text)
+        ORDER BY ev.created_at DESC`,
+        [suiteId, needle],
+      );
+      resources.push(...result.rows.map(mapEditVersionRow));
     }
     if (!query.resourceType || query.resourceType === "reverse_reference_asset") {
       const result = await this.pool.query<any>(`SELECT id, suite_id AS "suiteId", title, summary, mime_type AS "mimeType", object_key AS "objectKey",
@@ -442,7 +697,7 @@ export class PostgresLibraryRepository implements LibraryRepository {
     }
     if (resources.length > 0 && (!query.resourceType || query.resourceType === "process_image")) {
       const idsToCheck = resources
-        .filter((resource) => resource.resourceType === "task_image_version" || resource.resourceType === "process_image")
+        .filter((resource) => resource.id.startsWith("task-version:") || resource.id.startsWith("process:"))
         .map((resource) => resource.id);
       if (idsToCheck.length > 0) {
         const deleted = await this.pool.query<{ resource_id: string }>(
@@ -466,16 +721,17 @@ export class PostgresLibraryRepository implements LibraryRepository {
   }
 
   async getResource(resourceId: string, options?: { includeDeleted?: boolean }) {
-    const resource = await this.findResourceRaw(resourceId);
-    if (!resource) return null;
+    const found = await this.findResourceWithMeta(resourceId);
+    if (!found) return null;
     if (!options?.includeDeleted) {
+      if (found.archivedByTask) return null;
       const deleted = await this.pool.query<{ resource_id: string }>(
         `SELECT resource_id FROM suite_workbench.library_resource_deletions WHERE resource_id = $1`,
         [resourceId],
       );
       if (deleted.rows.length > 0) return null;
     }
-    return resource;
+    return found.resource;
   }
 
   async getPreviewObject(resourceId: string) {

@@ -383,3 +383,47 @@ test("画布已绑资源软删除后：节点预览正常、选择器剔除已�
 
   assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);
 });
+
+test("复刻结果区删除一张单卡后：/assets 中该卡生成图消失，剩余单卡图片仍可见", async (t) => {
+  const { url, page } = await offlineAssetsApp(t);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+
+  await page.goto(url + "create/replica");
+  await page.getByLabel("上传参考图", { exact: true }).setInputFiles([
+    "public/assets/gan65-product.jpg",
+    "public/assets/tokyo-desk-v3.jpg",
+  ]);
+  await page.getByRole("button", { name: "一键复刻（2张）", exact: true }).click();
+  await page.waitForURL(/\/create\/replica\?suite=[^&]+/);
+
+  const batch = page.getByRole("region", { name: "复刻批次" });
+  await batch.locator('[data-status="completed"]').waitFor({ timeout: 10000 });
+  const cards = batch.locator("[data-replica-card]");
+  assert.equal(await cards.count(), 2);
+
+  // Confirm both replica task versions appear in /assets under AI 生成结果
+  await page.goto(url + "assets");
+  await page.getByRole("radio", { name: "AI 生成结果", exact: true }).check();
+  await page.getByText("第 1 / 1 页 · 共 2 项").waitFor();
+
+  // Navigate back to replica batch and delete the second card via UI
+  await page.goBack();
+  await batch.locator("[data-replica-card]").nth(1).waitFor();
+  const secondCard = batch.locator("[data-replica-card]").nth(1);
+  await secondCard.getByRole("button", { name: /更多操作/ }).click();
+  await secondCard.getByRole("menuitem", { name: "删除", exact: true }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "删除复刻卡片" });
+  await deleteDialog.waitFor();
+  await deleteDialog.getByRole("button", { name: "确认删除", exact: true }).click();
+  await deleteDialog.waitFor({ state: "hidden" });
+  assert.equal(await batch.locator("[data-replica-card]").count(), 1);
+
+  // Open /assets again -> archived replica card's image disappears, total drops from 2 to 1
+  await page.goto(url + "assets");
+  await page.getByRole("radio", { name: "AI 生成结果", exact: true }).check();
+  await page.getByText("第 1 / 1 页 · 共 1 项").waitFor();
+  assert.equal(await page.locator(".style-card").count(), 1);
+
+  assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);
+});

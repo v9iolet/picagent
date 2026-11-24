@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import sharp from "sharp";
 import { createSuiteStudioApp } from "../server/app.js";
+import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
+import { createImageEditorApi } from "../server/image-editor-api.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
@@ -500,4 +502,243 @@ test("GET /api/library/resources supports scope=image pagination & resourceType 
   const restoredTv = await app.request("GET", `/api/library/resources/${encodeURIComponent(tvResourceId)}`);
   assert.equal(restoredTv.status, 200);
   assert.equal((restoredTv.body as any).data.id, tvResourceId);
+});
+
+test("archiving a task hides its generated and editor-derived images from library list/total/reference while keeping previews 200, and unarchiving restores visibility", async () => {
+  const suites = new MemorySuiteRepository();
+  const tasks = new MemoryTaskRepository();
+  const library = new MemoryLibraryRepository();
+  const storage = new MemoryStorage();
+  const editorRepo = new MemoryImageEditorRepository();
+  const pngA = await makePng(210, 60, 60);
+  const pngEdit1 = await makePng(60, 210, 80);
+  const pngEdit2 = await makePng(60, 90, 210);
+  let editCallCount = 0;
+
+  const editorService = new ImageEditorService(
+    editorRepo,
+    {
+      name: "fake-editor",
+      version: "gpt-image-2",
+      capabilitiesVersion: "1",
+      capabilities: () => ({
+        imageToImage: true,
+        addText: true,
+        changeText: true,
+        redraw: true,
+        erase: true,
+        outpaint: true,
+        currentVersionInput: true,
+      }),
+      async edit() {
+        editCallCount += 1;
+        return { bytes: editCallCount === 1 ? pngEdit1 : pngEdit2, mimeType: "image/png", width: 64, height: 64 };
+      },
+    },
+    storage,
+    async (versionId) => ({ bytes: pngA, mimeType: "image/png", width: 64, height: 64, generationPrompt: `src:${versionId}` }),
+  );
+  const imageEditorApi = createImageEditorApi(editorService);
+
+  const app = createSuiteStudioApp({
+    repository: suites,
+    taskRepository: tasks,
+    libraryRepository: library,
+    storage,
+    imageEditorApi,
+    provider: {
+      supportsMultipleImages: true,
+      async edit() {
+        return { bytes: pngA, mimeType: "image/png" };
+      },
+    },
+  });
+
+  const suite = await suites.createSuite("归档与编辑派生测试", undefined, "canvas");
+  const baseKey = `suites/${suite.id}/inputs/base.png`;
+  await storage.put({ key: baseKey, bytes: pngA, contentType: "image/png" });
+  library.addResource(
+    makeResource({
+      id: "base:seed-1",
+      resourceType: "base_image",
+      title: "商品白底图",
+      suiteId: suite.id,
+      baseVersionId: "seed-1",
+      resourceVersionId: "seed-1",
+      source: { objectKey: baseKey },
+    }),
+  );
+
+  const { task: task1 } = await tasks.createCustomTask!({
+    suiteId: suite.id,
+    planSnapshotId: null,
+    imageType: "main",
+    title: "可归档主图卡",
+    purpose: "主图",
+    promptDraft: "展示主图产品",
+    sourceInputImageId: null,
+    generationParams: { size: "1K", ratio: "1:1" },
+  });
+  const { task: task2 } = await tasks.createCustomTask!({
+    suiteId: suite.id,
+    planSnapshotId: null,
+    imageType: "detail",
+    title: "保留详情卡",
+    purpose: "详情",
+    promptDraft: "展示细节卖点",
+    sourceInputImageId: null,
+    generationParams: { size: "1K", ratio: "3:4" },
+  });
+
+  // Bind base image & generate versions for both tasks
+  for (const t of [task1, task2]) {
+    await app.request("POST", `/api/suite-tasks/${t.id}/white-resource`, {
+      headers: { "idempotency-key": `bind-${t.id}` },
+      body: { resourceIds: ["base:seed-1"] },
+    });
+    const gen = await app.request("POST", `/api/suite-tasks/${t.id}/generation`, {
+      headers: { "idempotency-key": `gen-${t.id}` },
+      body: {},
+    });
+    assert.equal(gen.status, 202);
+    const batchId = (gen.body as any).data.batchId as string;
+    for (let i = 0; i < 40; i++) {
+      const st = await app.request("GET", `/api/generation-batches/${batchId}`);
+      if ((st.body as any).data.batch.status !== "running") break;
+      await new Promise((r) => setTimeout(r, 15));
+    }
+  }
+
+  const task1Ver = (await tasks.listTaskVersions(task1.id)).versions[0];
+  const task2Ver = (await tasks.listTaskVersions(task2.id)).versions[0];
+  assert.ok(task1Ver && task2Ver);
+
+  // Create two-level image edit chain off task1: task1 -> child1 -> child2
+  const runEdit = async (sourceCardId: string, sourceVersionId: string, text: string, key: string) => {
+    await app.request("POST", `/api/image-editor/sessions/${sourceCardId}/operations`, {
+      body: {
+        operation: {
+          operationId: `op-${key}`,
+          type: "add_text",
+          order: 1,
+          sourceCardId,
+          sourceVersionId,
+          parentVersionId: sourceVersionId,
+          summary: `加字：${text}`,
+          payload: { text, prompt: `在上方添加文字“${text}”`, region: { x: 0.1, y: 0.1, width: 0.5, height: 0.2 } },
+        },
+        summary: `加字：${text}`,
+      },
+    });
+    const sub = await app.request("POST", `/api/image-editor/sessions/${sourceCardId}/submit`, {
+      headers: { "idempotency-key": key },
+      body: { sourceCardId, sourceVersionId, parentVersionId: sourceVersionId, summary: `加字：${text}` },
+    });
+    assert.equal(sub.status, 202);
+    const childTaskId = (sub.body as any).data.childTask.id as string;
+    let versions: any[] = [];
+    for (let i = 0; i < 40; i++) {
+      const detail = await app.request("GET", `/api/image-editor/tasks/${childTaskId}`);
+      const status = (detail.body as any).data.task.status;
+      versions = (detail.body as any).data.versions;
+      if (status !== "generating") break;
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.equal(versions.length, 1);
+    return { childTaskId, versionId: versions[0].id as string };
+  };
+
+  const edit1 = await runEdit(task1.id, task1Ver.id, "限时特惠", "edit-chain-1");
+  const edit2 = await runEdit(edit1.childTaskId, edit1.versionId, "升级款", "edit-chain-2");
+
+  const tv1Id = `task-version:${task1Ver.id}`;
+  const tv2Id = `task-version:${task2Ver.id}`;
+  const edit1Id = `edit-version:${edit1.versionId}`;
+  const edit2Id = `edit-version:${edit2.versionId}`;
+
+  // All 4 generated/edited resources appear under task_image_version with status=published
+  const beforeArchive = await app.request("GET", `/api/library/resources?scope=image&resourceType=task_image_version&status=published&suiteId=${suite.id}`);
+  assert.equal(beforeArchive.status, 200);
+  const beforeIds = (beforeArchive.body as any).data.items.map((item: any) => item.id);
+  assert.equal((beforeArchive.body as any).data.total, 4);
+  assert.ok(beforeIds.includes(tv1Id));
+  assert.ok(beforeIds.includes(tv2Id));
+  assert.ok(beforeIds.includes(edit1Id));
+  assert.ok(beforeIds.includes(edit2Id));
+
+  const edit1Item = (beforeArchive.body as any).data.items.find((item: any) => item.id === edit1Id);
+  assert.equal(edit1Item.resourceType, "task_image_version");
+  assert.equal(edit1Item.status, "published");
+  assert.equal(edit1Item.source.generatedBy, "image_editor");
+  assert.equal(edit1Item.source.editChildTaskId, edit1.childTaskId);
+  assert.match(edit1Item.summary, /编辑生成/);
+
+  // edit-version can be referenced (bound) on another task in the same suite before archive
+  const refBefore = await app.request("POST", `/api/suites/${suite.id}/library/references`, {
+    headers: { "idempotency-key": "bind-edit-1" },
+    body: { resourceId: edit1Id, targetType: "task", targetId: task2.id },
+  });
+  assert.equal(refBefore.status, 201);
+  assert.equal((refBefore.body as any).data.resourceId, edit1Id);
+
+  // Archive task1 via PATCH /api/suite-tasks/:id
+  const archiveRes = await app.request("PATCH", `/api/suite-tasks/${task1.id}`, {
+    body: { status: "archived" },
+  });
+  assert.equal(archiveRes.status, 200);
+
+  // task1's version AND both derived edit versions disappear from list & total & getResource & new reference binding
+  const afterArchive = await app.request("GET", `/api/library/resources?scope=image&resourceType=task_image_version&status=published&suiteId=${suite.id}`);
+  assert.equal(afterArchive.status, 200);
+  assert.equal((afterArchive.body as any).data.total, 1);
+  assert.deepEqual((afterArchive.body as any).data.items.map((item: any) => item.id), [tv2Id]);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(tv1Id)}`)).status, 404);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(edit1Id)}`)).status, 404);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(edit2Id)}`)).status, 404);
+  const bindArchived = await app.request("POST", `/api/suites/${suite.id}/library/references`, {
+    headers: { "idempotency-key": "bind-archived-edit-2" },
+    body: { resourceId: edit2Id, targetType: "task", targetId: task2.id },
+  });
+  assert.equal(bindArchived.status, 404);
+
+  // Frozen reference, task history, and ALL preview endpoints remain 200!
+  const refsAfterArchive = await app.request("GET", `/api/suites/${suite.id}/library/references?targetType=task&targetId=${task2.id}`);
+  assert.equal((refsAfterArchive.body as any).data.some((ref: any) => ref.resourceId === edit1Id), true);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(tv1Id)}/preview`)).status, 200);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(edit1Id)}/preview`)).status, 200);
+  assert.equal((await app.previewTaskVersion(task1.id, task1Ver.id)).status, 200);
+  assert.equal((await app.request("GET", `/api/image-editor/tasks/${edit1.childTaskId}/versions/${edit1.versionId}/preview`)).status, 200);
+
+  // Unarchiving task1 restores visibility
+  const unarchiveRes = await app.request("PATCH", `/api/suite-tasks/${task1.id}`, {
+    body: { status: "generated" },
+  });
+  assert.equal(unarchiveRes.status, 200);
+  const afterUnarchive = await app.request("GET", `/api/library/resources?scope=image&resourceType=task_image_version&status=published&suiteId=${suite.id}`);
+  assert.equal((afterUnarchive.body as any).data.total, 4);
+
+  // Soft-delete edit1 (single) and edit2 (batch), verify hidden from list/total while preview stays 200, then final-select restores edit1
+  const delEdit1 = await app.request("DELETE", `/api/library/resources/${encodeURIComponent(edit1Id)}`);
+  assert.equal(delEdit1.status, 200);
+  assert.equal((delEdit1.body as any).data.alreadyDeleted, false);
+  const delEdit2 = await app.request("POST", "/api/library/resources/batch-delete", {
+    body: { ids: [edit2Id, edit1Id] },
+  });
+  assert.equal(delEdit2.status, 200);
+  assert.deepEqual((delEdit2.body as any).data.deletedIds, [edit2Id]);
+  assert.deepEqual((delEdit2.body as any).data.alreadyDeletedIds, [edit1Id]);
+
+  const afterSoftDelete = await app.request("GET", `/api/library/resources?scope=image&resourceType=task_image_version&status=published&suiteId=${suite.id}`);
+  assert.equal((afterSoftDelete.body as any).data.total, 2);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(edit1Id)}/preview`)).status, 200);
+
+  // Selecting edit1 as final restores it in the library
+  const finalEdit1 = await app.request("POST", `/api/image-editor/tasks/${edit1.childTaskId}/versions/${edit1.versionId}/select`, {
+    headers: { "idempotency-key": "select-edit1-final" },
+    body: { selection: "final" },
+  });
+  assert.equal(finalEdit1.status, 200);
+  assert.equal((await app.request("GET", `/api/library/resources/${encodeURIComponent(edit1Id)}`)).status, 200);
+  const afterRestore = await app.request("GET", `/api/library/resources?scope=image&resourceType=task_image_version&status=published&suiteId=${suite.id}`);
+  assert.equal((afterRestore.body as any).data.total, 3);
 });

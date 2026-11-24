@@ -423,6 +423,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
                 <div className="resource-card-meta">
                   <span className="badge">{resourceLabel(selected)}</span>
                   <span className="badge">{stageLabel(selected.stage)}</span>
+                  {selected.source?.generatedBy === "image_editor" && <span className="badge">编辑生成</span>}
                 </div>
               </section>
               <section className="inspector-section">

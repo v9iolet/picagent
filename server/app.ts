@@ -18,6 +18,7 @@ import sharp from "sharp";
 import { processGeneratedImage, processImage } from "./image.js";
 import { PROMPT_STAGES, renderPromptTemplate, resolvePromptTemplateUsedBy, validateDynamicInput, withPromptTemplateUsage, type PromptStage, type PromptTemplateRuntime, type PromptVersionStatus } from "./prompt-library.js";
 import { MemoryCategoryPromptRepository } from "./repositories/memory-category-prompt-repository.js";
+import { MemoryLibraryRepository } from "./repositories/memory-library-repository.js";
 import { MemoryReverseRepository } from "./repositories/memory-reverse-repository.js";
 import { MemoryPipelineRepository } from "./repositories/memory-pipeline-repository.js";
 import { MemoryReplicaRepository } from "./repositories/memory-replica-repository.js";
@@ -441,6 +442,12 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const listingRepository = deps.listingRepository ?? new MemoryListingRepository();
   const listing = createListingCopyApi({ jobs: listingRepository, suites: deps.repository, storage: deps.storage, pipelines: pipelineRepository, plans: deps.planRepository, platforms: deps.platformRepository, prompts: deps.promptRepository, vision: resolveVision });
   const reverseRepository = deps.reverseRepository ?? new MemoryReverseRepository();
+  if (deps.libraryRepository instanceof MemoryLibraryRepository) {
+    deps.libraryRepository.bindSources({
+      taskRepository: deps.taskRepository,
+      imageEditorApi: deps.imageEditorApi,
+    });
+  }
 
   const resolveCategorySourceSnapshot = async (snapshot: PlanSnapshot): Promise<PlanSnapshot> => {
     if (!deps.planRepository) return snapshot;
@@ -992,7 +999,30 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return fail(error instanceof Error ? error.message : "LLM_FAILED", 502);
       }
     }
-    if (path.startsWith("/api/image-editor/")) return deps.imageEditorApi ? deps.imageEditorApi.request(method, path, options) : fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
+    const editVersionPreviewMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
+    if (method === "GET" && editVersionPreviewMatch) {
+      if (!deps.imageEditorApi) return fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
+      const taskRes = await deps.imageEditorApi.request("GET", `/api/image-editor/tasks/${editVersionPreviewMatch[1]}`);
+      const taskData = dataOf(taskRes) as { versions?: Array<{ id?: string; objectKey?: string }> } | null;
+      const version = taskRes.status === 200 ? taskData?.versions?.find((item) => item.id === editVersionPreviewMatch[2]) : null;
+      return version?.objectKey ? previewObject(version.objectKey, deps.storage) : fail("NOT_FOUND", 404);
+    }
+    const selectEditVersionMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/select$/);
+    if (path.startsWith("/api/image-editor/")) {
+      if (!deps.imageEditorApi) return fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
+      const res = await deps.imageEditorApi.request(method, path, options);
+      if (
+        method === "POST" &&
+        selectEditVersionMatch &&
+        res.status >= 200 &&
+        res.status < 300 &&
+        asRecord(options.body, { allowArrays: true }).selection === "final" &&
+        deps.libraryRepository
+      ) {
+        await deps.libraryRepository.restoreResource(`edit-version:${selectEditVersionMatch[2]}`);
+      }
+      return res;
+    }
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
 
     if (method === "POST" && path === "/api/replicas") return replicaPipeline.createReplica(idempotencyKey, options.body);
