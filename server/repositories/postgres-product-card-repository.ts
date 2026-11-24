@@ -399,7 +399,7 @@ export class PostgresProductCardRepository implements ProductCardRepository {
     try {
       await client.query("BEGIN");
       const cardResult = await client.query<CardRow>(
-        `SELECT ${CARD_COLS} FROM ${CARDS_TABLE} WHERE id = $1`,
+        `SELECT ${CARD_COLS} FROM ${CARDS_TABLE} WHERE id = $1 FOR UPDATE`,
         [id],
       );
       const cardRow = cardResult.rows[0];

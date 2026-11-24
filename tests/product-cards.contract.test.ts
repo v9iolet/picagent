@@ -425,3 +425,87 @@ test("configures request body limits for product card write endpoints", () => {
   );
   assert.equal(resolveRequestBodyLimit("GET", "/api/product-cards"), DEFAULT_REQUEST_BODY_MAX_BYTES);
 });
+
+test("normalizes uppercase UUID route/body params to lowercase and maps storage.get errors in preview", async () => {
+  const { app, storage } = createTestContext();
+  const img1 = await makeTestImageBase64(21, "png");
+  const img2 = await makeTestImageBase64(22, "jpeg");
+  const upperSessionId = randomUUID().toUpperCase();
+
+  const createRes = await app.request("POST", "/api/product-cards", {
+    body: validCardPayload({
+      sourceSessionId: upperSessionId,
+      supplierImages: [img1],
+    }),
+  });
+  assert.equal(createRes.status, 201);
+  const created = ("data" in createRes.body ? createRes.body.data : null) as ProductCard;
+  assert.equal(created.sourceSessionId, upperSessionId.toLowerCase());
+
+  const upperCardId = created.id.toUpperCase();
+  const upperImg1Id = created.supplierImages[0].id.toUpperCase();
+
+  // Uppercase UUID works on GET
+  const getRes = await app.request("GET", `/api/product-cards/${upperCardId}`);
+  assert.equal(getRes.status, 200);
+  assert.equal((("data" in getRes.body ? getRes.body.data : null) as ProductCard).id, created.id);
+
+  // Uppercase UUID works on PATCH with uppercase existing imageId + new upload, and keeps storage keys lowercase
+  const patchRes = await app.request("PATCH", `/api/product-cards/${upperCardId}`, {
+    body: {
+      name: "大写 UUID 归一化测试商品",
+      supplierImages: [{ imageId: upperImg1Id }, img2],
+    },
+  });
+  assert.equal(patchRes.status, 200);
+  const patched = ("data" in patchRes.body ? patchRes.body.data : null) as ProductCard;
+  assert.equal(patched.revision, 2);
+  assert.equal(patched.supplierImages.length, 2);
+  for (const img of patched.supplierImages) {
+    assert.equal(img.originalObjectKey, img.originalObjectKey.toLowerCase());
+    assert.equal(img.thumbnailObjectKey, img.thumbnailObjectKey.toLowerCase());
+    assert.ok(img.originalObjectKey.startsWith(`product-cards/${created.id}/images/${img.id}/`));
+  }
+
+  // Uppercase UUID works on preview, archive, restore
+  const previewRes = await app.request(
+    "GET",
+    `/api/product-cards/${upperCardId}/images/${upperImg1Id}/preview/thumbnail`,
+  );
+  assert.equal(previewRes.status, 200);
+  assert.ok(previewRes.raw && previewRes.raw.length > 0);
+
+  const archiveRes = await app.request("POST", `/api/product-cards/${upperCardId}/archive`);
+  assert.equal(archiveRes.status, 200);
+  assert.equal((("data" in archiveRes.body ? archiveRes.body.data : null) as ProductCard).status, "archived");
+
+  const restoreRes = await app.request("POST", `/api/product-cards/${upperCardId}/restore`);
+  assert.equal(restoreRes.status, 200);
+  assert.equal((("data" in restoreRes.body ? restoreRes.body.data : null) as ProductCard).status, "published");
+
+  // Preview maps storage.get throwing OBJECT_NOT_FOUND -> 404 and other errors -> 502
+  const originalGet = storage.get.bind(storage);
+  try {
+    storage.get = async () => {
+      throw new Error("OBJECT_NOT_FOUND");
+    };
+    const notFoundRes = await app.request("GET", patched.supplierImages[0].originalPreviewUrl);
+    assert.equal(notFoundRes.status, 404);
+    assert.equal("error" in notFoundRes.body && notFoundRes.body.error.code, "INPUT_OBJECT_NOT_FOUND");
+
+    storage.get = async () => {
+      throw new Error("OBJECT_READ_FAILED");
+    };
+    const readFailedRes = await app.request("GET", patched.supplierImages[0].originalPreviewUrl);
+    assert.equal(readFailedRes.status, 502);
+    assert.equal("error" in readFailedRes.body && readFailedRes.body.error.code, "INPUT_OBJECT_READ_FAILED");
+  } finally {
+    storage.get = originalGet;
+  }
+
+  // Uppercase UUID works on DELETE and cleans up lowercase storage keys
+  const deleteRes = await app.request("DELETE", `/api/product-cards/${upperCardId}`);
+  assert.equal(deleteRes.status, 200);
+  assert.deepEqual("data" in deleteRes.body ? deleteRes.body.data : null, { id: created.id });
+  assert.equal(storage.keys().filter((k) => k.startsWith(`product-cards/${created.id}/images/`)).length, 0);
+});

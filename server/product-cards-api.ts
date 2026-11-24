@@ -38,6 +38,11 @@ interface PreparedExistingImage {
 
 type PreparedImageEntry = PreparedNewUpload | PreparedExistingImage;
 
+function normalizeUuid(value: string): string | null {
+  const trimmed = value.trim();
+  return UUID_RE.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
@@ -205,8 +210,9 @@ export function createProductCardsApi(deps: {
     return ok(result);
   }
 
-  async function handleGet(cardId: string): Promise<AppResponse> {
-    if (!UUID_RE.test(cardId)) return fail("PRODUCT_CARD_NOT_FOUND", 404);
+  async function handleGet(rawCardId: string): Promise<AppResponse> {
+    const cardId = normalizeUuid(rawCardId);
+    if (!cardId) return fail("PRODUCT_CARD_NOT_FOUND", 404);
     const card = await deps.productCards.get(cardId);
     return card ? ok(card) : fail("PRODUCT_CARD_NOT_FOUND", 404);
   }
@@ -223,10 +229,12 @@ export function createProductCardsApi(deps: {
 
     let sourceSessionId: string | null = null;
     if (body.sourceSessionId !== undefined && body.sourceSessionId !== null && body.sourceSessionId !== "") {
-      if (typeof body.sourceSessionId !== "string" || !UUID_RE.test(body.sourceSessionId.trim())) {
+      const normalizedSessionId =
+        typeof body.sourceSessionId === "string" ? normalizeUuid(body.sourceSessionId) : null;
+      if (!normalizedSessionId) {
         return fail("PRODUCT_CARD_VALIDATION_FAILED", 400, "来源建档会话 ID 无效");
       }
-      sourceSessionId = body.sourceSessionId.trim();
+      sourceSessionId = normalizedSessionId;
     }
 
     const rawImages =
@@ -277,8 +285,9 @@ export function createProductCardsApi(deps: {
     }
   }
 
-  async function handleUpdate(cardId: string, body: unknown): Promise<AppResponse> {
-    if (!UUID_RE.test(cardId)) return fail("PRODUCT_CARD_NOT_FOUND", 404);
+  async function handleUpdate(rawCardId: string, body: unknown): Promise<AppResponse> {
+    const cardId = normalizeUuid(rawCardId);
+    if (!cardId) return fail("PRODUCT_CARD_NOT_FOUND", 404);
     if (!isPlainObject(body)) {
       return fail("PRODUCT_CARD_VALIDATION_FAILED", 400, "商品信息卡请求体必须是对象");
     }
@@ -327,13 +336,14 @@ export function createProductCardsApi(deps: {
         }
 
         if (hasExistingRef) {
-          const refId =
+          const rawRefId =
             typeof rawEntry.imageId === "string"
-              ? rawEntry.imageId.trim()
+              ? rawEntry.imageId
               : typeof rawEntry.id === "string"
-                ? rawEntry.id.trim()
+                ? rawEntry.id
                 : "";
-          if (!refId || !UUID_RE.test(refId)) {
+          const refId = normalizeUuid(rawRefId);
+          if (!refId) {
             return fail("PRODUCT_CARD_IMAGE_NOT_FOUND", 400);
           }
           const matched = existingImageById.get(refId);
@@ -386,14 +396,16 @@ export function createProductCardsApi(deps: {
     return ok(updated);
   }
 
-  async function handleSetStatus(cardId: string, status: ProductCardStatus): Promise<AppResponse> {
-    if (!UUID_RE.test(cardId)) return fail("PRODUCT_CARD_NOT_FOUND", 404);
+  async function handleSetStatus(rawCardId: string, status: ProductCardStatus): Promise<AppResponse> {
+    const cardId = normalizeUuid(rawCardId);
+    if (!cardId) return fail("PRODUCT_CARD_NOT_FOUND", 404);
     const updated = await deps.productCards.setStatus(cardId, status, now());
     return updated ? ok(updated) : fail("PRODUCT_CARD_NOT_FOUND", 404);
   }
 
-  async function handleDelete(cardId: string): Promise<AppResponse> {
-    if (!UUID_RE.test(cardId)) return fail("PRODUCT_CARD_NOT_FOUND", 404);
+  async function handleDelete(rawCardId: string): Promise<AppResponse> {
+    const cardId = normalizeUuid(rawCardId);
+    if (!cardId) return fail("PRODUCT_CARD_NOT_FOUND", 404);
     const deleted = await deps.productCards.delete(cardId);
     if (!deleted) return fail("PRODUCT_CARD_NOT_FOUND", 404);
     await deleteCardStorageKeys(cardId, deleted.supplierImages);
@@ -401,28 +413,37 @@ export function createProductCardsApi(deps: {
   }
 
   async function handlePreviewImage(
-    cardId: string,
-    imageId: string,
+    rawCardId: string,
+    rawImageId: string,
     variant: "original" | "thumbnail",
   ): Promise<AppResponse> {
-    if (!UUID_RE.test(cardId) || !UUID_RE.test(imageId)) {
+    const cardId = normalizeUuid(rawCardId);
+    const imageId = normalizeUuid(rawImageId);
+    if (!cardId || !imageId) {
       return fail("PRODUCT_CARD_IMAGE_NOT_FOUND", 404);
     }
     const image = await deps.productCards.getImage(cardId, imageId);
     if (!image) return fail("PRODUCT_CARD_IMAGE_NOT_FOUND", 404);
 
     const key = variant === "original" ? image.originalObjectKey : image.thumbnailObjectKey;
-    const object = await deps.storage.get(key);
-    if (!object) return fail("INPUT_OBJECT_NOT_FOUND", 404);
-
-    return {
-      ...ok(null),
-      raw: object.bytes,
-      headers: {
-        "content-type": object.contentType,
-        "cache-control": "private, max-age=60",
-      },
-    };
+    try {
+      const object = await deps.storage.get(key);
+      if (!object) return fail("INPUT_OBJECT_NOT_FOUND", 404);
+      return {
+        ...ok(null),
+        raw: object.bytes,
+        headers: {
+          "content-type": object.contentType,
+          "cache-control": "private, max-age=60",
+        },
+      };
+    } catch (error) {
+      const isNotFound = error instanceof Error && error.message === "OBJECT_NOT_FOUND";
+      return fail(
+        isNotFound ? "INPUT_OBJECT_NOT_FOUND" : "INPUT_OBJECT_READ_FAILED",
+        isNotFound ? 404 : 502,
+      );
+    }
   }
 
   async function request(method: string, path: string, body?: unknown): Promise<AppResponse> {
