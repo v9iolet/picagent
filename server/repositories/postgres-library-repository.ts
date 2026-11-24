@@ -513,7 +513,10 @@ export class PostgresLibraryRepository implements LibraryRepository {
 
   async listResources(query: LibraryResourceQuery) {
     const page = Math.max(1, query.page ?? 1); const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 24));
-    if (query.scope === "image" && query.resourceType === "prompt_template") {
+    if (
+      query.resourceType === "input_image" ||
+      (query.scope === "image" && query.resourceType === "prompt_template")
+    ) {
       return { items: [], total: 0, page, pageSize };
     }
     const resources: LibraryResource[] = [];
@@ -563,18 +566,6 @@ export class PostgresLibraryRepository implements LibraryRepository {
         ) latest
         ORDER BY latest."updatedAt" DESC`, [query.stage ?? null, needle]);
       resources.push(...result.rows.map(mapPromptTemplateRow));
-    }
-    if (!query.resourceType || query.resourceType === "input_image") {
-      const result = await this.pool.query<any>(`SELECT 'input:' || i.id::text AS id, 'input_image' AS "resourceType", i.original_filename AS title,
-        concat(i.width, ' × ', i.height, ' · ', i.mime_type) AS summary, i.mime_type AS "mimeType",
-        '/api/suites/' || i.suite_id::text || '/input-images/' || i.id::text || '/preview/thumbnail' AS "previewUrl",
-        i.suite_id AS "suiteId", NULL::uuid AS "taskId", NULL::uuid AS "imageVersionId", NULL::uuid AS "baseVersionId", i.id::text AS "resourceVersionId", NULL::text AS "templateVersionId", NULL::text AS stage,
-        jsonb_build_object('objectKey', i.original_object_key, 'originalFilename', i.original_filename, 'ordinal', i.ordinal) AS source, i.created_at AS "createdAt", i.created_at AS "updatedAt"
-        FROM suite_workbench.input_images i
-        WHERE ($1::uuid IS NULL OR i.suite_id = $1) AND ($2::text IS NULL OR i.original_filename ILIKE $2)
-          AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'input:' || i.id::text)
-        ORDER BY i.created_at DESC`, [suiteId, needle]);
-      resources.push(...result.rows.map((row) => ({ ...row, status: "published" as const })));
     }
     if (!query.resourceType || query.resourceType === "base_image") {
       const result = await this.pool.query<any>(`SELECT 'base:' || b.id::text AS id, 'base_image' AS "resourceType", concat('白底底图 · 版本 ', b.version_number) AS title,

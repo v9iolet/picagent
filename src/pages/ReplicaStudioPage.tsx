@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { defaultImageOptions } from "../../shared/model-settings";
-import { ApiHttpError, modelSettingsApi, suiteApi } from "../api/client";
+import { modelSettingsApi } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import {
   GenerationHistoryDrawer,
   type GenerationHistoryFeedItem,
 } from "../components/generation-history/GenerationHistoryDrawer";
-import type { ProductResourceSelection } from "../components/resource-picker";
 import { currentImageOptions, message } from "../components/suite-studio/studio";
 import { CreateToolsNav } from "../features/create/CreateToolsNav";
 import { ReplicaBatchPreview } from "../features/replica/ReplicaBatchPreview";
@@ -28,7 +27,6 @@ import {
   replicaApi,
   type ReplicaCloneLevel,
   type ReplicaConfigDraft,
-  type ReplicaProductDraft,
   type ReplicaSceneType,
   type ReplicaStudioState,
 } from "../features/replica/replica-types";
@@ -238,10 +236,6 @@ export function ReplicaStudioPage({
     replicaDraftStore.addProductFiles(files);
   }, []);
 
-  const handleApplyLibraryProducts = useCallback((selected: ProductResourceSelection[]) => {
-    replicaDraftStore.applyLibraryProducts(selected);
-  }, []);
-
   const handleRemoveProduct = useCallback((localId: string) => {
     replicaDraftStore.removeProduct(localId);
   }, []);
@@ -308,46 +302,6 @@ export function ReplicaStudioPage({
     [navigate, suiteId],
   );
 
-  const pruneDeletedLibraryProducts = useCallback(async (candidates: readonly ReplicaProductDraft[]) => {
-    const libraryItems = candidates.filter((item) => item.sourceKind === "library");
-    if (!libraryItems.length) return { remaining: candidates.slice(), removedIds: new Set<string>() };
-    const removedIds = new Set<string>();
-    await Promise.all(
-      libraryItems.map(async (item) => {
-        try {
-          const detail = await suiteApi.getLibraryResource(item.libraryResourceId);
-          if (
-            detail.status !== "published" ||
-            (detail.resourceType !== "base_image" && detail.resourceType !== "input_image")
-          ) {
-            removedIds.add(item.libraryResourceId);
-          }
-        } catch (error) {
-          if (error instanceof ApiHttpError && error.status === 404) {
-            removedIds.add(item.libraryResourceId);
-          }
-        }
-      }),
-    );
-    if (removedIds.size > 0) {
-      replicaDraftStore.removeDeletedLibraryProducts(
-        removedIds,
-        `已移除 ${removedIds.size} 张已删除的图片`,
-      );
-    }
-    const remaining = candidates.filter(
-      (item) => item.sourceKind !== "library" || !removedIds.has(item.libraryResourceId),
-    );
-    return { remaining, removedIds };
-  }, []);
-
-  useEffect(() => {
-    const initialProducts = replicaDraftStore.getSnapshot().products;
-    if (initialProducts.some((item) => item.sourceKind === "library")) {
-      void pruneDeletedLibraryProducts(initialProducts);
-    }
-  }, [pruneDeletedLibraryProducts]);
-
   const handleSubmit = useCallback(async () => {
     const submitState = getReplicaSubmitState(references, products, effectiveConfig, submitting);
     if (!submitState.canSubmit) return;
@@ -359,7 +313,6 @@ export function ReplicaStudioPage({
     setPageNotice("");
     setBatchError("");
     try {
-      const { remaining: validProducts } = await pruneDeletedLibraryProducts(readyProducts);
       const result = await replicaApi.create({
         references: validRefs.map((item) => ({
           filename: item.filename,
@@ -367,15 +320,11 @@ export function ReplicaStudioPage({
           bytesBase64: item.bytesBase64,
           remark: item.remark.trim(),
         })),
-        products: validProducts.map((item) =>
-          item.sourceKind === "library"
-            ? { libraryResourceId: item.libraryResourceId }
-            : {
-                filename: item.filename,
-                mimeType: item.mimeType,
-                bytesBase64: item.bytesBase64,
-              },
-        ),
+        products: readyProducts.map((item) => ({
+          filename: item.filename,
+          mimeType: item.mimeType,
+          bytesBase64: item.bytesBase64,
+        })),
         sceneType: effectiveConfig.sceneType,
         cloneLevel: effectiveConfig.cloneLevel,
         unifiedRequirement: effectiveConfig.unifiedRequirement.trim(),
@@ -404,7 +353,7 @@ export function ReplicaStudioPage({
     } finally {
       if (mountedRef.current) setSubmitting(false);
     }
-  }, [references, products, effectiveConfig, submitting, suiteId, navigate, pruneDeletedLibraryProducts]);
+  }, [references, products, effectiveConfig, submitting, suiteId, navigate]);
 
   const renderHistoryMeta = useCallback((item: GenerationHistoryFeedItem) => {
     const cfg = item.pipeline?.config;
@@ -461,7 +410,6 @@ export function ReplicaStudioPage({
           onMoveReference={handleMoveReference}
           onUpdateReferenceRemark={handleUpdateReferenceRemark}
           onAddProductFiles={handleAddProductFiles}
-          onApplyLibraryProducts={handleApplyLibraryProducts}
           onRemoveProduct={handleRemoveProduct}
           onMoveProduct={handleMoveProduct}
           onUpdateConfig={handleUpdateConfig}

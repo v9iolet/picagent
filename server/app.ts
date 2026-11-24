@@ -3,7 +3,7 @@ import { createSuitePipeline } from "./suite-pipeline.js";
 import { fail, errorMessages } from "./api-errors.js";
 import { ok, asRecord, dataOf, type AppResponse } from "./api-response.js";
 export type { AppResponse } from "./api-response.js";
-import { isProductImageResource } from "./library-reference-policy.js";
+import { isProductImageResource, isStoredProductImageReference } from "./library-reference-policy.js";
 import { createListingCopyApi } from "./listing-copy-api.js";
 import { MemoryListingRepository, type ListingRepository } from "./listing-copy.js";
 import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../shared/model-settings.js";
@@ -617,7 +617,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
             const referenceId = typeof material.libraryReferenceId === "string" ? material.libraryReferenceId : "";
             const reference = references.find((item) => item.id === referenceId);
             const source = reference?.snapshot.source as Record<string, unknown> | undefined;
-            if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
+            if (!reference || !isStoredProductImageReference(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
             const stored = await deps.storage.get(source.objectKey);
             if (!stored) throw new Error("TASK_INVALID_SOURCE");
             inputImages.push({ bytes: stored.bytes, mimeType: stored.contentType, filename: `product-${materialIndex + 1}.png`, role: materialIndex === 0 ? "product_primary" : "product_detail", objectKey: source.objectKey, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, libraryReferenceId: reference.id });
@@ -640,7 +640,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         } else if (!inputImages.length && task.sourceLibraryReferenceId && deps.libraryRepository) {
           const reference = (await deps.libraryRepository.listReferences(suiteId, "task", task.id)).find((item) => item.id === task.sourceLibraryReferenceId);
           const source = reference?.snapshot.source as Record<string, unknown> | undefined;
-          if (!reference || !isProductImageResource(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
+          if (!reference || !isStoredProductImageReference(reference) || typeof source?.objectKey !== "string") throw new Error("TASK_INVALID_SOURCE");
           sourceKind = "library"; sourceObjectKey = source.objectKey; sourceLibraryReferenceId = reference.id; sourceResourceVersionId = reference.resourceVersionId;
           sourceBaseVersionId = typeof reference.snapshot.baseVersionId === "string" ? reference.snapshot.baseVersionId : null;
         } else if (!inputImages.length) {
@@ -2035,7 +2035,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           if (typeof source?.objectKey !== "string") throw new Error("LIBRARY_RESOURCE_NOT_FOUND");
           (result.reference as typeof result.reference & { order?: number }).order = index + 1;
         }
-        for (const stale of existing.filter((reference) => isProductImageResource(reference) && !resourceIds.includes(reference.resourceId))) await deps.libraryRepository.archiveReference(task.suiteId, stale.id);
+        for (const stale of existing.filter((reference) => isStoredProductImageReference(reference) && !resourceIds.includes(reference.resourceId))) await deps.libraryRepository.archiveReference(task.suiteId, stale.id);
         const productMaterialRefs = references.map((reference, index) => ({ libraryReferenceId: reference.id, resourceId: reference.resourceId, resourceVersionId: reference.resourceVersionId, order: index + 1, title: String(reference.snapshot.title ?? "商品参考图"), previewUrl: typeof reference.snapshot.previewUrl === "string" ? reference.snapshot.previewUrl : `/api/library/resources/${encodeURIComponent(reference.resourceId)}/preview` }));
         const first = references[0];
         const updated = await deps.taskRepository.updateTask(task.id, { sourceInputImageId: null, sourceLibraryReferenceId: first.id, sourceResourceVersionId: first.resourceVersionId, sourceRevision: (task.sourceRevision ?? 0) + 1, generationParams: { ...task.generationParams, productMaterialRefs }, status: "pending" });

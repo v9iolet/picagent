@@ -1,10 +1,6 @@
 import { useState, type DragEvent } from "react";
 import type { ImageOptions } from "../../../shared/model-settings";
 import {
-  ProductResourcePickerModal,
-  type ProductResourceSelection,
-} from "../../components/resource-picker";
-import {
   allowedReplicaSizes,
   charCount,
   getReplicaSubmitState,
@@ -34,7 +30,6 @@ export interface ReplicaConfigPanelProps {
   onMoveReference: (fromIndex: number, toIndex: number) => void;
   onUpdateReferenceRemark: (localId: string, remark: string) => void;
   onAddProductFiles: (files: File[]) => void;
-  onApplyLibraryProducts: (selected: ProductResourceSelection[]) => void;
   onRemoveProduct: (localId: string) => void;
   onMoveProduct: (fromIndex: number, toIndex: number) => void;
   onUpdateConfig: (patch: Partial<ReplicaConfigDraft>) => void;
@@ -54,7 +49,6 @@ export function ReplicaConfigPanel({
   onMoveReference,
   onUpdateReferenceRemark,
   onAddProductFiles,
-  onApplyLibraryProducts,
   onRemoveProduct,
   onMoveProduct,
   onUpdateConfig,
@@ -63,25 +57,10 @@ export function ReplicaConfigPanel({
   const [refDragging, setRefDragging] = useState(false);
   const [productDragging, setProductDragging] = useState(false);
   const [dragRefIndex, setDragRefIndex] = useState<number | null>(null);
-  const [pickerOpen, setPickerOpen] = useState(false);
   const [hoveredLevel, setHoveredLevel] = useState<string | null>(null);
 
   const validRefCount = references.filter((item) => item.status === "ready").length;
   const validProductCount = products.filter((item) => item.status === "ready").length;
-  const localProductCount = products.filter((item) => item.sourceKind === "upload").length;
-  const librarySelected: ProductResourceSelection[] = products
-    .filter((item): item is Extract<ReplicaProductDraft, { sourceKind: "library" }> => item.sourceKind === "library")
-    .map((item, idx) => ({
-      libraryReferenceId: "",
-      resourceId: item.libraryResourceId,
-      resourceVersionId: item.resourceVersionId,
-      order: idx + 1,
-      title: item.title,
-      previewUrl: item.previewUrl,
-      resourceType: item.resourceType,
-    }));
-
-  const libraryMax = Math.max(0, REPLICA_MAX_PRODUCTS - localProductCount);
   const sizes = allowedReplicaSizes(imageOptions);
   const showStyleUnified = validRefCount >= 2;
   const showNoProductWarning = needsNoProductWarning(config.sceneType, validProductCount);
@@ -250,7 +229,7 @@ export function ReplicaConfigPanel({
             }}
           >
             {products.map((item, index) => {
-              const title = item.sourceKind === "library" ? item.title : item.filename;
+              const title = item.filename;
               return (
                 <div
                   className={`ss-thumb rp-product-thumb${item.status === "error" ? " is-error" : ""}`}
@@ -262,9 +241,7 @@ export function ReplicaConfigPanel({
                   ) : (
                     <span className="rp-ref-fallback">{item.status === "reading" ? "…" : "!"}</span>
                   )}
-                  <span className="rp-product-source">
-                    {item.sourceKind === "library" ? "资源库" : "本地"}
-                  </span>
+                  <span className="rp-product-source">本地</span>
                   <div className="rp-product-controls">
                     {index > 0 && (
                       <button
@@ -304,15 +281,7 @@ export function ReplicaConfigPanel({
             )}
           </div>
           <div className="rp-product-bar">
-            <button
-              type="button"
-              className="rp-library-btn"
-              disabled={submitting || (libraryMax === 0 && librarySelected.length === 0)}
-              onClick={() => setPickerOpen(true)}
-            >
-              从资源库选择
-            </button>
-            <small>同一商品多角度，整批共用（最多 6 张）</small>
+            <small>同一商品多角度，本地拖拽或点击上传，整批共用（最多 6 张）</small>
           </div>
           {productNotice && (
             <p className="rp-inline-notice" role="status">
@@ -498,20 +467,6 @@ export function ReplicaConfigPanel({
           {submitState.buttonLabel}
         </button>
       </footer>
-
-      <ProductResourcePickerModal
-        open={pickerOpen}
-        onClose={() => setPickerOpen(false)}
-        max={libraryMax}
-        initialSelected={librarySelected}
-        title="从资源库选择产品原图"
-        subtitle={`最多选择 ${libraryMax} 张已发布白底图或原图（产品原图总上限 ${REPLICA_MAX_PRODUCTS} 张）`}
-        confirmLabel="确认选择"
-        allowEmpty
-        onConfirm={(selected) => {
-          onApplyLibraryProducts(selected);
-        }}
-      />
     </aside>
   );
 }

@@ -1,6 +1,10 @@
 import type { LibraryResource } from "./types.js";
 
 export function isProductImageResource(resource: Pick<LibraryResource, "resourceType">) {
+  return resource.resourceType === "base_image";
+}
+
+export function isStoredProductImageReference(resource: Pick<LibraryResource, "resourceType">) {
   return resource.resourceType === "base_image" || resource.resourceType === "input_image";
 }
 
@@ -10,6 +14,7 @@ export function assertPublishedProductImageResource(resource: LibraryResource) {
 }
 
 export function assertReferenceAllowed(resource: LibraryResource, suiteId: string, targetType: "plan" | "task") {
+  if (resource.resourceType === "input_image") throw new Error("LIBRARY_RESOURCE_FORBIDDEN");
   const crossSuite = resource.suiteId !== null && resource.suiteId !== suiteId;
   if (crossSuite && !isProductImageResource(resource)) throw new Error("LIBRARY_RESOURCE_FORBIDDEN");
   if ((crossSuite || resource.status !== undefined) && resource.status !== "published") throw new Error("LIBRARY_RESOURCE_NOT_PUBLISHED");

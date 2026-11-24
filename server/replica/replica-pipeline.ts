@@ -4,7 +4,6 @@ import type { ImageOptions } from "../../shared/model-settings.js";
 import { errorMessages, fail } from "../api-errors.js";
 import { asRecord, dataOf, now, ok, type AppResponse } from "../api-response.js";
 import { processImage, type ProcessedImage } from "../image.js";
-import { assertPublishedProductImageResource } from "../library-reference-policy.js";
 import { waitUntil } from "../suite-pipeline.js";
 import type {
   LibraryRepository,
@@ -228,21 +227,12 @@ interface ValidatedReferenceUpload {
   processed: RetainedProcessedImage;
 }
 
-type ValidatedProductInput =
-  | {
-      sourceKind: "upload";
-      filename: string;
-      rawBytes: Buffer;
-      processed: RetainedProcessedImage;
-    }
-  | {
-      sourceKind: "library";
-      libraryResourceId: string;
-      resourceVersionId: string;
-      objectKey: string;
-      filename: string | null;
-      mimeType: string | null;
-    };
+interface ValidatedProductInput {
+  sourceKind: "upload";
+  filename: string;
+  rawBytes: Buffer;
+  processed: RetainedProcessedImage;
+}
 
 export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
   const { pipelineRepository, replicaRepository, request } = deps;
@@ -526,7 +516,7 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
       validatedRefs.push({ filename, remark, rawBytes, processed });
     }
 
-    // 2. Validate products (0..6, upload or published library product image)
+    // 2. Validate products (0..6, local upload only)
     const rawProducts = body.products === undefined || body.products === null ? [] : body.products;
     if (!Array.isArray(rawProducts)) return fail("REPLICA_INVALID_PRODUCTS", 400);
     if (rawProducts.length > REPLICA_MAX_PRODUCTS) return fail("REPLICA_TOO_MANY_PRODUCTS", 400);
@@ -535,51 +525,28 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
     for (const entry of rawProducts) {
       if (!isPlainObject(entry)) return fail("REPLICA_INVALID_PRODUCTS", 400);
       const hasLibraryId = entry.libraryResourceId !== undefined && entry.libraryResourceId !== null;
-      const hasUploadBytes = entry.bytesBase64 !== undefined && entry.bytesBase64 !== null;
-      if (hasLibraryId && hasUploadBytes) return fail("REPLICA_INVALID_PRODUCTS", 400);
-
-      if (hasLibraryId) {
-        const libraryResourceId = typeof entry.libraryResourceId === "string" ? entry.libraryResourceId.trim() : "";
-        if (!libraryResourceId) return fail("REPLICA_INVALID_PRODUCTS", 400);
-        if (!deps.libraryRepository) return fail("LIBRARY_REPOSITORY_NOT_CONFIGURED", 503);
-        const resource = await deps.libraryRepository.getResource(libraryResourceId);
-        if (!resource) return fail("LIBRARY_RESOURCE_NOT_FOUND", 404);
-        try {
-          assertPublishedProductImageResource(resource);
-        } catch (error) {
-          const code = error instanceof Error ? error.message : "LIBRARY_RESOURCE_FORBIDDEN";
-          return fail(code, code === "LIBRARY_RESOURCE_FORBIDDEN" ? 403 : 409);
-        }
-        const objectKey = typeof resource.source?.objectKey === "string" ? resource.source.objectKey : "";
-        if (!objectKey) return fail("INPUT_OBJECT_NOT_FOUND", 404);
-        const stored = await deps.storage.get(objectKey);
-        if (!stored) return fail("INPUT_OBJECT_NOT_FOUND", 404);
-        validatedProducts.push({
-          sourceKind: "library",
-          libraryResourceId: resource.id,
-          resourceVersionId: resource.resourceVersionId,
-          objectKey,
-          filename: resource.title || null,
-          mimeType: resource.mimeType ?? stored.contentType,
-        });
-      } else {
-        const filename = typeof entry.filename === "string" ? entry.filename.trim() : "";
-        const mimeType = typeof entry.mimeType === "string" ? entry.mimeType.trim() : "";
-        const bytesBase64 = typeof entry.bytesBase64 === "string" ? entry.bytesBase64.trim() : "";
-        if (!filename || !mimeType || !bytesBase64) return fail("REPLICA_INVALID_PRODUCTS", 400);
-        if (bytesBase64.length > REPLICA_MAX_BASE64_CHARS) {
-          return fail("IMAGE_TOO_LARGE", 400);
-        }
-        const rawBytes = Buffer.from(bytesBase64, "base64");
-        let processed: RetainedProcessedImage;
-        try {
-          const { generationInput: _unused, ...retained } = await processImage(rawBytes, mimeType);
-          processed = retained;
-        } catch (error) {
-          return fail(error instanceof Error ? error.message : "INVALID_IMAGE", 400);
-        }
-        validatedProducts.push({ sourceKind: "upload", filename, rawBytes, processed });
+      if (hasLibraryId || entry.sourceKind === "library") {
+        return fail("REPLICA_LIBRARY_PRODUCTS_UNSUPPORTED", 400);
       }
+      if (entry.sourceKind !== undefined && entry.sourceKind !== "upload") {
+        return fail("REPLICA_INVALID_PRODUCTS", 400);
+      }
+      const filename = typeof entry.filename === "string" ? entry.filename.trim() : "";
+      const mimeType = typeof entry.mimeType === "string" ? entry.mimeType.trim() : "";
+      const bytesBase64 = typeof entry.bytesBase64 === "string" ? entry.bytesBase64.trim() : "";
+      if (!filename || !mimeType || !bytesBase64) return fail("REPLICA_INVALID_PRODUCTS", 400);
+      if (bytesBase64.length > REPLICA_MAX_BASE64_CHARS) {
+        return fail("IMAGE_TOO_LARGE", 400);
+      }
+      const rawBytes = Buffer.from(bytesBase64, "base64");
+      let processed: RetainedProcessedImage;
+      try {
+        const { generationInput: _unused, ...retained } = await processImage(rawBytes, mimeType);
+        processed = retained;
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "INVALID_IMAGE", 400);
+      }
+      validatedProducts.push({ sourceKind: "upload", filename, rawBytes, processed });
     }
 
     // 3. Validate sceneType, cloneLevel, text constraints, styleUnified, language, ratio, size
@@ -688,45 +655,26 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
       const productRecords: ReplicaProductImage[] = [];
       for (const [index, product] of validatedProducts.entries()) {
         const productId = randomUUID();
-        if (product.sourceKind === "upload") {
-          const objectKey = `replicas/${suite.id}/products/${productId}/original`;
-          const thumbnailObjectKey = `replicas/${suite.id}/products/${productId}/thumbnail`;
-          await deps.storage.put({ key: objectKey, bytes: product.rawBytes, contentType: product.processed.mimeType });
-          await deps.storage.put({ key: thumbnailObjectKey, bytes: product.processed.thumbnail, contentType: "image/jpeg" });
-          productRecords.push({
-            id: productId,
-            suiteId: suite.id,
-            ordinal: index + 1,
-            sourceKind: "upload",
-            objectKey,
-            thumbnailObjectKey,
-            filename: product.filename,
-            mimeType: product.processed.mimeType,
-            sha256: product.processed.sha256,
-            width: product.processed.width,
-            height: product.processed.height,
-            libraryResourceId: null,
-            resourceVersionId: null,
-            createdAt,
-          });
-        } else {
-          productRecords.push({
-            id: productId,
-            suiteId: suite.id,
-            ordinal: index + 1,
-            sourceKind: "library",
-            objectKey: product.objectKey,
-            thumbnailObjectKey: null,
-            filename: product.filename,
-            mimeType: product.mimeType,
-            sha256: null,
-            width: null,
-            height: null,
-            libraryResourceId: product.libraryResourceId,
-            resourceVersionId: product.resourceVersionId,
-            createdAt,
-          });
-        }
+        const objectKey = `replicas/${suite.id}/products/${productId}/original`;
+        const thumbnailObjectKey = `replicas/${suite.id}/products/${productId}/thumbnail`;
+        await deps.storage.put({ key: objectKey, bytes: product.rawBytes, contentType: product.processed.mimeType });
+        await deps.storage.put({ key: thumbnailObjectKey, bytes: product.processed.thumbnail, contentType: "image/jpeg" });
+        productRecords.push({
+          id: productId,
+          suiteId: suite.id,
+          ordinal: index + 1,
+          sourceKind: "upload",
+          objectKey,
+          thumbnailObjectKey,
+          filename: product.filename,
+          mimeType: product.processed.mimeType,
+          sha256: product.processed.sha256,
+          width: product.processed.width,
+          height: product.processed.height,
+          libraryResourceId: null,
+          resourceVersionId: null,
+          createdAt,
+        });
       }
       await replicaRepository.saveProductImages(suite.id, productRecords);
     }

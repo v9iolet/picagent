@@ -89,28 +89,17 @@ export interface ReplicaReferenceDraft {
   error?: string;
 }
 
-export type ReplicaProductDraft =
-  | {
-      localId: string;
-      sourceKind: "upload";
-      filename: string;
-      mimeType: string;
-      previewUrl: string;
-      bytesBase64: string;
-      sha256: string;
-      status: "reading" | "ready" | "error";
-      error?: string;
-    }
-  | {
-      localId: string;
-      sourceKind: "library";
-      libraryResourceId: string;
-      resourceVersionId: string;
-      title: string;
-      previewUrl: string;
-      resourceType?: "base_image" | "input_image";
-      status: "ready";
-    };
+export interface ReplicaProductDraft {
+  localId: string;
+  sourceKind: "upload";
+  filename: string;
+  mimeType: string;
+  previewUrl: string;
+  bytesBase64: string;
+  sha256: string;
+  status: "reading" | "ready" | "error";
+  error?: string;
+}
 
 export interface ReplicaConfigDraft {
   sceneType: ReplicaSceneType;
@@ -141,10 +130,7 @@ export interface ReplicaCreatePayload {
     bytesBase64: string;
     remark?: string;
   }>;
-  products: Array<
-    | { filename: string; mimeType: string; bytesBase64: string }
-    | { libraryResourceId: string }
-  >;
+  products: Array<{ filename: string; mimeType: string; bytesBase64: string }>;
   sceneType: ReplicaSceneType;
   cloneLevel: ReplicaCloneLevel;
   unifiedRequirement: string;

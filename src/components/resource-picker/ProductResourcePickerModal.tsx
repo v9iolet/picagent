@@ -9,7 +9,7 @@ import { Icon } from "../../pages/shared";
 import "./resource-picker.css";
 
 export interface ProductResourceSelection extends ApiProductMaterialRef {
-  resourceType?: "base_image" | "input_image";
+  resourceType?: "base_image";
   mimeType?: string | null;
 }
 
@@ -28,10 +28,7 @@ export interface ProductResourcePickerModalProps {
 }
 
 function isAvailableProductResource(resource: ApiLibraryResource): boolean {
-  return (
-    resource.status === "published" &&
-    (resource.resourceType === "base_image" || resource.resourceType === "input_image")
-  );
+  return resource.status === "published" && resource.resourceType === "base_image";
 }
 
 export function ProductResourcePickerModal({
@@ -41,7 +38,7 @@ export function ProductResourcePickerModal({
   initialSelected = [],
   onConfirm,
   onError,
-  title = "选择图片库参考图",
+  title = "选择白底底图",
   eyebrow = "PRODUCT MATERIALS",
   subtitle,
   confirmLabel = "确认绑定",
@@ -69,16 +66,18 @@ export function ProductResourcePickerModal({
     let active = true;
     void (async () => {
       try {
-        const results = await Promise.all(
-          (["base_image", "input_image"] as const).map((resourceType) =>
-            suiteApi.listLibraryResources({ resourceType, status: "published", pageSize: 100 }),
-          ),
-        );
+        const result = await suiteApi.listLibraryResources({
+          resourceType: "base_image",
+          status: "published",
+          pageSize: 100,
+        });
         if (!active) return;
-        const loadedItems = results.flatMap((result) => result.items);
+        const loadedItems = result.items.filter(isAvailableProductResource);
         const loadedIds = new Set(loadedItems.map((item) => item.id));
         const missingFromPage = normalizedInitial.filter((ref) => !loadedIds.has(ref.resourceId));
         const unavailableIds = new Set<string>();
+        let deletedCount = 0;
+        let unsupportedCount = 0;
 
         if (missingFromPage.length > 0) {
           await Promise.all(
@@ -87,10 +86,12 @@ export function ProductResourcePickerModal({
                 const detail = await suiteApi.getLibraryResource(ref.resourceId);
                 if (!isAvailableProductResource(detail)) {
                   unavailableIds.add(ref.resourceId);
+                  unsupportedCount += 1;
                 }
               } catch (error) {
                 if (error instanceof ApiHttpError && error.status === 404) {
                   unavailableIds.add(ref.resourceId);
+                  deletedCount += 1;
                 }
               }
             }),
@@ -105,7 +106,13 @@ export function ProductResourcePickerModal({
               .filter((ref) => !unavailableIds.has(ref.resourceId))
               .map((ref, idx) => ({ ...ref, order: idx + 1 })),
           );
-          setRemovedNotice(`已移除 ${unavailableIds.size} 张已删除的图片`);
+          if (deletedCount > 0 && unsupportedCount === 0) {
+            setRemovedNotice(`已移除 ${deletedCount} 张已删除的图片`);
+          } else if (unsupportedCount > 0 && deletedCount === 0) {
+            setRemovedNotice(`已移除 ${unsupportedCount} 张历史原图引用（请改选白底底图）`);
+          } else {
+            setRemovedNotice(`已移除 ${unavailableIds.size} 张不可选的图片`);
+          }
         }
       } catch {
         if (active) setLoadError(true);
@@ -146,7 +153,7 @@ export function ProductResourcePickerModal({
           order: current.length + 1,
           title: item.title,
           previewUrl: item.previewUrl ?? `/api/library/resources/${encodeURIComponent(item.id)}/preview`,
-          resourceType: item.resourceType === "base_image" ? "base_image" : "input_image",
+          resourceType: "base_image",
           mimeType: item.mimeType,
         },
       ];
@@ -184,7 +191,7 @@ export function ProductResourcePickerModal({
     }
   };
 
-  const resolvedSubtitle = subtitle ?? `最多 ${limit} 张，按顺序作为主图和补充角度`;
+  const resolvedSubtitle = subtitle ?? `最多 ${limit} 张已发布白底底图，按顺序作为主图和补充角度`;
 
   return (
     <div
@@ -226,7 +233,7 @@ export function ProductResourcePickerModal({
             正在加载图片库…
           </p>
         ) : (
-          !items.length && <p className="rp-picker-state">暂无已发布的原图或白底图</p>
+          !items.length && <p className="rp-picker-state">暂无已发布的白底底图</p>
         )}
 
         <div className="wb-white-picker-grid rp-picker-grid">
@@ -245,7 +252,7 @@ export function ProductResourcePickerModal({
                 {item.previewUrl && <img src={item.previewUrl} alt={item.title} />}
                 <strong>{item.title}</strong>
                 <small>
-                  {item.resourceType === "base_image" ? "白底图" : "原图"} · {item.resourceVersionId.slice(0, 8)}
+                  白底底图 · {item.resourceVersionId.slice(0, 8)}
                 </small>
               </button>
             );

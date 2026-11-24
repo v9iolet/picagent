@@ -107,6 +107,7 @@ export const errorMessages: Record<string, string> = {
   REPLICA_TOO_MANY_REFERENCES: "最多上传 6 张参考图",
   REPLICA_REMARK_TOO_LONG: "单张参考要求不能超过 200 字",
   REPLICA_INVALID_PRODUCTS: "产品原图参数无效",
+  REPLICA_LIBRARY_PRODUCTS_UNSUPPORTED: "爆品图复刻仅支持本地上传产品原图，不支持从图片库选择",
   REPLICA_TOO_MANY_PRODUCTS: "最多提供 6 张产品原图",
   REPLICA_INVALID_SCENE_TYPE: "复刻类型无效",
   REPLICA_INVALID_CLONE_LEVEL: "复刻程度无效",

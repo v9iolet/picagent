@@ -84,13 +84,21 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
                 idempotencyKey: req.headers["idempotency-key"],
               });
               const image = result.body?.data;
-              // Production library builds this row from the uploaded input image table.
-              if (image) libraryRepository.addResource({
-                id: `input:${image.id}`, resourceType: "input_image", title: image.originalFilename, summary: "", mimeType: image.mimeType,
-                previewUrl: image.thumbnailPreviewUrl, suiteId: image.suiteId, taskId: null, imageVersionId: null, baseVersionId: null,
-                templateVersionId: null, resourceVersionId: image.id, stage: null, source: { objectKey: image.originalObjectKey },
-                status: "published", createdAt: image.createdAt, updatedAt: image.createdAt,
-              });
+              // Seed both an input_image (must stay hidden from picker) and a published base_image (must appear in picker).
+              if (image) {
+                libraryRepository.addResource({
+                  id: `input:${image.id}`, resourceType: "input_image", title: image.originalFilename, summary: "", mimeType: image.mimeType,
+                  previewUrl: image.thumbnailPreviewUrl, suiteId: image.suiteId, taskId: null, imageVersionId: null, baseVersionId: null,
+                  templateVersionId: null, resourceVersionId: image.id, stage: null, source: { objectKey: image.originalObjectKey },
+                  status: "published", createdAt: image.createdAt, updatedAt: image.createdAt,
+                });
+                libraryRepository.addResource({
+                  id: `base:${image.id}`, resourceType: "base_image", title: `白底底图 · ${image.originalFilename}`, summary: "", mimeType: image.mimeType,
+                  previewUrl: image.thumbnailPreviewUrl, suiteId: image.suiteId, taskId: null, imageVersionId: null, baseVersionId: image.id,
+                  templateVersionId: null, resourceVersionId: image.id, stage: null, source: { objectKey: image.originalObjectKey },
+                  status: "published", createdAt: image.createdAt, updatedAt: image.createdAt,
+                });
+              }
             } else if (input) result = await api.preview(input[1], input[2], input[3]);
             else if (version) result = await api.previewTaskVersion(version[1], version[2]);
             else if (edited) {
@@ -339,7 +347,8 @@ test("生图画布：新建、上传、绑定、选择 2K 后用选定尺寸出�
   assert.equal(await generateInspector.isEnabled(), true);
   await page.getByRole("button", { name: "从图片库选择" }).click();
   const library = page.getByRole("dialog", { name: "选择图片库参考图" });
-  await library.getByRole("button", { name: /gan65-product\.jpg.*原图/ }).waitFor();
+  await library.getByRole("button", { name: /白底底图 · gan65-product\.jpg.*白底底图/ }).waitFor();
+  assert.equal(await library.locator(".rp-picker-item").count(), 1);
   await library.getByRole("button", { name: "取消", exact: true }).click();
 
   const size = page.getByRole("combobox", { name: /^分辨率/ });

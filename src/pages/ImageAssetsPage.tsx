@@ -14,7 +14,7 @@ import {
 } from "../features/library/library-helpers";
 import { Icon } from "./shared";
 
-type ImageResourceFilter = "all" | Exclude<ApiLibraryResourceType, "prompt_template">;
+type ImageResourceFilter = "all" | Exclude<ApiLibraryResourceType, "prompt_template" | "input_image">;
 type DeleteConfirmState =
   | { mode: "single"; resource: ApiLibraryResource }
   | { mode: "batch"; ids: string[] };
@@ -78,7 +78,9 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
       })
       .then((result) => {
         if (!active || sequence !== loadSequence.current) return;
-        const visible = result.items.filter((item) => item.resourceType !== "prompt_template");
+        const visible = result.items.filter(
+          (item) => item.resourceType !== "prompt_template" && item.resourceType !== "input_image",
+        );
         if (visible.length === 0 && result.total > 0 && page > 1) {
           const lastPage = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
           setTotal(result.total);
@@ -257,10 +259,9 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
               <div className="style-filter-group">
                 <h3>资产类型</h3>
                 {([
-                  ["all", "全部图片"],
-                  ["input_image", "商品实拍原图"],
-                  ["base_image", "白底底图"],
+                  ["all", "全部生成图"],
                   ["task_image_version", "AI 生成结果"],
+                  ["base_image", "白底底图"],
                   ["process_image", "过程图"],
                   ["reverse_reference_asset", "爆品图反推"],
                 ] as [ImageResourceFilter, string][]).map(([value, label]) => (
@@ -286,7 +287,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
               </div>
               <div className="style-filter-note">
                 <Icon name="image" />
-                <p>图片资源来自商品生产链路；除实拍原图外，每张图片都保留对应提示词快照。</p>
+                <p>图片库仅沉淀 AI 生成与派生图片，每张图片都保留对应提示词快照。</p>
               </div>
             </div>
           </div>
@@ -296,7 +297,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
           <header className="panel-header style-catalog-toolbar">
             <div>
               <strong className="panel-title">图片资产</strong>
-              <div className="panel-subtitle">浏览实拍原图、白底底图、AI 生成图与爆品反推资产，单击卡片在右侧查看详情</div>
+              <div className="panel-subtitle">浏览 AI 生成图、白底底图、过程图与爆品反推资产，单击卡片在右侧查看详情</div>
             </div>
           </header>
           <div className="style-library-toolbar">
@@ -440,20 +441,13 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
               </section>
               <section className="inspector-section">
                 <h3>提示词快照</h3>
-                {selected.resourceType === "input_image" ? (
-                  <div className="resource-prompt-empty">
-                    <strong>原始输入图不适用生成提示词</strong>
-                    <p>实拍原图只作为商品事实和外观依据保存。</p>
+                <div className="style-library-prompt-entry">
+                  <div>
+                    <strong>已保存提示词快照</strong>
+                    <span>{promptTextFor(selected).slice(0, 72)}{promptTextFor(selected).length > 72 ? "…" : ""}</span>
                   </div>
-                ) : (
-                  <div className="style-library-prompt-entry">
-                    <div>
-                      <strong>已保存提示词快照</strong>
-                      <span>{promptTextFor(selected).slice(0, 72)}{promptTextFor(selected).length > 72 ? "…" : ""}</span>
-                    </div>
-                    <button className="btn" type="button" onClick={() => setPromptModal(selected)}>查看完整提示词快照</button>
-                  </div>
-                )}
+                  <button className="btn" type="button" onClick={() => setPromptModal(selected)}>查看完整提示词快照</button>
+                </div>
               </section>
               <section className="inspector-section">
                 <h3>快捷复用</h3>
@@ -461,32 +455,28 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
                   {selected.previewUrl && (
                     <a className="btn" href={selected.previewUrl} download={`${selected.title}.png`}>下载图片</a>
                   )}
-                  {selected.resourceType !== "input_image" && (
-                    <button
-                      className="btn btn-primary"
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard?.writeText(promptTextFor(selected)).catch(() => undefined);
-                        notify("已复制提示词，正在前往创建新方案");
-                        navigate(`/suites/new?prefillName=${encodeURIComponent(`${selected.title} · 复用方案`)}`);
-                      }}
-                    >
-                      复制提示词并新建方案
-                    </button>
-                  )}
+                  <button
+                    className="btn btn-primary"
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(promptTextFor(selected)).catch(() => undefined);
+                      notify("已复制提示词，正在前往创建新方案");
+                      navigate(`/suites/new?prefillName=${encodeURIComponent(`${selected.title} · 复用方案`)}`);
+                    }}
+                  >
+                    复制提示词并新建方案
+                  </button>
                 </div>
               </section>
-              {selected.resourceType !== "input_image" && (
-                <section className="inspector-section">
-                  <h3>生成参数</h3>
-                  <dl className="definition-list">
-                    <dt>图片比例</dt><dd>{ratioFor(selected)}</dd>
-                    <dt>图片尺寸</dt><dd>{dimensionsFor(selected)}</dd>
-                    <dt>清晰度</dt><dd>{promptSnapshotValue(selected, "quality")}</dd>
-                    <dt>模型</dt><dd>{promptSnapshotValue(selected, "model")}</dd>
-                  </dl>
-                </section>
-              )}
+              <section className="inspector-section">
+                <h3>生成参数</h3>
+                <dl className="definition-list">
+                  <dt>图片比例</dt><dd>{ratioFor(selected)}</dd>
+                  <dt>图片尺寸</dt><dd>{dimensionsFor(selected)}</dd>
+                  <dt>清晰度</dt><dd>{promptSnapshotValue(selected, "quality")}</dd>
+                  <dt>模型</dt><dd>{promptSnapshotValue(selected, "model")}</dd>
+                </dl>
+              </section>
               <section className="inspector-section">
                 <h3>资产管理</h3>
                 <div className="style-library-actions">

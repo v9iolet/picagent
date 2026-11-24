@@ -687,7 +687,7 @@ function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; 
         max={3}
         initialSelected={bound}
         title="选择图片库参考图"
-        subtitle="最多 3 张，按顺序作为主图和补充角度"
+        subtitle="最多 3 张已发布白底底图，按顺序作为主图和补充角度"
         confirmLabel="确认绑定"
         onConfirm={async (selected) => {
           await suiteApi.bindWhiteResources(task.id, selected.map((item) => item.resourceId));
