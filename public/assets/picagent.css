@@ -10,6 +10,8 @@
   --accent-hover: #27272A;
   --canvas: #18181B;
   --canvas-raised: #27272A;
+  --canvas-accent: #FAFAFA;
+  --canvas-accent-muted: #E4E4E7;
   --trust: #10B981;
   --warning: #D97706;
   --danger: #DC2626;
@@ -222,15 +224,15 @@ svg, use {
 .editor-center { min-width: 0; min-height: 0; display: grid; grid-template-rows: 1fr 70px 132px; background: var(--canvas); }
 .image-canvas { position: relative; min-height: 0; margin: 0; overflow: hidden; background: var(--canvas); display: grid; place-items: center; }
 .scene-frame { position: relative; width: min(820px, calc(100% - 38px)); aspect-ratio: 4 / 3; overflow: hidden; border-radius: 4px; background: oklch(0.87 0.03 80); box-shadow: 0 18px 48px color-mix(in oklch, var(--canvas) 70%, transparent); }
-.mask-zone { position: absolute; right: 16%; top: 39%; width: 24%; height: 30%; border: 1px dashed color-mix(in oklch, var(--accent) 75%, var(--surface)); background: color-mix(in oklch, var(--accent) 23%, transparent); }
+.mask-zone { position: absolute; right: 16%; top: 39%; width: 24%; height: 30%; border: 1px dashed var(--canvas-accent); background: rgba(250, 250, 250, 0.16); }
 .mask-zone::after { content: "重绘区域"; position: absolute; right: 5px; bottom: 5px; color: var(--surface); font-size: 10px; text-shadow: 0 1px 2px var(--canvas); }
 .fidelity-track { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: color-mix(in oklch, var(--surface) 8%, var(--canvas)); border-top: 1px solid color-mix(in oklch, var(--surface) 10%, transparent); border-bottom: 1px solid color-mix(in oklch, var(--surface) 10%, transparent); }
 .fidelity-cell { min-width: 0; padding: 11px 12px; background: var(--canvas); color: color-mix(in oklch, var(--surface) 72%, var(--canvas)); }
 .fidelity-cell strong { display: block; margin-top: 2px; color: var(--surface); font-size: 12px; }
 .fidelity-cell.warn strong { color: color-mix(in oklch, var(--warning) 82%, var(--surface)); }
-.filmstrip { display: flex; align-items: center; gap: 10px; padding: 10px 14px; overflow: hidden; background: oklch(0.18 0.01 255); }
+.filmstrip { display: flex; align-items: center; gap: 10px; padding: 10px 14px; overflow: hidden; background: #121215; }
 .version-thumb { position: relative; flex: 0 0 130px; aspect-ratio: 4/3; border: 2px solid transparent; border-radius: 5px; overflow: hidden; background-color: var(--canvas-raised); background-size:cover; background-position:center; cursor: pointer; }
-.version-thumb.active { border-color: var(--accent); }
+.version-thumb.active { border-color: var(--canvas-accent); box-shadow: 0 0 0 1px rgba(250, 250, 250, 0.35); }
 .version-thumb .version-id { position: absolute; left: 5px; top: 5px; padding: 2px 4px; border-radius: 3px; color: var(--surface); background: color-mix(in oklch, var(--canvas) 80%, transparent); }
 .version-thumb::after { content: ""; position: absolute; left: 43%; bottom: 13%; width: 28%; aspect-ratio:1; border-radius: 3px; background:url('gan65-product-tight.jpg') center/cover no-repeat; box-shadow: 0 6px 7px color-mix(in oklch, var(--fg) 28%, transparent); }
 
@@ -263,13 +265,13 @@ svg, use {
 .compare-pane .scene-frame { width: calc(100% - 22px); }
 .compare-label { position: absolute; left: 16px; top: 14px; z-index: 7; padding: 4px 7px; border-radius: 4px; background: color-mix(in oklch, var(--canvas) 82%, transparent); color: var(--surface); font: 700 10px/1 var(--font-mono); }
 .annotation-pin { position: absolute; z-index: 9; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; border: 2px solid var(--surface); background: var(--warning); color: var(--fg); font: 700 9px/1 var(--font-mono); box-shadow: 0 3px 8px color-mix(in oklch, var(--canvas) 35%, transparent); cursor: pointer; }
-.annotation-pin.active { background: var(--accent); color: var(--surface); transform: scale(1.08); }
-.timeline { padding: 12px 18px; background: oklch(0.18 0.01 255); color: var(--surface); overflow: hidden; }
+.annotation-pin.active { background: var(--canvas-accent); color: var(--canvas); border-color: var(--canvas-accent); transform: scale(1.08); }
+.timeline { padding: 12px 18px; background: #121215; color: var(--surface); overflow: hidden; }
 .timeline-track { position: relative; height: 48px; display: grid; grid-template-columns: repeat(6, 1fr); align-items: center; }
 .timeline-track::before { content: ""; position: absolute; left: 5%; right: 5%; top: 24px; height: 1px; background: color-mix(in oklch, var(--surface) 28%, transparent); }
 .timeline-node { position: relative; z-index: 2; justify-self: center; width: 34px; height: 34px; border-radius: 50%; border: 1px solid color-mix(in oklch, var(--surface) 30%, transparent); background: var(--canvas); display: grid; place-items: center; font: 700 9px/1 var(--font-mono); cursor: pointer; }
-.timeline-node.active { color: var(--surface); background: var(--accent); border-color: var(--accent); }
-.branch-line { position: absolute; left: 59%; top: 24px; width: 17%; height: 18px; border-top: 1px solid color-mix(in oklch, var(--accent) 70%, var(--surface)); border-right: 1px solid color-mix(in oklch, var(--accent) 70%, var(--surface)); transform: skewY(-13deg); }
+.timeline-node.active { color: var(--canvas); background: var(--canvas-accent); border-color: var(--canvas-accent); }
+.branch-line { position: absolute; left: 59%; top: 24px; width: 17%; height: 18px; border-top: 1px solid rgba(250, 250, 250, 0.55); border-right: 1px solid rgba(250, 250, 250, 0.55); transform: skewY(-13deg); }
 .diff-row { padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .diff-label { color: var(--muted); font-size: 10px; margin-bottom: 5px; }
 .diff-change { display: grid; grid-template-columns: 1fr auto 1fr; gap: 6px; align-items: start; font-size: 11px; }
@@ -360,7 +362,7 @@ svg, use {
 .scene-frame.has-image { background-size: cover; background-position: center; }
 .scene-frame.has-image::after { content:""; position:absolute; inset:0; background:color-mix(in oklch, var(--canvas) 8%, transparent); pointer-events:none; }
 .real-product { position:absolute; z-index:4; width:24%; max-width:190px; aspect-ratio:1; object-fit:cover; border-radius:8px; box-shadow:0 18px 28px color-mix(in oklch, var(--canvas) 56%, transparent); }
-.real-product.locked { outline:2px solid var(--genesis-indigo); outline-offset:5px; }
+.real-product.locked { outline:2px solid var(--canvas-accent); outline-offset:5px; }
 .editor-center .real-product { left:50%; bottom:17%; transform:translateX(-50%); }
 .compare-pane .real-product { left:50%; bottom:14%; transform:translateX(-50%); width:28%; }
 .dual-canvas[data-mode="slider"] { position:relative; display:block; }
@@ -370,7 +372,7 @@ svg, use {
 .dual-canvas[data-mode="product"] .scene-frame { background-image:none !important; background:var(--canvas-raised); }
 .dual-canvas[data-mode="product"] .real-product { width:38%; max-width:230px; bottom:22%; }
 .mask-zone { z-index:5; }
-.mask-zone::after { content:"商品像素锁定"; position:absolute; top:10px; left:10px; padding:4px 7px; border:1px solid color-mix(in oklch,var(--genesis-indigo) 58%,var(--surface)); border-radius:4px; background:color-mix(in oklch,var(--canvas) 72%,transparent); color:var(--surface); font:10px var(--font-mono); }
+.mask-zone::after { content:"商品像素锁定"; position:absolute; top:10px; left:10px; padding:4px 7px; border:1px solid rgba(250, 250, 250, 0.45); border-radius:4px; background:color-mix(in oklch,var(--canvas) 78%,transparent); color:var(--surface); font:10px var(--font-mono); }
 .ad-creative { position:relative; overflow:hidden; }
 .ad-creative .ad-left { position:relative; overflow:hidden; }
 .ad-creative .ad-left::before { content:""; position:absolute; inset:0; background:url('gan65-product-tight.jpg') center/contain no-repeat; opacity:.12; }

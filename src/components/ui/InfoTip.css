@@ -47,10 +47,13 @@
 
 .pa-info-popover {
   position: fixed;
+  inset: auto;
+  margin: 0;
   z-index: 140;
   width: 292px;
   max-width: calc(100vw - 24px);
   padding: 10px 12px;
+  overflow: visible;
   border-radius: var(--pa-radius-lg, 10px);
   border: 1px solid var(--pa-border-strong, #D4D4D8);
   background: var(--pa-surface, #FFFFFF);
@@ -62,6 +65,7 @@
   text-align: left;
   box-shadow: var(--pa-shadow-popover, 0 12px 32px -4px rgba(24, 24, 27, 0.14), 0 2px 6px rgba(24, 24, 27, 0.06));
   pointer-events: auto;
+  outline: none;
   animation: pa-info-fade-in 120ms ease-out;
 }
 

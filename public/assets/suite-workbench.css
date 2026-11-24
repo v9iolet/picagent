@@ -603,7 +603,11 @@ body:has(.suite-mode-switch button:nth-child(2).active) .flow-version-row { padd
 .wb-editor-tools > strong { display:block; margin-bottom:10px; font-size:12px; }
 .wb-editor-tools button { display:flex; align-items:center; width:100%; min-height:36px; margin-top:6px; padding:0 10px; border:1px solid transparent; border-radius:6px; background:transparent; color:var(--suite-ink); text-align:left; font-size:11px; }
 .wb-editor-tools button.is-active { border-color:#18181B; background:#18181B; color:#FFFFFF; font-weight:600; }
-.wb-editor-tools button.is-active small { color:#D4D4D8; }
+.wb-editor-tools button.is-active:hover:not(:disabled),
+.ss-layout .wb-editor-tools button.is-active:hover:not(:disabled) { border-color:#27272A; background:#27272A; color:#FFFFFF; }
+.wb-editor-tools button.is-active small,
+.wb-editor-tools button.is-active:hover:not(:disabled) small,
+.ss-layout .wb-editor-tools button.is-active:hover:not(:disabled) small { color:#E4E4E7; }
 .wb-editor-tools p { margin:14px 0 0; color:var(--suite-muted); font-size:10px; line-height:1.5; }
 .wb-editor-stage { min-width:0; display:flex; flex-direction:column; padding:18px; background:#eef1f4; }
 .wb-editor-canvas { position:relative; flex:1; min-height:450px; display:grid; place-items:center; overflow:hidden; border:1px solid #d4dbe5; border-radius:9px; background:#dfe4ea; }
@@ -659,6 +663,8 @@ body:has(.suite-mode-switch button:nth-child(2).active) .flow-version-row { padd
 .wb-editor-bottom { flex-wrap:wrap; }
 .wb-mask-mode { display:inline-flex; align-items:center; gap:4px; }
 .wb-mask-mode button.is-active { border-color:#18181B; background:#18181B; color:#FFFFFF; }
+.wb-mask-mode button.is-active:hover:not(:disabled),
+.ss-layout .wb-mask-mode button.is-active:hover:not(:disabled) { border-color:#27272A; background:#27272A; color:#FFFFFF; }
 .wb-editor-options textarea { min-height:88px; resize:vertical; border:1px solid var(--suite-line); border-radius:6px; background:#fff; padding:8px; color:var(--suite-ink); font:inherit; line-height:1.5; }
 .wb-editor-option-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .wb-editor-option-head button, .wb-danger-link { min-height:30px; border:1px solid var(--suite-line); border-radius:6px; background:#fff; color:var(--suite-ink); padding:0 8px; font:inherit; font-size:10px; }

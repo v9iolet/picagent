@@ -43,6 +43,11 @@ interface PopoverCoords {
   arrowLeft: number;
 }
 
+type PopoverElement = HTMLDivElement & {
+  showPopover?: () => void;
+  hidePopover?: () => void;
+};
+
 export function InfoTip({
   title,
   content,
@@ -55,7 +60,7 @@ export function InfoTip({
   const generatedId = useId();
   const popoverId = id ?? generatedId;
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const popoverRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<PopoverElement>(null);
   const openTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
   const suppressHoverRef = useRef(false);
@@ -129,6 +134,17 @@ export function InfoTip({
       setCoords(null);
       return;
     }
+    const popover = popoverRef.current;
+    let usedTopLayer = false;
+    if (popover && typeof popover.showPopover === "function") {
+      popover.setAttribute("popover", "manual");
+      try {
+        popover.showPopover();
+        usedTopLayer = true;
+      } catch {
+        popover.removeAttribute("popover");
+      }
+    }
     computePosition();
     const onReposition = () => computePosition();
     window.addEventListener("resize", onReposition);
@@ -136,16 +152,34 @@ export function InfoTip({
     return () => {
       window.removeEventListener("resize", onReposition);
       window.removeEventListener("scroll", onReposition, true);
+      if (usedTopLayer && popover && typeof popover.hidePopover === "function") {
+        try {
+          popover.hidePopover();
+        } catch {
+          // Ignore if already hidden or detached
+        }
+      }
     };
   }, [open, computePosition]);
 
   useEffect(() => {
     if (!open) return;
+    const dialogEl = triggerRef.current?.closest("dialog[open]") ?? null;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         event.stopPropagation();
+        event.stopImmediatePropagation();
         closeImmediately();
+        triggerRef.current?.focus({ preventScroll: true });
       }
+    };
+    const onDialogCancel = (event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      closeImmediately();
+      triggerRef.current?.focus({ preventScroll: true });
     };
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
@@ -155,10 +189,12 @@ export function InfoTip({
       }
       closeImmediately();
     };
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    dialogEl?.addEventListener("cancel", onDialogCancel, true);
     window.addEventListener("pointerdown", onPointerDown, true);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
+      dialogEl?.removeEventListener("cancel", onDialogCancel, true);
       window.removeEventListener("pointerdown", onPointerDown, true);
     };
   }, [open, closeImmediately]);
@@ -184,6 +220,7 @@ export function InfoTip({
     if (pinned) return;
     closeTimerRef.current = window.setTimeout(() => {
       closeTimerRef.current = null;
+      if (popoverRef.current?.contains(document.activeElement)) return;
       setOpen(false);
     }, HOVER_CLOSE_DELAY_MS);
   };
@@ -199,6 +236,7 @@ export function InfoTip({
     if (pinned) return;
     closeTimerRef.current = window.setTimeout(() => {
       closeTimerRef.current = null;
+      if (popoverRef.current?.contains(document.activeElement)) return;
       setOpen(false);
     }, HOVER_CLOSE_DELAY_MS);
   };
@@ -223,7 +261,26 @@ export function InfoTip({
     if (open) closeImmediately();
   };
 
+  const handlePopoverBlur = (event: FocusEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget as Node | null;
+    if (
+      nextTarget &&
+      (triggerRef.current?.contains(nextTarget) || popoverRef.current?.contains(nextTarget))
+    ) {
+      return;
+    }
+    if (open) closeImmediately();
+  };
+
+  const handlePopoverMouseDown = () => {
+    setPinned(true);
+  };
+
   const ariaLabel = label ?? (title ? `${title}说明` : "查看说明");
+  const portalTarget =
+    typeof document !== "undefined"
+      ? triggerRef.current?.closest("dialog[open]") ?? document.body
+      : null;
 
   return (
     <span className={`pa-info-anchor ${className}`.trim()}>
@@ -233,7 +290,7 @@ export function InfoTip({
         className={`pa-info-trigger${open ? " is-open" : ""}`}
         aria-label={ariaLabel}
         aria-expanded={open}
-        aria-controls={popoverId}
+        aria-controls={open ? popoverId : undefined}
         aria-describedby={open ? popoverId : undefined}
         onMouseEnter={handleTriggerMouseEnter}
         onMouseLeave={handleTriggerMouseLeave}
@@ -243,12 +300,13 @@ export function InfoTip({
         <Icon name="info" />
       </button>
       {open &&
-        typeof document !== "undefined" &&
+        portalTarget &&
         createPortal(
           <div
             ref={popoverRef}
             id={popoverId}
             role="tooltip"
+            tabIndex={-1}
             className="pa-info-popover"
             data-placement={coords?.placement ?? placement}
             style={
@@ -262,6 +320,8 @@ export function InfoTip({
             }
             onMouseEnter={handlePopoverMouseEnter}
             onMouseLeave={handlePopoverMouseLeave}
+            onMouseDown={handlePopoverMouseDown}
+            onBlur={handlePopoverBlur}
           >
             {title && (
               <div className="pa-info-popover-title">
@@ -271,7 +331,7 @@ export function InfoTip({
             )}
             <div className="pa-info-popover-body">{content}</div>
           </div>,
-          document.body,
+          portalTarget,
         )}
     </span>
   );

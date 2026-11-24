@@ -251,6 +251,15 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.goto(fixture.url + "suites/new");
   await page.waitForURL("**/create/suite");
   await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
+  const rootTokens = await page.evaluate(() => {
+    const s = getComputedStyle(document.documentElement);
+    return {
+      accent: s.getPropertyValue("--accent").trim().toLowerCase(),
+      bg: s.getPropertyValue("--bg").trim().toLowerCase(),
+    };
+  });
+  assert.equal(rootTokens.accent, "#18181b", `Global --accent must stay #18181b (not overridden by product-reverse.css), got ${rootTokens.accent}`);
+  assert.equal(rootTokens.bg, "#fafafa", `Global --bg must stay #fafafa, got ${rootTokens.bg}`);
   await page.screenshot({ path: "tests/browser/suite-studio-empty.png" });
   await page.getByLabel("上传商品原图").setInputFiles("public/assets/gan65-product.jpg");
   await page.waitForURL(/\/create\/suite\/[^/]+$/);
@@ -273,12 +282,15 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
     "建议包含以下信息生成更精准：\n1.产品名称\n2.核心卖点\n3.适用人群\n4.期望场景\n5.具体参数",
   );
   const helpButton = page.getByRole("button", { name: "商品卖点填写说明" });
+  assert.equal(await helpButton.getAttribute("aria-controls"), null, "Closed InfoTip must not expose dangling aria-controls");
   await helpButton.focus();
   await helpButton.press("Enter");
   const help = page.locator("#" + await helpButton.getAttribute("aria-controls"));
   await help.waitFor({ state: "visible" });
   assert.match(await help.textContent(), /已确认的商品事实/);
   assert.equal(await helpButton.getAttribute("aria-expanded"), "true");
+  await help.click();
+  assert.equal(await help.isVisible(), true, "Clicking inside InfoTip popover must keep it open");
   await helpButton.click();
   await help.waitFor({ state: "hidden" });
   await sellingPoints.fill("1. 产品名称：便携键盘\n2. 核心卖点：轻便");
@@ -403,6 +415,23 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.getByRole("tab", { name: "成品展示板", selected: true }).waitFor();
   await page.goto(fixture.url + "settings");
   await page.getByRole("button", { name: "编辑 离线测试", exact: true }).click();
+  const channelDialog = page.locator("dialog[open]");
+  await channelDialog.waitFor({ state: "visible" });
+  const sizeModeTipBtn = channelDialog.getByRole("button", { name: "尺寸换算说明" });
+  await sizeModeTipBtn.click();
+  const sizeModeTip = page.locator("#" + await sizeModeTipBtn.getAttribute("aria-controls"));
+  await sizeModeTip.waitFor({ state: "visible" });
+  const tipBox = await sizeModeTip.boundingBox();
+  assert.ok(tipBox && tipBox.width > 100 && tipBox.height > 20, "InfoTip inside native <dialog> must have non-zero visible geometry");
+  const topHitInsideTip = await sizeModeTip.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return Boolean(hit && el.contains(hit));
+  });
+  assert.equal(topHitInsideTip, true, "InfoTip inside native <dialog> must not be occluded by #top-layer");
+  await page.keyboard.press("Escape");
+  await sizeModeTip.waitFor({ state: "hidden" });
+  assert.equal(await channelDialog.isVisible(), true, "First Escape inside native <dialog> must close only InfoTip, keeping <dialog> open");
   await page.getByLabel("生图", { exact: true }).uncheck();
   await page.getByRole("button", { name: "保存渠道", exact: true }).click();
   await page.waitForFunction(() => !document.querySelector("dialog[open]"));

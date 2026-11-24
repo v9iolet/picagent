@@ -322,11 +322,29 @@
   color: var(--pa-muted);
   font-weight: 500;
 }
-.ss-segments button[aria-pressed="true"] {
+.ss-segments button[aria-pressed="true"],
+.ss-layout .ss-segments button[aria-pressed="true"]:hover:not(:disabled) {
   background: var(--pa-surface);
+  border-color: transparent;
   box-shadow: var(--pa-shadow-xs);
   color: var(--pa-ink);
   font-weight: 600;
+}
+.ss-layout .wb-editor-tools button.is-active,
+.ss-layout .wb-mask-mode button.is-active {
+  border-color: var(--pa-primary);
+  background: var(--pa-primary);
+  color: #FFFFFF;
+}
+.ss-layout .wb-editor-tools button.is-active:hover:not(:disabled),
+.ss-layout .wb-mask-mode button.is-active:hover:not(:disabled) {
+  border-color: var(--pa-primary-hover);
+  background: var(--pa-primary-hover);
+  color: #FFFFFF;
+}
+.ss-layout .wb-editor-tools button.is-active small,
+.ss-layout .wb-editor-tools button.is-active:hover:not(:disabled) small {
+  color: #E4E4E7;
 }
 .ss-help,
 .ss-counter {

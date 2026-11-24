@@ -524,6 +524,15 @@ test("下游接入商品信息卡：首页跳套图+归档快照可读、复刻�
   const pickerModal = page.getByRole("dialog", { name: "选择商品信息卡" });
   await pickerModal.waitFor();
 
+  // Verify InfoTip inside React modal is visible and Escape closes only InfoTip (not parent modal)
+  const pickerTipBtn = pickerModal.getByRole("button", { name: "商品信息卡选择说明" });
+  await pickerTipBtn.click();
+  const pickerTip = page.locator("#" + await pickerTipBtn.getAttribute("aria-controls"));
+  await pickerTip.waitFor({ state: "visible" });
+  await page.keyboard.press("Escape");
+  await pickerTip.waitFor({ state: "hidden" });
+  assert.equal(await pickerModal.isVisible(), true, "First Escape must close only InfoTip, leaving ProductCardPickerModal open");
+
   // Archived cards must not appear in picker
   assert.equal(await pickerModal.getByText(ctx.archivedCard.name).count(), 0);
   assert.equal(await pickerModal.getByText(ctx.tumblerCard.name).count(), 0);
