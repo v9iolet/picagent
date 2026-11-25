@@ -107,6 +107,7 @@ export const errorMessages: Record<string, string> = {
   REPLICA_TOO_MANY_REFERENCES: "最多上传 6 张参考图",
   REPLICA_REMARK_TOO_LONG: "单张参考要求不能超过 200 字",
   REPLICA_INVALID_PRODUCTS: "产品原图参数无效",
+  REPLICA_LIBRARY_PRODUCTS_UNSUPPORTED: "爆品图复刻仅支持本地上传产品原图，不支持从图片库选择",
   REPLICA_TOO_MANY_PRODUCTS: "最多提供 6 张产品原图",
   REPLICA_INVALID_SCENE_TYPE: "复刻类型无效",
   REPLICA_INVALID_CLONE_LEVEL: "复刻程度无效",
@@ -119,11 +120,47 @@ export const errorMessages: Record<string, string> = {
   REPLICA_TEMPLATE_NOT_FOUND: "复刻提示词模板未发布或配置缺失",
   REPLICA_REFERENCE_NOT_FOUND: "复刻参考图不存在",
   REPLICA_ANALYSIS_FAILED: "复刻视觉分析失败，请重试",
+  PRODUCT_CARD_NOT_FOUND: "商品信息卡不存在",
+  PRODUCT_CARD_INVALID_STATUS: "商品信息卡状态参数无效",
+  PRODUCT_CARD_REQUIRED_FIELDS_MISSING: "请补齐必填商品信息",
+  PRODUCT_CARD_VALIDATION_FAILED: "商品信息卡字段不符合格式或长度要求",
+  PRODUCT_CARD_INVALID_IMAGES: "供应商参考图参数无效",
+  PRODUCT_CARD_TOO_MANY_IMAGES: "每张商品信息卡最多上传 6 张供应商参考图",
+  PRODUCT_CARD_IMAGE_NOT_FOUND: "供应商参考图不存在",
+  PRODUCT_CARD_NOT_AVAILABLE: "所选商品信息卡不存在或已归档",
+  PRODUCT_ONBOARDING_SESSION_NOT_FOUND: "建档会话不存在",
+  PRODUCT_ONBOARDING_INVALID_STATUS: "建档会话状态参数无效",
+  PRODUCT_ONBOARDING_SESSION_COMPLETED: "该建档会话已保存至商品库，当前为只读状态，如需修改请前往商品库",
+  PRODUCT_ONBOARDING_EMPTY_MESSAGE: "请输入商品信息、上传 .txt 文件或添加供应商参考图",
+  PRODUCT_ONBOARDING_MESSAGE_TOO_LONG: "单条消息不能超过 10000 字",
+  PRODUCT_ONBOARDING_INVALID_TXT_FILE: "文本附件格式无效，仅支持非空 .txt 文件",
+  PRODUCT_ONBOARDING_TOO_MANY_TXT_FILES: "单次最多上传 3 个 .txt 文本附件",
+  PRODUCT_ONBOARDING_TXT_TOO_LARGE: "单个 .txt 文本附件不能超过 200 KiB",
+  PRODUCT_ONBOARDING_TXT_INVALID_UTF8: ".txt 文件必须是有效的 UTF-8 纯文本，不能包含非法字节或二进制内容",
+  PRODUCT_ONBOARDING_TOO_MANY_IMAGES: "同一建档会话最多累计上传 6 张供应商参考图",
+  PRODUCT_ONBOARDING_IMAGE_NOT_FOUND: "建档会话供应商参考图不存在",
+  PRODUCT_ONBOARDING_TEMPLATE_NOT_FOUND: "商品建档提示词模板未发布或配置缺失",
+  PRODUCT_ONBOARDING_LLM_NOT_SUPPORTED: "当前多模态模型客户端不支持商品建档抽取",
+  PRODUCT_ONBOARDING_OUTPUT_INVALID: "建档模型输出不符合契约，请重试",
+  INVALID_PAGINATION: "分页参数无效",
 };
 
-export function fail(code: string, status = 400, message?: string): AppResponse {
+export function fail(
+  code: string,
+  status = 400,
+  message?: string,
+  extra?: { missingFields?: string[]; details?: Record<string, unknown> },
+): AppResponse {
   return {
     status,
-    body: { error: { code, message: message ?? errorMessages[code] ?? "请求失败" }, requestId: randomUUID() },
+    body: {
+      error: {
+        code,
+        message: message ?? errorMessages[code] ?? "请求失败",
+        ...(extra?.missingFields ? { missingFields: extra.missingFields } : {}),
+        ...(extra?.details ? { details: extra.details } : {}),
+      },
+      requestId: randomUUID(),
+    },
   };
 }

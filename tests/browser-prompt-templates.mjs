@@ -164,9 +164,9 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
   await page.goto(`${baseUrl}/templates`, { waitUntil: "networkidle" });
   await page.waitForSelector(".template-card");
 
-  // 1. Default filter is "在用" and shows only the 6 active templates, each with a usedBy badge
+  // 1. Default filter is "在用" and shows only the 7 active templates, each with a usedBy badge
   const activeCount = await page.locator(".template-card").count();
-  assert.equal(activeCount, 6, `Expected 6 active templates by default, got ${activeCount}`);
+  assert.equal(activeCount, 7, `Expected 7 active templates by default, got ${activeCount}`);
 
   const allCardsText = await page.locator(".template-list-grid").innerText();
   for (const label of [
@@ -176,6 +176,7 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
     "上架文案",
     "爆品图复刻·参考风格",
     "爆品图复刻·高度复刻",
+    "首页·商品信息建档",
   ]) {
     assert.ok(allCardsText.includes(label), `Expected active template list to display feature badge "${label}"`);
   }
@@ -219,7 +220,7 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
 
   // 4. Switch back to "在用" and verify copy -> edit -> save -> draft filter -> publish flow still works
   await page.locator(".style-filter-panel label", { hasText: "在用" }).click();
-  await page.waitForFunction(() => document.querySelectorAll(".template-card").length === 6);
+  await page.waitForFunction(() => document.querySelectorAll(".template-card").length === 7);
   await page.locator(".template-card", { hasText: "套图·白底精修" }).click();
   await page.getByRole("button", { name: "复制新草稿" }).click();
   await page.getByRole("button", { name: "保存草稿" }).waitFor({ state: "visible" });
@@ -230,7 +231,7 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
   assert.match(await page.locator(".template-card").first().innerText(), /v2/);
   await page.getByRole("button", { name: "发布此版本" }).click();
   await page.locator(".style-filter-panel label", { hasText: "在用" }).click();
-  await page.waitForFunction(() => document.querySelectorAll(".template-card").length === 6);
+  await page.waitForFunction(() => document.querySelectorAll(".template-card").length === 7);
   await page.locator(".template-card", { hasText: "套图·白底精修" }).click();
   await page.waitForFunction(() =>
     Array.from(document.querySelectorAll(".style-version-row")).some((row) =>

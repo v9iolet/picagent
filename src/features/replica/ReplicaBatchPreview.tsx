@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
+import { readProductCardSnapshot } from "../../../shared/product-card";
 import { suiteApi } from "../../api/client";
+import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
 import { download, message, studioApi } from "../../components/suite-studio/studio";
 import { StudioDialog } from "../../components/suite-studio/StudioDialog";
 import {
@@ -106,6 +108,9 @@ export function ReplicaBatchPreview({
   const total = state.progress.total;
   const completed = state.progress.completed;
   const isStyleSketch = Boolean(state.styleSketch);
+  const productCardSnapshot = readProductCardSnapshot(
+    state.productCardSnapshot ?? run?.config?.productCardSnapshot,
+  );
   const convergedComplete =
     !running &&
     cards.length > 0 &&
@@ -408,6 +413,10 @@ export function ReplicaBatchPreview({
           </button>
         </div>
       </header>
+
+      {productCardSnapshot && (
+        <SelectedProductCardBar card={productCardSnapshot} readOnly compact />
+      )}
 
       {progress && (
         <div className="ss-progress">

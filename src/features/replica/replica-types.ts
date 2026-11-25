@@ -1,6 +1,8 @@
 import type { ImageOptions } from "../../../shared/model-settings";
+import type { ProductCardSnapshot } from "../../../shared/product-card";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { createIdempotencyKey, type ApiImage, type ApiLibraryResource, type ApiSuite, type ApiTaskStatus } from "../../api/client";
+import type { SelectedProductCardSummary } from "../../components/product-card-picker/types";
 
 export type ReplicaSceneType =
   | "ecommerce_product"
@@ -89,34 +91,25 @@ export interface ReplicaReferenceDraft {
   error?: string;
 }
 
-export type ReplicaProductDraft =
-  | {
-      localId: string;
-      sourceKind: "upload";
-      filename: string;
-      mimeType: string;
-      previewUrl: string;
-      bytesBase64: string;
-      sha256: string;
-      status: "reading" | "ready" | "error";
-      error?: string;
-    }
-  | {
-      localId: string;
-      sourceKind: "library";
-      libraryResourceId: string;
-      resourceVersionId: string;
-      title: string;
-      previewUrl: string;
-      resourceType?: "base_image" | "input_image";
-      status: "ready";
-    };
+export interface ReplicaProductDraft {
+  localId: string;
+  sourceKind: "upload";
+  filename: string;
+  mimeType: string;
+  previewUrl: string;
+  bytesBase64: string;
+  sha256: string;
+  status: "reading" | "ready" | "error";
+  error?: string;
+}
 
 export interface ReplicaConfigDraft {
   sceneType: ReplicaSceneType;
   cloneLevel: ReplicaCloneLevel;
   unifiedRequirement: string;
   productInfo: string;
+  productCardId: string | null;
+  productCardSummary: SelectedProductCardSummary | null;
   styleUnified: boolean;
   language: ReplicaLanguage;
   ratio: string;
@@ -128,6 +121,8 @@ export const INITIAL_REPLICA_CONFIG: ReplicaConfigDraft = {
   cloneLevel: "high",
   unifiedRequirement: "",
   productInfo: "",
+  productCardId: null,
+  productCardSummary: null,
   styleUnified: true,
   language: "zh",
   ratio: "reference",
@@ -141,14 +136,12 @@ export interface ReplicaCreatePayload {
     bytesBase64: string;
     remark?: string;
   }>;
-  products: Array<
-    | { filename: string; mimeType: string; bytesBase64: string }
-    | { libraryResourceId: string }
-  >;
+  products: Array<{ filename: string; mimeType: string; bytesBase64: string }>;
   sceneType: ReplicaSceneType;
   cloneLevel: ReplicaCloneLevel;
   unifiedRequirement: string;
   productInfo: string;
+  productCardId?: string | null;
   styleUnified: boolean;
   language: ReplicaLanguage;
   ratio: string;
@@ -160,6 +153,8 @@ export interface ReplicaBatchConfigView {
   cloneLevel?: ReplicaCloneLevel;
   unifiedRequirement?: string;
   productInfo?: string;
+  productCardId?: string | null;
+  productCardSnapshot?: ProductCardSnapshot | null;
   styleUnified?: boolean;
   language?: ReplicaLanguage;
   ratio?: string;
@@ -207,6 +202,7 @@ export interface ReplicaStudioState {
   cards: ReplicaResultCard[];
   progress: { total: number; completed: number; percent: number };
   styleSketch?: boolean;
+  productCardSnapshot?: ProductCardSnapshot | null;
   replicaReferences?: ReplicaReferenceView[];
   replicaProducts?: Array<Record<string, unknown>>;
 }

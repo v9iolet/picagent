@@ -25,8 +25,8 @@ async function makePng(r: number, g: number, b: number) {
 
 function makeResource(overrides: Partial<LibraryResource> & { id: string }): LibraryResource {
   return {
-    resourceType: "input_image",
-    title: "示例商品图.png",
+    resourceType: "base_image",
+    title: "示例白底图.png",
     summary: "32 × 32 · image/png",
     mimeType: "image/png",
     previewUrl: `/api/library/resources/${encodeURIComponent(overrides.id)}/preview`,
@@ -314,7 +314,8 @@ test("deleting a library image referenced by a task keeps task card, frozen refe
   assert.equal(rebind.status, 404);
   assert.equal((rebind.body as any).error.code, "LIBRARY_RESOURCE_NOT_FOUND");
 
-  const replicaWithDeleted = await app.request("POST", "/api/replicas", {
+  // Replica endpoint rejects library product resources regardless of deletion status -> 400
+  const replicaWithLibrary = await app.request("POST", "/api/replicas", {
     headers: { "idempotency-key": "replica-deleted-product" },
     body: {
       references: [{ filename: "ref.png", mimeType: "image/png", bytesBase64: pngA.toString("base64") }],
@@ -327,8 +328,8 @@ test("deleting a library image referenced by a task keeps task card, frozen refe
       size: "1K",
     },
   });
-  assert.equal(replicaWithDeleted.status, 404);
-  assert.equal((replicaWithDeleted.body as any).error.code, "LIBRARY_RESOURCE_NOT_FOUND");
+  assert.equal(replicaWithLibrary.status, 400);
+  assert.equal((replicaWithLibrary.body as any).error.code, "REPLICA_LIBRARY_PRODUCTS_UNSUPPORTED");
 
   // 2. Existing task card, frozen references, task version preview, and library resource preview still work!
   const wbRes = await app.request("GET", `/api/suites/${canvasSuite.id}/workbench`);
@@ -378,41 +379,50 @@ test("GET /api/library/resources supports scope=image pagination & resourceType 
   assert.equal(badScope.status, 400);
   assert.equal((badScope.body as any).error.code, "INVALID_LIBRARY_SCOPE");
 
-  // Seed 26 published input images + keep prompt_template in library
+  // Seed 26 published base_image resources + keep inputRes & prompt_template in library
   for (let i = 1; i <= 26; i++) {
     library.addResource(
       makeResource({
-        id: `input:page-img-${String(i).padStart(2, "0")}`,
-        resourceType: "input_image",
-        title: `分页测试原图 ${String(i).padStart(2, "0")}`,
+        id: `base:page-img-${String(i).padStart(2, "0")}`,
+        resourceType: "base_image",
+        title: `分页测试白底图 ${String(i).padStart(2, "0")}`,
         suiteId: sourceSuite.id,
+        baseVersionId: `page-img-${i}`,
         resourceVersionId: `page-img-${i}`,
         updatedAt: `2026-11-23T11:${String(i).padStart(2, "0")}:00.000Z`,
       }),
     );
   }
 
-  // scope=image excludes prompt_template and returns true total across pages
+  // scope=image excludes both prompt_template and input_image, returning true total across pages
   const page1 = await app.request("GET", "/api/library/resources?scope=image&status=published&page=1&pageSize=24");
   assert.equal(page1.status, 200);
   const p1Data = (page1.body as any).data;
   assert.equal(p1Data.items.some((item: any) => item.resourceType === "prompt_template"), false);
-  // 26 seeded + inputRes + baseRes + taskVerRes + processRes = 30 published image assets (reverseRes is draft)
-  assert.equal(p1Data.total, 30);
+  assert.equal(p1Data.items.some((item: any) => item.resourceType === "input_image"), false);
+  // 26 seeded + baseRes + taskVerRes + processRes = 29 published generated image assets (inputRes excluded, reverseRes is draft)
+  assert.equal(p1Data.total, 29);
   assert.equal(p1Data.items.length, 24);
 
   const page2 = await app.request("GET", "/api/library/resources?scope=image&status=published&page=2&pageSize=24");
   assert.equal(page2.status, 200);
   const p2Data = (page2.body as any).data;
-  assert.equal(p2Data.total, 30);
-  assert.equal(p2Data.items.length, 6);
+  assert.equal(p2Data.total, 29);
+  assert.equal(p2Data.items.length, 5);
+  assert.equal(p2Data.items.some((item: any) => item.resourceType === "input_image"), false);
 
-  // scope=image with resourceType=input_image filters cleanly on server
-  const onlyInputs = await app.request("GET", "/api/library/resources?scope=image&resourceType=input_image&status=published&page=2&pageSize=24");
+  // Explicit resourceType=input_image returns empty list (never exposed in library list)
+  const onlyInputs = await app.request("GET", "/api/library/resources?scope=image&resourceType=input_image&status=published&page=1&pageSize=24");
   assert.equal(onlyInputs.status, 200);
-  assert.equal((onlyInputs.body as any).data.total, 27);
-  assert.equal((onlyInputs.body as any).data.items.length, 3);
-  assert.equal((onlyInputs.body as any).data.items.every((item: any) => item.resourceType === "input_image"), true);
+  assert.equal((onlyInputs.body as any).data.total, 0);
+  assert.deepEqual((onlyInputs.body as any).data.items, []);
+
+  // scope=image with resourceType=base_image filters cleanly on server
+  const onlyBases = await app.request("GET", "/api/library/resources?scope=image&resourceType=base_image&status=published&page=2&pageSize=24");
+  assert.equal(onlyBases.status, 200);
+  assert.equal((onlyBases.body as any).data.total, 27);
+  assert.equal((onlyBases.body as any).data.items.length, 3);
+  assert.equal((onlyBases.body as any).data.items.every((item: any) => item.resourceType === "base_image"), true);
 
   // Reverse asset: archive -> soft-delete -> re-save resets status back to draft
   const archived = await app.request("POST", `/api/library/resources/${encodeURIComponent(reverseRes.id)}/status`, {
@@ -745,9 +755,9 @@ test("archiving a task hides its generated and editor-derived images from librar
   // Align suiteId: null behavior with PG: non-reverse/non-prompt resources with suiteId=null are excluded when suiteId is specified
   library.addResource(
     makeResource({
-      id: "input:orphan-null-suite",
-      resourceType: "input_image",
-      title: "无方案原图",
+      id: "base:orphan-null-suite",
+      resourceType: "base_image",
+      title: "无方案白底图",
       suiteId: null,
     }),
   );
@@ -759,8 +769,8 @@ test("archiving a task hides its generated and editor-derived images from librar
     mimeType: "image/png",
     promptSnapshot: { prompt: "global" },
   });
-  const scopedInputs = await app.request("GET", `/api/library/resources?resourceType=input_image&suiteId=${suite.id}`);
-  assert.equal((scopedInputs.body as any).data.items.some((item: any) => item.id === "input:orphan-null-suite"), false);
+  const scopedBases = await app.request("GET", `/api/library/resources?resourceType=base_image&suiteId=${suite.id}`);
+  assert.equal((scopedBases.body as any).data.items.some((item: any) => item.id === "base:orphan-null-suite"), false);
   const scopedReverse = await app.request("GET", `/api/library/resources?resourceType=reverse_reference_asset&suiteId=${suite.id}`);
   assert.equal((scopedReverse.body as any).data.items.some((item: any) => item.id === reverseNullSuite.id), true);
 });

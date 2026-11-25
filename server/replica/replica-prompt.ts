@@ -1,3 +1,7 @@
+import {
+  mergeProductCardFacts,
+  type ProductCardSnapshot,
+} from "../../shared/product-card.js";
 import type { PromptTemplateRuntime } from "../prompt-library.js";
 import type {
   LlmClient,
@@ -63,6 +67,7 @@ export interface BuildReplicaPromptInputParams {
   styleUnified: boolean;
   unifiedRequirement?: string | null;
   productInfo?: string | null;
+  productCardSnapshot?: ProductCardSnapshot | null;
   references: ReplicaPromptReferenceImage[];
   productImages?: ReplicaPromptProductImage[];
 }
@@ -135,7 +140,9 @@ export function buildReplicaPromptInput(params: BuildReplicaPromptInputParams): 
       bytes: img.bytes,
     }));
   const unifiedRequirement = params.unifiedRequirement?.trim();
-  const productInfo = params.productInfo?.trim();
+  const productInfo = params.productCardSnapshot
+    ? mergeProductCardFacts(params.productCardSnapshot, params.productInfo).trim()
+    : params.productInfo?.trim();
   return {
     ...(params.requestId ? { requestId: params.requestId } : {}),
     template: {

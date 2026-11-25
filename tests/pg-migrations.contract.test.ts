@@ -433,23 +433,46 @@ test("startup recovery fails running pipelines and listing jobs and increments t
   });
 });
 
-test("PG library binds a published input_image from another suite to a canvas task", { skip }, async () => {
+test("PG library excludes input_image from listing, rejects binding input_image, and binds published base_image across suites", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const suites = new PostgresSuiteRepository(pool);
     const library = new PostgresLibraryRepository(pool);
-    const source = await suites.createSuite("原图来源");
+    const source = await suites.createSuite("底图来源");
     const canvas = await suites.createSuite("资源画布", undefined, "canvas");
     const id = randomUUID();
     const prefix = `suites/${source.id}/inputs/${id}/`;
     await suites.createInputImage({ id, suiteId: source.id, ordinal: 1, originalObjectKey: prefix + "original",
       thumbnailObjectKey: prefix + "thumbnail", sha256: "1".repeat(64), width: 1, height: 1, mimeType: "image/png",
       originalFilename: "product.png", currentBaseVersionId: null, createdAt: timestamp });
+    const baseVersionId = randomUUID();
+    const attemptId = randomUUID();
+    await suites.beginBaseGeneration({
+      id: attemptId, suiteId: source.id, inputImageId: id, baseVersionId, idempotencyKey: "pg-base-gen-1",
+      model: "gpt-image-2", endpoint: "/v1/images/edits", prompt: "生成纯白底图", promptTemplateVersionId: null,
+      dynamicInput: {}, size: "1K", quality: "medium", n: 1, responseFormat: "b64_json", createdAt: timestamp,
+    });
+    await suites.completeBaseGeneration({
+      attemptId, objectKey: `${prefix}base/${baseVersionId}/v1.png`, sha256: "2".repeat(64), width: 1024, height: 1024, mimeType: "image/png", completedAt: timestamp,
+    });
     const { task } = await new PostgresTaskRepository(pool).createCustomTask({ suiteId: canvas.id, planSnapshotId: null,
       imageType: "detail", title: "细节", purpose: "展示细节", promptDraft: "展示商品", sourceInputImageId: null, generationParams: {} });
-    const { reference } = await library.createReference({ suiteId: canvas.id, resourceId: `input:${id}`,
-      targetType: "task", targetId: task.id, idempotencyKey: "bind-input" });
-    assert.equal(reference.resourceType, "input_image");
-    assert.equal(reference.resourceVersionId, id);
+
+    // input_image is excluded from image listings, still readable by direct ID/preview, and forbidden for new references
+    const listedAll = await library.listResources({ scope: "image", suiteId: source.id });
+    assert.equal(listedAll.items.some((item) => item.resourceType === "input_image"), false);
+    assert.deepEqual(listedAll.items.map((item) => item.id), [`base:${baseVersionId}`]);
+    const listedInputs = await library.listResources({ resourceType: "input_image", suiteId: source.id });
+    assert.deepEqual(listedInputs.items, []);
+    assert.deepEqual(await library.getPreviewObject(`input:${id}`), { objectKey: prefix + "original" });
+    await assert.rejects(
+      library.createReference({ suiteId: canvas.id, resourceId: `input:${id}`, targetType: "task", targetId: task.id, idempotencyKey: "bind-input" }),
+      { message: "LIBRARY_RESOURCE_FORBIDDEN" },
+    );
+
+    const { reference } = await library.createReference({ suiteId: canvas.id, resourceId: `base:${baseVersionId}`,
+      targetType: "task", targetId: task.id, idempotencyKey: "bind-base" });
+    assert.equal(reference.resourceType, "base_image");
+    assert.equal(reference.resourceVersionId, baseVersionId);
     assert.equal(reference.snapshot.suiteId, source.id);
     assert.deepEqual(await library.listReferences(canvas.id, "task", task.id), [reference]);
   });
@@ -1125,11 +1148,11 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
     const prompts = new PostgresPromptRepository(pool);
     const library = new PostgresLibraryRepository(pool);
 
-    // 1. After fresh migrations (001..036): reverse.* seeded in 018 are retired; replica.* upgraded by 036 stay published at v2 with usedBy
+    // 1. After fresh migrations (001..039): reverse.* seeded in 018 are retired; replica.* upgraded by 036 and product.onboarding seeded by 039 stay published with usedBy
     const initialPublished = await prompts.listPublished();
     assert.deepEqual(
       initialPublished.map((item) => item.code).sort(),
-      ["replica.compose", "replica.high"],
+      ["product.onboarding", "replica.compose", "replica.high"],
     );
     assert.equal(initialPublished.find((i) => i.code === "replica.compose")?.versionNo, 2);
     assert.equal(initialPublished.find((i) => i.code === "replica.high")?.versionNo, 2);
@@ -1177,6 +1200,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
         "general.category-prompt",
         "general.listing-copy",
         "general.structure-plan",
+        "product.onboarding",
         "replica.compose",
         "replica.high",
       ],
@@ -1184,12 +1208,12 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
 
     // Library repository filters published vs retired vs all accurately with usedBy
     const libPublished = await library.listResources({ resourceType: "prompt_template", status: "published", pageSize: 100 });
-    assert.equal(libPublished.items.length, 6);
+    assert.equal(libPublished.items.length, 7);
     assert.ok(libPublished.items.every((item) => (item.usedBy?.length ?? 0) > 0));
     const libRetired = await library.listResources({ resourceType: "prompt_template", status: "retired", pageSize: 100 });
     assert.equal(libRetired.items.length, 13); // 10 reverse + 2 plan + 1 repair
     const libAll = await library.listResources({ resourceType: "prompt_template", pageSize: 100 });
-    assert.equal(libAll.items.length, 19);
+    assert.equal(libAll.items.length, 20);
 
     // 3. Active template copy -> edit draft -> draft filtering -> publish flow works end-to-end in PG
     const baseRefine = activeAfterImport.find((i) => i.code === "general.base_refine")!;
@@ -1254,6 +1278,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
         "general.category-prompt",
         "general.listing-copy",
         "general.structure-plan",
+        "product.onboarding",
         "replica.compose",
         "replica.high",
       ],
@@ -1303,6 +1328,36 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
       createdAt: timestamp,
     });
 
+    const baseVersionId = randomUUID();
+    const baseAttemptId = randomUUID();
+    await suites.beginBaseGeneration({
+      id: baseAttemptId,
+      suiteId: suite.id,
+      inputImageId: inputId,
+      baseVersionId,
+      idempotencyKey: "pg-del-base-gen-1",
+      model: "gpt-image-2",
+      endpoint: "/v1/images/edits",
+      prompt: "生成纯白底图",
+      promptTemplateVersionId: null,
+      dynamicInput: {},
+      size: "1K",
+      quality: "medium",
+      n: 1,
+      responseFormat: "b64_json",
+      createdAt: timestamp,
+    });
+    const baseObjectKey = `${inputPrefix}base/${baseVersionId}/v1.png`;
+    await suites.completeBaseGeneration({
+      attemptId: baseAttemptId,
+      objectKey: baseObjectKey,
+      sha256: "9".repeat(64),
+      width: 512,
+      height: 512,
+      mimeType: "image/png",
+      completedAt: timestamp,
+    });
+
     const { task } = await tasks.createCustomTask({
       suiteId: suite.id,
       planSnapshotId: null,
@@ -1314,15 +1369,15 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
       generationParams: {},
     });
 
-    // Bind input resource to task before deleting
+    // Bind base_image resource to task before deleting
     const { reference } = await library.createReference({
       suiteId: suite.id,
-      resourceId: `input:${inputId}`,
+      resourceId: `base:${baseVersionId}`,
       targetType: "task",
       targetId: task.id,
       idempotencyKey: "pg-ref-before-delete",
     });
-    assert.equal(reference.resourceId, `input:${inputId}`);
+    assert.equal(reference.resourceId, `base:${baseVersionId}`);
 
     // Create task version with a process image
     const batchId = randomUUID();
@@ -1398,29 +1453,32 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
       source: { origin: "replica" },
     });
 
-    const inputResourceId = `input:${inputId}`;
+    const baseResourceId = `base:${baseVersionId}`;
     const taskVersionResourceId = `task-version:${version.id}`;
     const processResourceId = `process:${version.id}:0`;
 
     // Invalid / malformed IDs return null cleanly without throwing PG 22P02
-    assert.equal(await library.deleteResource("input:not-a-uuid"), null);
+    assert.equal(await library.deleteResource("base:not-a-uuid"), null);
     assert.equal(await library.getResource("reverse:not-a-uuid"), null);
 
     // Single delete + idempotency
-    const del1 = await library.deleteResource(inputResourceId);
+    const del1 = await library.deleteResource(baseResourceId);
     assert.ok(del1);
     assert.equal(del1.alreadyDeleted, false);
-    const del2 = await library.deleteResource(inputResourceId);
+    const del2 = await library.deleteResource(baseResourceId);
     assert.ok(del2);
     assert.equal(del2.alreadyDeleted, true);
     assert.equal(del2.deletedAt, del1.deletedAt);
 
-    // Deleted input is hidden from list & default getResource, but still resolvable for frozen preview
-    assert.equal(await library.getResource(inputResourceId), null);
-    assert.ok(await library.getResource(inputResourceId, { includeDeleted: true }));
-    assert.deepEqual(await library.getPreviewObject(inputResourceId), { objectKey: inputPrefix + "original" });
+    // Deleted base image is hidden from list & default getResource, but still resolvable for frozen preview
+    assert.equal(await library.getResource(baseResourceId), null);
+    assert.ok(await library.getResource(baseResourceId, { includeDeleted: true }));
+    assert.deepEqual(await library.getPreviewObject(baseResourceId), { objectKey: baseObjectKey });
+    const listedBases = await library.listResources({ resourceType: "base_image", suiteId: suite.id });
+    assert.equal(listedBases.items.some((item) => item.id === baseResourceId), false);
+    // Uploaded input_image is never returned by listResources even without deletion
     const listedInputs = await library.listResources({ resourceType: "input_image", suiteId: suite.id });
-    assert.equal(listedInputs.items.some((item) => item.id === inputResourceId), false);
+    assert.deepEqual(listedInputs.items, []);
 
     // Frozen reference and underlying input_image / task_image_versions rows remain intact
     assert.equal((await library.listReferences(suite.id, "task", task.id)).length, 1);
@@ -1436,17 +1494,17 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
     assert.equal(archivedDbBefore.rows[0]?.status, "archived");
     assert.ok(archivedDbBefore.rows[0]?.archived_at);
 
-    // Batch delete task version, process image, reverse asset + already deleted input + nonexistent ID
+    // Batch delete task version, process image, reverse asset + already deleted base + nonexistent ID
     const batch = await library.deleteResources([
       taskVersionResourceId,
       processResourceId,
       reverseAsset.id,
-      inputResourceId,
-      "input:not-a-uuid",
+      baseResourceId,
+      "base:not-a-uuid",
     ]);
     assert.deepEqual(batch.deletedIds, [taskVersionResourceId, processResourceId, reverseAsset.id]);
-    assert.deepEqual(batch.alreadyDeletedIds, [inputResourceId]);
-    assert.deepEqual(batch.notFoundIds, ["input:not-a-uuid"]);
+    assert.deepEqual(batch.alreadyDeletedIds, [baseResourceId]);
+    assert.deepEqual(batch.notFoundIds, ["base:not-a-uuid"]);
     assert.equal(batch.deletedCount, 3);
 
     // Repeat batch delete is idempotent
@@ -1511,7 +1569,7 @@ test("034 adds library_resource_deletions table and PostgresLibraryRepository so
 
     // Re-running migrations preserves deletion rows cleanly
     await runMigrations(pool);
-    assert.equal(await library.getResource(inputResourceId), null);
+    assert.equal(await library.getResource(baseResourceId), null);
   });
 });
 
@@ -2113,3 +2171,647 @@ test("037 adds source_card_id index and drops created_at index idempotently; PG 
     assert.ok(await library.getResource(edit2Id));
   });
 });
+
+test("038 migration enforces product library and onboarding constraints, cascades, and PostgresProductCardRepository CRUD", { skip }, async () => {
+  const { PostgresProductCardRepository } = await import(
+    "../server/repositories/postgres-product-card-repository.js"
+  );
+
+  await withMigratedSchemas(async ({ pool }) => {
+    const repo = new PostgresProductCardRepository(pool);
+    const expectSqlError = async (sql: string, values: unknown[]) => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await assert.rejects(client.query(sql, values));
+      } finally {
+        await client.query("ROLLBACK");
+        client.release();
+      }
+    };
+
+    // 1. product_cards CHECK constraints reject invalid status, blank required fields, empty/oversized selling points
+    const badCardId = randomUUID();
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'draft', '商品名', '["卖点1"]'::jsonb, '规格', '材质', '人群', '清单')`,
+      [badCardId],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'published', '   ', '["卖点1"]'::jsonb, '规格', '材质', '人群', '清单')`,
+      [badCardId],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'published', '商品名', '[]'::jsonb, '规格', '材质', '人群', '清单')`,
+      [badCardId],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents)
+       VALUES ($1, 'published', '商品名', '["1","2","3","4","5","6","7","8","9","10","11"]'::jsonb, '规格', '材质', '人群', '清单')`,
+      [badCardId],
+    );
+
+    // 2. Create card + 2 supplier images through PostgresProductCardRepository
+    const cardId = randomUUID();
+    const img1Id = randomUUID();
+    const img2Id = randomUUID();
+    const created = await repo.create({
+      id: cardId,
+      status: "published",
+      fields: {
+        name: "100% 纯棉重磅T恤",
+        sellingPoints: ["260g 高克重纯棉", "领口双针加固_不易变形", "透气率提升 50%"],
+        specifications: "尺码 M-XXL，衣长 70-76cm，克重 260g/m²",
+        materialsCraft: "100% 新疆长绒棉，活性染色工艺",
+        audienceScenarios: "春夏日常通勤与休闲穿搭",
+        packageContents: "单品本体 ×1，无额外配件",
+        painPointsComparison: "",
+        usageDemoHighlights: "",
+        certificationsProhibitions: "",
+      },
+      sourceSessionId: null,
+      revision: 1,
+      images: [
+        {
+          id: img1Id,
+          productCardId: cardId,
+          ordinal: 1,
+          originalObjectKey: `product-cards/${cardId}/images/${img1Id}/original`,
+          thumbnailObjectKey: `product-cards/${cardId}/images/${img1Id}/thumbnail`,
+          sha256: "1".repeat(64),
+          width: 800,
+          height: 800,
+          mimeType: "image/png",
+          originalFilename: "front.png",
+          createdAt: timestamp,
+        },
+        {
+          id: img2Id,
+          productCardId: cardId,
+          ordinal: 2,
+          originalObjectKey: `product-cards/${cardId}/images/${img2Id}/original`,
+          thumbnailObjectKey: `product-cards/${cardId}/images/${img2Id}/thumbnail`,
+          sha256: "2".repeat(64),
+          width: 800,
+          height: 600,
+          mimeType: "image/jpeg",
+          originalFilename: "detail.jpg",
+          createdAt: timestamp,
+        },
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    assert.equal(created.revision, 1);
+    assert.equal(created.supplierImages.length, 2);
+    assert.equal(created.coverThumbnailUrl, `/api/product-cards/${cardId}/images/${img1Id}/preview/thumbnail`);
+
+    // 3. product_card_images CHECK & UNIQUE constraints reject bad prefix, bad ordinal, duplicate ordinal/sha256
+    const badImgId = randomUUID();
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_card_images
+        (id, product_card_id, ordinal, original_object_key, thumbnail_object_key, sha256, width, height, mime_type, original_filename)
+       VALUES ($1, $2, 3, $3, $4, $5, 100, 100, 'image/png', 'wrong-prefix.png')`,
+      [
+        badImgId,
+        cardId,
+        `suites/${cardId}/inputs/${badImgId}/original`,
+        `suites/${cardId}/inputs/${badImgId}/thumbnail`,
+        "3".repeat(64),
+      ],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_card_images
+        (id, product_card_id, ordinal, original_object_key, thumbnail_object_key, sha256, width, height, mime_type, original_filename)
+       VALUES ($1, $2, 7, $3, $4, $5, 100, 100, 'image/png', 'bad-ordinal.png')`,
+      [
+        badImgId,
+        cardId,
+        `product-cards/${cardId}/images/${badImgId}/original`,
+        `product-cards/${cardId}/images/${badImgId}/thumbnail`,
+        "4".repeat(64),
+      ],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_card_images
+        (id, product_card_id, ordinal, original_object_key, thumbnail_object_key, sha256, width, height, mime_type, original_filename)
+       VALUES ($1, $2, 3, $3, $4, $5, 100, 100, 'image/png', 'dup-sha.png')`,
+      [
+        badImgId,
+        cardId,
+        `product-cards/${cardId}/images/${badImgId}/original`,
+        `product-cards/${cardId}/images/${badImgId}/thumbnail`,
+        "1".repeat(64),
+      ],
+    );
+
+    // 4. LIKE wildcard characters (% and _) in keyword search are escaped literally, and sellingPoints match case-insensitively
+    const literalMatch = await repo.list({ status: "published", keyword: "100%" });
+    assert.equal(literalMatch.total, 1);
+    assert.equal(literalMatch.items[0].id, cardId);
+    const nonMatchingPercent = await repo.list({ status: "published", keyword: "99%" });
+    assert.equal(nonMatchingPercent.total, 0);
+    const spCaseMatch = await repo.list({ status: "published", keyword: "260G 高克重" });
+    assert.equal(spCaseMatch.total, 1);
+    assert.equal(spCaseMatch.items[0].id, cardId);
+    const spLiteralUnderscore = await repo.list({ status: "published", keyword: "加固_不易" });
+    assert.equal(spLiteralUnderscore.total, 1);
+    const spLiteralUnderscoreMiss = await repo.list({ status: "published", keyword: "加固X不易" });
+    assert.equal(spLiteralUnderscoreMiss.total, 0);
+    const spLiteralPercent = await repo.list({ status: "published", keyword: "50%" });
+    assert.equal(spLiteralPercent.total, 1);
+    const jsonSyntaxNoMatch = await repo.list({ status: "published", keyword: '["' });
+    assert.equal(jsonSyntaxNoMatch.total, 0);
+
+    // 5. Update reorders images cleanly without ordinal unique collision and increments revision
+    const updated = await repo.update(cardId, {
+      fields: {
+        name: "100% 纯棉重磅T恤 升级款",
+        sellingPoints: ["280g 重磅纯棉"],
+        specifications: "尺码 M-XXL",
+        materialsCraft: "100% 新疆长绒棉",
+        audienceScenarios: "日常通勤",
+        packageContents: "单品本体 ×1，无额外配件",
+        painPointsComparison: "相比 220g 普通棉更挺括",
+        usageDemoHighlights: "",
+        certificationsProhibitions: "",
+      },
+      images: [
+        {
+          id: img2Id,
+          productCardId: cardId,
+          ordinal: 1,
+          originalObjectKey: `product-cards/${cardId}/images/${img2Id}/original`,
+          thumbnailObjectKey: `product-cards/${cardId}/images/${img2Id}/thumbnail`,
+          sha256: "2".repeat(64),
+          width: 800,
+          height: 600,
+          mimeType: "image/jpeg",
+          originalFilename: "detail.jpg",
+          createdAt: timestamp,
+        },
+        {
+          id: img1Id,
+          productCardId: cardId,
+          ordinal: 2,
+          originalObjectKey: `product-cards/${cardId}/images/${img1Id}/original`,
+          thumbnailObjectKey: `product-cards/${cardId}/images/${img1Id}/thumbnail`,
+          sha256: "1".repeat(64),
+          width: 800,
+          height: 800,
+          mimeType: "image/png",
+          originalFilename: "front.png",
+          createdAt: timestamp,
+        },
+      ],
+      updatedAt: "2026-01-01T00:05:00.000Z",
+    });
+    assert.ok(updated);
+    assert.equal(updated.revision, 2);
+    assert.equal(updated.supplierImages[0].id, img2Id);
+    assert.equal(updated.supplierImages[1].id, img1Id);
+    assert.equal((await repo.getImage(cardId, img2Id))?.ordinal, 1);
+
+    // 6. Archive & restore status transitions
+    const archived = await repo.setStatus(cardId, "archived", "2026-01-01T00:06:00.000Z");
+    assert.equal(archived?.status, "archived");
+    assert.equal((await repo.list({ status: "published" })).total, 0);
+    assert.equal((await repo.list({ status: "archived" })).total, 1);
+    const restored = await repo.setStatus(cardId, "published", "2026-01-01T00:07:00.000Z");
+    assert.equal(restored?.status, "published");
+
+    // 7. Onboarding session + messages constraints, ON DELETE SET NULL on product_card_id, ON DELETE CASCADE on messages
+    const sessionId = randomUUID();
+    await pool.query(
+      `INSERT INTO suite_workbench.product_onboarding_sessions
+        (id, title, status, draft_card_json, draft_images_json, missing_required_fields_json, product_card_id)
+       VALUES ($1, 'T恤建档', 'completed', '{}'::jsonb, '[]'::jsonb, '[]'::jsonb, $2)`,
+      [sessionId, cardId],
+    );
+    const msg1Id = randomUUID();
+    await pool.query(
+      `INSERT INTO suite_workbench.product_onboarding_messages
+        (id, session_id, ordinal, role, content, attachments_json)
+       VALUES ($1, $2, 1, 'user', '这是一件重磅T恤', '[]'::jsonb)`,
+      [msg1Id, sessionId],
+    );
+    // Reject invalid role and duplicate message ordinal
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_onboarding_messages (id, session_id, ordinal, role, content)
+       VALUES ($1, $2, 2, 'system', 'invalid')`,
+      [randomUUID(), sessionId],
+    );
+    await expectSqlError(
+      `INSERT INTO suite_workbench.product_onboarding_messages (id, session_id, ordinal, role, content)
+       VALUES ($1, $2, 1, 'assistant', 'dup ordinal')`,
+      [randomUUID(), sessionId],
+    );
+
+    // Deleting product_card cascades to product_card_images and sets session.product_card_id = NULL
+    const deleted = await repo.delete(cardId);
+    assert.ok(deleted);
+    assert.equal(deleted.supplierImages.length, 2);
+    const remainingImages = await pool.query<{ cnt: number }>(
+      "SELECT count(*)::int AS cnt FROM suite_workbench.product_card_images WHERE product_card_id = $1",
+      [cardId],
+    );
+    assert.equal(remainingImages.rows[0]?.cnt, 0);
+    const sessionAfterCardDelete = await pool.query<{ product_card_id: string | null }>(
+      "SELECT product_card_id FROM suite_workbench.product_onboarding_sessions WHERE id = $1",
+      [sessionId],
+    );
+    assert.equal(sessionAfterCardDelete.rows.length, 1);
+    assert.equal(sessionAfterCardDelete.rows[0]?.product_card_id, null);
+
+    // Deleting onboarding session cascades to product_onboarding_messages
+    await pool.query("DELETE FROM suite_workbench.product_onboarding_sessions WHERE id = $1", [sessionId]);
+    const remainingMessages = await pool.query<{ cnt: number }>(
+      "SELECT count(*)::int AS cnt FROM suite_workbench.product_onboarding_messages WHERE session_id = $1",
+      [sessionId],
+    );
+    assert.equal(remainingMessages.rows[0]?.cnt, 0);
+  });
+});
+
+test("039 migration extends prompt stages, seeds product.onboarding idempotently, and supports PostgresProductOnboardingRepository", { skip }, async () => {
+  const { PostgresProductCardRepository } = await import(
+    "../server/repositories/postgres-product-card-repository.js"
+  );
+  const { PostgresProductOnboardingRepository } = await import(
+    "../server/product-onboarding/index.js"
+  );
+  const { importPromptRecordsWithPolicy } = await import("../server/prompt-library.js");
+
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const productCards = new PostgresProductCardRepository(pool);
+    const onboarding = new PostgresProductOnboardingRepository(pool);
+
+    // 1. Seeded product.onboarding template is active & published at v1 with stage product_onboarding
+    const published = await prompts.listPublished("product_onboarding");
+    assert.equal(published.length, 1);
+    assert.equal(published[0].code, "product.onboarding");
+    assert.equal(published[0].stage, "product_onboarding");
+    assert.equal(published[0].versionNo, 1);
+    assert.deepEqual(published[0].usedBy, ["首页·商品信息建档"]);
+
+    // 2. source_sha256 strictly matches prompt/normalized/product-onboarding.md and import-prompts is idempotent
+    const sourcePath = "prompt/normalized/product-onboarding.md";
+    const markdown = await readFile(sourcePath, "utf8");
+    const parsedRecord = parseNormalizedPromptMarkdown(markdown, sourcePath);
+    const seededRuntime = await prompts.getPublishedVersion(
+      published[0].templateVersionId,
+      "product_onboarding",
+    );
+    assert.ok(seededRuntime);
+    assert.equal(seededRuntime.sourceSha256, parsedRecord.sourceSha256);
+
+    const [reimported] = await importPromptRecordsWithPolicy(prompts, [parsedRecord], {
+      publish: false,
+    });
+    assert.equal(reimported.templateVersionId, seededRuntime.templateVersionId);
+    assert.equal(reimported.versionNo, 1);
+    assert.equal(reimported.status, "published");
+    assert.equal((await prompts.listVersions(seededRuntime.templateId)).length, 1);
+
+    // 3. Stage CHECK rejects unknown stage values
+    const tx = await pool.connect();
+    try {
+      await tx.query("BEGIN");
+      await assert.rejects(
+        tx.query(
+          `INSERT INTO prompt_library.prompt_templates (id, code, name, kind, stage, execution_target)
+           VALUES ($1, 'bad.stage', '非法阶段', 'planner', 'unknown_stage', 'llm')`,
+          [randomUUID()],
+        ),
+        { code: "23514", constraint: "prompt_templates_stage_check" },
+      );
+    } finally {
+      await tx.query("ROLLBACK");
+      tx.release();
+    }
+
+    // 4. Replaying runMigrations with live product_onboarding rows succeeds idempotently
+    await runMigrations(pool);
+    assert.equal((await prompts.listPublished("product_onboarding")).length, 1);
+
+    // 5. PostgresProductOnboardingRepository end-to-end CRUD, draft update, turn append, publish lock, and delete
+    const sessionId = randomUUID();
+    const imgId = randomUUID();
+    const created = await onboarding.createWithMessages({
+      id: sessionId,
+      title: "PG 保温杯建档",
+      draftCard: {
+        name: "PG 不锈钢保温杯",
+        sellingPoints: ["316L 内胆"],
+        specifications: "",
+        materialsCraft: "",
+        audienceScenarios: "",
+        packageContents: "",
+        painPointsComparison: "",
+        usageDemoHighlights: "",
+        certificationsProhibitions: "",
+      },
+      draftImages: [
+        {
+          id: imgId,
+          ordinal: 1,
+          originalObjectKey: `product-onboarding/${sessionId}/images/${imgId}/original`,
+          thumbnailObjectKey: `product-onboarding/${sessionId}/images/${imgId}/thumbnail`,
+          sha256: "a".repeat(64),
+          width: 400,
+          height: 400,
+          mimeType: "image/png",
+          originalFilename: "cup.png",
+          createdAt: timestamp,
+        },
+      ],
+      missingRequiredFields: [
+        "specifications",
+        "materialsCraft",
+        "audienceScenarios",
+        "packageContents",
+      ],
+      messages: [
+        {
+          id: randomUUID(),
+          role: "user",
+          content: "帮我建档一款 316L 保温杯",
+          attachments: [],
+          templateVersionId: null,
+          modelSnapshot: null,
+          createdAt: timestamp,
+        },
+        {
+          id: randomUUID(),
+          role: "assistant",
+          content: "请补充规格、材质工艺、人群场景与包装清单。",
+          attachments: [],
+          templateVersionId: seededRuntime.templateVersionId,
+          modelSnapshot: { provider: "fake", model: "vision-v1", isFake: true },
+          createdAt: timestamp,
+        },
+      ],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    assert.equal(created.messages.length, 2);
+    assert.equal(created.supplierImages.length, 1);
+    assert.equal(
+      (await onboarding.getDraftImage(sessionId, imgId))?.thumbnailPreviewUrl,
+      `/api/product-onboarding/sessions/${sessionId}/images/${imgId}/preview/thumbnail`,
+    );
+
+    const draftUpdate = await onboarding.updateDraft(sessionId, {
+      title: "PG 不锈钢保温杯 500ml",
+      draftCard: {
+        ...created.draftCard,
+        name: "PG 不锈钢保温杯 500ml",
+        specifications: "500ml，高 215mm，重 265g",
+        materialsCraft: "316L 内胆 + 304 外壳",
+        audienceScenarios: "通勤办公与户外露营",
+        packageContents: "单品本体 ×1，无额外配件",
+      },
+      draftImages: created.supplierImages.map(({ originalPreviewUrl: _o, thumbnailPreviewUrl: _t, ...rest }) => rest),
+      missingRequiredFields: [],
+      updatedAt: "2026-01-01T00:05:00.000Z",
+    });
+    assert.ok(draftUpdate && "session" in draftUpdate);
+    assert.deepEqual(draftUpdate.session.missingRequiredFields, []);
+
+    const cardId = randomUUID();
+    await productCards.create({
+      id: cardId,
+      status: "published",
+      fields: draftUpdate.session.draftCard,
+      sourceSessionId: sessionId,
+      revision: 1,
+      images: [],
+      createdAt: "2026-01-01T00:06:00.000Z",
+      updatedAt: "2026-01-01T00:06:00.000Z",
+    });
+    const completed = await onboarding.markCompleted(
+      sessionId,
+      cardId,
+      "2026-01-01T00:06:00.000Z",
+    );
+    assert.ok(completed);
+    assert.equal(completed.alreadyCompleted, false);
+    assert.equal(completed.session.status, "completed");
+    assert.equal(completed.session.productCardId, cardId);
+
+    // Second markCompleted is idempotent and mutations return conflict
+    const completedAgain = await onboarding.markCompleted(
+      sessionId,
+      randomUUID(),
+      "2026-01-01T00:07:00.000Z",
+    );
+    assert.equal(completedAgain?.alreadyCompleted, true);
+    assert.equal(completedAgain?.session.productCardId, cardId);
+    const conflictTurn = await onboarding.appendTurn(sessionId, {
+      title: "尝试追加",
+      draftCard: draftUpdate.session.draftCard,
+      draftImages: [],
+      missingRequiredFields: [],
+      messages: [],
+      updatedAt: "2026-01-01T00:08:00.000Z",
+    });
+    assert.deepEqual(conflictTurn, { conflict: "completed" });
+
+    assert.equal((await onboarding.list({ status: "completed" })).total, 1);
+    assert.equal((await onboarding.list({ status: "draft" })).total, 0);
+
+    // Deleting session cascades messages and leaves published product card intact
+    const deletedSession = await onboarding.delete(sessionId);
+    assert.ok(deletedSession);
+    assert.equal(await onboarding.get(sessionId), null);
+    assert.ok(await productCards.get(cardId));
+  });
+});
+
+test("040 migration upgrades legacy 001..039 database, drops category/sku_code, updates product.onboarding v1, and replays 001..040 idempotently", { skip }, async () => {
+  const { readdir } = await import("node:fs/promises");
+  const path = await import("node:path");
+  const { PostgresProductCardRepository } = await import(
+    "../server/repositories/postgres-product-card-repository.js"
+  );
+
+  const client = new Client({ ...loadPostgresConfig(), connectionTimeoutMillis: 10_000 });
+  const suffix = randomUUID().replaceAll("-", "");
+  const suiteSchema = `contract_suite_${suffix}`;
+  const promptSchema = `contract_prompt_${suffix}`;
+  let connected = false;
+
+  try {
+    await client.connect();
+    connected = true;
+    await client.query("BEGIN");
+    await client.query(`CREATE SCHEMA ${suiteSchema}`);
+    await client.query(`CREATE SCHEMA ${promptSchema}`);
+    await client.query(`SET LOCAL search_path TO ${suiteSchema}, ${promptSchema}`);
+    const extension = await client.query<{ schema: string }>(
+      `SELECT n.nspname AS schema FROM pg_catalog.pg_extension e
+       JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace WHERE e.extname=$1`,
+      ["pgcrypto"],
+    );
+    const cryptoSchema = escapeIdentifier(extension.rows[0]?.schema ?? suiteSchema);
+
+    function query<Row extends QueryResultRow>(sql: string, values?: unknown[]) {
+      assert.doesNotMatch(sql, /\bpublic\b"?\s*\.|\b(?:COMMIT|ROLLBACK|ABORT|END\s+(?:TRANSACTION|WORK)|SET\s+(?:LOCAL\s+|SESSION\s+)?search_path)\b|(?:^|;)\s*END\s*;/i);
+      return client.query<Row>(
+        sql
+          .replace(/\bsuite_workbench\b/g, suiteSchema)
+          .replace(/\bprompt_library\b/g, promptSchema)
+          .replace(
+            /\bFROM pg_constraint WHERE conname\b/gi,
+            `FROM pg_catalog.pg_constraint
+          WHERE connamespace IN (SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = ANY(pg_catalog.current_schemas(false))) AND conname`,
+          )
+          .replace(
+            /\bCREATE EXTENSION IF NOT EXISTS pgcrypto\s*;/i,
+            `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA ${suiteSchema};`,
+          )
+          .replace(/\b(digest|gen_random_uuid)\(/g, (_match, fn: string) => `${cryptoSchema}.${fn}(`),
+        values,
+      );
+    }
+
+    let leased = false;
+    const pool = {
+      query,
+      async connect() {
+        assert.equal(leased, false);
+        leased = true;
+        return {
+          async query(sql: string, values?: unknown[]) {
+            switch (sql) {
+              case "BEGIN": return client.query("SAVEPOINT repo_transaction");
+              case "COMMIT": return client.query("RELEASE SAVEPOINT repo_transaction");
+              case "ROLLBACK":
+                await client.query("ROLLBACK TO SAVEPOINT repo_transaction");
+                return client.query("RELEASE SAVEPOINT repo_transaction");
+              default: return query(sql, values);
+            }
+          },
+          release() { leased = false; },
+        };
+      },
+    } as unknown as Pool;
+
+    // 1. Run migrations 001..039 only, then simulate legacy pre-040 product_cards row and legacy v1 prompt seed
+    const migrationDir = path.resolve("db/migrations");
+    const pre040Files = (await readdir(migrationDir))
+      .filter((file) => /^\d{3}_.+\.sql$/.test(file) && file < "040_")
+      .sort();
+    for (const file of pre040Files) {
+      await pool.query(await readFile(path.join(migrationDir, file), "utf8"));
+    }
+
+    const legacyCardId = randomUUID();
+    await pool.query(
+      `INSERT INTO suite_workbench.product_cards
+        (id, status, name, category, selling_points_json, specifications, materials_craft, audience_scenarios, package_contents, sku_code)
+       VALUES ($1, 'published', '存量真空保温杯 500ml', '水杯水具', '["316L 医用级内胆", "12小时保冷"]'::jsonb, '500ml', '316L不锈钢', '通勤露营', '杯体×1', 'LEGACY-SKU-001')`,
+      [legacyCardId],
+    );
+
+    // Simulate pre-040 product.onboarding v1 row with old sha256
+    const legacySha256 = "4b12e4254750710d98a33801ff0e40fcb6b0458d79d51f38bffd2c0ca7b070bd";
+    await pool.query(`ALTER TABLE prompt_library.prompt_template_versions DISABLE TRIGGER protect_published_prompt_version`);
+    await pool.query(
+      `UPDATE prompt_library.prompt_template_versions v
+       SET body = 'legacy 7+4 body with category and skuCode',
+           output_schema = '{"type":"object","properties":{"schemaVersion":{"const":"product-onboarding-v1"}}}'::jsonb,
+           source_sha256 = $1
+       FROM prompt_library.prompt_templates t
+       WHERE v.template_id = t.id AND t.code = 'product.onboarding' AND v.version_no = 1`,
+      [legacySha256],
+    );
+    await pool.query(`ALTER TABLE prompt_library.prompt_template_versions ENABLE TRIGGER protect_published_prompt_version`);
+
+    // 2. Apply 040 migration on legacy 001..039 schema
+    const sql040 = await readFile(path.join(migrationDir, "040_drop_product_card_category_and_sku.sql"), "utf8");
+    await pool.query(sql040);
+
+    // Verify category and sku_code columns & old indexes are removed, and new indexes exist
+    const cols = await pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'suite_workbench' AND table_name = 'product_cards'`,
+    );
+    const colNames = new Set(cols.rows.map((row) => row.column_name));
+    assert.equal(colNames.has("category"), false);
+    assert.equal(colNames.has("sku_code"), false);
+
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = 'suite_workbench' AND tablename = 'product_cards'`,
+    );
+    const indexNames = new Set(indexes.rows.map((row) => row.indexname));
+    assert.equal(indexNames.has("product_cards_sku_lower_idx"), false);
+    assert.equal(indexNames.has("product_cards_category_lower_idx"), false);
+    assert.equal(indexNames.has("product_cards_name_lower_idx"), true);
+    assert.equal(indexNames.has("product_cards_selling_points_gin_idx"), true);
+
+    // Verify existing card survives and is searchable by selling point via PostgresProductCardRepository
+    const cardRepo = new PostgresProductCardRepository(pool);
+    const foundBySp = await cardRepo.list({ status: "published", keyword: "316l 医用级" });
+    assert.equal(foundBySp.total, 1);
+    assert.equal(foundBySp.items[0].id, legacyCardId);
+    assert.equal("category" in foundBySp.items[0], false);
+    assert.equal("skuCode" in foundBySp.items[0], false);
+
+    // Verify product.onboarding v1 was upgraded in-place to the latest 6+3 prompt & sha256
+    const prompts = new PostgresPromptRepository(pool);
+    const sourcePath = "prompt/normalized/product-onboarding.md";
+    const parsedRecord = parseNormalizedPromptMarkdown(await readFile(sourcePath, "utf8"), sourcePath);
+    const published = await prompts.listPublished("product_onboarding");
+    assert.equal(published.length, 1);
+    assert.equal(published[0].versionNo, 1);
+    const runtime = await prompts.getPublishedVersion(published[0].templateVersionId, "product_onboarding");
+    assert.ok(runtime);
+    assert.equal(runtime.sourceSha256, parsedRecord.sourceSha256);
+    assert.match(runtime.body, /6 项入库必填 \+ 3 项选填/);
+    assert.doesNotMatch(runtime.body, /skuCode|category/);
+
+    // Verify protect_published_prompt_version trigger is re-enabled after 040
+    const guardClient = await pool.connect();
+    try {
+      await guardClient.query("BEGIN");
+      await assert.rejects(
+        guardClient.query(
+          `UPDATE prompt_library.prompt_template_versions SET body = 'tampered' WHERE id = $1`,
+          [runtime.templateVersionId],
+        ),
+        /published prompt versions are immutable/,
+      );
+    } finally {
+      await guardClient.query("ROLLBACK");
+      guardClient.release();
+    }
+
+    // Verify import-prompts is idempotent after 040 upgrade (no v2 draft created)
+    const [reimported] = await importPromptRecordsWithPolicy(prompts, [parsedRecord], { publish: false });
+    assert.equal(reimported.templateVersionId, runtime.templateVersionId);
+    assert.equal(reimported.versionNo, 1);
+    assert.equal((await prompts.listVersions(runtime.templateId)).length, 1);
+
+    // 3. Replay full migrations 001..040 twice after upgrade -> strictly idempotent without errors
+    await runMigrations(pool);
+    await runMigrations(pool);
+    assert.equal((await prompts.listVersions(runtime.templateId)).length, 1);
+    assert.equal((await cardRepo.get(legacyCardId))?.name, "存量真空保温杯 500ml");
+  } finally {
+    try {
+      if (connected) await client.query("ROLLBACK");
+    } finally {
+      await client.end();
+    }
+  }
+});
+

@@ -433,7 +433,7 @@ async function seedSuiteBatch(app, sample, { name, idempotencyKey, counts, expec
   assert.fail(`Suite ${suiteId} did not reach ${expectedStatuses.join(" or ")}`);
 }
 
-test("进入套图页默认仅展示最近 1 条批次，抽屉点选 500 批次呈现可重试错误态且不弹全局告警，再切正常批次恢复", async (t) => {
+test("冷进入无运行中批次时展示空态真实套图示例，抽屉点选 500 批次呈现可重试错误态且不弹全局告警，再切正常批次恢复", async (t) => {
   let brokenSuiteId = "";
   let brokenHits = 0;
   const { app, page, url, sample } = await offlineProgressFixture(t, {
@@ -459,22 +459,31 @@ test("进入套图页默认仅展示最近 1 条批次，抽屉点选 500 批次
     seeded.push({ id, name });
   }
   brokenSuiteId = seeded[2].id;
-  const latest = seeded[seeded.length - 1];
   const target = seeded[1];
 
   await page.goto(url + "create/suite");
+  await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor({ timeout: 10000 });
   const regions = page.getByRole("region", { name: "生成批次" });
-  await regions.getByRole("heading", { name: latest.name, exact: true }).waitFor({ timeout: 10000 });
-  assert.equal(await regions.count(), 1, "结果区应仅展示当前 1 个批次，不再纵向堆叠历史");
+  assert.equal(await regions.count(), 0, "冷进入遇到已完成历史批次时不应自动挂载旧批次");
   assert.equal(await page.getByRole("button", { name: "加载更多历史批次" }).count(), 0);
   assert.equal(await page.getByRole("alert").count(), 0);
+
+  const showcaseBoard = page.locator(".ss-showcase-board");
+  await showcaseBoard.waitFor({ state: "visible" });
+  await page.waitForFunction(
+    () => {
+      const imgs = Array.from(document.querySelectorAll(".ss-showcase-board img"));
+      return imgs.length === 5 && imgs.every((img) => img.complete && img.naturalWidth > 0);
+    },
+    undefined,
+    { timeout: 8000 },
+  );
 
   await page.getByRole("button", { name: "生成记录", exact: true }).click();
   const drawer = page.getByRole("dialog", { name: "生成记录" });
   await drawer.waitFor({ state: "visible" });
   await drawer.getByText("共 6 条", { exact: true }).waitFor();
   assert.equal(await drawer.locator("[data-history-item]").count(), 6);
-  assert.equal(await drawer.locator(`[data-history-item="${latest.id}"]`).getAttribute("data-current"), "true");
 
   // 实际点击 brokenSuiteId 触发 500 分支：结果区展示可重试错误态，且不弹全局 alert
   await drawer.locator(`[data-history-item="${brokenSuiteId}"]`).click();
@@ -508,6 +517,95 @@ test("进入套图页默认仅展示最近 1 条批次，抽屉点选 500 批次
   assert.equal(await regions.count(), 1, "切换回正常批次后结果区应只渲染所选批次");
   assert.equal(await batchError.count(), 0);
   assert.equal(await page.getByRole("alert").count(), 0);
+});
+
+test("会话内切页缓存：未上传草稿、已上传未生成草稿、生成中与生成完成后切页均保留配置与结果，直至点击新建重置", async (t) => {
+  const imageGate = Promise.withResolvers();
+  const { page, url } = await offlineProgressFixture(t, {
+    imageGate: imageGate.promise,
+  });
+  try {
+    // (a) 未上传原图草稿：填卖点 + 改自定义张数 -> 切到生图画布 -> 切回套图 -> 配置保留且展示空态示例
+    await page.goto(url + "create/suite");
+    await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
+    const preUploadSellingPoints = "产品名称：无线降噪耳机\n核心卖点：45小时续航";
+    await page.getByLabel("商品卖点与生成要求").fill(preUploadSellingPoints);
+    await page.getByRole("button", { name: "自定义配置", exact: true }).click();
+    for (const [group, times] of [
+      ["卖点图", 2],
+      ["场景图", 2],
+      ["其他", 1],
+    ]) {
+      for (let i = 0; i < times; i += 1) {
+        await page.getByRole("button", { name: new RegExp(`^减少${group}`) }).click();
+      }
+    }
+    assert.equal(await page.getByLabel("卖点图张数", { exact: true }).textContent(), "1");
+    await page.getByRole("button", { name: "＋ 新建套图", exact: true }).waitFor({ state: "visible" });
+
+    await page.getByRole("navigation", { name: "创作功能" }).getByRole("link", { name: "生图画布", exact: true }).click();
+    await page.waitForURL("**/create/canvas");
+    await page.getByRole("navigation", { name: "创作功能" }).getByRole("link", { name: "商品套图", exact: true }).click();
+    await page.waitForURL(url + "create/suite");
+
+    await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
+    assert.equal(await page.getByLabel("商品卖点与生成要求").inputValue(), preUploadSellingPoints);
+    assert.equal(await page.getByLabel("卖点图张数", { exact: true }).textContent(), "1");
+    assert.equal(await page.getByLabel("场景图张数", { exact: true }).textContent(), "0");
+
+    // (b) 已上传未生成草稿：上传原图 + 更新卖点 -> 切到商品库(/products) -> 经顶部导航「创建」返回 -> 原图与配置均保留
+    await page.getByLabel("上传商品原图").setInputFiles(PHOTO_PATH);
+    await page.waitForURL(/\/create\/suite\/[^/]+$/);
+    const draftSuiteId = new URL(page.url()).pathname.split("/").pop();
+    const postUploadSellingPoints = "产品名称：无线降噪耳机 Pro\n核心卖点：记忆海绵耳罩、可拆卸麦";
+    await page.getByLabel("商品卖点与生成要求").fill(postUploadSellingPoints);
+    await page.getByText("1 / 6", { exact: true }).waitFor();
+
+    await page.getByRole("link", { name: "商品库", exact: true }).click();
+    await page.waitForURL("**/products");
+    await page.getByRole("link", { name: "创建", exact: true }).click();
+    await page.waitForURL(`**/create/suite/${draftSuiteId}`);
+
+    await page.getByText("1 / 6", { exact: true }).waitFor();
+    assert.equal(await page.getByLabel("商品卖点与生成要求").inputValue(), postUploadSellingPoints);
+    assert.equal(await page.getByLabel("卖点图张数", { exact: true }).textContent(), "1");
+    await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
+
+    // (c) 生成中切页 + 完成后切页均保留，直至点击「＋ 新建套图」
+    await page.getByRole("button", { name: "一键生成套图（2张）", exact: true }).click();
+    const batch = page.getByRole("region", { name: "生成批次" });
+    await batch.locator('[data-status="running"]').waitFor();
+
+    await page.getByRole("link", { name: "商品库", exact: true }).click();
+    await page.waitForURL("**/products");
+    await page.getByRole("link", { name: "创建", exact: true }).click();
+    await page.waitForURL(`**/create/suite/${draftSuiteId}`);
+    await batch.locator('[data-status="running"]').waitFor();
+    assert.equal(await page.getByLabel("商品卖点与生成要求").inputValue(), postUploadSellingPoints);
+
+    imageGate.resolve();
+    await batch.locator('[data-status="completed"]').waitFor({ timeout: 12000 });
+    assert.equal(await batch.locator("[data-result-card] img").count(), 2);
+
+    // 生成完成后切去生图画布再切回，同会话仍保留已完成结果与左侧配置
+    await page.getByRole("navigation", { name: "创作功能" }).getByRole("link", { name: "生图画布", exact: true }).click();
+    await page.waitForURL("**/create/canvas");
+    await page.getByRole("navigation", { name: "创作功能" }).getByRole("link", { name: "商品套图", exact: true }).click();
+    await page.waitForURL(`**/create/suite/${draftSuiteId}`);
+    await batch.locator('[data-status="completed"]').waitFor();
+    assert.equal(await batch.locator("[data-result-card] img").count(), 2);
+    assert.equal(await page.getByLabel("商品卖点与生成要求").inputValue(), postUploadSellingPoints);
+
+    // 点击「＋ 新建套图」重置回空态与清空草稿
+    await page.getByRole("button", { name: "＋ 新建套图", exact: true }).click();
+    await page.waitForURL(url + "create/suite");
+    await page.getByRole("heading", { name: "AI 商品套图", exact: true }).waitFor();
+    await page.getByText("0 / 6", { exact: true }).waitFor();
+    assert.equal(await page.getByLabel("商品卖点与生成要求").inputValue(), "");
+    assert.equal(await page.getByRole("region", { name: "生成批次" }).count(), 0);
+  } finally {
+    imageGate.resolve();
+  }
 });
 
 test("partial_failed 批次单卡点击失败重试成功后，批次徽标立即收敛为已完成且清除失败告警", async (t) => {

@@ -1,5 +1,23 @@
 import type { ListingConfig, ListingContent, ListingRules } from "../../shared/listing-config";
 import type { ModelChannelInput, ModelChannelSnapshot, ModelPreferences, ModelSettingsView } from "../../shared/model-settings";
+import type {
+  ProductCard,
+  ProductCardFields,
+  ProductCardSnapshot,
+  ProductCardStatus,
+  ProductCardSummary,
+  ProductCardSupplierImage,
+} from "../../shared/product-card";
+import type {
+  ProductOnboardingAttachment,
+  ProductOnboardingDraftImage,
+  ProductOnboardingMessage,
+  ProductOnboardingPublishResult,
+  ProductOnboardingSession,
+  ProductOnboardingSessionListResult,
+  ProductOnboardingSessionSummary,
+  ProductOnboardingStatus,
+} from "../../shared/product-onboarding";
 
 export interface ApiImage {
   id: string; suiteId: string; ordinal: number; originalObjectKey: string; thumbnailObjectKey: string;
@@ -27,7 +45,7 @@ export interface ApiPromptInputField {
 }
 export interface ApiPromptTemplate {
   templateId: string; templateVersionId: string; versionNo: number; code: string; name: string;
-  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy" | "replica_prompt"; executionTarget: "llm" | "image_model";
+  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy" | "replica_prompt" | "product_onboarding"; executionTarget: "llm" | "image_model";
   inputSchema: ApiPromptInputField[]; applicability: Record<string, unknown>;
   usedBy?: string[]; status?: "draft" | "published" | "retired";
 }
@@ -263,4 +281,182 @@ export const suiteApi = {
   importReversePlan(planId: string, body: { targetSuiteId?: string; name?: string } = {}) { return request<{ suiteId: string; taskGroupId: string; taskIds: string[]; duplicate: boolean }>(`/api/reverse-plans/${encodeURIComponent(planId)}/canvas-imports`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   bindWhiteResources(taskId: string, resourceIds: string[]) { return request<{ task: ApiSuiteTask; reference: ApiLibraryReference; references: ApiLibraryReference[]; duplicate: boolean }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/white-resource`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ resourceIds }) }); },
   bindWhiteResource(taskId: string, resourceId: string) { return this.bindWhiteResources(taskId, [resourceId]); },
+};
+
+export type {
+  ProductCard as ApiProductCard,
+  ProductCardFields as ApiProductCardFields,
+  ProductCardSnapshot as ApiProductCardSnapshot,
+  ProductCardStatus as ApiProductCardStatus,
+  ProductCardSummary as ApiProductCardSummary,
+  ProductCardSupplierImage as ApiProductCardSupplierImage,
+};
+
+export interface ApiProductCardListQuery {
+  status?: ProductCardStatus | "all";
+  keyword?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ApiProductCardListResult {
+  items: ProductCardSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ApiProductCardNewImagePayload {
+  filename: string;
+  mimeType: string;
+  bytesBase64: string;
+}
+
+export type ApiProductCardUpdateImagePayload =
+  | { imageId: string }
+  | ApiProductCardNewImagePayload;
+
+export interface ApiCreateProductCardPayload extends ProductCardFields {
+  sourceSessionId?: string | null;
+  supplierImages?: ApiProductCardNewImagePayload[];
+}
+
+export interface ApiUpdateProductCardPayload extends Partial<ProductCardFields> {
+  supplierImages?: ApiProductCardUpdateImagePayload[];
+}
+
+const productCardsPath = "/api/product-cards";
+const productCardItemPath = (id: string) => `${productCardsPath}/${encodeURIComponent(id)}`;
+
+export const productCardsApi = {
+  list(query: ApiProductCardListQuery = {}) {
+    const search = new URLSearchParams();
+    if (query.status) search.set("status", query.status);
+    if (query.keyword?.trim()) search.set("keyword", query.keyword.trim());
+    if (query.limit !== undefined) search.set("limit", String(query.limit));
+    if (query.offset !== undefined) search.set("offset", String(query.offset));
+    const qs = search.toString();
+    return request<ApiProductCardListResult>(qs ? `${productCardsPath}?${qs}` : productCardsPath);
+  },
+  get(id: string) {
+    return request<ProductCard>(productCardItemPath(id));
+  },
+  create(payload: ApiCreateProductCardPayload) {
+    return request<ProductCard>(productCardsPath, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify(payload),
+    });
+  },
+  update(id: string, payload: ApiUpdateProductCardPayload) {
+    return request<ProductCard>(productCardItemPath(id), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify(payload),
+    });
+  },
+  archive(id: string) {
+    return request<ProductCard>(`${productCardItemPath(id)}/archive`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify({}),
+    });
+  },
+  restore(id: string) {
+    return request<ProductCard>(`${productCardItemPath(id)}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify({}),
+    });
+  },
+  delete(id: string) {
+    return request<{ id: string }>(productCardItemPath(id), { method: "DELETE" });
+  },
+};
+
+export type {
+  ProductOnboardingAttachment as ApiProductOnboardingAttachment,
+  ProductOnboardingDraftImage as ApiProductOnboardingDraftImage,
+  ProductOnboardingMessage as ApiProductOnboardingMessage,
+  ProductOnboardingPublishResult as ApiProductOnboardingPublishResult,
+  ProductOnboardingSession as ApiProductOnboardingSession,
+  ProductOnboardingSessionListResult as ApiProductOnboardingSessionListResult,
+  ProductOnboardingSessionSummary as ApiProductOnboardingSessionSummary,
+  ProductOnboardingStatus as ApiProductOnboardingStatus,
+};
+
+export interface ApiProductOnboardingSessionListQuery {
+  status?: ProductOnboardingStatus | "all";
+  limit?: number;
+  offset?: number;
+}
+
+export interface ApiProductOnboardingTxtUploadPayload {
+  filename: string;
+  bytesBase64?: string;
+  content?: string;
+}
+
+export interface ApiProductOnboardingTurnPayload {
+  message?: string;
+  title?: string;
+  txtFiles?: ApiProductOnboardingTxtUploadPayload[];
+  supplierImages?: ApiProductCardNewImagePayload[];
+}
+
+export interface ApiProductOnboardingDraftPatchPayload {
+  title?: string;
+  draftCard?: Partial<ProductCardFields>;
+  supplierImages?: ApiProductCardUpdateImagePayload[];
+}
+
+const onboardingSessionsPath = "/api/product-onboarding/sessions";
+const onboardingSessionItemPath = (id: string) =>
+  `${onboardingSessionsPath}/${encodeURIComponent(id)}`;
+
+export const productOnboardingApi = {
+  list(query: ApiProductOnboardingSessionListQuery = {}) {
+    const search = new URLSearchParams();
+    if (query.status) search.set("status", query.status);
+    if (query.limit !== undefined) search.set("limit", String(query.limit));
+    if (query.offset !== undefined) search.set("offset", String(query.offset));
+    const qs = search.toString();
+    return request<ProductOnboardingSessionListResult>(
+      qs ? `${onboardingSessionsPath}?${qs}` : onboardingSessionsPath,
+    );
+  },
+  createSession(payload: ApiProductOnboardingTurnPayload) {
+    return request<ProductOnboardingSession>(onboardingSessionsPath, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify(payload),
+    });
+  },
+  getSession(id: string) {
+    return request<ProductOnboardingSession>(onboardingSessionItemPath(id));
+  },
+  sendMessage(id: string, payload: ApiProductOnboardingTurnPayload) {
+    return request<ProductOnboardingSession>(`${onboardingSessionItemPath(id)}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify(payload),
+    });
+  },
+  saveDraft(id: string, payload: ApiProductOnboardingDraftPatchPayload) {
+    return request<ProductOnboardingSession>(`${onboardingSessionItemPath(id)}/draft`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify(payload),
+    });
+  },
+  publish(id: string) {
+    return request<ProductOnboardingPublishResult>(`${onboardingSessionItemPath(id)}/publish`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
+      body: JSON.stringify({}),
+    });
+  },
+  deleteSession(id: string) {
+    return request<{ id: string }>(onboardingSessionItemPath(id), { method: "DELETE" });
+  },
 };

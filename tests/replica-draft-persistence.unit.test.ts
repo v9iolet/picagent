@@ -229,35 +229,26 @@ test("复刻草稿持久化：图片二进制存 Blob 存储，localStorage 不�
   const prod1 = new File([new Uint8Array([11, 12, 13, 14])], "prod-local.webp", {
     type: "image/webp",
   });
+  const prod2 = new File([new Uint8Array([15, 16, 17, 18])], "prod-angle.png", {
+    type: "image/png",
+  });
 
   store1.addReferences([ref1, ref2]);
-  store1.addProductFiles([prod1]);
+  store1.addProductFiles([prod1, prod2]);
   await waitUntil(
     () =>
       store1.getSnapshot().references.length === 2 &&
       store1.getSnapshot().references.every((r) => r.status === "ready") &&
-      store1.getSnapshot().products.length === 1 &&
+      store1.getSnapshot().products.length === 2 &&
       store1.getSnapshot().products.every((p) => p.status === "ready"),
   );
 
-  // Add remarks, reorder references, add library product and reorder products
+  // Add remarks, reorder references and products
   const r0 = store1.getSnapshot().references[0];
   const r1 = store1.getSnapshot().references[1];
   store1.updateReferenceRemark(r0.localId, "第一张局部要求");
   store1.updateReferenceRemark(r1.localId, "第二张顶部留白");
   store1.moveReference(1, 0);
-
-  store1.applyLibraryProducts([
-    {
-      libraryReferenceId: "",
-      resourceId: "lib-001",
-      resourceVersionId: "ver-001",
-      order: 1,
-      title: "白底图1",
-      previewUrl: "/api/library/resources/lib-001/preview",
-      resourceType: "base_image",
-    },
-  ]);
   store1.moveProduct(1, 0);
 
   store1.updateConfig({
@@ -276,7 +267,7 @@ test("复刻草稿持久化：图片二进制存 Blob 存储，localStorage 不�
   assert.ok(rawStored, "localStorage should store draft metadata");
   assert.equal(rawStored.includes("bytesBase64"), false);
   assert.equal(rawStored.includes("blob:mock-"), false);
-  assert.equal(blobs.blobs.size, 3);
+  assert.equal(blobs.blobs.size, 4);
 
   // Seed an orphan blob to verify startup orphan cleanup
   blobs.blobs.set("orphan-old-blob", new Blob([new Uint8Array([99])], { type: "image/png" }));
@@ -291,10 +282,10 @@ test("复刻草稿持久化：图片二进制存 Blob 存储，localStorage 不�
     revokeObjectUrl: urls2.revokeObjectUrl,
   });
 
-  // Config and library product are available immediately synchronously
+  // Config is available immediately synchronously
   assert.equal(store2.getSnapshot().config.sceneType, "apparel");
   assert.equal(store2.getSnapshot().config.unifiedRequirement, "保持构图与暖色调");
-  assert.equal(store2.getSnapshot().products[0].sourceKind, "library");
+  assert.equal(store2.getSnapshot().products[0].sourceKind, "upload");
 
   await store2.waitForHydration();
 
@@ -312,17 +303,16 @@ test("复刻草稿持久化：图片二进制存 Blob 存储，localStorage 不�
   assert.equal(snap2.references[1].bytesBase64, Buffer.from([1, 2, 3, 4, 5]).toString("base64"));
 
   assert.equal(snap2.products.length, 2);
-  assert.equal(snap2.products[0].sourceKind, "library");
-  assert.equal(snap2.products[1].sourceKind, "upload");
-  if (snap2.products[1].sourceKind === "upload") {
-    assert.equal(snap2.products[1].filename, "prod-local.webp");
-    assert.equal(snap2.products[1].status, "ready");
-    assert.equal(snap2.products[1].bytesBase64, Buffer.from([11, 12, 13, 14]).toString("base64"));
-  }
+  assert.equal(snap2.products[0].filename, "prod-angle.png");
+  assert.equal(snap2.products[0].status, "ready");
+  assert.equal(snap2.products[0].bytesBase64, Buffer.from([15, 16, 17, 18]).toString("base64"));
+  assert.equal(snap2.products[1].filename, "prod-local.webp");
+  assert.equal(snap2.products[1].status, "ready");
+  assert.equal(snap2.products[1].bytesBase64, Buffer.from([11, 12, 13, 14]).toString("base64"));
 
   // Orphan blob should have been pruned
   assert.equal(blobs.blobs.has("orphan-old-blob"), false);
-  assert.equal(blobs.blobs.size, 3);
+  assert.equal(blobs.blobs.size, 4);
 
   // Duplicate upload after reload is still detected via restored sha256
   store2.addReferences([new File([new Uint8Array([1, 2, 3, 4, 5])], "dup.jpg", { type: "image/jpeg" })]);
@@ -333,13 +323,14 @@ test("复刻草稿持久化：图片二进制存 Blob 存储，localStorage 不�
   const removedRefId = snap2.references[0].localId;
   store2.removeReference(removedRefId);
   assert.equal(blobs.blobs.has(removedRefId), false);
-  assert.equal(blobs.blobs.size, 2);
+  assert.equal(blobs.blobs.size, 3);
 
-  // Pruning deleted library product persists to localStorage
-  store2.removeDeletedLibraryProducts(new Set(["lib-001"]), "已移除 1 张已删除的图片");
-  assert.equal(store2.getSnapshot().productNotice, "已移除 1 张已删除的图片");
+  // Removing a single local product deletes its blob and updates localStorage
+  const removedProdId = snap2.products[0].localId;
+  store2.removeProduct(removedProdId);
+  assert.equal(blobs.blobs.has(removedProdId), false);
   assert.equal(store2.getSnapshot().products.length, 1);
-  assert.equal(local.getItem(REPLICA_DRAFT_STORAGE_KEY)?.includes("lib-001"), false);
+  assert.equal(local.getItem(REPLICA_DRAFT_STORAGE_KEY)?.includes(removedProdId), false);
 
   // clearDraft clears both localStorage and IndexedDB blobs
   store2.clearDraft();
@@ -512,7 +503,7 @@ test("复刻草稿持久化：旧 sessionStorage 迁移后改回默认会清理�
   assert.equal(store1Reloaded.getSnapshot().config.sceneType, "ecommerce_product");
   assert.equal(store1Reloaded.getSnapshot().config.unifiedRequirement, "");
 
-  // 2. Sanitize unsafe library previewUrl & reject empty/oversized blobs during hydration
+  // 2. Ignore legacy persisted library products & reject empty/oversized blobs during hydration
   const local2 = new MemoryStorageLike();
   const blobs2 = new MemoryBlobStorage();
   local2.setItem(
@@ -527,22 +518,21 @@ test("复刻草稿持久化：旧 sessionStorage 迁移后改回默认会清理�
       ],
       products: [
         {
-          localId: "lib-unsafe-1",
+          localId: "lib-legacy-1",
           sourceKind: "library",
-          libraryResourceId: "base:unsafe-1",
+          libraryResourceId: "base:legacy-1",
           resourceVersionId: "v1",
-          title: "不安全地址1",
-          previewUrl: "blob:https://example.invalid/123",
+          title: "旧资源库产品图",
+          previewUrl: "/api/library/resources/base%3Alegacy-1/preview",
           resourceType: "base_image",
         },
         {
-          localId: "lib-unsafe-2",
-          sourceKind: "library",
-          libraryResourceId: "base:unsafe-2",
-          resourceVersionId: "v2",
-          title: "不安全地址2",
-          previewUrl: "//evil.example/a.jpg",
-          resourceType: "base_image",
+          localId: "prod-ok",
+          sourceKind: "upload",
+          blobKey: "prod-ok",
+          filename: "local-ok.jpg",
+          mimeType: "image/jpeg",
+          sha256: "",
         },
       ],
     }),
@@ -555,6 +545,7 @@ test("复刻草稿持久化：旧 sessionStorage 迁移后改回默认会清理�
     arrayBuffer: async () => new ArrayBuffer(0),
   } as unknown as Blob);
   blobs2.blobs.set("ref-ok", new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" }));
+  blobs2.blobs.set("prod-ok", new Blob([new Uint8Array([4, 5, 6])], { type: "image/jpeg" }));
 
   const store2 = createReplicaDraftStore({
     storage: local2,
@@ -568,9 +559,9 @@ test("复刻草稿持久化：旧 sessionStorage 迁移后改回默认会清理�
   const snap2 = store2.getSnapshot();
   assert.equal(snap2.references.length, 1);
   assert.equal(snap2.references[0].localId, "ref-ok");
-  assert.equal(snap2.products.length, 2);
-  assert.equal(snap2.products[0].previewUrl, "/api/library/resources/base%3Aunsafe-1/preview");
-  assert.equal(snap2.products[1].previewUrl, "/api/library/resources/base%3Aunsafe-2/preview");
+  assert.equal(snap2.products.length, 1);
+  assert.equal(snap2.products[0].localId, "prod-ok");
+  assert.equal(snap2.products[0].sourceKind, "upload");
 });
 
 test("复刻草稿持久化：IndexedDB 写入失败或不可用时降级，不影响当前会话且刷新不报错", async () => {
@@ -588,21 +579,16 @@ test("复刻草稿持久化：IndexedDB 写入失败或不可用时降级，不�
   });
 
   store1.addReferences([new File([new Uint8Array([1, 2, 3])], "ref.jpg", { type: "image/jpeg" })]);
-  store1.applyLibraryProducts([
-    {
-      libraryReferenceId: "",
-      resourceId: "lib-keep",
-      resourceVersionId: "v1",
-      order: 1,
-      title: "资源库图",
-      previewUrl: "/api/library/resources/lib-keep/preview",
-      resourceType: "base_image",
-    },
-  ]);
+  store1.addProductFiles([new File([new Uint8Array([4, 5, 6])], "prod.jpg", { type: "image/jpeg" })]);
   store1.updateConfig({ unifiedRequirement: "降级模式仍保留配置" });
 
-  await waitUntil(() => store1.getSnapshot().references[0]?.status === "ready");
+  await waitUntil(
+    () =>
+      store1.getSnapshot().references[0]?.status === "ready" &&
+      store1.getSnapshot().products[0]?.status === "ready",
+  );
   assert.equal(store1.getSnapshot().references.length, 1);
+  assert.equal(store1.getSnapshot().products.length, 1);
   assert.equal(store1.getSnapshot().refNotice, "");
 
   // Reload with unavailable IndexedDB (null)
@@ -617,8 +603,7 @@ test("复刻草稿持久化：IndexedDB 写入失败或不可用时降级，不�
 
   const snap2 = store2.getSnapshot();
   assert.equal(snap2.references.length, 0);
-  assert.equal(snap2.products.length, 1);
-  assert.equal(snap2.products[0].sourceKind, "library");
+  assert.equal(snap2.products.length, 0);
   assert.equal(snap2.config.unifiedRequirement, "降级模式仍保留配置");
 });
 
@@ -655,4 +640,55 @@ test("复刻草稿持久化：水合进行中调用 clearDraft 不会回填旧�
 
   assert.equal(store2.getSnapshot().references.length, 0);
   assert.equal(urls2.active.size, 0);
+});
+
+test("复刻草稿持久化：仅选择商品信息卡时也会持久化到 localStorage，重建 store 后完整恢复且 clearDraft 清空", async () => {
+  const local = new MemoryStorageLike();
+  const blobs = new MemoryBlobStorage();
+
+  const store1 = createReplicaDraftStore({
+    storage: local,
+    legacySessionStorage: null,
+    blobStorage: blobs,
+    createObjectUrl: makeFakeUrlHooks().createObjectUrl,
+    revokeObjectUrl: () => {},
+  });
+
+  store1.updateConfig({
+    productCardId: "card-gan-100",
+    productCardSummary: {
+      cardId: "card-gan-100",
+      name: "氮化镓 65W 折叠快充头",
+      revision: 2,
+      coverThumbnailUrl: "/api/product-cards/card-gan-100/images/img-1/preview/thumbnail",
+      sellingPoints: ["65W 双口快充", "折叠插脚便携"],
+      specifications: "65W Max，52×36×36mm，112g",
+      materialsCraft: "阻燃 PC 外壳",
+      audienceScenarios: "差旅办公人群",
+      packageContents: "快充头 ×1，说明书 ×1",
+    },
+  });
+
+  const persistedRaw = local.getItem(REPLICA_DRAFT_STORAGE_KEY);
+  assert.ok(persistedRaw, "Selecting only a product card should still persist draft metadata");
+
+  const store2 = createReplicaDraftStore({
+    storage: local,
+    legacySessionStorage: null,
+    blobStorage: blobs,
+    createObjectUrl: makeFakeUrlHooks().createObjectUrl,
+    revokeObjectUrl: () => {},
+  });
+  await store2.waitForHydration();
+
+  const snap2 = store2.getSnapshot();
+  assert.equal(snap2.config.productCardId, "card-gan-100");
+  assert.equal(snap2.config.productCardSummary?.name, "氮化镓 65W 折叠快充头");
+  assert.deepEqual(snap2.config.productCardSummary?.sellingPoints, ["65W 双口快充", "折叠插脚便携"]);
+  assert.equal(snap2.config.productCardSummary?.revision, 2);
+
+  store2.clearDraft();
+  assert.equal(store2.getSnapshot().config.productCardId, null);
+  assert.equal(store2.getSnapshot().config.productCardSummary, null);
+  assert.equal(local.getItem(REPLICA_DRAFT_STORAGE_KEY), null);
 });

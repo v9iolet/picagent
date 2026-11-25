@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { suiteApi, type ApiLibraryResource, type ApiPromptTemplate, type ApiPromptTemplateCopy } from "../api/client";
 import { AppShell } from "../components/AppShell";
+import { InfoTip } from "../components/ui/InfoTip";
 import {
   promptTextFor,
   stageLabel,
@@ -172,16 +173,21 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
       <main className="workarea styles-layout style-library-workarea">
         <section className="panel style-filter-panel">
           <header className="panel-header">
-            <div>
-              <strong className="panel-title">模板筛选</strong>
-              <div className="panel-subtitle">按执行阶段与版本状态筛选</div>
-            </div>
+            <strong className="panel-title">模板筛选</strong>
             <span className="badge">{items.length} 项</span>
           </header>
           <div className="panel-scroll">
             <div className="style-filters">
               <div className="style-filter-group">
-                <h3>状态</h3>
+                <div className="style-filter-group-head">
+                  <h3>状态</h3>
+                  <InfoTip
+                    label="模板版本规则说明"
+                    title="版本生命周期"
+                    align="start"
+                    content="已发布模板不可原地修改，需复制为新草稿编辑后再发布上线；历史计划与任务始终以引用时的版本为准。"
+                  />
+                </div>
                 {([
                   ["published", "在用"],
                   ["retired", "已下架"],
@@ -203,6 +209,7 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
                   ["base_refine", "底图精修"],
                   ["listing_copy", "上架文案"],
                   ["replica_prompt", "爆品图复刻"],
+                  ["product_onboarding", "商品建档"],
                   ["plan", "计划生成"],
                   ["task_image", "单卡创作"],
                   ["reverse_prompt", "爆品图反推"],
@@ -213,31 +220,19 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
                   </label>
                 ))}
               </div>
-              <div className="style-filter-note">
-                <Icon name="files" />
-                <p>已发布模板不可原地修改；需复制为新草稿编辑后再发布上线。</p>
-              </div>
             </div>
           </div>
         </section>
 
-        <section className="styles-center style-library-center">
+        <section className="styles-center style-library-center style-templates-center">
           <header className="panel-header style-catalog-toolbar">
-            <div>
-              <strong className="panel-title">提示词模板</strong>
-              <div className="panel-subtitle">维护各阶段的 System Prompt、User Prompt 模板与版本生命周期，单击卡片在右侧编辑</div>
-            </div>
+            <strong className="panel-title">提示词模板</strong>
           </header>
           <div className="style-library-toolbar">
             <div className="search-wrap">
               <input className="input" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") load().catch(() => undefined); }} placeholder="搜索提示词模板名称或正文" />
             </div>
             <button className="btn" type="button" onClick={() => load().catch(() => undefined)}>搜索</button>
-          </div>
-          <div className="style-boundary">
-            <strong>当前范围</strong>
-            <span>System Prompt、User Prompt、inputSchema 和不可变版本生命周期。</span>
-            <span className="badge pass">提示词模板库</span>
           </div>
           <div className="style-results">
             <div className="template-list-grid">
@@ -282,10 +277,7 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
 
         <aside className="panel right style-inspector">
           <header className="panel-header">
-            <div>
-              <strong className="panel-title">模板详情与版本</strong>
-              <div className="panel-subtitle">查看正文、复制草稿并发布上线</div>
-            </div>
+            <strong className="panel-title">模板详情与版本</strong>
             {selected && <button className="icon-btn" type="button" aria-label="清除详情" onClick={() => setSelected(null)}><Icon name="x" /></button>}
           </header>
           {selected ? (
@@ -373,18 +365,11 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
                         <button className="btn" type="button" disabled={savingTemplate} onClick={() => publishTemplateVersion(activeTemplateVersion.templateVersionId).catch(() => undefined)}>发布此版本</button>
                       </div>
                     ) : (
-                      <small className="style-readonly-hint">当前版本为只读状态，如需修改请点击上方“复制新草稿”。</small>
+                      <small className="style-readonly-hint">只读版本，修改请点击上方“复制新草稿”。</small>
                     )}
                   </div>
                 )}
               </section>
-              <div className="resource-selection">
-                <Icon name="sparkles" />
-                <div>
-                  <strong>历史引用保持稳定</strong>
-                  <span>已发布模板版本不可原地改写，历史计划与任务始终以引用时的版本为准。</span>
-                </div>
-              </div>
             </div>
           ) : (
             <div className="style-library-inspector-empty">

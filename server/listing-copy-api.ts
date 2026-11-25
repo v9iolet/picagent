@@ -1,4 +1,9 @@
 import { LISTING_CONFIG_FIELDS, type ListingConfigInput } from "../shared/listing-config.js";
+import {
+  mergeProductCardFacts,
+  readProductCardSnapshot,
+  type ProductCardSnapshot,
+} from "../shared/product-card.js";
 import { randomUUID } from "node:crypto";
 import { now, ok, type AppResponse } from "./api-response.js";
 import { processImage } from "./image.js";
@@ -37,6 +42,11 @@ function applyListingConfig(job: ListingJob, params: ListingConfigInput) {
     else job[k] = params[k].trim();
   }
   if (invalid) throw new ListingError("INVALID_LISTING_CONFIG");
+  return job;
+}
+function applyProductCardSnapshotToListingJob(job: ListingJob, snapshot: ProductCardSnapshot | null) {
+  if (!snapshot) return job;
+  job.input.sellingPoints = mergeProductCardFacts(snapshot, job.input.sellingPoints);
   return job;
 }
 function newListingDraft(sourceSuiteId: string | null = null, id: string = randomUUID()): ListingJob {
@@ -169,11 +179,16 @@ export function createListingCopyApi(deps: {
   }
   // Claim the run ID before interpreting inherited data. A bad historical field must
   // leave a visible, retryable result rather than disappearing from studio-state.
-  async function startSuiteListingGeneration(job: ListingJob, config: ListingConfigInput) {
+  async function startSuiteListingGeneration(
+    job: ListingJob,
+    config: ListingConfigInput,
+    productCardSnapshot: ProductCardSnapshot | null = null,
+  ) {
     const claimed = await saveListingJob({ ...job, status: "running" }, null);
     const configured = structuredClone(claimed);
     try {
       applyListingConfig(configured, config);
+      applyProductCardSnapshotToListingJob(configured, productCardSnapshot);
       if (!configured.inputImages.length) throw new ListingError("INPUT_IMAGES_REQUIRED");
     } catch (e) {
       if (!(e instanceof ListingError)) throw e;
@@ -182,12 +197,18 @@ export function createListingCopyApi(deps: {
     return startListingGeneration(configured, claimed);
   }
   // A pipeline run has one deterministic job ID, so replay/resume never creates a second job.
-  async function startPipeline(runId: string, suiteId: string, config: ListingConfigInput, images: ListingImage[]) {
+  async function startPipeline(
+    runId: string,
+    suiteId: string,
+    config: ListingConfigInput & Record<string, unknown>,
+    images: ListingImage[],
+  ) {
     if (await deps.jobs.summary(runId)) return;
     const job = newListingDraft(suiteId, runId);
     job.inputImages = images.map(copySuiteImageReference);
+    const snapshot = readProductCardSnapshot(config.productCardSnapshot);
     try {
-      await startSuiteListingGeneration(job, config);
+      await startSuiteListingGeneration(job, config, snapshot);
     } catch (e) {
       if (!(e instanceof ListingError && e.status === 409)) throw e;
     }
@@ -208,9 +229,13 @@ export function createListingCopyApi(deps: {
         outputLanguage: v.output_language,
         sellingPoints: v.human_supplement,
       };
+      const snapshot = readProductCardSnapshot(run?.config?.productCardSnapshot);
       job.inputImages = (await deps.suites.getInputImages(source)).map(copySuiteImageReference);
       params = { ...inherited, ...params };
-      if (generateNow) return startSuiteListingGeneration(job, params);
+      if (generateNow) return startSuiteListingGeneration(job, params, snapshot);
+      applyListingConfig(job, params);
+      applyProductCardSnapshotToListingJob(job, snapshot);
+      return ok(await saveListingJob(job, null), 201);
     }
     applyListingConfig(job, params);
     return generateNow ? startListingGeneration(job, null) : ok(await saveListingJob(job, null), 201);
@@ -299,7 +324,12 @@ export function createListingCopyApi(deps: {
     if (method === "GET" && !action) return ok(job);
     if (!imageId && method === "POST" && (action === "generate" || action === "regenerate")) {
       requireEditableListing(job);
-      return startListingGeneration(applyListingConfig(structuredClone(job), params), job);
+      const next = applyListingConfig(structuredClone(job), params);
+      const run =
+        (await deps.pipelines.getRun(job.id)) ??
+        (job.sourceSuiteId ? await deps.pipelines.getLatestRun(job.sourceSuiteId) : null);
+      applyProductCardSnapshotToListingJob(next, readProductCardSnapshot(run?.config?.productCardSnapshot));
+      return startListingGeneration(next, job);
     }
     if (!action && method === "PUT") {
       requireEditableListing(job);

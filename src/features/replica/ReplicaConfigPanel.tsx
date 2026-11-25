@@ -1,9 +1,11 @@
-import { useState, type DragEvent } from "react";
+import { useId, useState, type DragEvent } from "react";
 import type { ImageOptions } from "../../../shared/model-settings";
-import {
-  ProductResourcePickerModal,
-  type ProductResourceSelection,
-} from "../../components/resource-picker";
+import { ProductCardPickerModal } from "../../components/product-card-picker/ProductCardPickerModal";
+import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
+import { toSelectedProductCardSummary } from "../../components/product-card-picker/types";
+import { ProductImageGuideTip } from "../../components/product-image-guide/ProductImageGuideTip";
+import { InfoTip } from "../../components/ui/InfoTip";
+import { Icon } from "../../pages/shared";
 import {
   allowedReplicaSizes,
   charCount,
@@ -34,7 +36,6 @@ export interface ReplicaConfigPanelProps {
   onMoveReference: (fromIndex: number, toIndex: number) => void;
   onUpdateReferenceRemark: (localId: string, remark: string) => void;
   onAddProductFiles: (files: File[]) => void;
-  onApplyLibraryProducts: (selected: ProductResourceSelection[]) => void;
   onRemoveProduct: (localId: string) => void;
   onMoveProduct: (fromIndex: number, toIndex: number) => void;
   onUpdateConfig: (patch: Partial<ReplicaConfigDraft>) => void;
@@ -54,7 +55,6 @@ export function ReplicaConfigPanel({
   onMoveReference,
   onUpdateReferenceRemark,
   onAddProductFiles,
-  onApplyLibraryProducts,
   onRemoveProduct,
   onMoveProduct,
   onUpdateConfig,
@@ -63,30 +63,18 @@ export function ReplicaConfigPanel({
   const [refDragging, setRefDragging] = useState(false);
   const [productDragging, setProductDragging] = useState(false);
   const [dragRefIndex, setDragRefIndex] = useState<number | null>(null);
-  const [pickerOpen, setPickerOpen] = useState(false);
   const [hoveredLevel, setHoveredLevel] = useState<string | null>(null);
+  const [productCardPickerOpen, setProductCardPickerOpen] = useState(false);
+  const styleUnifiedId = useId();
 
   const validRefCount = references.filter((item) => item.status === "ready").length;
   const validProductCount = products.filter((item) => item.status === "ready").length;
-  const localProductCount = products.filter((item) => item.sourceKind === "upload").length;
-  const librarySelected: ProductResourceSelection[] = products
-    .filter((item): item is Extract<ReplicaProductDraft, { sourceKind: "library" }> => item.sourceKind === "library")
-    .map((item, idx) => ({
-      libraryReferenceId: "",
-      resourceId: item.libraryResourceId,
-      resourceVersionId: item.resourceVersionId,
-      order: idx + 1,
-      title: item.title,
-      previewUrl: item.previewUrl,
-      resourceType: item.resourceType,
-    }));
-
-  const libraryMax = Math.max(0, REPLICA_MAX_PRODUCTS - localProductCount);
   const sizes = allowedReplicaSizes(imageOptions);
   const showStyleUnified = validRefCount >= 2;
   const showNoProductWarning = needsNoProductWarning(config.sceneType, validProductCount);
   const submitState = getReplicaSubmitState(references, products, config, submitting);
   const unifiedCount = charCount(config.unifiedRequirement);
+  const hasProductCard = Boolean(config.productCardId && config.productCardSummary);
 
   const handleRefCardDrop = (targetIndex: number) => (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
@@ -231,9 +219,13 @@ export function ReplicaConfigPanel({
         </section>
 
         <section>
-          <h2>
-            产品原图（选填） <small>{products.length} / {REPLICA_MAX_PRODUCTS}</small>
-          </h2>
+          <div className="pig-heading-row">
+            <div className="pig-heading-left">
+              <h2>产品原图（选填）</h2>
+              <ProductImageGuideTip label="产品原图上传说明" />
+            </div>
+            <small>{products.length} / {REPLICA_MAX_PRODUCTS}</small>
+          </div>
           <div
             className={`ss-upload rp-product-upload${productDragging ? " dragging" : ""}`}
             onDragOver={(event) => {
@@ -250,7 +242,7 @@ export function ReplicaConfigPanel({
             }}
           >
             {products.map((item, index) => {
-              const title = item.sourceKind === "library" ? item.title : item.filename;
+              const title = item.filename;
               return (
                 <div
                   className={`ss-thumb rp-product-thumb${item.status === "error" ? " is-error" : ""}`}
@@ -262,9 +254,7 @@ export function ReplicaConfigPanel({
                   ) : (
                     <span className="rp-ref-fallback">{item.status === "reading" ? "…" : "!"}</span>
                   )}
-                  <span className="rp-product-source">
-                    {item.sourceKind === "library" ? "资源库" : "本地"}
-                  </span>
+                  <span className="rp-product-source">本地</span>
                   <div className="rp-product-controls">
                     {index > 0 && (
                       <button
@@ -302,17 +292,6 @@ export function ReplicaConfigPanel({
                 />
               </label>
             )}
-          </div>
-          <div className="rp-product-bar">
-            <button
-              type="button"
-              className="rp-library-btn"
-              disabled={submitting || (libraryMax === 0 && librarySelected.length === 0)}
-              onClick={() => setPickerOpen(true)}
-            >
-              从资源库选择
-            </button>
-            <small>同一商品多角度，整批共用（最多 6 张）</small>
           </div>
           {productNotice && (
             <p className="rp-inline-notice" role="status">
@@ -405,29 +384,83 @@ export function ReplicaConfigPanel({
         </section>
 
         <section>
-          <h2>商品信息（选填）</h2>
+          {hasProductCard && config.productCardSummary ? (
+            <SelectedProductCardBar
+              card={config.productCardSummary}
+              disabled={submitting}
+              onChangeCard={() => setProductCardPickerOpen(true)}
+              onRemove={() =>
+                onUpdateConfig({
+                  productCardId: null,
+                  productCardSummary: null,
+                })
+              }
+            />
+          ) : (
+            <div className="pcp-trigger-wrap">
+              <button
+                type="button"
+                className="pcp-trigger-btn"
+                aria-haspopup="dialog"
+                disabled={submitting}
+                onClick={() => setProductCardPickerOpen(true)}
+              >
+                <span className="pcp-trigger-left">
+                  <Icon name="box" />
+                  <span>选择商品信息卡（选填）</span>
+                </span>
+                <span className="pcp-trigger-arrow" aria-hidden="true">›</span>
+              </button>
+            </div>
+          )}
+          <div className="rp-heading-with-tip">
+            <h2>{hasProductCard ? "补充商品信息（选填）" : "商品信息（选填）"}</h2>
+            <InfoTip
+              label="事实来源说明"
+              title="商品事实来源"
+              align="start"
+              content={
+                hasProductCard
+                  ? "客观商品事实由所选商品信息卡自动注入，并与此处补充说明合并作为本批次唯一事实来源。"
+                  : "作为本批次新文案中参数、卖点、规格的唯一事实来源，未填写的参数不会编造。"
+              }
+            />
+          </div>
           <textarea
             rows={3}
             aria-label="商品信息"
-            placeholder="填写商品名称、核心卖点、参数、规格等真实事实"
+            placeholder={
+              hasProductCard
+                ? "客观商品事实将由所选商品信息卡自动注入；可在此补充本次复刻特有的文案或卖点说明"
+                : "填写商品名称、核心卖点、参数、规格等真实事实"
+            }
             value={config.productInfo}
             onChange={(event) => onUpdateConfig({ productInfo: event.target.value })}
           />
-          <small>作为本批次新文案中参数、卖点、规格的唯一事实来源，未填写的参数不会编造。</small>
         </section>
 
         {showStyleUnified && (
           <section>
-            <label className="ss-switch rp-style-switch">
-              输出风格保持一致
-              <input
-                type="checkbox"
-                aria-label="输出风格保持一致"
-                checked={config.styleUnified}
-                onChange={(event) => onUpdateConfig({ styleUnified: event.target.checked })}
-              />
-            </label>
-            <small>开启后整组参考图共享统一的配色与视觉调性。</small>
+            <div className="rp-style-switch-row">
+              <span className="rp-style-switch-label">
+                <label htmlFor={styleUnifiedId}>输出风格保持一致</label>
+                <InfoTip
+                  label="风格统一说明"
+                  title="多图统一调性"
+                  align="start"
+                  content="开启后整组参考图共享统一的配色与视觉调性。"
+                />
+              </span>
+              <label className="ss-switch rp-style-switch">
+                <input
+                  id={styleUnifiedId}
+                  type="checkbox"
+                  aria-label="输出风格保持一致"
+                  checked={config.styleUnified}
+                  onChange={(event) => onUpdateConfig({ styleUnified: event.target.checked })}
+                />
+              </label>
+            </div>
           </section>
         )}
 
@@ -483,6 +516,18 @@ export function ReplicaConfigPanel({
         </section>
       </fieldset>
 
+      <ProductCardPickerModal
+        open={productCardPickerOpen}
+        selectedCardId={config.productCardId}
+        onClose={() => setProductCardPickerOpen(false)}
+        onConfirm={(card) =>
+          onUpdateConfig({
+            productCardId: card.id,
+            productCardSummary: toSelectedProductCardSummary(card),
+          })
+        }
+      />
+
       <footer className="rp-footer">
         {submitState.disabledReason && (
           <p className="rp-submit-reason" data-submit-reason role="status">
@@ -498,20 +543,6 @@ export function ReplicaConfigPanel({
           {submitState.buttonLabel}
         </button>
       </footer>
-
-      <ProductResourcePickerModal
-        open={pickerOpen}
-        onClose={() => setPickerOpen(false)}
-        max={libraryMax}
-        initialSelected={librarySelected}
-        title="从资源库选择产品原图"
-        subtitle={`最多选择 ${libraryMax} 张已发布白底图或原图（产品原图总上限 ${REPLICA_MAX_PRODUCTS} 张）`}
-        confirmLabel="确认选择"
-        allowEmpty
-        onConfirm={(selected) => {
-          onApplyLibraryProducts(selected);
-        }}
-      />
     </aside>
   );
 }

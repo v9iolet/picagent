@@ -171,11 +171,17 @@ export function materializeCategoryPlanItems(snapshot: PlanSnapshot, requests: C
     ? snapshot.dynamicInput.platform_text_rule
     : typeof snapshot.dynamicInput.text_strategy === "string" ? snapshot.dynamicInput.text_strategy : undefined;
   const factsById = new Map(snapshot.chunks.map((chunk) => [chunk.sourceChunkId, chunk]));
-  const humanSupplement = [snapshot.dynamicInput.human_supplement, snapshot.dynamicInput.emphasis_requirements]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .map((value) => value.trim())
-    .filter((value, index, values) => values.indexOf(value) === index)
-    .join("\n");
+  const rawSupplement = typeof snapshot.dynamicInput.human_supplement === "string"
+    ? snapshot.dynamicInput.human_supplement.trim()
+    : "";
+  const rawEmphasis = typeof snapshot.dynamicInput.emphasis_requirements === "string"
+    ? snapshot.dynamicInput.emphasis_requirements.trim()
+    : "";
+  const humanSupplement = !rawSupplement
+    ? rawEmphasis
+    : !rawEmphasis || rawSupplement === rawEmphasis || rawSupplement.endsWith(`【本次补充说明】\n${rawEmphasis}`)
+      ? rawSupplement
+      : `${rawSupplement}\n${rawEmphasis}`;
   const items: PlanItem[] = [...snapshot.items];
   const existingKeys = new Set(items.map(itemKey));
   for (const { code } of expected) {

@@ -94,16 +94,16 @@ async function offlineAssetsApp(t, { extraImages = 0 } = {}) {
     updatedAt: "2026-11-23T11:40:00.000Z",
   });
   libraryRepository.addResource({
-    id: "input:lib-c",
-    resourceType: "input_image",
-    title: "保留商品原图 C",
+    id: "base:lib-c",
+    resourceType: "base_image",
+    title: "保留白底图 C",
     summary: "1024 × 1024",
     mimeType: "image/jpeg",
-    previewUrl: "/api/library/resources/input%3Alib-c/preview",
+    previewUrl: "/api/library/resources/base%3Alib-c/preview",
     suiteId: null,
     taskId: null,
     imageVersionId: null,
-    baseVersionId: null,
+    baseVersionId: "bv-c",
     templateVersionId: null,
     resourceVersionId: "ver-c",
     stage: null,
@@ -112,25 +112,45 @@ async function offlineAssetsApp(t, { extraImages = 0 } = {}) {
     createdAt: "2026-11-23T11:30:00.000Z",
     updatedAt: "2026-11-23T11:30:00.000Z",
   });
+  // Uploaded input_image must never be exposed in /assets or canvas resource picker
+  libraryRepository.addResource({
+    id: "input:hidden-orig",
+    resourceType: "input_image",
+    title: "不应展示的实拍原图",
+    summary: "1024 × 1024",
+    mimeType: "image/jpeg",
+    previewUrl: "/api/library/resources/input%3Ahidden-orig/preview",
+    suiteId: null,
+    taskId: null,
+    imageVersionId: null,
+    baseVersionId: null,
+    templateVersionId: null,
+    resourceVersionId: "ver-hidden",
+    stage: null,
+    source: { objectKey: "lib/input-c.jpg" },
+    status: "published",
+    createdAt: "2026-11-23T11:55:00.000Z",
+    updatedAt: "2026-11-23T11:55:00.000Z",
+  });
 
   for (let i = 1; i <= extraImages; i++) {
-    const id = `input:extra-${String(i).padStart(2, "0")}`;
+    const id = `task-version:extra-${String(i).padStart(2, "0")}`;
     const min = String(Math.floor(i / 60)).padStart(2, "0");
     const sec = String(i % 60).padStart(2, "0");
     libraryRepository.addResource({
       id,
-      resourceType: "input_image",
+      resourceType: "task_image_version",
       title: `分页图片 ${String(i).padStart(2, "0")}`,
       summary: "1024 × 1024",
       mimeType: "image/jpeg",
       previewUrl: `/api/library/resources/${encodeURIComponent(id)}/preview`,
       suiteId: null,
       taskId: null,
-      imageVersionId: null,
+      imageVersionId: `ver-extra-${i}`,
       baseVersionId: null,
       templateVersionId: null,
       resourceVersionId: `ver-extra-${i}`,
-      stage: null,
+      stage: "task_image",
       source: { objectKey: "lib/input-c.jpg" },
       status: "published",
       createdAt: `2026-11-23T08:${min}:${sec}.000Z`,
@@ -256,6 +276,9 @@ test("图片资源库：超过 24 张图片分页翻页批量删除、真实 tot
 
   await page.goto(url + "assets");
   await page.locator(".style-card").first().waitFor();
+  assert.equal(await page.getByRole("radio", { name: "全部生成图", exact: true }).count(), 1);
+  assert.equal(await page.getByRole("radio", { name: "商品实拍原图", exact: true }).count(), 0);
+  assert.equal(await page.locator(".style-card", { hasText: "不应展示的实拍原图" }).count(), 0);
   assert.equal(await page.locator(".style-card").count(), 24);
   await page.getByText("第 1 / 2 页 · 共 27 项").waitFor();
   await page.getByText("当前共 27 项").waitFor();
@@ -292,16 +315,16 @@ test("图片资源库：超过 24 张图片分页翻页批量删除、真实 tot
   await page.locator(".style-card", { hasText: "可删除白底图 A" }).waitFor();
   assert.equal(await page.locator(".style-card").count(), 24);
 
-  // Filter by resourceType=base_image -> server returns only the 2 base images
+  // Filter by resourceType=base_image -> server returns only the 3 base images (lib-a, lib-b, lib-c)
   await page.getByRole("radio", { name: "白底底图", exact: true }).check();
-  await page.getByText("第 1 / 1 页 · 共 2 项").waitFor();
+  await page.getByText("第 1 / 1 页 · 共 3 项").waitFor();
   await page.locator(".style-card", { hasText: "可删除白底图 A" }).waitFor();
-  assert.equal(await page.locator(".style-card").count(), 2);
+  assert.equal(await page.locator(".style-card").count(), 3);
 
   assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);
 });
 
-test("画布已绑资源软删除后：节点预览正常、选择器剔除已删项并支持移除与换绑；复刻草稿遇已删资源提交不报 404", async (t) => {
+test("画布已绑资源软删除后：节点预览正常、选择器仅展示白底底图并剔除已删项；复刻配置栏不再提供资源库选图入口", async (t) => {
   const { api, url, page, canvasSuite, canvasTask } = await offlineAssetsApp(t);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -335,20 +358,21 @@ test("画布已绑资源软删除后：节点预览正常、选择器剔除已�
   const imgComplete = await nodeImg.evaluate((el) => el.complete && el.naturalWidth > 0);
   assert.equal(imgComplete, true, "Frozen canvas reference preview image must remain viewable after library deletion");
 
-  // 4. Open ProductResourcePickerModal -> deleted item automatically removed with notice, rebinding succeeds!
+  // 4. Open ProductResourcePickerModal -> deleted item automatically removed with notice, input_image hidden, rebinding succeeds!
   await page.getByRole("button", { name: "从图片库选择" }).click();
   const canvasPicker = page.getByRole("dialog", { name: "选择图片库参考图" });
   await canvasPicker.getByText("已移除 1 张已删除的图片").waitFor();
   assert.equal(await canvasPicker.getByText("可删除白底图 A").count(), 0);
+  assert.equal(await canvasPicker.getByText("不应展示的实拍原图").count(), 0);
 
-  // Select two items, test explicit "移除" button on order list, then confirm rebind with 保留商品原图 C
+  // Select two base_image items, test explicit "移除" button on order list, then confirm rebind with 保留白底图 C
   await canvasPicker.getByRole("button", { name: /可删除白底图 B/ }).click();
-  await canvasPicker.getByRole("button", { name: /保留商品原图 C/ }).click();
+  await canvasPicker.getByRole("button", { name: /保留白底图 C/ }).click();
   const orderSection = canvasPicker.locator(".rp-picker-order");
   await orderSection.getByText("1. 可删除白底图 B").waitFor();
   await orderSection.getByRole("button", { name: "移除" }).first().click();
   assert.equal(await orderSection.getByText("可删除白底图 B").count(), 0);
-  await orderSection.getByText("1. 保留商品原图 C").waitFor();
+  await orderSection.getByText("1. 保留白底图 C").waitFor();
 
   const rebindReq = page.waitForResponse(
     (res) => res.request().method() === "POST" && res.url().endsWith(`/api/suite-tasks/${canvasTask.id}/white-resource`),
@@ -358,27 +382,18 @@ test("画布已绑资源软删除后：节点预览正常、选择器剔除已�
   assert.ok(rebindHttp.status() === 200 || rebindHttp.status() === 201, `Expected rebind 200/201, got ${rebindHttp.status()}`);
   await page.getByRole("status").filter({ hasText: "已绑定图片库参考图" }).waitFor();
 
-  // 5. Replica studio: select base:lib-b from resource picker, delete base:lib-b concurrently, then submit -> must prune and NOT 404
+  // 5. Replica studio: no "从资源库选择" button; local upload product + submit succeeds with 201
   await page.goto(url + "create/replica");
+  assert.equal(await page.getByRole("button", { name: /资源库选择/ }).count(), 0);
   await page.getByLabel("上传参考图", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
-  await page.getByRole("button", { name: /资源库选择/ }).click();
-  const replicaPicker = page.getByRole("dialog");
-  await replicaPicker.getByText("可删除白底图 B").waitFor();
-  assert.equal(await replicaPicker.getByText("可删除白底图 A").count(), 0);
-  await replicaPicker.getByRole("button", { name: /可删除白底图 B/ }).click();
-  await replicaPicker.getByRole("button", { name: /确认/ }).click();
+  await page.getByLabel("上传产品原图", { exact: true }).setInputFiles("public/assets/tokyo-desk-v3.jpg");
 
-  // Soft-delete base:lib-b after it's already in the replica draft
-  const delB = await page.request.delete(url + "api/library/resources/base%3Alib-b");
-  assert.equal(delB.status(), 200);
-
-  // Submit replica -> must auto-prune deleted base:lib-b and succeed with 201 (not 404)
   const createReq = page.waitForResponse(
     (res) => res.request().method() === "POST" && res.url().endsWith("/api/replicas"),
   );
   await page.getByRole("button", { name: "一键复刻（1张）", exact: true }).click();
   const createRes = await createReq;
-  assert.equal(createRes.status(), 201, `Replica submit must not fail with 404 after library product deletion, got ${createRes.status()}`);
+  assert.equal(createRes.status(), 201, `Expected replica submit 201, got ${createRes.status()}`);
   await page.waitForURL(/\/create\/replica\?suite=[^&]+/);
 
   assert.deepEqual(errors, [], `Unexpected page errors: ${errors.join("; ")}`);

@@ -643,6 +643,7 @@ function PromptLibraryButton({ onNotify }: { onNotify: (message: string) => void
               <option value="base_refine">底图精修</option>
               <option value="listing_copy">上架文案</option>
               <option value="replica_prompt">爆品图复刻</option>
+              <option value="product_onboarding">商品建档</option>
             </select>
             <div className="wb-prompt-list">
               {templates.length > 0 ? templates.map((template) => (
@@ -687,7 +688,7 @@ function WhiteResourcePicker({ task, onBound, onNotify }: { task: ApiSuiteTask; 
         max={3}
         initialSelected={bound}
         title="选择图片库参考图"
-        subtitle="最多 3 张，按顺序作为主图和补充角度"
+        subtitle="最多 3 张已发布白底底图，按顺序作为主图和补充角度"
         confirmLabel="确认绑定"
         onConfirm={async (selected) => {
           await suiteApi.bindWhiteResources(task.id, selected.map((item) => item.resourceId));

@@ -23,6 +23,8 @@ import { PostgresPromptRepository } from "./repositories/postgres-prompt-reposit
 import { PostgresLibraryRepository } from "./repositories/postgres-library-repository.js";
 import { PostgresReverseRepository } from "./repositories/postgres-reverse-repository.js";
 import { PostgresPipelineRepository } from "./repositories/postgres-pipeline-repository.js";
+import { PostgresProductCardRepository } from "./repositories/postgres-product-card-repository.js";
+import { PostgresProductOnboardingRepository } from "./product-onboarding/index.js";
 import { PostgresReplicaRepository } from "./repositories/postgres-replica-repository.js";
 import { MinioStorage } from "./storage/minio-storage.js";
 import { ImageEditorService, type ImageEditProvider, type ImageSource } from "./image-editor.js";
@@ -144,6 +146,8 @@ const app = createSuiteStudioApp({
   taskRepository,
   listingRepository: new PostgresListingRepository(pool),
   pipelineRepository: new PostgresPipelineRepository(pool),
+  productCardRepository: new PostgresProductCardRepository(pool),
+  productOnboardingRepository: new PostgresProductOnboardingRepository(pool),
   replicaRepository: new PostgresReplicaRepository(pool),
   imageEditorApi,
   libraryRepository: new PostgresLibraryRepository(pool),
@@ -180,7 +184,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   const upload = req.method === "POST" ? await dispatchInputImageUpload(app, requestUrl.pathname, body, headers) : null;
   if (upload) {
     response = upload;
-  } else if (req.method === "GET" && /^\/api\/listing-copies\/[^/]+\/input-images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname)) {
+  } else if (
+    req.method === "GET" &&
+    (
+      /^\/api\/listing-copies\/[^/]+\/input-images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname) ||
+      /^\/api\/product-cards\/[^/]+\/images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname) ||
+      /^\/api\/product-onboarding\/sessions\/[^/]+\/images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname)
+    )
+  ) {
     response = await app.request("GET", requestUrl.pathname);
   } else if (req.method === "GET" && path.includes("/preview")) {
     const inputMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/preview\/(original|thumbnail)$/);

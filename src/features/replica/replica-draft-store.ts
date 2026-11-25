@@ -1,4 +1,4 @@
-import type { ProductResourceSelection } from "../../components/resource-picker";
+import { sanitizeSelectedProductCardSummary } from "../../components/product-card-picker/types";
 import {
   replicaDraftBlobStorage,
   type ReplicaDraftBlobStorage,
@@ -50,24 +50,14 @@ interface PersistedReplicaReferenceMeta {
   remark: string;
 }
 
-type PersistedReplicaProductMeta =
-  | {
-      localId: string;
-      sourceKind: "upload";
-      blobKey: string;
-      filename: string;
-      mimeType: string;
-      sha256: string;
-    }
-  | {
-      localId: string;
-      sourceKind: "library";
-      libraryResourceId: string;
-      resourceVersionId: string;
-      title: string;
-      previewUrl: string;
-      resourceType?: "base_image" | "input_image";
-    };
+interface PersistedReplicaProductMeta {
+  localId: string;
+  sourceKind: "upload";
+  blobKey: string;
+  filename: string;
+  mimeType: string;
+  sha256: string;
+}
 
 interface PersistedReplicaDraft {
   version: 1;
@@ -107,10 +97,6 @@ export function clearLastReplicaSuiteId(): void {
 const VALID_LANGUAGES = new Set<string>(REPLICA_LANGUAGE_OPTIONS.map((item) => item.value));
 const VALID_MIME_TYPES = new Set<string>(REPLICA_ACCEPTED_MIME_TYPES);
 
-function isSafeRelativePreviewUrl(url: string): boolean {
-  return url.startsWith("/") && !url.startsWith("//");
-}
-
 function sanitizeConfigDraft(raw: unknown): ReplicaConfigDraft {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { ...INITIAL_REPLICA_CONFIG };
@@ -131,6 +117,16 @@ function sanitizeConfigDraft(raw: unknown): ReplicaConfigDraft {
       ? (data.language as ReplicaLanguage)
       : INITIAL_REPLICA_CONFIG.language;
 
+  const productCardId =
+    typeof data.productCardId === "string" && data.productCardId.trim()
+      ? data.productCardId.trim()
+      : null;
+  const rawSummary = productCardId
+    ? sanitizeSelectedProductCardSummary(data.productCardSummary)
+    : null;
+  const productCardSummary =
+    rawSummary && rawSummary.cardId === productCardId ? rawSummary : null;
+
   return {
     sceneType,
     cloneLevel,
@@ -140,6 +136,8 @@ function sanitizeConfigDraft(raw: unknown): ReplicaConfigDraft {
         : INITIAL_REPLICA_CONFIG.unifiedRequirement,
     productInfo:
       typeof data.productInfo === "string" ? data.productInfo : INITIAL_REPLICA_CONFIG.productInfo,
+    productCardId,
+    productCardSummary,
     styleUnified:
       typeof data.styleUnified === "boolean"
         ? data.styleUnified
@@ -162,6 +160,8 @@ function isDefaultConfig(config: ReplicaConfigDraft): boolean {
     config.cloneLevel === INITIAL_REPLICA_CONFIG.cloneLevel &&
     config.unifiedRequirement === INITIAL_REPLICA_CONFIG.unifiedRequirement &&
     config.productInfo === INITIAL_REPLICA_CONFIG.productInfo &&
+    config.productCardId === INITIAL_REPLICA_CONFIG.productCardId &&
+    config.productCardSummary === INITIAL_REPLICA_CONFIG.productCardSummary &&
     config.styleUnified === INITIAL_REPLICA_CONFIG.styleUnified &&
     config.language === INITIAL_REPLICA_CONFIG.language &&
     config.ratio === INITIAL_REPLICA_CONFIG.ratio &&
@@ -200,63 +200,28 @@ function sanitizePersistedProducts(raw: unknown): PersistedReplicaProductMeta[] 
   if (!Array.isArray(raw)) return [];
   const items: PersistedReplicaProductMeta[] = [];
   const seenLocalIds = new Set<string>();
-  const seenLibraryIds = new Set<string>();
   for (const entry of raw) {
     if (items.length >= REPLICA_MAX_PRODUCTS) break;
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const data = entry as Record<string, unknown>;
-    if (data.sourceKind === "upload") {
-      const localId = typeof data.localId === "string" ? data.localId.trim() : "";
-      const filename = typeof data.filename === "string" ? data.filename.trim() : "";
-      const mimeType = typeof data.mimeType === "string" ? data.mimeType.trim() : "";
-      if (!localId || !filename || !VALID_MIME_TYPES.has(mimeType) || seenLocalIds.has(localId)) {
-        continue;
-      }
-      seenLocalIds.add(localId);
-      const blobKey =
-        typeof data.blobKey === "string" && data.blobKey.trim() ? data.blobKey.trim() : localId;
-      items.push({
-        localId,
-        sourceKind: "upload",
-        blobKey,
-        filename,
-        mimeType,
-        sha256: typeof data.sha256 === "string" ? data.sha256 : "",
-      });
-    } else if (data.sourceKind === "library") {
-      const libraryResourceId =
-        typeof data.libraryResourceId === "string" ? data.libraryResourceId.trim() : "";
-      if (!libraryResourceId || seenLibraryIds.has(libraryResourceId)) continue;
-      const localId =
-        typeof data.localId === "string" && data.localId.trim()
-          ? data.localId.trim()
-          : `lib-${libraryResourceId}`;
-      if (seenLocalIds.has(localId)) continue;
-      seenLocalIds.add(localId);
-      seenLibraryIds.add(libraryResourceId);
-      const resourceType =
-        data.resourceType === "base_image" || data.resourceType === "input_image"
-          ? data.resourceType
-          : undefined;
-      const defaultPreviewUrl = `/api/library/resources/${encodeURIComponent(libraryResourceId)}/preview`;
-      const rawPreviewUrl = typeof data.previewUrl === "string" ? data.previewUrl.trim() : "";
-      const previewUrl = isSafeRelativePreviewUrl(rawPreviewUrl)
-        ? rawPreviewUrl
-        : defaultPreviewUrl;
-      items.push({
-        localId,
-        sourceKind: "library",
-        libraryResourceId,
-        resourceVersionId:
-          typeof data.resourceVersionId === "string" ? data.resourceVersionId : "",
-        title:
-          typeof data.title === "string" && data.title.trim()
-            ? data.title
-            : libraryResourceId.slice(0, 8),
-        previewUrl,
-        ...(resourceType ? { resourceType } : {}),
-      });
+    if (data.sourceKind !== "upload") continue;
+    const localId = typeof data.localId === "string" ? data.localId.trim() : "";
+    const filename = typeof data.filename === "string" ? data.filename.trim() : "";
+    const mimeType = typeof data.mimeType === "string" ? data.mimeType.trim() : "";
+    if (!localId || !filename || !VALID_MIME_TYPES.has(mimeType) || seenLocalIds.has(localId)) {
+      continue;
     }
+    seenLocalIds.add(localId);
+    const blobKey =
+      typeof data.blobKey === "string" && data.blobKey.trim() ? data.blobKey.trim() : localId;
+    items.push({
+      localId,
+      sourceKind: "upload",
+      blobKey,
+      filename,
+      mimeType,
+      sha256: typeof data.sha256 === "string" ? data.sha256 : "",
+    });
   }
   return items;
 }
@@ -373,9 +338,7 @@ export interface ReplicaDraftStore {
   moveReference(fromIndex: number, toIndex: number): void;
   updateReferenceRemark(localId: string, remark: string): void;
   addProductFiles(files: File[]): void;
-  applyLibraryProducts(selected: ProductResourceSelection[]): void;
   removeProduct(localId: string): void;
-  removeDeletedLibraryProducts(removedIds: ReadonlySet<string>, notice?: string): void;
   moveProduct(fromIndex: number, toIndex: number): void;
   updateConfig(patch: Partial<ReplicaConfigDraft>): void;
   clearDraft(): void;
@@ -427,31 +390,18 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
       });
     }
     for (const product of initialPersisted.products) {
-      if (product.sourceKind === "upload") {
-        hydratingProductBlobKeys.set(product.localId, product.blobKey);
-        persistedBlobKeys.set(product.localId, product.blobKey);
-        initialProducts.push({
-          localId: product.localId,
-          sourceKind: "upload",
-          filename: product.filename,
-          mimeType: product.mimeType,
-          previewUrl: "",
-          bytesBase64: "",
-          sha256: product.sha256,
-          status: "reading",
-        });
-      } else {
-        initialProducts.push({
-          localId: product.localId,
-          sourceKind: "library",
-          libraryResourceId: product.libraryResourceId,
-          resourceVersionId: product.resourceVersionId,
-          title: product.title,
-          previewUrl: product.previewUrl,
-          ...(product.resourceType ? { resourceType: product.resourceType } : {}),
-          status: "ready",
-        });
-      }
+      hydratingProductBlobKeys.set(product.localId, product.blobKey);
+      persistedBlobKeys.set(product.localId, product.blobKey);
+      initialProducts.push({
+        localId: product.localId,
+        sourceKind: "upload",
+        filename: product.filename,
+        mimeType: product.mimeType,
+        previewUrl: "",
+        bytesBase64: "",
+        sha256: product.sha256,
+        status: "reading",
+      });
     }
   }
 
@@ -521,29 +471,17 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
 
     const products: PersistedReplicaProductMeta[] = [];
     for (const item of snapshot.products) {
-      if (item.sourceKind === "library") {
-        products.push({
-          localId: item.localId,
-          sourceKind: "library",
-          libraryResourceId: item.libraryResourceId,
-          resourceVersionId: item.resourceVersionId,
-          title: item.title,
-          previewUrl: item.previewUrl,
-          ...(item.resourceType ? { resourceType: item.resourceType } : {}),
-        });
-      } else {
-        const blobKey = persistedBlobKeys.get(item.localId);
-        if (!blobKey) continue;
-        if (item.status !== "ready" && !hydratingProductBlobKeys.has(item.localId)) continue;
-        products.push({
-          localId: item.localId,
-          sourceKind: "upload",
-          blobKey,
-          filename: item.filename,
-          mimeType: item.mimeType,
-          sha256: item.sha256,
-        });
-      }
+      const blobKey = persistedBlobKeys.get(item.localId);
+      if (!blobKey) continue;
+      if (item.status !== "ready" && !hydratingProductBlobKeys.has(item.localId)) continue;
+      products.push({
+        localId: item.localId,
+        sourceKind: "upload",
+        blobKey,
+        filename: item.filename,
+        mimeType: item.mimeType,
+        sha256: item.sha256,
+      });
     }
 
     try {
@@ -1158,50 +1096,9 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
       })();
     },
 
-    applyLibraryProducts(selected: ProductResourceSelection[]): void {
-      updateSnapshot((prev) => {
-        const selectedById = new Map(selected.map((item) => [item.resourceId, item]));
-        const toDraft = (item: ProductResourceSelection): ReplicaProductDraft => ({
-          localId: `lib-${item.resourceId}`,
-          sourceKind: "library",
-          libraryResourceId: item.resourceId,
-          resourceVersionId: item.resourceVersionId,
-          title: item.title ?? item.resourceId.slice(0, 8),
-          previewUrl:
-            item.previewUrl ??
-            `/api/library/resources/${encodeURIComponent(item.resourceId)}/preview`,
-          resourceType: item.resourceType,
-          status: "ready",
-        });
-
-        const kept: ReplicaProductDraft[] = [];
-        const keptLibraryIds = new Set<string>();
-        for (const item of prev.products) {
-          if (item.sourceKind === "upload") {
-            kept.push(item);
-          } else if (selectedById.has(item.libraryResourceId)) {
-            kept.push(toDraft(selectedById.get(item.libraryResourceId)!));
-            keptLibraryIds.add(item.libraryResourceId);
-          }
-        }
-
-        const added = selected
-          .filter((item) => !keptLibraryIds.has(item.resourceId))
-          .slice(0, Math.max(0, REPLICA_MAX_PRODUCTS - kept.length))
-          .map(toDraft);
-
-        return {
-          ...prev,
-          productNotice: "",
-          products: [...kept, ...added],
-        };
-      });
-      persistDraftMetadata();
-    },
-
     removeProduct(localId: string): void {
       const target = snapshot.products.find((item) => item.localId === localId);
-      if (target?.sourceKind === "upload" && target.previewUrl) {
+      if (target?.previewUrl) {
         releaseObjectUrl(target.previewUrl);
       }
       const blobKey = persistedBlobKeys.get(localId);
@@ -1215,26 +1112,6 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
       persistDraftMetadata();
       if (blobKey && blobStorage) {
         void blobStorage.deleteBlob(blobKey);
-      }
-    },
-
-    removeDeletedLibraryProducts(removedIds: ReadonlySet<string>, notice?: string): void {
-      if (!removedIds.size) return;
-      let changed = false;
-      updateSnapshot((prev) => {
-        const nextProducts = prev.products.filter(
-          (item) => item.sourceKind !== "library" || !removedIds.has(item.libraryResourceId),
-        );
-        if (nextProducts.length === prev.products.length) return prev;
-        changed = true;
-        return {
-          ...prev,
-          products: nextProducts,
-          productNotice: notice ?? prev.productNotice,
-        };
-      });
-      if (changed) {
-        persistDraftMetadata();
       }
     },
 
