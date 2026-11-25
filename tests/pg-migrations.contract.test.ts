@@ -21,6 +21,8 @@ import { PostgresPlatformRepository } from "../server/repositories/postgres-plat
 import { PostgresSuiteRepository } from "../server/repositories/postgres-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import type { SuitePipelineRun } from "../server/types.js";
+import { APLUS_MODULES } from "../shared/aplus.js";
+import { resolveAplusPromptTemplate } from "../server/aplus/aplus-prompt.js";
 
 const skip = process.env.PG_CONTRACT_TEST !== "1";
 const timestamp = "2026-01-01T00:00:00.000Z";
@@ -762,6 +764,57 @@ test("041 seeds editable A+ sizes and preserves A+ rows and template stages on m
   });
 });
 
+test("043 publishes all A+ templates at v1, matches Markdown imports and preserves later publishes on replay", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const singleStages = [
+      { stage: "aplus_plan", file: "aplus-plan.md" },
+      { stage: "aplus_image", file: "aplus-image.md" },
+      { stage: "aplus_ai_write", file: "aplus-ai-write.md" },
+    ] as const;
+    const published = [];
+    for (const { stage, file } of singleStages) {
+      assert.equal((await prompts.listPublished(stage)).length, 1);
+      published.push({ template: await resolveAplusPromptTemplate(prompts, stage), file });
+    }
+    assert.equal((await prompts.listPublished("aplus_module_rule")).length, 16);
+    for (const { code } of APLUS_MODULES) {
+      const template = await resolveAplusPromptTemplate(prompts, "aplus_module_rule", code);
+      published.push({ template, file: `aplus-module-${code}.md` });
+    }
+
+    const records = await Promise.all(published.map(async ({ template, file }) => {
+      assert.ok(template, file);
+      const sourceFile = `prompt/normalized/${file}`;
+      const record = parseNormalizedPromptMarkdown(await readFile(sourceFile, "utf8"), sourceFile);
+      assert.deepEqual(template, { ...record, status: "published", versionNo: 1, usedBy: template.usedBy });
+      assert.ok(template.usedBy?.length, file);
+      return record;
+    }));
+
+    for (const publish of [false, true]) {
+      const reimported = await importPromptRecordsWithPolicy(prompts, records, { publish });
+      assert.deepEqual(reimported, published.map(({ template }) => template));
+    }
+    for (const record of records) {
+      assert.deepEqual((await prompts.listVersions(record.templateId)).map(({ versionNo }) => versionNo), [1]);
+    }
+
+    const plan = await resolveAplusPromptTemplate(prompts, "aplus_plan");
+    assert.ok(plan);
+    const draft = await prompts.copyVersion(plan.templateVersionId);
+    assert.ok(draft);
+    await prompts.publishVersion(draft.templateVersionId);
+    const hero = await resolveAplusPromptTemplate(prompts, "aplus_module_rule", "hero");
+    assert.ok(hero);
+    await prompts.retireVersion(hero.templateVersionId);
+
+    await runMigrations(pool);
+    assert.equal((await resolveAplusPromptTemplate(prompts, "aplus_plan"))?.templateVersionId, draft.templateVersionId);
+    assert.equal(await resolveAplusPromptTemplate(prompts, "aplus_module_rule", "hero"), null);
+  });
+});
+
 test("PG replica repository normalizes null remark, creates replica tasks, recovers replica_analyzing runs, and keeps 032 prompt import idempotent", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const suites = new PostgresSuiteRepository(pool);
@@ -1366,13 +1419,14 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);
     const library = new PostgresLibraryRepository(pool);
-
+    const aplusCodes = ["aplus.ai-write", "aplus.image", "aplus.plan", ...APLUS_MODULES.map(({ code }) => `aplus.module.${code}`)].sort();
     const editorCodes = ["image-editor.add_text", "image-editor.change_text", "image-editor.erase", "image-editor.outpaint", "image-editor.redraw", "image-editor.restore_product"];
-    // Legacy reverse templates are retired; current replica, onboarding and editor templates remain published.
+
+    // Legacy reverse templates are retired; replica, onboarding, A+ and editor templates remain published.
     const initialPublished = await prompts.listPublished();
     assert.deepEqual(
       initialPublished.map((item) => item.code).sort(),
-      [...editorCodes, "product.onboarding", "replica.compose", "replica.high"],
+      [...aplusCodes, ...editorCodes, "product.onboarding", "replica.compose", "replica.high"],
     );
     assert.equal(initialPublished.find((i) => i.code === "replica.compose")?.versionNo, 2);
     assert.equal(initialPublished.find((i) => i.code === "replica.high")?.versionNo, 2);
@@ -1416,6 +1470,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
     assert.deepEqual(
       activeAfterImport.map((item) => item.code).sort(),
       [
+        ...aplusCodes,
         "general.base_refine",
         "general.category-prompt",
         "general.listing-copy",
@@ -1429,12 +1484,12 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
 
     // Library repository filters published vs retired vs all accurately with usedBy
     const libPublished = await library.listResources({ resourceType: "prompt_template", status: "published", pageSize: 100 });
-    assert.equal(libPublished.items.length, 7 + editorCodes.length);
+    assert.equal(libPublished.items.length, 7 + aplusCodes.length + editorCodes.length);
     assert.ok(libPublished.items.every((item) => (item.usedBy?.length ?? 0) > 0));
     const libRetired = await library.listResources({ resourceType: "prompt_template", status: "retired", pageSize: 100 });
     assert.equal(libRetired.items.length, 13); // 10 reverse + 2 plan + 1 repair
     const libAll = await library.listResources({ resourceType: "prompt_template", pageSize: 100 });
-    assert.equal(libAll.items.length, 20 + editorCodes.length);
+    assert.equal(libAll.items.length, 20 + aplusCodes.length + editorCodes.length);
 
     // 3. Active template copy -> edit draft -> draft filtering -> publish flow works end-to-end in PG
     const baseRefine = activeAfterImport.find((i) => i.code === "general.base_refine")!;
@@ -1495,6 +1550,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
     assert.deepEqual(
       publishedAfterReplay.map((item) => item.code).sort(),
       [
+        ...aplusCodes,
         "general.base_refine",
         "general.category-prompt",
         "general.listing-copy",
