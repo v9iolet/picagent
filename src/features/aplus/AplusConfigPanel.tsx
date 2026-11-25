@@ -1,6 +1,6 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import {
-  APLUS_MODULES, APLUS_MODULE_LIMITS, APLUS_SIZE_PRESETS, validateAplusSizePresets,
+  APLUS_MODULES, APLUS_MODULE_LIMITS, APLUS_PRODUCT_INFO_MAX_LENGTH, APLUS_SIZE_PRESETS, validateAplusSizePresets,
 } from "../../../shared/aplus";
 import { SUPPORTED_OUTPUT_LANGUAGES } from "../../../shared/workbench-delivery";
 import type { ApiImage, ApiPlatformProfile } from "../../api/client";
@@ -8,16 +8,17 @@ import { ProductCardPickerModal } from "../../components/product-card-picker/Pro
 import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
 import { toSelectedProductCardSummary } from "../../components/product-card-picker/types";
 import { StudioProductImageUpload } from "../../components/suite-studio/StudioProductImageUpload";
+import { StudioDialog } from "../../components/suite-studio/StudioDialog";
 import { Icon } from "../../pages/shared";
-import { configForPlatform, toggleSizePreset, type AplusConfig } from "./aplus-studio";
+import { configForPlatform, toggleSizePreset, type AplusConfig, type AplusDraft } from "./aplus-studio";
 
 const markets = ["美国", "中国", "英国", "德国", "法国", "日本", "其他"];
 const productInfoPlaceholder = "1. 产品名称\n2. 核心卖点\n3. 适用人群\n4. 期望场景\n5. 具体参数";
-const infoLimit = 1000;
+const infoLimit = APLUS_PRODUCT_INFO_MAX_LENGTH;
 
 export function AplusConfigPanel({
-  config, profiles, images, busy, blocked, submitting, stale, awaitingConfirmation,
-  onChange, onUpload, onRemove, onSubmit, onViewPlan,
+  config, profiles, images, busy, blocked, submitting, aiWriting, aiWrite, stale, awaitingConfirmation,
+  onChange, onUpload, onRemove, onAiWrite, onUndoAiWrite, onSubmit, onViewPlan,
 }: {
   config: AplusConfig;
   profiles: ApiPlatformProfile[];
@@ -25,17 +26,23 @@ export function AplusConfigPanel({
   busy: boolean;
   blocked: string;
   submitting: boolean;
+  aiWriting: boolean;
+  aiWrite: AplusDraft["aiWrite"];
   stale: boolean;
   awaitingConfirmation: boolean;
   onChange: (config: AplusConfig) => void;
   onUpload: (files: File[]) => void;
   onRemove: (image: ApiImage) => void;
+  onAiWrite: () => void;
+  onUndoAiWrite: () => void;
   onSubmit: () => void;
   onViewPlan: () => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [moduleNotice, setModuleNotice] = useState("");
+  const [showPlaceholderWarning, setShowPlaceholderWarning] = useState(false);
   const infoId = useId();
+  const infoRef = useRef<HTMLTextAreaElement>(null);
   const disabledReason = blocked || (
     !images.length ? "请上传至少 1 张商品原图。"
       : (!config.productCard && !config.productInfo.trim()) ? "请选择商品信息卡或填写商品卖点。"
@@ -45,6 +52,9 @@ export function AplusConfigPanel({
   );
   const submitText = stale ? "方案已失效，重新规划" : "生成策划方案";
   const profile = profiles.find(({ code }) => code === config.platform);
+  const aiWriteDisabledReason = !images.length ? "请先上传商品原图，再使用 AI 帮写。"
+    : !config.modules.length ? "请至少选择 1 个模块。"
+    : !profile ? "请选择可用的平台。" : "";
   const sizeOptions = profile?.detailSizePresets.options.filter((option) =>
     validateAplusSizePresets([option], profile.detailSizePresets),
   ) as AplusConfig["sizePresets"] | undefined;
@@ -144,18 +154,31 @@ export function AplusConfigPanel({
         <section>
           <div className="aplus-section-heading">
             <h2><label htmlFor={infoId}>商品卖点&生成要求</label></h2>
-            <button type="button" className="aplus-ai-write" disabled title="AI 帮写暂未开放">
-              <Icon name="sparkles" />AI 帮写
+            <button
+              type="button"
+              className="aplus-ai-write"
+              disabled={busy || Boolean(aiWriteDisabledReason)}
+              aria-busy={aiWriting}
+              aria-describedby={aiWriteDisabledReason ? `${infoId}-ai-write-reason` : undefined}
+              onClick={onAiWrite}
+            >
+              <Icon name="sparkles" />{aiWriting ? "AI 帮写中…" : "AI 帮写"}
             </button>
           </div>
           <textarea
             id={infoId}
+            ref={infoRef}
             rows={5}
             placeholder={productInfoPlaceholder}
             value={config.productInfo}
             onChange={(event) => onChange({ ...config, productInfo: Array.from(event.target.value).slice(0, infoLimit).join("") })}
           />
-          <small className="aplus-char-count">{Array.from(config.productInfo).length} / {infoLimit}</small>
+          <div className="aplus-product-info-footer">
+            {aiWrite && <button type="button" onClick={onUndoAiWrite}>撤销帮写</button>}
+            <small className="aplus-char-count">{Array.from(config.productInfo).length} / {infoLimit}</small>
+          </div>
+          {aiWriteDisabledReason && <p className="ss-help" id={`${infoId}-ai-write-reason`}>{aiWriteDisabledReason}</p>}
+          {aiWrite?.truncated && <p className="ss-help" role="status">AI 帮写结果超过 {infoLimit} 字，已截断。</p>}
         </section>
         <section>
           <div className="aplus-section-heading">
@@ -195,11 +218,31 @@ export function AplusConfigPanel({
         {awaitingConfirmation ? (
           <button type="button" onClick={onViewPlan}>查看方案</button>
         ) : (
-          <button className="ss-primary" type="button" disabled={busy || Boolean(disabledReason)} onClick={onSubmit}>
+          <button className="ss-primary" type="button" disabled={busy || Boolean(disabledReason)} onClick={() => {
+            if (config.productInfo.includes("【待补充")) setShowPlaceholderWarning(true);
+            else onSubmit();
+          }}>
             {submitting ? "正在提交…" : submitText}
           </button>
         )}
       </footer>
+      {showPlaceholderWarning && (
+        <StudioDialog title="还有待补充的商品信息" close={() => setShowPlaceholderWarning(false)}>
+          <div className="aplus-action-form">
+            <p>卖点中还有「待补充」占位。你可以先补充，也可以继续生成策划方案。</p>
+            <div className="aplus-review-actions">
+              <button type="button" onClick={() => {
+                setShowPlaceholderWarning(false);
+                requestAnimationFrame(() => infoRef.current?.focus());
+              }}>去补充</button>
+              <button type="button" onClick={() => {
+                setShowPlaceholderWarning(false);
+                onSubmit();
+              }}>继续</button>
+            </div>
+          </div>
+        </StudioDialog>
+      )}
     </aside>
   );
 }

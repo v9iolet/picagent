@@ -198,6 +198,10 @@ export interface PlanLlmInput {
   chunks: RagChunk[]; inputImageIds: string[]; baseVersionIds: string[]; visionImages?: PlanVisionImage[]; platformProfile?: PlatformProfile; flow?: "plan" | "category-prompt" | "listing-copy" | "aplus-plan";
   userPrompt?: string;
 }
+export type AplusAiWriteLlmInput = Pick<PlanLlmInput, "requestId" | "templateVersionId" | "templateBody"> & {
+  userPrompt: string;
+  visionImages: PlanVisionImage[];
+};
 export interface CategoryPromptLlmInput extends PlanLlmInput {
   categoryCode: string;
   requestedCount: number;
@@ -266,6 +270,7 @@ export interface LlmClient {
   channel?: ModelChannelSnapshot;
   provider: string; model: string; isFake: boolean;
   generatePlan(input: PlanLlmInput): Promise<unknown>;
+  generateAplusAiWrite?(input: AplusAiWriteLlmInput): Promise<unknown>;
   generateCategoryPrompt?(input: CategoryPromptLlmInput): Promise<unknown>;
   generateReplicaPrompts?(input: ReplicaPromptLlmInput): Promise<unknown>;
   generateProductOnboarding?(input: ProductOnboardingLlmInput): Promise<unknown>;

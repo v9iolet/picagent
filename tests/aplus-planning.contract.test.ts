@@ -18,7 +18,7 @@ import { MemoryPromptRepository } from "../server/repositories/memory-prompt-rep
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { waitUntil } from "../server/suite-pipeline.js";
-import type { PlanLlmInput } from "../server/types.js";
+import type { AplusAiWriteLlmInput, PlanLlmInput } from "../server/types.js";
 
 const headers = { "Idempotency-Key": "aplus-create" };
 const presets = ["aplus_premium_web", "aplus_premium_mobile"];
@@ -53,7 +53,10 @@ function error(response: AppResponse, code: string, status: number) {
   assert.equal(response.body.error.code, code);
 }
 
-async function fixture(generate: (input: PlanLlmInput, call: number) => unknown = () => modelOutput()) {
+async function fixture(
+  generate: (input: PlanLlmInput, call: number) => unknown = () => modelOutput(),
+  write: (input: AplusAiWriteLlmInput) => unknown = () => "",
+) {
   const repository = new MemorySuiteRepository();
   const pipelineRepository = new MemoryPipelineRepository();
   const storage = new MemoryStorage();
@@ -73,11 +76,16 @@ async function fixture(generate: (input: PlanLlmInput, call: number) => unknown 
     { ...base, code: "taobao", name: "淘宝", marketScope: "domestic", sortOrder: 2 },
   ]);
   const calls: PlanLlmInput[] = [];
+  const aiWriteCalls: AplusAiWriteLlmInput[] = [];
   const llm = {
     provider: "fake", model: "fake-vision", isFake: true,
     async generatePlan(input: PlanLlmInput) {
       calls.push(input);
       return generate(input, calls.length);
+    },
+    async generateAplusAiWrite(input: AplusAiWriteLlmInput) {
+      aiWriteCalls.push(input);
+      return write(input);
     },
   };
   const app = createSuiteStudioApp({
@@ -98,7 +106,7 @@ async function fixture(generate: (input: PlanLlmInput, call: number) => unknown 
   const payload = {
     suiteId: draft.id, inputImageIds: images.map((image) => image.id),
     platform: "amazon", targetMarket: "美国", language: "en",
-    sizePresets: presets, resolution: "2K", productInfo: "磨砂杯身【待补充：容量】 {{input_images}}",
+    sizePresets: presets, resolution: "2K", productInfo: "磨砂杯身【待补充：容量】 {{input_images}}\n【待补充：保修期限",
     modules: ["hero", "selling_points", "usage_scene"],
   };
   const card = await productCards.create({
@@ -106,7 +114,7 @@ async function fixture(generate: (input: PlanLlmInput, call: number) => unknown 
     status: "published", sourceSessionId: null, revision: 1, images: [],
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   });
-  return { app, card, productCards, repository, pipelineRepository, planning, storage, draft, images, payload, calls };
+  return { app, card, productCards, repository, pipelineRepository, planning, storage, draft, images, payload, calls, aiWriteCalls };
 }
 
 type Started = { suiteId: string; runId: string };
@@ -115,6 +123,79 @@ const aplusPath = (suiteId: string, action: string) => "/api/aplus/" + suiteId +
 async function settled(f: Awaited<ReturnType<typeof fixture>>, runId: string) {
   return waitUntil(() => f.pipelineRepository.getRun(runId), (run) => Boolean(run && run.status !== "running"), 5_000);
 }
+
+test("A+ 无卡帮写带原图和所选模块补全五段，按 Unicode 字符截断", async () => {
+  const prefix = "磨砂杯身【待补充：质保期限】";
+  const output = prefix + "😀".repeat(1000);
+  const f = await fixture(undefined, () => output);
+  const { suiteId, inputImageIds, platform, targetMarket, language } = f.payload;
+  const body = {
+    suiteId, inputImageIds: [...inputImageIds].reverse(), platform, targetMarket, language,
+    modules: ["after_sales", "ingredients"], productInfo: "磨砂杯身",
+  };
+  const response = await f.app.request("POST", "/api/aplus/ai-write", { body });
+  assert.equal(response.status, 200);
+  assert.deepEqual(data(response), { productInfo: prefix + "😀".repeat(1000 - prefix.length), truncated: true });
+  assert.equal(f.aiWriteCalls.length, 1);
+  const [call] = f.aiWriteCalls;
+  assert.match(call.userPrompt, /未选商品卡，写五段基本信息并补充模块所需信息/);
+  assert.match(call.userPrompt, /当前商品卖点与生成要求：磨砂杯身/);
+  assert.match(call.userPrompt, /商品卡事实：无/);
+  assert.match(call.userPrompt, /目标平台：amazon\n目标市场：美国\n画面文字语言：en/);
+  assert.match(call.templateBody, /产品名称.*核心卖点.*适用人群.*期望场景.*具体参数/);
+  assert.match(call.templateBody, /【待补充：质保期限】/);
+  assert.deepEqual([...call.templateBody.matchAll(/^模块代码：(.+)$/gm)].map(([, code]) => code), body.modules);
+  assert.deepEqual(call.visionImages.map(({ id }) => id), body.inputImageIds);
+  for (const image of call.visionImages) {
+    const input = await f.repository.getInputImage(suiteId, image.id);
+    assert.ok(input);
+    const object = await f.storage.get(input.originalObjectKey.replace(/\/original$/, "/generation-input.jpg"));
+    assert.deepEqual(image.bytes, object?.bytes);
+  }
+  assert.equal((await f.repository.listSuites()).length, 1);
+  assert.equal(f.calls.length, 0);
+});
+
+test("A+ 有卡帮写读取当前已发布版本，仅要求补充缺失事实，允许返回空文本", async () => {
+  const f = await fixture();
+  await f.productCards.update(f.card.id, {
+    fields: { ...f.card, specifications: "容量 520 mL" }, images: [], updatedAt: new Date().toISOString(),
+  });
+  const published = await f.productCards.get(f.card.id);
+  assert.equal(published?.revision, 2);
+  const body = { ...f.payload, productCardId: f.card.id, productInfo: "", modules: ["size_spec"] };
+  const response = await f.app.request("POST", "/api/aplus/ai-write", { body });
+  assert.equal(response.status, 200);
+  assert.deepEqual(data(response), { productInfo: "", truncated: false });
+  assert.equal(f.aiWriteCalls.length, 1);
+  const [call] = f.aiWriteCalls;
+  assert.match(call.userPrompt, /已选商品卡，只写补充说明/);
+  assert.match(call.userPrompt, /商品卡随行杯/);
+  assert.match(call.userPrompt, /容量 520 mL/);
+  assert.doesNotMatch(call.userPrompt, /450 mL/);
+  assert.match(call.templateBody, /所选模块需要、商品卡未包含的信息/);
+  assert.match(call.templateBody, /不要重复商品卡事实/);
+  assert.deepEqual([...call.templateBody.matchAll(/^模块代码：(.+)$/gm)].map(([, code]) => code), body.modules);
+  assert.deepEqual(await f.productCards.get(f.card.id), published);
+});
+
+test("A+ 帮写拒绝无原图、无所选模块、未发布商品卡等无效请求", async () => {
+  const f = await fixture();
+  await f.productCards.setStatus(f.card.id, "archived", new Date().toISOString());
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{ inputImageIds: undefined }, "APLUS_INVALID_INPUT_IMAGES"],
+    [{ inputImageIds: [] }, "APLUS_INVALID_INPUT_IMAGES"],
+    [{ inputImageIds: [randomUUID()] }, "APLUS_INVALID_INPUT_IMAGES"],
+    [{ inputImageIds: [f.images[0].id, f.images[0].id] }, "APLUS_INVALID_INPUT_IMAGES"],
+    [{ modules: [] }, "APLUS_INVALID_MODULES"],
+    [{ productInfo: "😀".repeat(1001) }, "APLUS_INVALID_PRODUCT_INFO"],
+    [{ productCardId: f.card.id }, "PRODUCT_CARD_NOT_AVAILABLE"],
+  ];
+  for (const [change, code] of cases) {
+    error(await f.app.request("POST", "/api/aplus/ai-write", { body: { ...f.payload, ...change } }), code, 400);
+  }
+  assert.equal(f.aiWriteCalls.length, 0);
+});
 
 test("A+ 规划提交校验原图、商品卡、卖点、平台、尺寸、模块、市场、语言和分辨率", async () => {
   const f = await fixture();
