@@ -37,5 +37,5 @@ npm run test:pg
 - [领域词汇与当前共识](CONTEXT.md)
 - [架构决策记录 (ADR 0001–0008)](docs/adr/)
 - [Agent 协作规范](AGENTS.md)
-- [生图网关接口与规格实测记录](docs/gpt-image-2.md)
+- [生图模型渠道与能力实测记录](docs/image-models.md)
 - [平台规范维护参考](docs/平台维护表-海外优先.md)
