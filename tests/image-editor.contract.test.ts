@@ -3,6 +3,7 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import sharp from "sharp";
+import { computeOutpaintCanvas } from "../shared/image-editor.js";
 import { buildImageEditPrompt, imageEditProductInputs, ImageEditorService, MemoryImageEditorRepository, type EditOperation, type ImageEditProvider, type ImageSource } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import { createSuiteStudioApp } from "../server/app.js";
@@ -252,31 +253,84 @@ test("change_text accepts 50 changes and 500-character fields and reports which 
   assert.equal(result.snapshot?.operations.length, 50);
 });
 
-test("redraw materializes a same-size grayscale mask with persisted metadata", async () => {
+test("redraw keeps a same-size grayscale mask in the snapshot without applying it", async () => {
   const repository = new MemoryImageEditorRepository(); const storage = new MemoryStorage(); const service = new ImageEditorService(repository, provider(), storage, async () => source);
   await service.upsertOperation({ sessionId: "session", operation: { ...operation("redraw"), payload: { prompt: "局部重绘", strokes: [{ points: [{ x: 0.1, y: 0.2 }, { x: 0.8, y: 0.9 }], width: 0.12 }], feather: 0.25 } } });
   const submitted = await service.submit({ sessionId: "session", idempotencyKey: "mask", sourceCardId: "parent", sourceVersionId: "version-1" });
+  assert.equal(submitted.snapshot.maskApplied, false);
+  assert.equal(submitted.attempt.command.maskApplied, false);
+  assert.deepEqual(submitted.snapshot.operations[0].payload.region, { x: 0.04, y: 0.14, width: 0.82, height: 0.82 });
   const mask = submitted.snapshot.operations[0].payload.mask as { width: number; height: number; mimeType: string; sha256: string; objectKey: string; feather: number };
   assert.deepEqual({ width: mask.width, height: mask.height, mimeType: mask.mimeType, feather: mask.feather }, { width: 100, height: 100, mimeType: "image/png", feather: 0.25 });
   assert.match(mask.sha256, /^[a-f0-9]{64}$/); assert.equal(mask.objectKey, `image-edits/masks/version-1/op-1-${mask.sha256}.png`);
   const object = await storage.get(mask.objectKey); assert.ok(object); assert.equal(object.contentType, "image/png");
   const metadata = await sharp(object.bytes).metadata(); assert.equal(metadata.format, "png"); assert.equal(metadata.width, 100); assert.equal(metadata.height, 100); assert.equal(metadata.channels, 1);
   const pixels = await sharp(object.bytes).removeAlpha().grayscale().raw().toBuffer(); assert.ok([...pixels].some((value) => value > 0 && value < 255), "feather must produce soft mask pixels");
+
+  await requestImageEditorEdit({
+    async edit(request) {
+      assert.deepEqual(request.mask, object.bytes);
+      assert.equal(request.maskMimeType, "image/png");
+      return { bytes: object.bytes, mimeType: "image/png" };
+    },
+  }, storage, "gpt-image-2", defaultImageOptions("gpt-image-2"), {
+    ...submitted.attempt.command, maskApplied: true,
+  }, source);
 });
 
-test("outpaint freezes computed dimensions and anchor, and rejects conflicting dimensions", async () => {
-  const repository = new MemoryImageEditorRepository(); const seen: Array<EditOperation> = []; const editProvider = provider({ edit: async (command) => { seen.push(...command.operations); return { bytes: Buffer.from("result"), mimeType: "image/png", width: 100, height: 100 }; } });
-  const outpaintSource: ImageSource = { bytes: Buffer.from("source"), mimeType: "image/png", width: 100, height: 200 }; const service = new ImageEditorService(repository, editProvider, new MemoryStorage(), async () => outpaintSource);
-  await service.upsertOperation({ sessionId: "session", operation: { ...operation("outpaint"), payload: { direction: "right", targetRatio: "1:1" } } });
-  const submitted = await service.submit({ sessionId: "session", idempotencyKey: "outpaint", sourceCardId: "parent", sourceVersionId: "version-1" });
-  assert.deepEqual(submitted.snapshot.operations[0].payload, { direction: "right", targetRatio: "1:1", targetWidth: 200, targetHeight: 200, anchor: "right" });
-  await settle(); assert.equal(seen[0].payload.targetWidth, 200); assert.equal(seen[0].payload.targetHeight, 200);
-  const invalidRepository = new MemoryImageEditorRepository(); const invalidService = new ImageEditorService(invalidRepository, provider(), new MemoryStorage(), async () => outpaintSource);
-  await invalidService.upsertOperation({ sessionId: "session", operation: { ...operation("outpaint"), payload: { direction: "right", targetRatio: "1:1", targetWidth: 100 } } });
-  await assert.rejects(invalidService.submit({ sessionId: "session", idempotencyKey: "outpaint-invalid", sourceCardId: "parent", sourceVersionId: "version-1" }), /OUTPAINT_TARGET_DIMENSIONS_INVALID/);
+test("outpaint sends a centered gray-padded canvas at the target ratio in the source resolution tier", async () => {
+  const repository = new MemoryImageEditorRepository();
+  const storage = new MemoryStorage();
+  const calls: ImageEditRequest[] = [];
+  const bytes = await sharp({ create: { width: 1824, height: 1024, channels: 3, background: "#336699" } }).png().toBuffer();
+  const outpaintSource = { ...source, bytes, width: 1824, height: 1024 };
+  const imageProvider = { edit: async (request: ImageEditRequest) => { calls.push(request); return { bytes, mimeType: "image/png" }; } };
+  const service = new ImageEditorService(repository, provider({
+    edit: (command, image) => requestImageEditorEdit(imageProvider, storage, "gpt-image-2", defaultImageOptions("gpt-image-2"), command, image),
+  }), storage, async () => outpaintSource);
+  const submit = async (payload: EditOperation["payload"], idempotencyKey: string) => {
+    await service.upsertOperation({ sessionId: "session", operation: { ...operation("outpaint"), payload } });
+    return service.submit({ sessionId: "session", idempotencyKey, sourceCardId: "parent", sourceVersionId: "version-1" });
+  };
+  await assert.rejects(submit({ direction: "vertical", targetRatio: "original" }, "original"), /OUTPAINT_TARGET_RATIO_INVALID/);
+  await assert.rejects(submit({ direction: "vertical", targetRatio: "9:16", targetWidth: 1824 }, "wrong-width"), /OUTPAINT_TARGET_DIMENSIONS_INVALID/);
+  const submitted = await submit({ direction: "vertical", targetRatio: "9:16" }, "outpaint");
+  assert.equal(submitted.snapshot.maskApplied, false);
+  assert.deepEqual(submitted.snapshot.operations[0].payload, {
+    direction: "vertical", targetRatio: "9:16", targetWidth: 1827, targetHeight: 3248,
+    sourceOffset: { left: 1, top: 1112 }, anchor: "center",
+  });
+  for (let i = 0; i < 30 && !(await repository.getChildTask(submitted.childTask.id))?.currentVersionId; i += 1) await settle();
+  const request = calls[0];
+  assert.ok(request);
+  assert.equal(request.size, "1024x1824");
+  assert.equal(request.imageMimeType, "image/png");
+  assert.deepEqual(request.images?.[0].bytes, request.image);
+  assert.equal(Object.hasOwn(request, "mask"), false);
+  assert.match(request.prompt, /待编辑图已扩边至 9:16/);
+  assert.match(request.prompt, /仅补全灰色扩展区/);
+  const canvas = await sharp(request.image).raw().toBuffer({ resolveWithObject: true });
+  assert.equal(canvas.info.width * 16, canvas.info.height * 9);
+  const pixel = (x: number, y: number) => Array.from(canvas.data.subarray((y * canvas.info.width + x) * 3, (y * canvas.info.width + x) * 3 + 3));
+  for (const [x, y] of [[1, 1112], [1824, 2135]]) assert.deepEqual(pixel(x, y), [51, 102, 153]);
+  for (const [x, y] of [[0, 1112], [1, 1111], [1825, 2135], [1824, 2136]]) assert.deepEqual(pixel(x, y), [176, 176, 176]);
+
+  await service.regenerate({ childTaskId: submitted.childTask.id, idempotencyKey: "outpaint-replay" });
+  for (let i = 0; i < 30 && calls.length < 2; i += 1) await settle();
+  assert.deepEqual(calls[1]?.image, request.image);
+  assert.equal(calls[1]?.size, request.size);
 });
 
-test("regenerate replays the frozen prompt, source, mask and attached inputs on the same child task", async () => {
+test("outpaint adds margins when the source matches the target ratio, including rounded model sizes", () => {
+  assert.deepEqual(computeOutpaintCanvas(960, 1280, "3:4"), {
+    targetWidth: 1200, targetHeight: 1600, sourceOffset: { left: 120, top: 160 },
+  });
+  assert.deepEqual(computeOutpaintCanvas(1024, 1360, "3:4"), {
+    targetWidth: 1281, targetHeight: 1708, sourceOffset: { left: 128, top: 174 },
+  });
+});
+
+test("regenerate replays the frozen redraw prompt, source, fallback and attached inputs on the same child task", async () => {
   const repository = new MemoryImageEditorRepository();
   const storage = new MemoryStorage();
   const calls: ImageEditRequest[] = [];
@@ -294,10 +348,10 @@ test("regenerate replays the frozen prompt, source, mask and attached inputs on 
   const api = createImageEditorApi(service);
   await service.upsertOperation({ sessionId: "session", operation: operation("redraw") });
   const first = await service.submit({ sessionId: "session", idempotencyKey: "submit", sourceCardId: "parent", sourceVersionId: "version-1", tool: "redraw" });
-  assert.equal(first.snapshot.maskApplied, true);
+  assert.equal(first.snapshot.maskApplied, false);
   await settle();
 
-  // Simulate a snapshot with attachments to verify the replay path before the attachment tools are added.
+  // Exercise replay from the snapshot even if the initial command has different attachments.
   const attachment = { objectKey: "frozen-product", role: "product" };
   await storage.put({ key: attachment.objectKey, bytes: resultBytes, contentType: "image/png" });
   const snapshot = { ...first.snapshot, id: randomUUID(), attachedInputs: [attachment] };
@@ -329,10 +383,10 @@ test("regenerate replays the frozen prompt, source, mask and attached inputs on 
   assert.equal(calls.length, 2);
   const initial = calls[0];
   const replay = calls[1];
-  assert.match(initial.prompt, /仅重绘蒙版白色选区：局部重绘/);
+  assert.match(initial.prompt, /仅重绘顶部左侧区域（横向约 5%–15%，纵向约 16%–24%）：局部重绘/);
   assert.equal(replay.prompt, initial.prompt);
-  assert.ok(initial.mask?.length);
-  assert.deepEqual(replay.mask, initial.mask);
+  assert.equal(Object.hasOwn(initial, "mask"), false);
+  assert.equal(Object.hasOwn(replay, "mask"), false);
   assert.deepEqual(replay.images?.map(({ role, bytes }) => ({ role, bytes })), [
     { role: "source", bytes }, { role: "product", bytes: resultBytes },
   ]);
@@ -370,7 +424,7 @@ test("submission freezes sourcePrompt while compiling pure product-fidelity prom
   assert.match(add, /使用醒目的无衬线标题/);
   assert.match(change, /顶部居中区域（横向约 10%–60%，纵向约 10%–30%）/);
   assert.match(change, /旧标语.*新标语/);
-  assert.match(redraw, /仅重绘蒙版白色选区：替换为柔和木纹桌面/);
+  assert.match(redraw, /仅重绘顶部左侧区域（横向约 5%–35%，纵向约 15%–45%）：替换为柔和木纹桌面/);
   for (const { prompt } of commands) {
     assert.match(prompt, /严格保持输入图片中的商品主体外观/);
     assert.doesNotMatch(prompt, /SOURCE VERSION PROMPT|strokes|ocrSnapshot/);
@@ -430,12 +484,13 @@ test("DashScopeOcrProvider downscales large images to <=1280px JPEG and maps net
   assert.doesNotMatch(timeoutSnap.error ?? "", /OCR_TIMEOUT/);
 });
 
-test("mask eraser strokes subtract from previously painted mask pixels", async () => {
+test("erased brush strokes are excluded from the region description", async () => {
   const repository = new MemoryImageEditorRepository(); const storage = new MemoryStorage();
   const service = new ImageEditorService(repository, provider(), storage, async () => source);
   await service.upsertOperation({ sessionId: "session", operation: { ...operation("redraw"), payload: { prompt: "局部重绘", strokes: [
     { mode: "draw", points: [{ x: 0.1, y: 0.5 }, { x: 0.9, y: 0.5 }], width: 0.2 },
     { mode: "erase", points: [{ x: 0.5, y: 0.5 }], width: 0.1 },
+    { mode: "erase", points: [{ x: 0.85, y: 0.3 }, { x: 0.85, y: 0.7 }], width: 0.4 },
   ], feather: 0 } } });
   const submitted = await service.submit({ sessionId: "session", idempotencyKey: "mask-eraser", sourceCardId: "parent", sourceVersionId: "version-1" });
   const mask = submitted.snapshot.operations[0].payload.mask as { objectKey: string };
@@ -443,6 +498,25 @@ test("mask eraser strokes subtract from previously painted mask pixels", async (
   const pixels = await sharp(object.bytes).removeAlpha().grayscale().raw().toBuffer();
   assert.ok(pixels[50 * 100 + 30] > 200, "painted area remains selected");
   assert.ok(pixels[50 * 100 + 50] < 20, "eraser removes the selected center area");
+  assert.match(submitted.attempt.command.prompt, /横向约 0%–65%，纵向约 40%–60%/);
+});
+
+test("submission rejects a fully erased selection before creating a child task", async () => {
+  const repository = new MemoryImageEditorRepository();
+  const service = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source);
+  const redraw = operation("redraw");
+  const stroke = { points: [{ x: 0.5, y: 0.5 }], width: 0.2 };
+  redraw.payload.strokes = [stroke, { ...stroke, mode: "erase" }];
+  await service.upsertOperation({ sessionId: "session", operation: redraw });
+  const response = await createImageEditorApi(service).request("POST", "/api/image-editor/sessions/session/submit", {
+    headers: { "idempotency-key": "empty-selection" },
+    body: { sourceCardId: "parent", sourceVersionId: "version-1", tool: "redraw" },
+  });
+  assert.equal(response.status, 409);
+  assert.deepEqual((response.body as { error: unknown }).error, {
+    code: "MASK_SELECTION_REQUIRED", message: "请先在图片上绘制要编辑的区域",
+  });
+  assert.deepEqual(await repository.listChildTasks(), []);
 });
 
 test("editing attaches the version's product inputs in order only for the applicable tools", async () => {
@@ -458,7 +532,7 @@ test("editing attaches the version's product inputs in order only for the applic
   await storage.put({ key: "first", bytes: Buffer.from("first"), contentType: "image/png" });
   await storage.put({ key: "second", bytes: Buffer.from("second"), contentType: "image/png" });
   assert.deepEqual(productInputs, [{ objectKey: "first", role: "product" }, { objectKey: "second", role: "product" }]);
-  const editorSource = { ...source, bytes, productInputs };
+  const editorSource = { ...source, bytes, width: 20, height: 20, productInputs };
   const calls: ImageEditRequest[] = [];
   const fakeImageProvider = {
     async edit(request: ImageEditRequest) {
@@ -485,9 +559,16 @@ test("editing attaches the version's product inputs in order only for the applic
     for (let check = 0; check < 30 && calls.length <= i; check += 1) await settle();
     const call = calls[i];
     assert.ok(call);
-    assert.deepEqual(call.images?.map((image) => [image.role, image.bytes]), attaches
-      ? [["source", bytes], ["product", Buffer.from("first")], ["product", Buffer.from("second")]]
-      : [["source", bytes]]);
+    assert.equal(call.images?.[0].role, "source");
+    if (op.type !== "outpaint") assert.deepEqual(call.image, bytes);
+    assert.deepEqual(call.images?.slice(1).map((image) => [image.role, image.bytes]), attaches
+      ? [["product", Buffer.from("first")], ["product", Buffer.from("second")]]
+      : []);
+    assert.equal(Object.hasOwn(call, "mask"), false);
+    if (op.type === "erase") {
+      assert.equal(result.snapshot.maskApplied, false);
+      assert.match(call.prompt, /仅消除顶部左侧区域（横向约 5%–15%，纵向约 15%–25%）中的目标/);
+    }
     if (attaches) assert.match(call.prompt, /^第 1 张为待编辑图，其余为商品外观依据，不得复制其背景与文字/);
     else assert.doesNotMatch(call.prompt, /商品外观依据/);
   }

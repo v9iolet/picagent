@@ -785,61 +785,6 @@ export function evaluateDeliveryCompliance(
   };
 }
 
-export interface OutpaintPreviewBox {
-  targetWidth: number;
-  targetHeight: number;
-  anchor: "center" | "left" | "right";
-  /** Normalized 0..1 position of the original image inside the expanded target frame */
-  innerX: number;
-  innerY: number;
-  innerWidth: number;
-  innerHeight: number;
-}
-
-export function computeOutpaintPreviewBox(
-  sourceWidth: number,
-  sourceHeight: number,
-  direction: "all" | "horizontal" | "vertical" | "left" | "right",
-  targetRatio: "original" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9",
-): OutpaintPreviewBox {
-  const safeW = Math.max(1, sourceWidth);
-  const safeH = Math.max(1, sourceHeight);
-  const sourceRatio = safeW / safeH;
-  const ratioMap: Record<typeof targetRatio, number | null> = {
-    original: null,
-    "1:1": 1,
-    "3:4": 3 / 4,
-    "4:3": 4 / 3,
-    "9:16": 9 / 16,
-    "16:9": 16 / 9,
-  };
-  const desiredRatio = ratioMap[targetRatio] ?? sourceRatio;
-  let targetWidth = safeW;
-  let targetHeight = safeH;
-  if (targetRatio === "original") {
-    if (direction === "all") {
-      targetWidth = Math.ceil(safeW * 1.25);
-      targetHeight = Math.ceil(safeH * 1.25);
-    } else if (direction === "horizontal" || direction === "left" || direction === "right") {
-      targetWidth = Math.ceil(safeW * 1.3);
-    } else if (direction === "vertical") {
-      targetHeight = Math.ceil(safeH * 1.3);
-    }
-  } else if (sourceRatio < desiredRatio) {
-    targetWidth = Math.max(safeW, Math.ceil(safeH * desiredRatio));
-  } else {
-    targetHeight = Math.max(safeH, Math.ceil(safeW / desiredRatio));
-  }
-
-  const innerWidth = Math.min(1, safeW / targetWidth);
-  const innerHeight = Math.min(1, safeH / targetHeight);
-  const anchor: "center" | "left" | "right" = direction === "left" ? "right" : direction === "right" ? "left" : "center";
-  const innerX = anchor === "left" ? 0 : anchor === "right" ? 1 - innerWidth : (1 - innerWidth) / 2;
-  const innerY = (1 - innerHeight) / 2;
-
-  return { targetWidth, targetHeight, anchor, innerX, innerY, innerWidth, innerHeight };
-}
-
 export interface ListingCopyMarkdownInput {
   suiteName: string;
   platformName?: string;
