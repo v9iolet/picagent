@@ -15,7 +15,7 @@ import {
   type LaneLayoutOptions,
   type ResolvedDeliverySlot,
 } from "../../shared/workbench-delivery";
-import { modelSettingsApi, suiteApi, type ApiCanvasLayout, type ApiLibraryResource, type ApiPromptTemplateCopy, type ApiProductMaterialRef, type ApiSuiteTask, type ApiTaskVersion, type ApiWorkbench } from "../api/client";
+import { modelSettingsApi, suiteApi, type ApiCanvasLayout, type ApiImageEditSelection, type ApiImageEditTool, type ApiLibraryResource, type ApiPromptTemplateCopy, type ApiProductMaterialRef, type ApiSuiteTask, type ApiTaskVersion, type ApiWorkbench } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { BeforeAfterLightbox, type LightboxPreview } from "../components/BeforeAfterLightbox";
 import { CustomTaskModal } from "../components/CustomTaskModal";
@@ -62,7 +62,10 @@ type BoardData = {
 type BoardNode = Node<BoardData>;
 type EditTool = "re_edit" | "regenerate" | "add_text" | "change_text" | "inpaint" | "erase" | "expand";
 type MaskStroke = { mode: "draw" | "erase"; points: Array<{ x: number; y: number }>; size: number };
-type DraftOperation = { operationId: string; type: "re_edit" | "add_text" | "change_text" | "redraw" | "erase" | "outpaint"; summary: string; sourceVersionId: string; payload: Record<string, unknown> };
+type DraftOperation = { operationId: string; type: ApiImageEditTool; summary: string; sourceVersionId: string; payload: Record<string, unknown> };
+const editOperationType = (tool: Exclude<EditTool, "regenerate">): ApiImageEditTool => tool === "inpaint" ? "redraw" : tool === "expand" ? "outpaint" : tool;
+const editorToolFor = (type: ApiImageEditTool): Exclude<EditTool, "regenerate"> => type === "redraw" ? "inpaint" : type === "outpaint" ? "expand" : type;
+const DEFAULT_EDIT_TEXT_REGION = { x: 0.36, y: 0.42, width: 0.28, height: 0.1, rotation: 0 };
 type ImageEditCapabilities = Record<string, boolean>;
 type ImageFrame = { left: number; top: number; width: number; height: number };
 
@@ -735,12 +738,13 @@ export function ImageEditorModal({
   task: ImageEditorTaskInput;
   version: ImageEditorVersionInput;
   onClose: () => void;
-  onSubmit: (spec: Record<string, unknown>, instruction: string) => Promise<void>;
+  onSubmit: (selection: ApiImageEditSelection, instruction: string) => Promise<void>;
   onOperationAdded?: (operation: DraftOperation, instruction: string) => Promise<void>;
   onRegenerate?: () => Promise<void>;
 }) {
   const freshOperationId = (type: DraftOperation["type"]) => `${type}-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`;
   const [tool, setTool] = useState<EditTool>("re_edit");
+  const activeTool = useRef<EditTool>("re_edit");
   const [strokes, setStrokes] = useState<MaskStroke[]>([]);
   const [activeStroke, setActiveStroke] = useState<MaskStroke | null>(null);
   const [maskMode, setMaskMode] = useState<"draw" | "erase">("draw");
@@ -751,6 +755,7 @@ export function ImageEditorModal({
   // Local-only canvas contrast preview toggle (never persisted into EditSnapshot)
   const [previewTone, setPreviewTone] = useState<"dark" | "light">("dark");
   const [textOperationId, setTextOperationId] = useState(() => freshOperationId("add_text"));
+  const [changeTextOperationId, setChangeTextOperationId] = useState(() => freshOperationId("change_text"));
   const [brush, setBrush] = useState(42);
   const [expand, setExpand] = useState("all");
   const [ratio, setRatio] = useState("original");
@@ -760,7 +765,10 @@ export function ImageEditorModal({
   const [redrawPrompt, setRedrawPrompt] = useState("");
   const [erasePrompt, setErasePrompt] = useState("移除选区中的目标，并根据周围画面自然补全背景，保持原有光线、纹理和透视关系");
   const [operations, setOperations] = useState<DraftOperation[]>([]);
-  const committedOperationIds = useRef<Set<string>>(new Set());
+  const workingDrafts = useRef<Partial<Record<ApiImageEditTool, DraftOperation>>>({});
+  const pendingDraftWrite = useRef(Promise.resolve());
+  const [loadingDraft, setLoadingDraft] = useState(true);
+  const [toolNotice, setToolNotice] = useState("");
   const [saving, setSaving] = useState(false);
   const [editorError, setEditorError] = useState("");
   const [ocrBlocks, setOcrBlocks] = useState<Array<{ id: string; text: string; confidence: number; bounds: { x: number; y: number; width: number; height: number }; rotation: number }>>([]);
@@ -772,7 +780,7 @@ export function ImageEditorModal({
   const [translatedMap, setTranslatedMap] = useState<Record<string, string>>({});
   const [zoom, setZoom] = useState(1);
   const [holdCompareOriginal, setHoldCompareOriginal] = useState(false);
-  const [textRegion, setTextRegion] = useState({ x: 0.36, y: 0.42, width: 0.28, height: 0.1, rotation: 0 });
+  const [textRegion, setTextRegion] = useState(DEFAULT_EDIT_TEXT_REGION);
   const [capabilities, setCapabilities] = useState<ImageEditCapabilities | null>(null);
   const [capabilityError, setCapabilityError] = useState("");
   const [feather, setFeather] = useState(0.08);
@@ -784,6 +792,14 @@ export function ImageEditorModal({
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const textNodeRef = useRef<Konva.Text | null>(null);
   const transformerRef = useRef<Konva.Transformer | null>(null);
+  const activeOperationType = tool === "regenerate" ? null : editOperationType(tool);
+  const activeOperations = operations.filter((item) => item.type === activeOperationType);
+
+  const writeDraft = (write: () => Promise<unknown> | undefined) => {
+    const pending = pendingDraftWrite.current.then(write).then(() => undefined);
+    pendingDraftWrite.current = pending.catch(() => undefined);
+    return pending;
+  };
 
   const runOcr = useCallback(async () => {
     setOcrLoading(true);
@@ -798,7 +814,7 @@ export function ImageEditorModal({
       const blocks = result.blocks ?? [];
       setOcrBlocks(blocks);
       setTranslatedMap({});
-      if (blocks[0]) {
+      if (blocks[0] && activeTool.current === "change_text") {
         setOriginalText(blocks[0].text);
         setTextRegion({ ...blocks[0].bounds, rotation: blocks[0].rotation });
       }
@@ -823,7 +839,7 @@ export function ImageEditorModal({
       const nextMap: Record<string, string> = {};
       for (const row of result.translations) nextMap[row.id] = row.translatedText;
       setTranslatedMap(nextMap);
-      if (ocrBlocks[0] && nextMap[ocrBlocks[0].id]) {
+      if (activeTool.current === "change_text" && ocrBlocks[0] && nextMap[ocrBlocks[0].id]) {
         setOriginalText(ocrBlocks[0].text);
         setNewText(nextMap[ocrBlocks[0].id]);
         setTextRegion({ ...ocrBlocks[0].bounds, rotation: ocrBlocks[0].rotation });
@@ -848,7 +864,7 @@ export function ImageEditorModal({
     try {
       const created: DraftOperation[] = [];
       for (const { block, translated } of pairs) {
-        const opId = `change_text-tr-${block.id}`;
+        const opId = `change_text-tr-${version.id}-${block.id}`;
         const op: DraftOperation = {
           operationId: opId,
           type: "change_text",
@@ -861,8 +877,7 @@ export function ImageEditorModal({
             prompt: `${changeTextPrompt}；目标语言：${translateLang}`,
           },
         };
-        await onOperationAdded?.(op, op.summary);
-        committedOperationIds.current.add(op.operationId);
+        await writeDraft(() => onOperationAdded?.(op, op.summary));
         created.push(op);
       }
       setOperations((current) => {
@@ -871,6 +886,7 @@ export function ImageEditorModal({
       });
       setOriginalText("");
       setNewText("");
+      setChangeTextOperationId(freshOperationId("change_text"));
     } catch (errorValue) {
       setEditorError(errorValue instanceof Error ? errorValue.message : "批量写入翻译操作失败");
     } finally {
@@ -880,19 +896,15 @@ export function ImageEditorModal({
 
   useEffect(() => { suiteApi.imageEditorCapabilities().then((result) => setCapabilities(result.capabilities)).catch(() => setCapabilityError("能力状态暂时不可用")); }, []);
   useEffect(() => {
+    let mounted = true;
     suiteApi.getImageEditDraft(task.id).then((draft) => {
+      if (!mounted) return;
       const restored = (draft.operations as unknown as DraftOperation[]).filter((item) => item.sourceVersionId === version.id);
-      committedOperationIds.current = new Set(restored.map((item) => item.operationId));
       setOperations(restored);
-      const firstText = restored.find((item) => item.type === "add_text");
-      if (firstText) {
-        const payload = firstText.payload;
-        setTextOperationId(firstText.operationId);
-        setText(String(payload.text ?? ""));
-        setAddTextPrompt(String(payload.prompt ?? ""));
-        if (payload.region && typeof payload.region === "object") setTextRegion(payload.region as typeof textRegion);
-      }
-    }).catch(() => undefined);
+      const reEdit = restored.find((item) => item.type === "re_edit");
+      if (reEdit) setInstruction(String(reEdit.payload.prompt ?? ""));
+    }).catch(() => undefined).finally(() => { if (mounted) setLoadingDraft(false); });
+    return () => { mounted = false; };
   }, [task.id, version.id]);
 
   const updateFrame = useCallback(() => {
@@ -994,6 +1006,7 @@ export function ImageEditorModal({
     return { x: Math.max(0, Math.min(1, point.x / Math.max(1, frame.width))), y: Math.max(0, Math.min(1, point.y / Math.max(1, frame.height))) };
   };
   const startStroke = (event: { target: { getStage(): Konva.Stage | null } }) => {
+    if (saving) return;
     const point = pointFromEvent(event);
     if (["inpaint", "erase"].includes(tool)) {
       setActiveStroke({ mode: maskMode, points: [point], size: brush / Math.max(1, Math.min(frame.width, frame.height)) });
@@ -1018,12 +1031,28 @@ export function ImageEditorModal({
     setActiveRegion(null);
   };
 
-  const operationFor = (selectedTool = tool): DraftOperation => {
-    const type = selectedTool === "inpaint" ? "redraw" : selectedTool === "expand" ? "outpaint" : selectedTool as DraftOperation["type"];
-    const prompt = selectedTool === "re_edit" ? instruction : selectedTool === "add_text" ? addTextPrompt : selectedTool === "change_text" ? changeTextPrompt : selectedTool === "inpaint" ? redrawPrompt : selectedTool === "erase" ? erasePrompt : "";
-    const summary = selectedTool === "add_text" ? `添加文本：${text}` : selectedTool === "change_text" ? `改文字：${originalText || "原文字"} → ${newText}` : selectedTool === "inpaint" ? "局部重绘选区" : selectedTool === "erase" ? "消除笔移除选区" : selectedTool === "expand" ? `扩图：${expand} · ${ratio}` : "重新编辑提示词";
-    const existing = selectedTool === "add_text" ? textOperationId : operations.find((item) => item.type === type)?.operationId;
-    return { operationId: existing ?? freshOperationId(type), type, summary, sourceVersionId: version.id, payload: { text, originalText, newText, region: textRegion, strokes: strokes.map((stroke) => ({ mode: stroke.mode, points: stroke.points, width: stroke.size })), feather, direction: expand, targetRatio: ratio, prompt } };
+  const operationFor = (type: ApiImageEditTool): DraftOperation => {
+    const operation = (summary: string, payload: DraftOperation["payload"]): DraftOperation => {
+      const existing = workingDrafts.current[type]?.operationId ?? operations.find((item) => item.type === type)?.operationId;
+      const operationId = type === "add_text" ? textOperationId : type === "change_text" ? changeTextOperationId : existing ?? freshOperationId(type);
+      return { operationId, type, summary, sourceVersionId: version.id, payload };
+    };
+    switch (type) {
+      case "re_edit":
+        return operation("重新编辑提示词", { prompt: instruction });
+      case "add_text":
+        return operation(`添加文本：${text}`, { text, region: textRegion, prompt: addTextPrompt });
+      case "change_text":
+        return operation(`改文字：${originalText || "原文字"} → ${newText}`, { originalText, newText, region: textRegion, prompt: changeTextPrompt });
+      case "redraw":
+      case "erase":
+        return operation(type === "redraw" ? "局部重绘选区" : "消除笔移除选区", {
+          strokes: strokes.map((stroke) => ({ mode: stroke.mode, points: stroke.points, width: stroke.size })),
+          feather, prompt: type === "redraw" ? redrawPrompt : erasePrompt,
+        });
+      case "outpaint":
+        return operation(`扩图：${expand} · ${ratio}`, { direction: expand, targetRatio: ratio });
+    }
   };
 
   const validationError = () => {
@@ -1036,14 +1065,14 @@ export function ImageEditorModal({
   };
 
   const addOperation = async () => {
+    if (!activeOperationType) return;
     const error = validationError();
     if (error) { setEditorError(error); return; }
-    const next = operationFor();
+    const next = operationFor(activeOperationType);
     setSaving(true);
     setEditorError("");
     try {
-      await onOperationAdded?.(next, next.summary);
-      committedOperationIds.current.add(next.operationId);
+      await writeDraft(() => onOperationAdded?.(next, next.summary));
       setOperations((current) => [...current.filter((item) => item.operationId !== next.operationId), next]);
     } catch (errorValue) {
       setEditorError(errorValue instanceof Error ? errorValue.message : "操作保存失败");
@@ -1053,59 +1082,43 @@ export function ImageEditorModal({
   };
 
   useEffect(() => {
-    if (tool === "regenerate") return;
-    const next = operationFor();
+    if (!activeOperationType || saving || loadingDraft) return;
+    const next = operationFor(activeOperationType);
     const current = operations.find((item) => item.operationId === next.operationId);
-    if (!current || !committedOperationIds.current.has(next.operationId) || (current.summary === next.summary && JSON.stringify(current.payload) === JSON.stringify(next.payload))) return;
+    if (!current || (current.summary === next.summary && JSON.stringify(current.payload) === JSON.stringify(next.payload))) return;
     const timer = window.setTimeout(() => {
       setOperations((items) => items.map((item) => item.operationId === next.operationId ? next : item));
-      void onOperationAdded?.(next, next.summary).catch(() => setEditorError("对话操作同步失败，请重试"));
+      void writeDraft(() => onOperationAdded?.(next, next.summary)).catch(() => setEditorError("对话操作同步失败，请重试"));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [tool, text, originalText, newText, textRegion, strokes, feather, expand, ratio, instruction, addTextPrompt, changeTextPrompt, redrawPrompt, erasePrompt, textOperationId, operations]);
+  }, [activeOperationType, saving, loadingDraft, text, originalText, newText, textRegion, strokes, feather, expand, ratio, instruction, addTextPrompt, changeTextPrompt, redrawPrompt, erasePrompt, textOperationId, changeTextOperationId, operations]);
 
   const submit = async () => {
-    let finalOperations = operations;
-    const currentError = tool === "regenerate" ? "" : validationError();
-    if (!currentError && tool !== "regenerate") {
-      const next = operationFor();
-      const existing = operations.find((item) => item.operationId === next.operationId);
-      const needsSync =
-        !existing ||
-        !committedOperationIds.current.has(next.operationId) ||
-        existing.summary !== next.summary ||
-        JSON.stringify(existing.payload) !== JSON.stringify(next.payload);
-      if (needsSync) {
-        setSaving(true);
-        setEditorError("");
-        try {
-          await onOperationAdded?.(next, next.summary);
-          committedOperationIds.current.add(next.operationId);
-          finalOperations = [...operations.filter((item) => item.operationId !== next.operationId), next];
-          setOperations(finalOperations);
-        } catch (errorValue) {
-          setEditorError(errorValue instanceof Error ? errorValue.message : "操作保存失败");
-          setSaving(false);
-          return;
-        }
-      }
-    } else if (currentError && operations.length === 0) {
+    if (!activeOperationType) return;
+    const next = operationFor(activeOperationType);
+    const multiple = activeOperationType === "add_text" || activeOperationType === "change_text";
+    const currentError = validationError();
+    if (currentError && (!multiple || !activeOperations.length || activeOperations.some((item) => item.operationId === next.operationId))) {
       setEditorError(currentError);
       return;
     }
-
-    if (finalOperations.length === 0) {
-      setEditorError("请先添加或填写至少一项编辑操作");
-      return;
-    }
-
+    const finalOperations = currentError ? activeOperations
+      : multiple ? [...activeOperations.filter((item) => item.operationId !== next.operationId), next] : [next];
     setSaving(true);
     setEditorError("");
     try {
+      await writeDraft(async () => {
+        for (const operation of finalOperations) await onOperationAdded?.(operation, operation.summary);
+      });
+      setOperations((current) => [
+        ...current.filter((item) => !finalOperations.some((submitted) => submitted.operationId === item.operationId)),
+        ...finalOperations,
+      ]);
       await onSubmit(
-        { schemaVersion: "image-edit-v1", sourceVersionId: version.id, operations: finalOperations },
+        { tool: activeOperationType, sourceVersionId: version.id, operationIds: finalOperations.map((item) => item.operationId) },
         finalOperations.map((item) => item.summary).join("；"),
       );
+      setOperations((current) => current.filter((item) => !finalOperations.some((submitted) => submitted.operationId === item.operationId)));
     } catch (errorValue) {
       setEditorError(errorValue instanceof Error ? errorValue.message : "生成提交失败");
     } finally {
@@ -1113,17 +1126,79 @@ export function ImageEditorModal({
     }
   };
 
-  const selectOperation = (item: DraftOperation) => {
-    const payload = item.payload;
+  const restoreOperation = (item: DraftOperation) => {
+    const { payload } = item;
+    switch (item.type) {
+      case "add_text":
+        setTextOperationId(item.operationId);
+        setText(String(payload.text ?? ""));
+        setAddTextPrompt(String(payload.prompt ?? ""));
+        break;
+      case "change_text":
+        setChangeTextOperationId(item.operationId);
+        setOriginalText(String(payload.originalText ?? ""));
+        setNewText(String(payload.newText ?? ""));
+        setChangeTextPrompt(String(payload.prompt ?? ""));
+        break;
+      case "redraw":
+        setRedrawPrompt(String(payload.prompt ?? ""));
+        break;
+      case "erase":
+        setErasePrompt(String(payload.prompt ?? ""));
+        break;
+      case "outpaint":
+        setExpand(String(payload.direction ?? "all"));
+        setRatio(String(payload.targetRatio ?? "original"));
+        break;
+      case "re_edit":
+        setInstruction(String(payload.prompt ?? ""));
+        break;
+    }
+    if ((item.type === "add_text" || item.type === "change_text") && payload.region && typeof payload.region === "object") {
+      setTextRegion(payload.region as typeof textRegion);
+    }
+    if (item.type === "redraw" || item.type === "erase") {
+      if (Array.isArray(payload.strokes)) setStrokes((payload.strokes as Array<{ mode?: "draw" | "erase"; points: MaskStroke["points"]; width: number }>).map((stroke) => ({ mode: stroke.mode ?? "draw", points: stroke.points, size: stroke.width })));
+      if (typeof payload.feather === "number") setFeather(payload.feather);
+    }
+  };
+
+  const switchTool = (next: EditTool, selected?: DraftOperation) => {
+    if (tool === next && !selected) return;
+    if (activeOperationType) workingDrafts.current[activeOperationType] = operationFor(activeOperationType);
     setEditorError("");
-    if (item.type === "add_text") { setTool("add_text"); setTextOperationId(item.operationId); setText(String(payload.text ?? "")); setAddTextPrompt(String(payload.prompt ?? "")); }
-    else if (item.type === "change_text") { setTool("change_text"); setOriginalText(String(payload.originalText ?? "")); setNewText(String(payload.newText ?? "")); setChangeTextPrompt(String(payload.prompt ?? "")); }
-    else if (item.type === "redraw") { setTool("inpaint"); setRedrawPrompt(String(payload.prompt ?? "")); }
-    else if (item.type === "erase") { setTool("erase"); setErasePrompt(String(payload.prompt ?? "")); }
-    else if (item.type === "outpaint") setTool("expand");
-    else setTool("re_edit");
-    if (payload.region && typeof payload.region === "object") setTextRegion(payload.region as typeof textRegion);
-    if (Array.isArray(payload.strokes)) setStrokes((payload.strokes as Array<{ mode?: "draw" | "erase"; points: MaskStroke["points"]; width: number }>).map((stroke) => ({ mode: stroke.mode ?? "draw", points: stroke.points, size: stroke.width })));
+    if (tool !== next) {
+      setToolNotice("切换前的草稿会保留，提交时只使用当前工具的草稿。");
+      activeTool.current = next;
+      setTool(next);
+    }
+    setTextRegion(DEFAULT_EDIT_TEXT_REGION);
+    setStrokes([]);
+    setRedoStrokes([]);
+    setActiveStroke(null);
+    setFeather(0.08);
+    setRegionStart(null);
+    setActiveRegion(null);
+    if (next !== "regenerate") {
+      const nextType = editOperationType(next);
+      const draft = selected ?? workingDrafts.current[nextType] ?? operations.find((item) => item.type === nextType);
+      if (draft) {
+        workingDrafts.current[nextType] = draft;
+        restoreOperation(draft);
+      }
+    }
+  };
+
+  const removeOperation = async (operationId: string) => {
+    const item = operations.find((operation) => operation.operationId === operationId);
+    if (item && workingDrafts.current[item.type]?.operationId === operationId) delete workingDrafts.current[item.type];
+    setOperations((current) => current.filter((operation) => operation.operationId !== operationId));
+    try {
+      await writeDraft(() => suiteApi.removeImageEditOperation(task.id, operationId));
+    } catch (errorValue) {
+      if (item) setOperations((current) => [...current, item]);
+      setEditorError(errorValue instanceof Error ? errorValue.message : "移除草稿失败");
+    }
   };
 
   const updateTextRegion = (node: Konva.Text, transformed = false) => {
@@ -1213,12 +1288,13 @@ export function ImageEditorModal({
           <aside className="wb-editor-tools">
             <strong>编辑工具</strong>
             {toolList.map(([value, label, capability]) => (
-              <button key={value} type="button" className={tool === value ? "is-active" : ""} disabled={!capabilityAvailable(value, capability)} onClick={() => { setTool(value); setEditorError(""); }}>
+              <button key={value} type="button" className={tool === value ? "is-active" : ""} disabled={saving || loadingDraft || !capabilityAvailable(value, capability)} onClick={() => switchTool(value)}>
                 {label}
                 <small>{!capabilityAvailable(value, capability) ? "不可用" : capabilities ? "可用" : "检查中"}</small>
               </button>
             ))}
             <p>{["inpaint", "erase"].includes(tool) ? "快捷键：Ctrl+Z 撤销 · [ / ] 调整笔刷大小" : tool === "change_text" ? "先 OCR 识别；失败时手工框选原文字" : "调整操作后添加到对话，生成时才冻结"}</p>
+            {toolNotice && <p role="status">{toolNotice}</p>}
             {capabilityError && <p className="wb-editor-error">{capabilityError}</p>}
           </aside>
           <div className="wb-editor-stage">
@@ -1252,8 +1328,8 @@ export function ImageEditorModal({
                           draggable={selected}
                           shadowColor={previewShadow}
                           shadowBlur={6}
-                          onClick={() => selectOperation(item)}
-                          onTap={() => selectOperation(item)}
+                          onClick={() => { if (!saving && !selected) switchTool("add_text", item); }}
+                          onTap={() => { if (!saving && !selected) switchTool("add_text", item); }}
                           onDragEnd={selected ? (event) => updateTextRegion(event.target as Konva.Text) : undefined}
                           onTransformEnd={selected ? (event) => updateTextRegion(event.target as Konva.Text, true) : undefined}
                         />
@@ -1349,12 +1425,12 @@ export function ImageEditorModal({
               <>
                 <div className="wb-editor-option-head">
                   <strong>文字区域</strong>
-                  <button type="button" onClick={() => { setTextOperationId(freshOperationId("add_text")); setText(""); setAddTextPrompt(""); setTextRegion({ x: 0.36, y: 0.42, width: 0.28, height: 0.1, rotation: 0 }); }}>新建文字框</button>
+                  <button type="button" onClick={() => { setTextOperationId(freshOperationId("add_text")); setText(""); setAddTextPrompt(""); setTextRegion(DEFAULT_EDIT_TEXT_REGION); }}>新建文字框</button>
                 </div>
                 <label>精确文字<input value={text} onChange={(event) => setText(event.target.value)} /></label>
                 <label>添加文字要求<textarea value={addTextPrompt} onChange={(event) => setAddTextPrompt(event.target.value)} placeholder="描述文字的视觉感觉，以及与画面光线、透视的关系" /></label>
                 <small>上方浅/深切换仅用于画布定位清晰度，实际视觉风格由“添加文字要求”控制。</small>
-                <button type="button" className="wb-danger-link" onClick={() => { const id = textOperationId; setOperations((current) => current.filter((item) => item.operationId !== id)); void suiteApi.removeImageEditOperation(task.id, id); setTextOperationId(freshOperationId("add_text")); setText(""); }}>删除当前文字框</button>
+                <button type="button" className="wb-danger-link" disabled={saving} onClick={() => { if (operations.some((item) => item.operationId === textOperationId)) void removeOperation(textOperationId); setTextOperationId(freshOperationId("add_text")); setText(""); }}>删除当前文字框</button>
               </>
             )}
             {tool === "change_text" && (
@@ -1401,6 +1477,7 @@ export function ImageEditorModal({
                 <label>原文字<input value={originalText} onChange={(event) => setOriginalText(event.target.value)} placeholder="OCR 失败时手工确认" /></label>
                 <label>新文字<input value={newText} onChange={(event) => setNewText(event.target.value)} /></label>
                 <label>替换要求<textarea value={changeTextPrompt} onChange={(event) => setChangeTextPrompt(event.target.value)} /></label>
+                <button type="button" disabled={saving} onClick={() => { setChangeTextOperationId(freshOperationId("change_text")); setOriginalText(""); setNewText(""); setTextRegion(DEFAULT_EDIT_TEXT_REGION); }}>新建文字替换</button>
                 <small>可拖拽虚线框校正识别区域</small>
               </>
             )}
@@ -1430,23 +1507,23 @@ export function ImageEditorModal({
             )}
             {tool === "regenerate" && <p>再次生成只在当前卡片下新增版本，不创建子卡片。</p>}
             <div className="wb-editor-operations">
-              {operations.map((item) => (
+              {activeOperations.map((item) => (
                 <div key={item.operationId}>
-                  <button type="button" className="wb-operation-edit" onClick={() => selectOperation(item)}>{item.summary}</button>
-                  <button type="button" onClick={() => { setOperations((current) => current.filter((entry) => entry.operationId !== item.operationId)); void suiteApi.removeImageEditOperation(task.id, item.operationId); }}>移除</button>
+                  <button type="button" className="wb-operation-edit" disabled={saving} onClick={() => switchTool(editorToolFor(item.type), item)}>{item.summary}</button>
+                  <button type="button" disabled={saving} onClick={() => void removeOperation(item.operationId)}>移除</button>
                 </div>
               ))}
             </div>
           </aside>
           <footer className="wb-editor-footer">
-            <span>已加入对话 {operations.length} 项</span>
+            <span>已加入对话 {activeOperations.length} 项</span>
             {editorError && <strong role="alert"><ModelSettingsMessage message={editorError} /></strong>}
             <button type="button" onClick={onClose}>取消</button>
-            {tool !== "regenerate" && <button type="button" disabled={saving || !capabilityReady} onClick={() => void addOperation()}>{saving ? "保存中…" : operations.some((item) => item.operationId === operationFor().operationId) ? "更新对话操作" : "添加到对话"}</button>}
+            {activeOperationType && <button type="button" disabled={saving || loadingDraft || !capabilityReady} onClick={() => void addOperation()}>{saving ? "保存中…" : activeOperations.some((item) => item.operationId === operationFor(activeOperationType).operationId) ? "更新对话操作" : "添加到对话"}</button>}
             {tool === "regenerate" ? (
               <button type="button" className="wb-primary-action" disabled={saving || !capabilityReady} onClick={() => { setSaving(true); onRegenerate().then(onClose).catch((errorValue) => setEditorError(errorValue instanceof Error ? errorValue.message : "再次生成失败")).finally(() => setSaving(false)); }}>{saving ? "提交中…" : "再次生成当前版本"}</button>
             ) : (
-              <button type="button" className="wb-primary-action" disabled={saving || !capabilityReady} onClick={() => void submit()}>{saving ? "提交中…" : "开始生成（新建编辑子卡）"}</button>
+              <button type="button" className="wb-primary-action" disabled={saving || loadingDraft || !capabilityReady} onClick={() => void submit()}>{saving ? "提交中…" : "开始生成（新建编辑子卡）"}</button>
             )}
           </footer>
         </div>
@@ -1745,10 +1822,8 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     notify("已提交单卡生成");
   };
 
-  const submitEdit = async (task: ApiSuiteTask, spec: Record<string, unknown>, instruction: string) => {
-    const operations = Array.isArray(spec.operations) ? spec.operations : [];
-    for (const operation of operations) await suiteApi.upsertImageEditOperation(task.id, operation as Record<string, unknown>, instruction);
-    await suiteApi.submitImageEdit(task.id, { sourceCardId: task.id, sourceVersionId: String(spec.sourceVersionId ?? ""), parentVersionId: String(spec.sourceVersionId ?? ""), summary: instruction });
+  const submitEdit = async (task: ApiSuiteTask, selection: ApiImageEditSelection, instruction: string) => {
+    await suiteApi.submitImageEdit(task.id, { ...selection, sourceCardId: task.id, parentVersionId: selection.sourceVersionId, summary: instruction });
     setEditor(null);
     await reload();
     notify("编辑已加入对话，正在生成子卡片");
@@ -1763,7 +1838,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     if (child) {
       const latest = child.attempts[child.attempts.length - 1];
       if (latest && String(latest.status) === "failed") await suiteApi.retryImageEdit(String(latest.id));
-      else await suiteApi.regenerateImageEditTask(task.id, task.promptDraft);
+      else await suiteApi.regenerateImageEditTask(task.id);
     } else {
       const failed = [...task.attempts].reverse().find((attempt) => attempt.status === "failed");
       if (task.status === "failed" && failed) await suiteApi.retryTaskAttempt(failed.id);
@@ -2162,6 +2237,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
 
       {editor && (
         <ImageEditorModal
+          key={editor.version.id}
           task={editor.task}
           version={editor.version}
           onClose={() => setEditor(null)}

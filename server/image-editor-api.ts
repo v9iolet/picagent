@@ -51,8 +51,19 @@ export function createImageEditorApi(service: ImageEditorService) {
       const submitMatch = path.match(/^\/api\/image-editor\/sessions\/([^/]+)\/submit$/);
       if (method === "POST" && submitMatch) {
         if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
+        if (body.tool !== undefined && typeof body.tool !== "string") return fail("INVALID_IMAGE_EDIT_TOOL");
+        const { operationIds } = body;
+        if (operationIds !== undefined && (!Array.isArray(operationIds) || !operationIds.every((id) => typeof id === "string" && id))) {
+          return fail("INVALID_IMAGE_EDIT_OPERATION_IDS");
+        }
         try {
-          const result = await service.submit({ sessionId: submitMatch[1], idempotencyKey, sourceCardId: String(body.sourceCardId ?? ""), sourceVersionId: String(body.sourceVersionId ?? ""), parentVersionId: typeof body.parentVersionId === "string" ? body.parentVersionId : undefined, summary: typeof body.summary === "string" ? body.summary : undefined });
+          const result = await service.submit({
+            sessionId: submitMatch[1], idempotencyKey,
+            sourceCardId: String(body.sourceCardId ?? ""), sourceVersionId: String(body.sourceVersionId ?? ""),
+            parentVersionId: typeof body.parentVersionId === "string" ? body.parentVersionId : undefined,
+            summary: typeof body.summary === "string" ? body.summary : undefined,
+            tool: typeof body.tool === "string" ? body.tool : undefined, operationIds,
+          });
           return ok(result, result.duplicate ? 200 : 202);
         } catch (error) { return fail(error instanceof Error ? error.message : "IMAGE_EDIT_SUBMIT_FAILED", 409); }
       }
@@ -62,7 +73,7 @@ export function createImageEditorApi(service: ImageEditorService) {
       if (method === "POST" && regenerateMatch) {
         if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
         try {
-          const result = await service.regenerate({ childTaskId: regenerateMatch[1], idempotencyKey, summary: typeof body.summary === "string" ? body.summary : undefined });
+          const result = await service.regenerate({ childTaskId: regenerateMatch[1], idempotencyKey });
           return ok(result, result.duplicate ? 200 : 202);
         } catch (error) { return fail(error instanceof Error ? error.message : "IMAGE_EDIT_REGENERATE_FAILED", 409); }
       }

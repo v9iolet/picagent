@@ -29,6 +29,7 @@ export class PostgresPromptRepository {
             EXISTS (SELECT 1 FROM suite_workbench.generation_attempts g WHERE g.prompt_template_version_id = v.id)
             OR EXISTS (SELECT 1 FROM suite_workbench.plan_generation_attempts p WHERE p.template_version_id = v.id)
             OR EXISTS (SELECT 1 FROM suite_workbench.plan_snapshots s WHERE s.template_version_id = v.id)
+            OR EXISTS (SELECT 1 FROM suite_workbench.image_edit_snapshots e WHERE e.prompt_template_version_id = v.id)
           )
         )`, [template.id]);
         if (references.rows[0]?.exists) {

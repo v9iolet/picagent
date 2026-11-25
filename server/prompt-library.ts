@@ -22,6 +22,7 @@ export const IN_USE_PROMPT_STAGES: readonly PromptStage[] = [
   "base_refine",
   "structure_plan",
   "category_prompt",
+  "task_image",
   "listing_copy",
   "replica_prompt",
   "product_onboarding",
@@ -29,7 +30,6 @@ export const IN_USE_PROMPT_STAGES: readonly PromptStage[] = [
 
 export const UNUSED_PROMPT_STAGES: readonly PromptStage[] = [
   "plan",
-  "task_image",
   "reverse_prompt",
 ];
 
@@ -39,6 +39,7 @@ export function resolvePromptTemplateUsedBy(template: {
   applicability?: Record<string, unknown> | null;
 }): string[] {
   const code = typeof template.code === "string" ? template.code.trim() : "";
+  if (template.stage === "task_image" && code.startsWith("image-editor.")) return ["图片编辑"];
   if (code && code in PROMPT_TEMPLATE_USAGE_BY_CODE) {
     return [...PROMPT_TEMPLATE_USAGE_BY_CODE[code as keyof typeof PROMPT_TEMPLATE_USAGE_BY_CODE]];
   }
