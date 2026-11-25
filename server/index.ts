@@ -83,12 +83,13 @@ const resolveImageSource = async (versionId: string): Promise<ImageSource | null
   const object = await storage.get(version.objectKey);
   if (!object) return null;
   const { width, height } = await sharp(object.bytes).metadata();
-  return { bytes: object.bytes, mimeType: version.mimeType, width, height, generationPrompt: version.generationPrompt };
+  return { bytes: object.bytes, mimeType: version.mimeType, width, height, generationPrompt: version.generationPrompt, productInputs: version.productInputs };
 };
 const imageEditorApi = createImageEditorApi(new ImageEditorService(
   imageEditorRepository, resolveImageEditorProvider, storage, resolveImageSource, resolveOcrProvider,
   (sourceCardId, sourceVersionId) => imageEditorRepository.validateSource(sourceCardId, sourceVersionId),
   promptRepository,
+  async (versionId) => (await imageEditorRepository.getSourceVersion(versionId))?.productInputs ?? null,
 ));
 const app = createSuiteStudioApp({
   repository: new PostgresSuiteRepository(pool),

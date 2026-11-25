@@ -1,3 +1,57 @@
+.wb-restore-inputs {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.wb-restore-inputs legend {
+  padding: 0;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.wb-restore-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.wb-restore-inputs .wb-restore-choice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.wb-restore-choice input[type="radio"] {
+  width: auto;
+  margin: 0;
+}
+
+.wb-restore-grid img,
+.wb-restore-uploaded img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+  background: #f3f4f6;
+  border-radius: 6px;
+}
+
+.wb-restore-uploaded {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.wb-restore-uploaded img {
+  width: 60px;
+}
+
 .pa-wb-main {
   flex: 1;
   min-height: 0;

@@ -1,15 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { ok } from "./api-response.js";
+import { ok, type AppResponse } from "./api-response.js";
 import { formatOcrErrorMessage, type ImageEditChildTask, type ImageEditorService } from "./image-editor.js";
-import type { ErrorEnvelope, ResponseEnvelope } from "./types.js";
 
-export interface ImageEditorApiResponse { status: number; body: ResponseEnvelope<unknown> | ErrorEnvelope }
+export type ImageEditorApiResponse = AppResponse;
+const restoreInputErrors: Record<string, string> = {
+  RESTORE_PRODUCT_REFERENCE_REQUIRED: "请上传一张商品外观依据图",
+  RESTORE_PRODUCT_REFERENCE_INVALID: "这张依据图不适用于当前图片，请重新选择或上传",
+  RESTORE_PRODUCT_IMAGE_INVALID: "请选择有效的 PNG、JPG 或 WebP 图片",
+  RESTORE_PRODUCT_IMAGE_TOO_LARGE: "商品外观依据图不能超过 10 MB",
+};
 const fail = (code: string, status = 400): ImageEditorApiResponse => {
   if (code === "IMAGE_PROVIDER_NOT_CONFIGURED" || code === "OCR_PROVIDER_UNAVAILABLE") {
     const purpose = code === "OCR_PROVIDER_UNAVAILABLE" ? "多模态" : "生图";
     return { status: 503, body: { error: { code, message: `请前往配置 → 偏好设置，选择默认${purpose}模型` }, requestId: randomUUID() } };
   }
-  return { status, body: { error: { code, message: code }, requestId: randomUUID() } };
+  return { status, body: { error: { code, message: restoreInputErrors[code] ?? code }, requestId: randomUUID() } };
 };
 
 export function createImageEditorApi(service: ImageEditorService) {
@@ -18,8 +23,36 @@ export function createImageEditorApi(service: ImageEditorService) {
       const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
       const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
       if (method === "GET" && path === "/api/image-editor/capabilities") return ok(await service.capabilities());
-      const sessionMatch = path.match(/^\/api\/image-editor\/sessions\/([^/]+)$/);
-      if (method === "GET" && sessionMatch) { const draft = await service.getDraft(sessionMatch[1]); return draft ? ok(draft) : fail("EDIT_SESSION_NOT_FOUND", 404); }
+      const sessionMatch = path.match(/^\/api\/image-editor\/sessions\/([^/?]+)(?:\?(.*))?$/);
+      if (method === "GET" && sessionMatch) {
+        const sourceVersionId = new URLSearchParams(sessionMatch[2]).get("sourceVersionId");
+        if (sourceVersionId) {
+          try {
+            return ok(await service.getSession(sessionMatch[1], sourceVersionId));
+          } catch (error) {
+            return fail(error instanceof Error ? error.message : "EDIT_SESSION_NOT_FOUND", 404);
+          }
+        }
+        const draft = await service.getDraft(sessionMatch[1]);
+        return draft ? ok(draft) : fail("EDIT_SESSION_NOT_FOUND", 404);
+      }
+      const restoreInputsMatch = path.match(/^\/api\/image-editor\/sessions\/([^/]+)\/versions\/([^/]+)\/restore-inputs(?:\/([^/]+)\/thumbnail)?$/);
+      if (restoreInputsMatch) {
+        const [, sessionId, sourceVersionId, encodedKey] = restoreInputsMatch;
+        try {
+          if (method === "POST" && !encodedKey) {
+            if (!Buffer.isBuffer(body.bytes) || typeof body.mimeType !== "string") return fail("RESTORE_PRODUCT_IMAGE_INVALID");
+            return ok(await service.uploadRestoreInput(sessionId, sourceVersionId, body.bytes, body.mimeType), 201);
+          }
+          if (method === "GET" && encodedKey) {
+            const raw = await service.restoreInputThumbnail(sessionId, sourceVersionId, decodeURIComponent(encodedKey));
+            return { ...ok(null), raw, headers: { "content-type": "image/webp", "cache-control": "private, max-age=300" } };
+          }
+        } catch (error) {
+          const code = error instanceof Error ? error.message : "RESTORE_PRODUCT_IMAGE_INVALID";
+          return fail(code, method === "GET" ? 404 : code === "RESTORE_PRODUCT_IMAGE_TOO_LARGE" ? 413 : 400);
+        }
+      }
       const taskMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)$/);
       if (method === "GET" && taskMatch) { const result = await service.getTask(taskMatch[1]); return result ? ok(result) : fail("INVALID_IMAGE_EDIT_TASK", 404); }
       if (method === "GET" && path === "/api/image-editor/tasks") return ok(await service.listAllTasks());

@@ -7,7 +7,7 @@ export type { AppResponse } from "./api-response.js";
 import { isProductImageResource, isStoredProductImageReference } from "./library-reference-policy.js";
 import { createListingCopyApi } from "./listing-copy-api.js";
 import { MemoryListingRepository, type ListingRepository } from "./listing-copy.js";
-import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../shared/model-settings.js";
+import { defaultImageOptions, IMAGE_QUALITIES, resolveClosestImageSize, resolveImageSize, type ImageQuality, type ModelCapability } from "../shared/model-settings.js";
 import { PURE_WHITE_MAIN_IMAGE_REQUIREMENTS } from "../shared/platform-main-background.js";
 import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
 import { allocateSellingPointLayouts, resolveSellingPointLayouts } from "../shared/selling-point-layouts.js";
@@ -44,6 +44,7 @@ import {
 } from "../shared/workbench-delivery.js";
 import { createZipBuffer } from "./zip.js";
 import type { ImageEditorApiResponse } from "./image-editor-api.js";
+import { declareImageEditInputs, imageEditProductInputs } from "./image-editor.js";
 import type {
   BaseImageVersion,
   CategoryPromptItem,
@@ -71,6 +72,7 @@ import type {
   SuiteTask,
   TaskGenerationAttempt,
   TaskGenerationBatch,
+  TaskImageVersion,
   TaskResultSlot,
   LibraryRepository,
   ReverseRepository, ReverseReference, ReversePromptVersion,
@@ -96,6 +98,16 @@ function extensionForImageMime(mimeType: string): string {
   if (lower.includes("jpeg") || lower.includes("jpg")) return "jpg";
   if (lower.includes("webp")) return "webp";
   return "png";
+}
+
+function taskVersionProductInputs(version: TaskImageVersion, versions: TaskImageVersion[]) {
+  const products = imageEditProductInputs(version.contextSnapshot.inputImages);
+  // Older single-card generations recorded their preceding output as the sole product input.
+  if (products.length === 1 && Array.isArray(version.contextSnapshot.inputImages) && version.contextSnapshot.inputImages.length === 1) {
+    const preceding = versions.find((item) => item.objectKey === products[0].objectKey && item.versionNumber < version.versionNumber);
+    if (preceding) return taskVersionProductInputs(preceding, versions);
+  }
+  return products;
 }
 
 function platformForPlanning(profile: PlatformProfile | null, background: unknown): PlatformProfile | undefined {
@@ -558,7 +570,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     return visionImages;
   };
 
-  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, failedAttempt?: TaskGenerationAttempt, sourceVersionIds: Record<string, string> = {}) => {
+  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, failedAttempt?: TaskGenerationAttempt, sourceVersionIds: Record<string, string> = {}, editSource?: { version: TaskImageVersion; versions: TaskImageVersion[] }) => {
     if (!deps.taskRepository) throw new Error("TASK_REPOSITORY_NOT_CONFIGURED");
     const existing = (await deps.taskRepository.listBatches(suiteId)).find((batch) => batch.idempotencyKey === idempotencyKey);
     if (existing) return { batch: existing, duplicate: true };
@@ -585,6 +597,37 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         attempts.push({
           ...failedAttempt, id: randomUUID(), slotId: slots[index].id, attemptNo: 1,
           provider: providerName, model, contextSnapshot: { ...failedAttempt.contextSnapshot, channel, model },
+          status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null,
+        });
+        continue;
+      }
+      if (editSource?.version.taskId === task.id) {
+        const { version, versions } = editSource;
+        const attachedInputs = taskVersionProductInputs(version, versions);
+        const inputImages = [
+          { objectKey: version.objectKey, role: "source", filename: `source.${extensionForImageMime(version.mimeType)}` },
+          ...attachedInputs.map((input, i) => ({ ...input, filename: `product-${i + 1}` })),
+        ];
+        const frozenPrompt = String(version.promptSnapshot.finalPrompt ?? version.promptSnapshot.prompt ?? "");
+        const finalPrompt = declareImageEditInputs(frozenPrompt, attachedInputs);
+        const providerPrompt = declareImageEditInputs(String(version.promptSnapshot.providerPrompt ?? frozenPrompt), attachedInputs);
+        const stored = await deps.storage.get(version.objectKey);
+        if (!stored) throw new Error("TASK_INVALID_SOURCE");
+        const { width, height } = await sharp(stored.bytes).metadata();
+        attempts.push({
+          id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits",
+          requestSummary: {
+            n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((image) => image.role),
+            size: resolveClosestImageSize(width, height, imageOptions), quality: imageOptions.quality ?? "high",
+          },
+          promptSnapshot: { ...version.promptSnapshot, finalPrompt, providerPrompt, inputImages },
+          promptSha256: createHash("sha256").update(finalPrompt).digest("hex"),
+          contextSnapshot: {
+            ...version.contextSnapshot, channel, model, suiteTaskId: task.id, sourceRevision: task.sourceRevision ?? 0,
+            tool: "regenerate", sourceVersionId: version.id, inputImages, attachedInputs,
+          },
+          sourceKind: "original", sourceObjectKey: version.objectKey, sourceInputImageId: null,
+          sourceBaseVersionId: null, sourceLibraryReferenceId: null, sourceResourceVersionId: null,
           status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null,
         });
         continue;
@@ -807,7 +850,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return;
       }
       if (images.length > 1 && provider.supportsMultipleImages === false) { await deps.taskRepository.failAttempt(attempt.id, "TASK_PROVIDER_MULTI_IMAGE_UNSUPPORTED", "当前图片模型不支持多图输入", finish); return; }
-      const editRequest: Parameters<ImageProvider["edit"]>[0] = { requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.providerPrompt ?? attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality: "medium", n: 1, responseFormat: "b64_json" };
+      const frozenQuality = IMAGE_QUALITIES.find((quality) => quality === attempt.requestSummary.quality);
+      const quality: ImageQuality = attempt.contextSnapshot.tool === "regenerate" ? frozenQuality ?? "high" : "medium";
+      const editRequest: Parameters<ImageProvider["edit"]>[0] = { requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.providerPrompt ?? attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality, n: 1, responseFormat: "b64_json" };
       let generated: Awaited<ReturnType<ImageProvider["edit"]>>;
       try {
         generated = await provider.edit(editRequest);
@@ -2141,6 +2186,15 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const task = await deps.taskRepository.getTask(taskGenerationMatch[1]);
       if (!task || task.status === "archived") return fail("INVALID_SUITE_TASK", 404);
       const body = asRecord(options.body, { allowArrays: true });
+      if (typeof body.editSourceVersionId === "string") {
+        try {
+          const { versions } = await deps.taskRepository.listTaskVersions(task.id);
+          const version = versions.find((item) => item.id === body.editSourceVersionId);
+          if (!version) return fail("TASK_CURRENT_VERSION_NOT_FOUND", 409);
+          const result = await createTaskBatch(task.suiteId, [task], "single", idempotencyKey, undefined, {}, { version, versions });
+          return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
+        } catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
+      }
       if (typeof body.promptDraft === "string") await deps.taskRepository.updateTask(task.id, { promptDraft: body.promptDraft });
       const current = await deps.taskRepository.getTask(task.id);
       try {

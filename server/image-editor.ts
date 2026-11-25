@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import sharp from "sharp";
 import type { PromptRepository, StorageAdapter } from "./types.js";
 
-export const IMAGE_EDIT_TOOLS = ["re_edit", "regenerate", "add_text", "change_text", "redraw", "erase", "outpaint"] as const;
+export const IMAGE_EDIT_TOOLS = ["re_edit", "regenerate", "add_text", "change_text", "redraw", "erase", "outpaint", "restore_product"] as const;
 export type ImageEditTool = (typeof IMAGE_EDIT_TOOLS)[number];
 export type ImageEditOperationType = Exclude<ImageEditTool, "regenerate">;
 
@@ -101,6 +101,25 @@ export interface ImageEditCommand {
 
 export interface ImageEditAttachedInput { objectKey: string; role: string }
 
+const PRODUCT_INPUT_ROLES = new Set(["product", "product_primary", "product_detail"]);
+const IMAGE_EDIT_INPUT_ROLES = "第 1 张为待编辑图，其余为商品外观依据，不得复制其背景与文字。下文提到的输入图顺序以此处声明为准。";
+const RESTORE_INPUT_MAX_BYTES = 10 * 1024 * 1024;
+const RESTORE_INPUT_FORMATS = new Map([["image/png", "png"], ["image/jpeg", "jpeg"], ["image/webp", "webp"]]);
+
+export function imageEditProductInputs(inputImages: unknown): ImageEditAttachedInput[] {
+  const productKeys = new Set<string>();
+  for (const image of Array.isArray(inputImages) ? inputImages : []) {
+    if (typeof image?.objectKey === "string" && image.objectKey.trim() && PRODUCT_INPUT_ROLES.has(image.role)) {
+      productKeys.add(image.objectKey);
+    }
+  }
+  return Array.from(productKeys, (objectKey) => ({ objectKey, role: "product" }));
+}
+
+export function declareImageEditInputs(prompt: string, inputs: ReadonlyArray<ImageEditAttachedInput>) {
+  return inputs.length && !prompt.startsWith(IMAGE_EDIT_INPUT_ROLES) ? `${IMAGE_EDIT_INPUT_ROLES}\n${prompt}` : prompt;
+}
+
 export interface ImageEditProviderCapabilities {
   imageToImage: boolean;
   addText: boolean;
@@ -121,7 +140,14 @@ export interface OcrProvider extends OcrProviderSnapshot {
   recognize(source: ImageSource): Promise<{ blocks: OcrTextBlock[] }>;
 }
 
-export interface ImageSource { bytes: Buffer; mimeType: string; width: number; height: number; generationPrompt?: string }
+export interface ImageSource {
+  bytes: Buffer;
+  mimeType: string;
+  width: number;
+  height: number;
+  generationPrompt?: string;
+  productInputs?: ReadonlyArray<ImageEditAttachedInput>;
+}
 
 const OUTPAINT_RATIOS: Record<OutpaintSpec["targetRatio"], number | null> = {
   original: null,
@@ -393,15 +419,18 @@ const EDIT_PAYLOAD_FIELDS: Record<ImageEditOperationType, readonly string[]> = {
   redraw: ["strokes", "feather", "prompt"],
   erase: ["strokes", "feather", "prompt"],
   outpaint: ["direction", "targetRatio", "targetWidth", "targetHeight", "prompt"],
+  restore_product: ["referenceObjectKeys"],
 };
 
 const IMAGE_EDIT_PROMPT_HEADER = "严格保持输入图片中的商品主体外观、结构比例、材质细节、光影色调、背景构图及未指定修改的文字与元素不变，仅执行以下局部修改：";
+const RESTORE_PRODUCT_HEADER = "仅修正待编辑图中的商品外观，保持原图的构图、背景、文字、版式和光影不变。";
 const IMAGE_EDIT_INSTRUCTIONS = {
   change_text: "将{{region}}的原文字“{{originalText}}”替换为“{{newText}}”，保持原有排版、字体风格、颜色与光影一致{{requirement}}。",
   add_text: "在{{region}}新增文字“{{text}}”{{requirement}}。",
   redraw: "仅重绘蒙版白色选区{{requirement}}，蒙版以外的商品与背景画面严格保持不变。",
   erase: "仅消除蒙版白色选区中的目标并自然补全周围背景{{requirement}}，蒙版以外画面严格保持不变。",
   outpaint: "{{direction}}扩展画面至比例 {{ratio}}{{dimensions}}，原图主体锚点保持{{anchor}}并自然延续背景纹理与光影{{requirement}}。",
+  restore_product: "以提供的商品外观依据图还原商品的形状、结构比例、颜色、材质、细节和可见标识，保持商品在原构图中的位置和视角。不可补造依据图无法确认的配件、标识或细节。",
 };
 
 export function buildImageEditPrompt(
@@ -447,9 +476,12 @@ export function buildImageEditPrompt(
       }
       case "re_edit":
         return `${prefix}${req || operation.summary}`;
+      case "restore_product":
+        return render(IMAGE_EDIT_INSTRUCTIONS.restore_product, {});
     }
   });
-  return [template?.body ?? IMAGE_EDIT_PROMPT_HEADER, ...instructions].filter(Boolean).join("\n");
+  const header = operations[0]?.type === "restore_product" ? RESTORE_PRODUCT_HEADER : IMAGE_EDIT_PROMPT_HEADER;
+  return [template?.body ?? header, ...instructions].filter(Boolean).join("\n");
 }
 
 function editProviderSnapshot({ name, version, capabilitiesVersion, channel }: ImageEditProvider): EditProviderSnapshot {
@@ -465,6 +497,7 @@ export class ImageEditorService {
     private readonly ocrProvider?: OcrProvider | (() => Promise<OcrProvider | null>),
     private readonly validateSource?: (sourceCardId: string, sourceVersionId: string) => Promise<boolean>,
     private readonly prompts?: PromptRepository,
+    private readonly resolveProductInputs?: (versionId: string) => Promise<ReadonlyArray<ImageEditAttachedInput> | null>,
   ) {}
 
   private async requireProvider() {
@@ -482,6 +515,94 @@ export class ImageEditorService {
   }
 
   async getDraft(sessionId: string) { return this.repository.getDraft(sessionId); }
+
+  async getSession(sessionId: string, sourceVersionId: string) {
+    const productInputs = await this.getSessionProductInputs(sessionId, sourceVersionId);
+    const draft = await this.getDraft(sessionId);
+    return {
+      sessionId, operations: draft?.operations ?? [], summary: draft?.summary ?? "",
+      productInputs: productInputs.map(({ objectKey }) => this.restoreInputView(sessionId, sourceVersionId, objectKey)),
+    };
+  }
+
+  async uploadRestoreInput(sessionId: string, sourceVersionId: string, bytes: Buffer, mimeType: string) {
+    const format = RESTORE_INPUT_FORMATS.get(mimeType);
+    if (!format || !bytes.length) throw new Error("RESTORE_PRODUCT_IMAGE_INVALID");
+    if (bytes.length > RESTORE_INPUT_MAX_BYTES) throw new Error("RESTORE_PRODUCT_IMAGE_TOO_LARGE");
+    await this.assertSessionSource(sessionId, sourceVersionId);
+    try {
+      const image = sharp(bytes);
+      if ((await image.metadata()).format !== format) throw new Error("RESTORE_PRODUCT_IMAGE_INVALID");
+      await image.resize(1, 1).toBuffer();
+    } catch {
+      throw new Error("RESTORE_PRODUCT_IMAGE_INVALID");
+    }
+    const objectKey = `${this.restoreUploadPrefix(sessionId, sourceVersionId)}${randomUUID()}.${format}`;
+    await this.storage.put({ key: objectKey, bytes, contentType: mimeType });
+    return this.restoreInputView(sessionId, sourceVersionId, objectKey);
+  }
+
+  async restoreInputThumbnail(sessionId: string, sourceVersionId: string, objectKey: string) {
+    const productInputs = await this.getSessionProductInputs(sessionId, sourceVersionId);
+    if (!productInputs.some((input) => input.objectKey === objectKey) && !this.isRestoreUpload(sessionId, sourceVersionId, objectKey)) {
+      throw new Error("RESTORE_PRODUCT_REFERENCE_INVALID");
+    }
+    const stored = await this.storage.get(objectKey);
+    if (!stored) throw new Error("RESTORE_PRODUCT_REFERENCE_INVALID");
+    return sharp(stored.bytes).rotate().resize(160, 160, { fit: "inside", withoutEnlargement: true }).webp().toBuffer();
+  }
+
+  private async assertSessionSource(sessionId: string, sourceVersionId: string) {
+    if (!sessionId || !sourceVersionId || (this.validateSource && !(await this.validateSource(sessionId, sourceVersionId)))) {
+      throw new Error("EDIT_SOURCE_NOT_FOUND");
+    }
+  }
+
+  private async getSessionProductInputs(sessionId: string, sourceVersionId: string) {
+    await this.assertSessionSource(sessionId, sourceVersionId);
+    if (this.resolveProductInputs) {
+      const inputs = await this.resolveProductInputs(sourceVersionId);
+      if (!inputs) throw new Error("SOURCE_VERSION_NOT_FOUND");
+      return inputs;
+    }
+    const source = await this.resolveSource(sourceVersionId);
+    if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND");
+    return source.productInputs ?? [];
+  }
+
+  private restoreUploadPrefix(sessionId: string, sourceVersionId: string) {
+    return `image-edits/sessions/${encodeURIComponent(sessionId)}/versions/${encodeURIComponent(sourceVersionId)}/restore-inputs/`;
+  }
+
+  private isRestoreUpload(sessionId: string, sourceVersionId: string, objectKey: string) {
+    const prefix = this.restoreUploadPrefix(sessionId, sourceVersionId);
+    return objectKey.startsWith(prefix) && /^[0-9a-f-]{36}\.(png|jpeg|webp)$/.test(objectKey.slice(prefix.length));
+  }
+
+  private restoreInputView(sessionId: string, sourceVersionId: string, objectKey: string) {
+    const base = `/api/image-editor/sessions/${encodeURIComponent(sessionId)}/versions/${encodeURIComponent(sourceVersionId)}/restore-inputs`;
+    return { objectKey, thumbnailUrl: `${base}/${encodeURIComponent(objectKey)}/thumbnail` };
+  }
+
+  private async resolveRestoreInputs(sessionId: string, source: ImageSource, operation: EditOperation) {
+    const available = source.productInputs ?? [];
+    const requested = operation.payload.referenceObjectKeys;
+    if (requested !== undefined && (!Array.isArray(requested) || requested.length !== 1 ||
+      typeof requested[0] !== "string" || !requested[0])) {
+      throw new Error("RESTORE_PRODUCT_REFERENCE_INVALID");
+    }
+    if (requested === undefined) {
+      if (!available.length) throw new Error("RESTORE_PRODUCT_REFERENCE_REQUIRED");
+      return available;
+    }
+    const objectKey = requested[0];
+    const candidate = available.find((input) => input.objectKey === objectKey);
+    if (candidate) return [candidate];
+    if (this.isRestoreUpload(sessionId, operation.sourceVersionId, objectKey) && await this.storage.get(objectKey)) {
+      return [{ objectKey, role: "product" }];
+    }
+    throw new Error("RESTORE_PRODUCT_REFERENCE_INVALID");
+  }
 
   async recognize(sessionId: string, sourceVersionId: string) {
     const ocr = typeof this.ocrProvider === "function" ? await this.ocrProvider() : this.ocrProvider;
@@ -562,9 +683,16 @@ export class ImageEditorService {
     const caps = await provider.capabilities();
     this.assertCapabilities(operations, caps);
     for (const operation of operations) this.validateOperation(operation);
+    const operationType = operations[0].type;
+    const attachedInputs = operationType === "restore_product"
+      ? await this.resolveRestoreInputs(input.sessionId, source, operations[0])
+      : ["re_edit", "redraw", "outpaint"].includes(operationType) ? source.productInputs ?? [] : [];
     const template = await this.resolveEditPrompt(operations[0].type);
     const materialized = await Promise.all(operations.map(async (operation) => {
       const payload = { ...operation.payload };
+      if (operation.type === "restore_product") {
+        payload.referenceObjectKeys = attachedInputs.map((input) => input.objectKey);
+      }
       if (operation.type === "outpaint") {
         const direction = payload.direction;
         const targetRatio = payload.targetRatio;
@@ -591,11 +719,11 @@ export class ImageEditorService {
       return { ...operation, payload };
     }));
     const summary = input.summary ?? draftOperations.map((operation) => operation.summary).join("；");
-    const prompt = buildImageEditPrompt(materialized, sourcePrompt, template);
+    const prompt = declareImageEditInputs(buildImageEditPrompt(materialized, sourcePrompt, template), attachedInputs);
     const snapshot: EditSnapshot = {
       id: randomUUID(), sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId,
       parentVersionId: input.parentVersionId ?? input.sourceVersionId, summary, sourcePrompt, tool: materialized[0].type,
-      attachedInputs: [], maskApplied: materialized.some((operation) => Boolean(operation.payload.mask)),
+      attachedInputs: structuredClone(attachedInputs), maskApplied: materialized.some((operation) => Boolean(operation.payload.mask)),
       promptTemplateVersionId: template?.templateVersionId ?? null,
       operations: structuredClone(materialized), provider: editProviderSnapshot(provider),
       createdAt: new Date().toISOString(), schemaVersion: "image-edit-snapshot-v1",
@@ -679,7 +807,6 @@ export class ImageEditorService {
   async listAllTasks() { const tasks = await this.repository.listChildTasks(); return Promise.all(tasks.map(async (task) => ({ task, snapshot: await this.repository.getSnapshot(task.snapshotId), attempts: await this.repository.listAttempts(task.id), versions: await this.repository.listVersions(task.id) }))); }
   private validateOperation(operation: EditOperation) {
     if (!operation.sourceVersionId || !operation.parentVersionId) throw new Error("EDIT_SOURCE_VERSION_REQUIRED");
-    if (!["re_edit", "add_text", "change_text", "redraw", "erase", "outpaint"].includes(operation.type)) throw new Error("INVALID_IMAGE_EDIT_OPERATION");
     const region = operation.payload.region;
     if (region && typeof region === "object") this.validateRect(region as Record<string, unknown>);
     const prompt = typeof operation.payload.prompt === "string" ? operation.payload.prompt.trim() : "";
@@ -707,9 +834,12 @@ export class ImageEditorService {
     return this.repository.submit(input);
   }
   private assertCapabilities(operations: ReadonlyArray<EditOperation>, caps: ImageEditProviderCapabilities) {
+    const capabilities = {
+      re_edit: caps.imageToImage, restore_product: caps.imageToImage,
+      add_text: caps.addText, change_text: caps.changeText, redraw: caps.redraw, erase: caps.erase, outpaint: caps.outpaint,
+    };
     for (const operation of operations) {
-      const supported = operation.type === "re_edit" ? caps.imageToImage : operation.type === "add_text" ? caps.addText : operation.type === "change_text" ? caps.changeText : operation.type === "redraw" ? caps.redraw : operation.type === "erase" ? caps.erase : caps.outpaint;
-      if (!supported) throw new Error(`IMAGE_EDIT_CAPABILITY_UNSUPPORTED:${operation.type}`);
+      if (!capabilities[operation.type]) throw new Error(`IMAGE_EDIT_CAPABILITY_UNSUPPORTED:${operation.type}`);
     }
   }
   private validateRect(rect: Record<string, unknown>) { if (!["x", "y", "width", "height"].every((key) => Number.isFinite(Number(rect[key])))) throw new Error("NORMALIZED_RECT_INVALID"); if (!this.inUnit(Number(rect.x)) || !this.inUnit(Number(rect.y)) || !this.inUnit(Number(rect.width)) || !this.inUnit(Number(rect.height)) || Number(rect.width) <= 0 || Number(rect.height) <= 0 || Number(rect.x) + Number(rect.width) > 1 || Number(rect.y) + Number(rect.height) > 1) throw new Error("NORMALIZED_RECT_INVALID"); }
