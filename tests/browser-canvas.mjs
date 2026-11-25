@@ -31,7 +31,11 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
       edit: async () => ({ bytes: sample, mimeType: "image/jpeg", width: 64, height: 64 }),
     },
     storage,
-    async (versionId) => ({ bytes: sample, mimeType: "image/jpeg", width: 64, height: 64, generationPrompt: `source:${versionId}` }),
+    async (versionId) => {
+      const version = taskRepository.listAllVersions().find(({ version }) => version.id === versionId)?.version;
+      const snapshot = version?.promptSnapshot;
+      return { bytes: sample, mimeType: "image/jpeg", width: 64, height: 64, generationPrompt: snapshot?.finalPrompt ?? snapshot?.prompt };
+    },
     async () => null,
   );
   const api = createSuiteStudioApp({
@@ -463,6 +467,49 @@ test("默认生图模型：套图配置、新建任务与检查器可选七种�
   await card.getByText("9:16", { exact: true }).waitFor();
 });
 
+test("创作画布：AI 改图支持空输入重绘和按指令修改", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId, tasks: [taskId] } = await seedGeneratedCanvas(api, 1);
+  const history = await api.request("GET", `/api/suite-tasks/${taskId}/versions`);
+  assert.equal(history.status, 200);
+  const { finalPrompt: sourcePrompt } = history.body.data.versions[0].promptSnapshot;
+  assert.ok(sourcePrompt.includes(cardDescription));
+  await page.goto(url + `create/canvas/${suiteId}`);
+
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  const area = dialog.getByLabel("调整要求");
+  const sourceBody = dialog.locator(".wb-editor-source-prompt p");
+  const editButton = page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit");
+  const instruction = "商品向左移动一点，换成浅灰色背景";
+  for (const [index, input] of ["", instruction].entries()) {
+    await editButton.click();
+    await dialog.locator(".wb-editor-tools").getByRole("button", { name: /^AI 改图/ }).waitFor();
+    assert.equal(await area.inputValue(), "");
+    assert.equal(await area.getAttribute("placeholder"), "输入调整要求（选填，空着将按原提示词重绘）。如：商品向左移动一点，换成浅灰色背景…");
+    assert.equal(await sourceBody.isVisible(), false);
+    await dialog.getByText("原提示词", { exact: true }).click();
+    assert.equal(await sourceBody.innerText(), sourcePrompt);
+    if (input) await area.fill(input);
+
+    const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));
+    await dialog.getByRole("button", { name: "生成", exact: true }).click();
+    const response = await submitted;
+    assert.equal(response.status(), 202);
+    const { snapshot, attempt } = (await response.json()).data;
+    assert.equal(snapshot.tool, "re_edit");
+    assert.equal(snapshot.sourcePrompt, sourcePrompt);
+    assert.equal(snapshot.operations[0].payload.prompt, input);
+    if (input) {
+      assert.match(attempt.command.prompt, /\n只执行以下修改：商品向左移动一点，换成浅灰色背景$/);
+      assert.ok(!attempt.command.prompt.includes(sourcePrompt));
+    } else {
+      assert.equal(attempt.command.prompt, sourcePrompt);
+    }
+    await dialog.waitFor({ state: "hidden" });
+    await page.locator(".wb-edit-child-card .wb-card-state").filter({ hasText: /^已生成$/ }).nth(index).waitFor();
+  }
+});
+
 test("创作画布：未配 OCR 时可手工编辑文字，切换工具保留草稿，提交只使用当前工具", async (t) => {
   const { api, url, page } = await offlineCanvas(t);
   const { suiteId } = await seedGeneratedCanvas(api, 2);
@@ -485,7 +532,7 @@ test("创作画布：未配 OCR 时可手工编辑文字，切换工具保留草
   await page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit").first().click();
   const dialog = page.getByRole("dialog", { name: "图片编辑器" });
   await dialog.waitFor();
-  await dialog.getByLabel("版本详细提示词").fill("保留在重新编辑里的草稿");
+  await dialog.getByLabel("调整要求").fill("保留在 AI 改图里的草稿");
   await dialog.getByRole("button", { name: "添加到对话" }).click();
   await dialog.getByRole("button", { name: "更新对话操作" }).waitFor();
 
@@ -505,9 +552,9 @@ test("创作画布：未配 OCR 时可手工编辑文字，切换工具保留草
   assert.doesNotMatch(await dialog.innerText(), /fetch failed/);
 
   await addManualTextEdit(page, dialog, "旧卖点标题", "65W 便携快充");
-  const reEditTool = dialog.locator(".wb-editor-tools button", { hasText: "重新编辑" });
+  const reEditTool = dialog.locator(".wb-editor-tools").getByRole("button", { name: /^AI 改图/ });
   await reEditTool.click();
-  assert.equal(await dialog.getByLabel("版本详细提示词").inputValue(), "保留在重新编辑里的草稿");
+  assert.equal(await dialog.getByLabel("调整要求").inputValue(), "保留在 AI 改图里的草稿");
   await changeTextTool.click();
   assert.equal(await dialog.getByLabel("新文字：旧卖点标题").inputValue(), "65W 便携快充");
   const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));

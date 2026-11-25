@@ -1508,12 +1508,60 @@ test("044 preserves the published product restoration template v2 on migration r
   });
 });
 
+test("047 publishes the AI edit wrapper and new submissions use the latest published version only for explicit changes", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const original = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.re_edit");
+    assert.ok(original);
+    const template = await prompts.getPublishedVersion(original.templateVersionId, "task_image");
+    assert.match(template?.body ?? "", /^严格保持待编辑图中未指定修改的商品主体外观/);
+    assert.equal(template?.userPromptTemplate, "只执行以下修改：{{instruction}}");
+
+    const draft = await prompts.copyVersion(original.templateVersionId);
+    assert.ok(draft);
+    await prompts.updateDraft(draft.templateVersionId, { body: "保留未指定修改的内容。", userPromptTemplate: "按此调整：{{instruction}}" });
+    await prompts.publishVersion(draft.templateVersionId);
+    await runMigrations(pool);
+    assert.deepEqual((await prompts.listVersions(original.templateId)).map(({ versionNo, status }) => [versionNo, status]), [[1, "retired"], [2, "published"]]);
+
+    const sourceCardId = randomUUID();
+    const sourceVersionId = randomUUID();
+    const sourcePrompt = "来源版本的生成提示词";
+    const image = { bytes: Buffer.from("source"), mimeType: "image/png", width: 64, height: 64 };
+    const editor = new PostgresImageEditorRepository(pool);
+    const service = new ImageEditorService(editor, {
+      name: "fake-editor", version: "1", capabilitiesVersion: "1",
+      capabilities: () => ({ imageToImage: true, currentVersionInput: true, addText: false, changeText: false, redraw: false, erase: false, outpaint: false }),
+      edit: async () => image,
+    }, new MemoryStorage(), async () => ({ ...image, generationPrompt: sourcePrompt }), undefined, undefined, prompts);
+    const submit = async (prompt: string) => {
+      await service.upsertOperation({ sessionId: sourceCardId, operation: {
+        operationId: randomUUID(), type: "re_edit", order: 1, sourceCardId, sourceVersionId, parentVersionId: sourceVersionId,
+        summary: "AI 改图", payload: { prompt },
+      } });
+      const result = await service.submit({ sessionId: sourceCardId, idempotencyKey: randomUUID(), sourceCardId, sourceVersionId, tool: "re_edit" });
+      for (let i = 0; i < 30 && (await editor.getChildTask(result.childTask.id))?.status === "generating"; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const saved = await service.getTask(result.childTask.id);
+      assert.equal(saved?.task.status, "succeeded");
+      return saved;
+    };
+    const explicit = await submit("换成浅灰色背景");
+    assert.equal(explicit?.snapshot?.promptTemplateVersionId, draft.templateVersionId);
+    assert.equal(explicit?.attempts[0].command.prompt, "保留未指定修改的内容。\n按此调整：换成浅灰色背景");
+    const blank = await submit(" ");
+    assert.equal(blank?.snapshot?.promptTemplateVersionId, null);
+    assert.equal(blank?.attempts[0].command.prompt, sourcePrompt);
+  });
+});
+
 test("035 idempotently retires unused templates, preserves read-by-id & library filtering, and keeps active edit/publish working", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);
     const library = new PostgresLibraryRepository(pool);
     const aplusCodes = ["aplus.ai-write", "aplus.image", "aplus.plan", ...APLUS_MODULES.map(({ code }) => `aplus.module.${code}`)].sort();
-    const editorCodes = ["image-editor.add_text", "image-editor.change_text", "image-editor.erase", "image-editor.outpaint", "image-editor.redraw", "image-editor.restore_product"];
+    const editorCodes = ["image-editor.add_text", "image-editor.change_text", "image-editor.erase", "image-editor.outpaint", "image-editor.re_edit", "image-editor.redraw", "image-editor.restore_product"];
 
     // Legacy reverse templates are retired; replica, onboarding, A+ and editor templates remain published.
     const initialPublished = await prompts.listPublished();

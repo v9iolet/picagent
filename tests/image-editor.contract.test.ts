@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 import sharp from "sharp";
 import { computeOutpaintCanvas } from "../shared/image-editor.js";
-import { buildImageEditPrompt, imageEditProductInputs, ImageEditorService, MemoryImageEditorRepository, type EditOperation, type ImageEditProvider, type ImageSource } from "../server/image-editor.js";
+import { buildImageEditPrompt, imageEditProductInputs, ImageEditorService, MemoryImageEditorRepository, type EditOperation, type ImageEditCommand, type ImageEditProvider, type ImageSource } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import { createSuiteStudioApp } from "../server/app.js";
 import { dispatchInputImageUpload } from "../server/multipart.js";
@@ -112,7 +112,7 @@ test("submission leaves a draft intact if it changed while the request was being
   assert.equal((await repository.listChildTasks()).length, 0);
   assert.equal((await repository.getDraft("session"))?.operations[0].payload.prompt, "更新后的草稿");
   const retried = await service.submit(input);
-  assert.equal(retried.attempt.command.prompt, "更新后的草稿");
+  assert.match(retried.attempt.command.prompt, /\n只执行以下修改：更新后的草稿$/);
   assert.deepEqual((await repository.getDraft("session"))?.operations, []);
 });
 
@@ -399,7 +399,7 @@ test("regenerate replays the frozen redraw prompt, source, fallback and attached
   assert.equal(calls[2].size, "1024x1824");
 });
 
-test("submission freezes sourcePrompt while compiling pure product-fidelity prompts for local edits and preserving full prompt for re_edit", async () => {
+test("submission freezes sourcePrompt while compiling pure product-fidelity prompts for local edits", async () => {
   const repository = new MemoryImageEditorRepository();
   const commands: Array<{ prompt: string }> = [];
   const service = new ImageEditorService(
@@ -429,9 +429,56 @@ test("submission freezes sourcePrompt while compiling pure product-fidelity prom
     assert.match(prompt, /严格保持输入图片中的商品主体外观/);
     assert.doesNotMatch(prompt, /SOURCE VERSION PROMPT|strokes|ocrSnapshot/);
   }
+});
 
-  const reEditPrompt = buildImageEditPrompt([{ ...operation("re_edit"), payload: { prompt: "完整重编辑提示词" } }], "SOURCE VERSION PROMPT");
-  assert.equal(reEditPrompt, "完整重编辑提示词");
+test("AI editing uses the frozen prompt for missing or blank input and wraps only the requested changes otherwise", () => {
+  const frozen = "原版商品海报\n使用深色背景，将商品放在右侧。";
+  const build = (payload: EditOperation["payload"]) => buildImageEditPrompt([{ ...operation(), payload }], frozen);
+  for (const payload of [{}, { prompt: "" }, { prompt: " \n　" }]) assert.equal(build(payload), frozen);
+
+  const instruction = "将商品向左移一点\n换成浅灰色背景";
+  const prompt = build({ prompt: ` ${instruction}\n` });
+  assert.match(prompt, /^严格保持待编辑图中未指定修改的商品主体外观/);
+  assert.equal(prompt.slice(prompt.indexOf("\n") + 1), `只执行以下修改：${instruction}`);
+  assert.ok(!prompt.includes(frozen));
+});
+
+test("regenerate reads a legacy re_edit snapshot and replays its original command", async () => {
+  const repository = new MemoryImageEditorRepository();
+  const originalOperation = { ...operation(), payload: { prompt: "旧版保存的整段重编辑提示词" } };
+  const fakeProvider = provider();
+  const { name, version, capabilitiesVersion } = fakeProvider;
+  const providerSnapshot = { name, version, capabilitiesVersion };
+  const createdAt = new Date().toISOString();
+  const snapshot = {
+    id: "legacy-snapshot", sourceCardId: "parent", sourceVersionId: "version-1", parentVersionId: "version-1",
+    summary: originalOperation.summary, sourcePrompt: "来源版本的生成提示词", operations: [originalOperation],
+    provider: providerSnapshot, createdAt, schemaVersion: "image-edit-snapshot-v1" as const,
+  };
+  const task = {
+    id: "legacy-child", sourceCardId: "parent", sourceVersionId: "version-1", parentVersionId: "version-1",
+    summary: snapshot.summary, snapshotId: snapshot.id, status: "generating" as const, currentVersionId: null, finalVersionId: null,
+    errorCode: null, errorMessage: null, createdAt, updatedAt: createdAt,
+  };
+  const command = {
+    type: "re_edit" as const, sourceVersionId: "version-1", prompt: originalOperation.payload.prompt, operations: [originalOperation],
+  };
+  await repository.submit({ idempotencyKey: "legacy-first", snapshot, childTask: task, attempt: {
+    id: "legacy-attempt", childTaskId: task.id, snapshotId: snapshot.id, attemptNo: 1, status: "generating",
+    command, provider: providerSnapshot, errorCode: null, errorMessage: null, createdAt, completedAt: null,
+  } });
+  await repository.completeAttempt({ attemptId: "legacy-attempt", objectKey: "legacy-result", sha256: "legacy-hash", width: 100, height: 100, mimeType: "image/png", completedAt: createdAt });
+
+  const requested = Promise.withResolvers<ImageEditCommand>();
+  const service = new ImageEditorService(repository, provider({ edit: async (replayed) => {
+    requested.resolve(replayed);
+    return fakeProvider.edit(replayed, source);
+  } }), new MemoryStorage(), async () => ({ ...source, generationPrompt: "现在的生成提示词" }));
+  assert.deepEqual((await service.getTask(task.id))?.snapshot, snapshot);
+  const replay = await service.regenerate({ childTaskId: task.id, idempotencyKey: "legacy-replay" });
+  assert.equal(replay.childTask.id, task.id);
+  assert.equal(replay.attempt.snapshotId, snapshot.id);
+  assert.deepEqual(await requested.promise, { ...command, attachedInputs: undefined, maskApplied: undefined });
 });
 
 test("DashScopeOcrProvider downscales large images to <=1280px JPEG and maps network/timeout errors to readable Chinese", async (t) => {
@@ -532,7 +579,7 @@ test("editing attaches the version's product inputs in order only for the applic
   await storage.put({ key: "first", bytes: Buffer.from("first"), contentType: "image/png" });
   await storage.put({ key: "second", bytes: Buffer.from("second"), contentType: "image/png" });
   assert.deepEqual(productInputs, [{ objectKey: "first", role: "product" }, { objectKey: "second", role: "product" }]);
-  const editorSource = { ...source, bytes, width: 20, height: 20, productInputs };
+  const editorSource = { ...source, bytes, width: 20, height: 20, productInputs, generationPrompt: "版本冻结的生成提示词" };
   const calls: ImageEditRequest[] = [];
   const fakeImageProvider = {
     async edit(request: ImageEditRequest) {
@@ -545,6 +592,7 @@ test("editing attaches the version's product inputs in order only for the applic
   }), storage, async () => editorSource);
   const region = { x: 0.1, y: 0.1, width: 0.5, height: 0.2 };
   const operations: Array<{ op: EditOperation; attaches: boolean }> = [
+    { op: { ...operation("re_edit"), payload: { prompt: "" } }, attaches: true },
     { op: operation("re_edit"), attaches: true },
     { op: operation("redraw"), attaches: true },
     { op: { ...operation("outpaint"), payload: { direction: "all", targetRatio: "3:4" } }, attaches: true },
@@ -554,7 +602,7 @@ test("editing attaches the version's product inputs in order only for the applic
   ];
   for (const [i, { op, attaches }] of operations.entries()) {
     await service.upsertOperation({ sessionId: "parent", operation: op });
-    const result = await service.submit({ sessionId: "parent", idempotencyKey: op.type, sourceCardId: "parent", sourceVersionId: "version-1", tool: op.type });
+    const result = await service.submit({ sessionId: "parent", idempotencyKey: `${op.type}-${i}`, sourceCardId: "parent", sourceVersionId: "version-1", tool: op.type });
     assert.deepEqual(result.snapshot.attachedInputs, attaches ? productInputs : []);
     for (let check = 0; check < 30 && calls.length <= i; check += 1) await settle();
     const call = calls[i];
@@ -571,6 +619,15 @@ test("editing attaches the version's product inputs in order only for the applic
     }
     if (attaches) assert.match(call.prompt, /^第 1 张为待编辑图，其余为商品外观依据，不得复制其背景与文字/);
     else assert.doesNotMatch(call.prompt, /商品外观依据/);
+    if (op.type === "re_edit") {
+      assert.equal(call.mask, undefined);
+      if (op.payload.prompt) {
+        assert.match(call.prompt, /\n严格保持待编辑图中未指定修改的商品主体外观[^\n]+\n只执行以下修改：调整背景$/);
+        assert.ok(!call.prompt.includes(editorSource.generationPrompt));
+      } else {
+        assert.equal(call.prompt.split("\n").slice(1).join("\n"), editorSource.generationPrompt);
+      }
+    }
   }
 });
 
