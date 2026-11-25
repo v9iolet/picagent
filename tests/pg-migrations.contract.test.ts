@@ -1187,6 +1187,10 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
     assert.equal(afterClear.versions.some((v) => v.isFinal), false);
 
     const editorRepo = new PostgresImageEditorRepository(pool);
+    assert.equal(await editorRepo.getSourceVersion("invalid-version"), null);
+    await assert.rejects(editorRepo.validateSource(task.id, "invalid-version"), { message: "SOURCE_VERSION_NOT_FOUND" });
+    assert.equal(await editorRepo.validateSource(task.id, version.id), true);
+    assert.equal(await editorRepo.validateSource(randomUUID(), version.id), false);
     assert.deepEqual(await editorRepo.getSourceVersion(version.id), {
       objectKey: version.objectKey, mimeType: "image/png", generationPrompt: "PG 复刻提示词",
     });
@@ -1248,6 +1252,7 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
     assert.deepEqual(await editorRepo.getSourceVersion(completedEdit.version.id), {
       objectKey: completedEdit.version.objectKey, mimeType: "image/png", generationPrompt: "测试编辑",
     });
+    assert.equal(await editorRepo.validateSource(childId, completedEdit.version.id), true);
     await editorRepo.selectVersion(childId, completedEdit.version.id, "final");
     assert.equal((await editorRepo.getChildTask(childId))?.finalVersionId, completedEdit.version.id);
     await editorRepo.clearFinalVersions([childId]);
@@ -1304,6 +1309,36 @@ test("042 persists editor snapshot metadata and consumes only submitted drafts w
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal((await editor.getChildTask(result.childTask.id))?.status, "succeeded");
+
+    const constraints = [
+      ["SET prompt_template_version_id=$2", randomUUID(), "23503", "image_edit_snapshots_prompt_template_version_fk"],
+      ["SET attached_inputs_json=$2", "{}", "23514", "image_edit_snapshots_attached_inputs_array"],
+    ];
+    const tx = await pool.connect();
+    try {
+      for (const [update, invalidValue, code, constraint] of constraints) {
+        await tx.query("BEGIN");
+        try {
+          await assert.rejects(
+            tx.query(`UPDATE suite_workbench.image_edit_snapshots ${update} WHERE id=$1`, [result.snapshot.id, invalidValue]),
+            { code, constraint },
+          );
+        } finally {
+          await tx.query("ROLLBACK");
+        }
+      }
+    } finally {
+      tx.release();
+    }
+
+    const { rows: retained } = await pool.query<{ code: string }>(
+      "SELECT code FROM prompt_library.prompt_templates WHERE code <> $1", [original.code],
+    );
+    assert.deepEqual(await prompts.pruneExcept(retained.map(({ code }) => code)), { deleted: 0, disabled: 1 });
+    await runMigrations(pool);
+    assert.equal(await prompts.getPublishedVersion(draft.templateVersionId, "task_image"), null);
+    assert.equal((await prompts.getVersion(draft.templateVersionId))?.status, "retired");
+    assert.equal((await editor.getSnapshot(result.snapshot.id))?.promptTemplateVersionId, draft.templateVersionId);
   });
 });
 

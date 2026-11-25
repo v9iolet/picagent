@@ -176,9 +176,12 @@ test("regenerate replays the frozen prompt, source, mask and attached inputs on 
   const editorSource = { ...source, bytes, width: 1024, height: 1360 };
   const imageProvider = { edit: async (request: ImageEditRequest) => { calls.push(request); return { bytes: resultBytes, mimeType: "image/png" }; } };
   const options = defaultImageOptions("gpt-image-2");
-  const service = new ImageEditorService(repository, provider({
+  const editProvider = provider();
+  const service = new ImageEditorService(repository, {
+    ...editProvider,
+    capabilities: async () => ({ ...await editProvider.capabilities(), imageToImage: false }),
     edit: (command, input) => requestImageEditorEdit(imageProvider, storage, "gpt-image-2", options, command, input),
-  }), storage, async (versionId) => versionId === "version-1" ? editorSource : null);
+  }, storage, async (versionId) => versionId === "version-1" ? editorSource : null);
   const api = createImageEditorApi(service);
   await service.upsertOperation({ sessionId: "session", operation: operation("redraw") });
   const first = await service.submit({ sessionId: "session", idempotencyKey: "submit", sourceCardId: "parent", sourceVersionId: "version-1", tool: "redraw" });
@@ -196,13 +199,23 @@ test("regenerate replays the frozen prompt, source, mask and attached inputs on 
     attemptId: attempt.id, objectKey: "existing-version", sha256: "a".repeat(64), width: 1024, height: 1024,
     mimeType: "image/png", completedAt: new Date().toISOString(),
   });
+  const failedAttempt = await repository.appendAttempt({
+    idempotencyKey: "previous-regeneration", snapshot, childTask: (await repository.getChildTask(childTask.id))!,
+    attempt: { ...attempt, id: randomUUID() },
+  });
+  await repository.failAttempt(failedAttempt.attempt.id, "MODEL_FAILED", "上次生成失败", new Date().toISOString());
 
   const path = `/api/image-editor/tasks/${childTask.id}/regenerate`;
   const request = { headers: { "idempotency-key": "regenerate" }, body: { summary: "用于界面展示的摘要" } };
-  assert.equal((await api.request("POST", path, request)).status, 202);
+  const submitted = await api.request("POST", path, request);
+  assert.equal(submitted.status, 202);
+  const { childTask: regenerating } = (submitted.body as { data: typeof first }).data;
+  assert.equal(regenerating.status, "generating");
+  assert.equal(regenerating.errorCode, null);
+  assert.equal(regenerating.errorMessage, null);
   assert.equal((await api.request("POST", path, request)).status, 200);
   for (let i = 0; i < 30 && (await repository.listVersions(childTask.id)).length < 2; i += 1) await settle();
-  assert.equal((await repository.listAttempts(childTask.id)).length, 2);
+  assert.equal((await repository.listAttempts(childTask.id)).length, 3);
   assert.equal((await repository.listVersions(childTask.id)).length, 2);
   assert.equal(calls.length, 2);
   const initial = calls[0];

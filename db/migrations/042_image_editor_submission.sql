@@ -4,6 +4,27 @@ ALTER TABLE suite_workbench.image_edit_snapshots
   ADD COLUMN IF NOT EXISTS mask_applied boolean,
   ADD COLUMN IF NOT EXISTS prompt_template_version_id uuid;
 
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'suite_workbench.image_edit_snapshots'::regclass
+      AND conname = 'image_edit_snapshots_prompt_template_version_fk'
+  ) THEN
+    ALTER TABLE suite_workbench.image_edit_snapshots
+      ADD CONSTRAINT image_edit_snapshots_prompt_template_version_fk
+      FOREIGN KEY (prompt_template_version_id) REFERENCES prompt_library.prompt_template_versions(id) ON DELETE RESTRICT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'suite_workbench.image_edit_snapshots'::regclass
+      AND conname = 'image_edit_snapshots_attached_inputs_array'
+  ) THEN
+    ALTER TABLE suite_workbench.image_edit_snapshots
+      ADD CONSTRAINT image_edit_snapshots_attached_inputs_array
+      CHECK (jsonb_typeof(attached_inputs_json) = 'array');
+  END IF;
+END $$;
+
 INSERT INTO prompt_library.prompt_templates (id, code, name, kind, stage, execution_target)
 VALUES
   (gen_random_uuid(), 'image-editor.add_text', '图片编辑 · 添加文字', 'repair', 'task_image', 'image_model'),

@@ -658,14 +658,14 @@ export class ImageEditorService {
       maskApplied: snapshot.maskApplied ?? original.command.maskApplied,
     };
     const caps = await provider.capabilities();
-    if (!caps.currentVersionInput || !caps.imageToImage) throw new Error("IMAGE_EDIT_CURRENT_VERSION_UNSUPPORTED");
+    if (!caps.currentVersionInput) throw new Error("IMAGE_EDIT_CURRENT_VERSION_UNSUPPORTED");
     this.assertCapabilities(command.operations, caps);
     const attempt: ImageEditAttempt = {
       id: randomUUID(), childTaskId: task.id, snapshotId: snapshot.id, attemptNo: attempts.length + 1,
       status: "generating", command, provider: editProviderSnapshot(provider), errorCode: null, errorMessage: null,
       createdAt: new Date().toISOString(), completedAt: null,
     };
-    const childTask = { ...task, status: "generating" as const, updatedAt: attempt.createdAt };
+    const childTask = { ...task, status: "generating" as const, errorCode: null, errorMessage: null, updatedAt: attempt.createdAt };
     const result = await this.appendAttempt({ idempotencyKey: input.idempotencyKey, snapshot, childTask, attempt });
     if (!result.duplicate) void this.execute(result.attempt, provider);
     return result;

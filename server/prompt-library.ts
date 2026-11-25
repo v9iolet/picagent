@@ -22,6 +22,7 @@ export const IN_USE_PROMPT_STAGES: readonly PromptStage[] = [
   "base_refine",
   "structure_plan",
   "category_prompt",
+  "task_image",
   "listing_copy",
   "replica_prompt",
   "product_onboarding",
@@ -29,7 +30,6 @@ export const IN_USE_PROMPT_STAGES: readonly PromptStage[] = [
 
 export const UNUSED_PROMPT_STAGES: readonly PromptStage[] = [
   "plan",
-  "task_image",
   "reverse_prompt",
 ];
 

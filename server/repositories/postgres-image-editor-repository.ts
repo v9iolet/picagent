@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { removeDraftOperations, upsertDraftOperation, type EditDraft, type EditOperation, type EditSnapshot, type EditSubmissionInput, type ImageEditAttempt, type ImageEditChildTask, type ImageEditVersion, type ImageEditorRepository } from "../image-editor.js";
 
+const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const draftRow = `session_id AS "sessionId",operations_json AS operations,summary`;
 const snapshotRow = `id,source_card_id AS "sourceCardId",source_version_id AS "sourceVersionId",parent_version_id AS "parentVersionId",summary,source_prompt AS "sourcePrompt",operations_json AS operations,provider_json AS provider,created_at AS "createdAt",schema_version AS "schemaVersion",tool,attached_inputs_json AS "attachedInputs",mask_applied AS "maskApplied",prompt_template_version_id AS "promptTemplateVersionId"`;
 const taskRow = `id,source_card_id AS "sourceCardId",source_version_id AS "sourceVersionId",parent_version_id AS "parentVersionId",snapshot_id AS "snapshotId",summary,status,current_version_id AS "currentVersionId",final_version_id AS "finalVersionId",error_code AS "errorCode",error_message AS "errorMessage",created_at AS "createdAt",updated_at AS "updatedAt"`;
@@ -11,6 +12,7 @@ const versionRow = `id,child_task_id AS "childTaskId",attempt_id AS "attemptId",
 export class PostgresImageEditorRepository implements ImageEditorRepository {
   constructor(private readonly pool: Pool) {}
   async getSourceVersion(versionId: string) {
+    if (!UUID_RE.test(versionId)) return null;
     const result = await this.pool.query<{ objectKey: string; mimeType: string; generationPrompt: string }>(
       `SELECT v.object_key AS "objectKey", v.mime_type AS "mimeType", COALESCE(a.command_json->>'prompt', '') AS "generationPrompt"
        FROM suite_workbench.image_edit_versions v
@@ -22,6 +24,16 @@ export class PostgresImageEditorRepository implements ImageEditorRepository {
        WHERE id = $1`, [versionId],
     );
     return result.rows[0] ?? null;
+  }
+  async validateSource(sourceCardId: string, sourceVersionId: string) {
+    if (!UUID_RE.test(sourceVersionId)) throw new Error("SOURCE_VERSION_NOT_FOUND");
+    if (!UUID_RE.test(sourceCardId)) return false;
+    const result = await this.pool.query<{ valid: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM suite_workbench.task_image_versions WHERE task_id=$1 AND id=$2)
+           OR EXISTS (SELECT 1 FROM suite_workbench.image_edit_versions WHERE child_task_id=$1 AND id=$2) AS valid`,
+      [sourceCardId, sourceVersionId],
+    );
+    return Boolean(result.rows[0]?.valid);
   }
   async getDraft(sessionId: string) {
     const result = await this.pool.query<EditDraft>(`SELECT ${draftRow} FROM suite_workbench.image_edit_drafts WHERE session_id=$1`, [sessionId]);

@@ -85,11 +85,11 @@ const resolveImageSource = async (versionId: string): Promise<ImageSource | null
   const { width, height } = await sharp(object.bytes).metadata();
   return { bytes: object.bytes, mimeType: version.mimeType, width, height, generationPrompt: version.generationPrompt };
 };
-const validateImageEditSource = async (sourceCardId: string, sourceVersionId: string) => {
-  const result = await pool.query<{ valid: boolean }>(`SELECT EXISTS (SELECT 1 FROM suite_workbench.suite_tasks t JOIN suite_workbench.task_image_versions v ON v.task_id=t.id WHERE t.id=$1 AND v.id=$2) OR EXISTS (SELECT 1 FROM suite_workbench.image_edit_child_tasks c JOIN suite_workbench.image_edit_versions v ON v.child_task_id=c.id WHERE c.id=$1 AND v.id=$2) AS valid`, [sourceCardId, sourceVersionId]);
-  return Boolean(result.rows[0]?.valid);
-};
-const imageEditorApi = createImageEditorApi(new ImageEditorService(imageEditorRepository, resolveImageEditorProvider, storage, resolveImageSource, resolveOcrProvider, validateImageEditSource, promptRepository));
+const imageEditorApi = createImageEditorApi(new ImageEditorService(
+  imageEditorRepository, resolveImageEditorProvider, storage, resolveImageSource, resolveOcrProvider,
+  (sourceCardId, sourceVersionId) => imageEditorRepository.validateSource(sourceCardId, sourceVersionId),
+  promptRepository,
+));
 const app = createSuiteStudioApp({
   repository: new PostgresSuiteRepository(pool),
   storage,
