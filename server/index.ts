@@ -13,7 +13,7 @@ import { readBoundedRequestBody } from "./request-body-limit.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
 import { defaultImageOptions } from "../shared/model-settings.js";
-import { requestImageEditorEdit } from "./providers/image-editor-provider.js";
+import { requestImageEditorEdit, supportedImageEditorOutpaintRatios } from "./providers/image-editor-provider.js";
 import { PostgresPlanRepository } from "./repositories/postgres-plan-repository.js";
 import { PostgresCategoryPromptRepository } from "./repositories/postgres-category-prompt-repository.js";
 import { PostgresPlatformRepository } from "./repositories/postgres-platform-repository.js";
@@ -56,6 +56,7 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
   const selected = await modelSettings.resolve("image");
   if (!selected) return null;
   const imageProvider = new GptImageProvider(selected.baseUrl, selected.apiKey);
+  const imageOptions = selected.imageOptions ?? defaultImageOptions(selected.model);
   return {
     name: "openai-compatible-image",
     version: selected.model,
@@ -68,10 +69,11 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
       redraw: process.env.IMAGE_EDITOR_REDRAW !== "false",
       erase: process.env.IMAGE_EDITOR_ERASE !== "false",
       outpaint: process.env.IMAGE_EDITOR_OUTPAINT !== "false",
+      outpaintRatios: supportedImageEditorOutpaintRatios(imageOptions),
       currentVersionInput: process.env.IMAGE_EDITOR_CURRENT_VERSION !== "false",
     }),
     edit: (command, source) => requestImageEditorEdit(
-      imageProvider, storage, selected.model, selected.imageOptions ?? defaultImageOptions(selected.model), command, source,
+      imageProvider, storage, selected.model, imageOptions, command, source,
     ),
   };
 };

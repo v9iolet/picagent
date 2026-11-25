@@ -47,16 +47,19 @@ function mapReference(row: any): LibraryReference {
 
 function mapTaskVersionRow(row: any): LibraryResource {
   const isReplica = row.origin_kind === "replica";
-  const taskStage = isReplica ? "replica_prompt" as const : "task_image" as const;
-  const kindLabel = isReplica ? "爆品图复刻" : (row.image_type === "main" ? "主图" : "详情页");
-  const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
+  const isAplus = row.origin_kind === "aplus";
+  const taskStage = isAplus ? "aplus_image" : isReplica ? "replica_prompt" : "task_image";
+  const kindLabel = isAplus ? "A+详情" : isReplica ? "爆品图复刻" : row.image_type === "main" ? "主图" : "详情页";
+  const originMeta = isAplus || isReplica ? { origin: row.origin_kind, originKind: row.origin_kind } : {};
+  const deliveryKey = isAplus ? row.delivery_object_key : null;
+  const { width, height } = (deliveryKey && row.delivery_size_json) || row;
   return normalizeTimestamps({
     id: `task-version:${row.version_id}`,
     resourceType: "task_image_version",
     title: `${row.task_title} · 版本 ${row.version_number}`,
-    summary: `${kindLabel} · ${row.width} × ${row.height}`,
+    summary: `${kindLabel} · ${width} × ${height}`,
     mimeType: row.mime_type,
-    previewUrl: `/api/suite-tasks/${row.task_id}/versions/${row.version_id}/preview`,
+    previewUrl: `/api/suite-tasks/${row.task_id}/versions/${row.version_id}/preview${deliveryKey ? "/delivery" : ""}`,
     suiteId: row.suite_id,
     taskId: row.task_id,
     imageVersionId: row.version_id,
@@ -64,7 +67,7 @@ function mapTaskVersionRow(row: any): LibraryResource {
     templateVersionId: null,
     resourceVersionId: row.version_id,
     stage: taskStage,
-    source: { objectKey: row.object_key, versionNumber: row.version_number, promptSummary: row.prompt_draft.slice(0, 180), model: row.model, channel: row.channel, ...originMeta },
+    source: { objectKey: deliveryKey || row.object_key, versionNumber: row.version_number, promptSummary: row.prompt_draft.slice(0, 180), model: row.model, channel: row.channel, ...originMeta },
     promptSnapshot: row.prompt_snapshot_json,
     status: "published",
     createdAt: row.created_at,
@@ -74,9 +77,10 @@ function mapTaskVersionRow(row: any): LibraryResource {
 
 function mapProcessImageRow(row: any, objectKey: string, index: number): LibraryResource {
   const isReplica = row.origin_kind === "replica";
-  const taskStage = isReplica ? "replica_prompt" as const : "task_image" as const;
-  const kindLabel = isReplica ? "爆品图复刻" : (row.image_type === "main" ? "主图" : "详情页");
-  const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
+  const isAplus = row.origin_kind === "aplus";
+  const taskStage = isAplus ? "aplus_image" : isReplica ? "replica_prompt" : "task_image";
+  const kindLabel = isAplus ? "A+详情" : isReplica ? "爆品图复刻" : row.image_type === "main" ? "主图" : "详情页";
+  const originMeta = isAplus || isReplica ? { origin: row.origin_kind, originKind: row.origin_kind } : {};
   return normalizeTimestamps({
     id: `process:${row.version_id}:${index}`,
     resourceType: "process_image",
@@ -101,9 +105,12 @@ function mapProcessImageRow(row: any, objectKey: string, index: number): Library
 
 function mapEditVersionRow(row: any): LibraryResource {
   const isReplica = row.origin_kind === "replica";
-  const taskStage = isReplica ? ("replica_prompt" as const) : ("task_image" as const);
-  const kindLabel = isReplica ? "爆品图复刻" : row.image_type === "main" ? "主图" : "详情页";
-  const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
+  const isAplus = row.origin_kind === "aplus";
+  const taskStage = isAplus ? "aplus_image" : isReplica ? "replica_prompt" : "task_image";
+  const kindLabel = isAplus ? "A+详情" : isReplica ? "爆品图复刻" : row.image_type === "main" ? "主图" : "详情页";
+  const originMeta = isAplus || isReplica ? { origin: row.origin_kind, originKind: row.origin_kind } : {};
+  const deliveryKey = isAplus ? row.delivery_object_key : null;
+  const { width, height } = (deliveryKey && row.delivery_size_json) || row;
   const command = row.command_json && typeof row.command_json === "object" ? (row.command_json as Record<string, unknown>) : {};
   const provider = row.provider_json && typeof row.provider_json === "object" ? (row.provider_json as Record<string, unknown>) : {};
   const editPrompt = typeof command.prompt === "string" && command.prompt.trim()
@@ -128,9 +135,9 @@ function mapEditVersionRow(row: any): LibraryResource {
     id: `edit-version:${row.version_id}`,
     resourceType: "task_image_version",
     title: `${baseTitle} · 编辑版本 ${row.version_number}`,
-    summary: `编辑生成 · ${kindLabel} · ${row.width} × ${row.height}`,
-    mimeType: row.mime_type,
-    previewUrl: `/api/image-editor/tasks/${row.child_task_id}/versions/${row.version_id}/preview`,
+    summary: `编辑生成 · ${kindLabel} · ${width} × ${height}`,
+    mimeType: deliveryKey && deliveryKey !== row.object_key ? "image/png" : row.mime_type,
+    previewUrl: `/api/image-editor/tasks/${row.child_task_id}/versions/${row.version_id}/preview${deliveryKey ? "/delivery" : ""}`,
     suiteId: row.suite_id ?? null,
     taskId: row.root_task_id ?? row.child_task_id,
     imageVersionId: row.version_id,
@@ -139,7 +146,7 @@ function mapEditVersionRow(row: any): LibraryResource {
     resourceVersionId: row.version_id,
     stage: taskStage,
     source: {
-      objectKey: row.object_key,
+      objectKey: deliveryKey || row.object_key,
       generatedBy: "image_editor",
       editChildTaskId: row.child_task_id,
       editSnapshotId: row.snapshot_id,
@@ -296,7 +303,7 @@ export class PostgresLibraryRepository implements LibraryRepository {
     }
     if (parsed.kind === "task-version" || parsed.kind === "process") {
       const result = await this.pool.query<any>(
-        `SELECT v.id AS version_id, v.task_id, v.object_key, v.process_object_keys_json, v.prompt_snapshot_json, a.model, v.context_snapshot_json->'channel' AS channel, v.mime_type, v.width, v.height, v.version_number, v.created_at,
+        `SELECT v.id AS version_id, v.task_id, v.object_key, v.delivery_object_key, v.delivery_size_json, v.process_object_keys_json, v.prompt_snapshot_json, a.model, v.context_snapshot_json->'channel' AS channel, v.mime_type, v.width, v.height, v.version_number, v.created_at,
           t.suite_id, t.title AS task_title, t.image_type, t.prompt_draft, t.origin_kind, t.status AS task_status
          FROM suite_workbench.task_image_versions v
          JOIN suite_workbench.suite_tasks t ON t.id = v.task_id
@@ -358,6 +365,8 @@ export class PostgresLibraryRepository implements LibraryRepository {
           ev.attempt_id,
           ev.version_number,
           ev.object_key,
+          ev.delivery_object_key,
+          ev.delivery_size_json,
           ev.width,
           ev.height,
           ev.mime_type,
@@ -585,11 +594,12 @@ export class PostgresLibraryRepository implements LibraryRepository {
       const taskVersionFilter = query.resourceType === "task_image_version"
         ? " AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'task-version:' || v.id::text)"
         : "";
-      const result = await this.pool.query<any>(`SELECT v.id AS version_id, v.task_id, v.object_key, v.process_object_keys_json, v.prompt_snapshot_json, a.model, v.context_snapshot_json->'channel' AS channel, v.mime_type, v.width, v.height, v.version_number, v.created_at,
+      const result = await this.pool.query<any>(`SELECT v.id AS version_id, v.task_id, v.object_key, v.delivery_object_key, v.delivery_size_json, v.process_object_keys_json, v.prompt_snapshot_json, a.model, v.context_snapshot_json->'channel' AS channel, v.mime_type, v.width, v.height, v.version_number, v.created_at,
         t.suite_id, t.title AS task_title, t.image_type, t.prompt_draft, t.origin_kind
         FROM suite_workbench.task_image_versions v JOIN suite_workbench.suite_tasks t ON t.id = v.task_id
         JOIN suite_workbench.task_generation_attempts a ON a.id = v.attempt_id
-        WHERE ($1::uuid IS NULL OR t.suite_id = $1) AND ($2::text IS NULL OR t.title ILIKE $2 OR t.prompt_draft ILIKE $2)
+        WHERE ($1::uuid IS NULL OR t.suite_id = $1)
+          AND ($2::text IS NULL OR t.title ILIKE $2 OR t.prompt_draft ILIKE $2 OR (t.origin_kind = 'aplus' AND 'A+详情' ILIKE $2))
           AND t.status <> 'archived'${taskVersionFilter}
         ORDER BY v.created_at DESC`, [suiteId, needle]);
       for (const row of result.rows) {
@@ -649,6 +659,8 @@ export class PostgresLibraryRepository implements LibraryRepository {
           ev.attempt_id,
           ev.version_number,
           ev.object_key,
+          ev.delivery_object_key,
+          ev.delivery_size_json,
           ev.width,
           ev.height,
           ev.mime_type,
@@ -677,7 +689,9 @@ export class PostgresLibraryRepository implements LibraryRepository {
             OR tree.edit_summary ILIKE $2
             OR COALESCE(a.command_json->>'prompt', '') ILIKE $2
             OR concat(COALESCE(NULLIF(btrim(tree.task_title), ''), NULLIF(btrim(tree.edit_summary), ''), '图片编辑'), ' · 编辑版本 ', ev.version_number) ILIKE $2
-            OR concat('编辑生成 · ', CASE WHEN tree.origin_kind = 'replica' THEN '爆品图复刻' WHEN tree.image_type = 'main' THEN '主图' ELSE '详情页' END, ' · ', ev.width, ' × ', ev.height) ILIKE $2)
+            OR concat('编辑生成 · ', CASE WHEN tree.origin_kind = 'aplus' THEN 'A+详情' WHEN tree.origin_kind = 'replica' THEN '爆品图复刻' WHEN tree.image_type = 'main' THEN '主图' ELSE '详情页' END, ' · ',
+              CASE WHEN tree.origin_kind = 'aplus' AND ev.delivery_object_key IS NOT NULL THEN COALESCE(ev.delivery_size_json->>'width', ev.width::text) ELSE ev.width::text END, ' × ',
+              CASE WHEN tree.origin_kind = 'aplus' AND ev.delivery_object_key IS NOT NULL THEN COALESCE(ev.delivery_size_json->>'height', ev.height::text) ELSE ev.height::text END) ILIKE $2)
           AND NOT EXISTS (SELECT 1 FROM suite_workbench.library_resource_deletions d WHERE d.resource_id = 'edit-version:' || ev.id::text)
         ORDER BY ev.created_at DESC`,
         [suiteId, needle],

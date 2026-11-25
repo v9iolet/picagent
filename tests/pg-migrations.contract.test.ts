@@ -657,7 +657,7 @@ test("031 extends origin, task origin_kind, pipeline phase, adds replica tables,
   });
 });
 
-test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切，044–046 启动重放保留数据", { skip }, async () => {
+test("PG 保存 A+ 商品还原交付图与图片库来源，044–046 启动重放保留数据", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const suites = new PostgresSuiteRepository(pool);
     const tasks = new PostgresTaskRepository(pool);
@@ -758,7 +758,7 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
     const generatedSize = { width: 2496, height: 1024 };
     const deliverySize = { width: 1464, height: 600 };
     const { version } = await tasks.completeAttempt({
-      attemptId, slotId, taskId, completedAt: timestamp, processObjectKeys: [], sha256: "b".repeat(64),
+      attemptId, slotId, taskId, completedAt: timestamp, processObjectKeys: ["generated.png"], sha256: "b".repeat(64),
       objectKey: "generated.png", mimeType: "image/png", ...generatedSize,
       generatedSize, deliverySize, deliveryObjectKey: "delivery.png",
     });
@@ -768,8 +768,10 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
     assert.equal(version.deliveryObjectKey, "delivery.png");
     const prompts = new PostgresPromptRepository(pool);
     const editor = new PostgresImageEditorRepository(pool);
+    const library = new PostgresLibraryRepository(pool);
     const original = await sharp({ create: { ...generatedSize, channels: 3, background: "navy" } }).png().toBuffer();
     await storage.put({ key: version.objectKey, bytes: original, contentType: "image/png" });
+    await storage.put({ key: version.deliveryObjectKey!, bytes: await sharp(original).resize(deliverySize).png().toBuffer(), contentType: "image/png" });
     const editorCalls: ImageEditRequest[] = [];
     const fakeProvider = {
       async edit(request: ImageEditRequest) {
@@ -789,7 +791,31 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
       return { ...source, bytes: object.bytes, width, height };
     }, undefined, (cardId, versionId) => editor.validateSource(cardId, versionId), prompts,
     async (sourceVersionId) => (await editor.getSourceVersion(sourceVersionId))?.productInputs ?? null);
-    const editorApp = createSuiteStudioApp({ repository: suites, storage, taskRepository: tasks, imageEditorApi: createImageEditorApi(service) });
+    const editorApp = createSuiteStudioApp({ repository: suites, storage, taskRepository: tasks, imageEditorApi: createImageEditorApi(service), libraryRepository: library });
+    const assertLibraryImage = async (id: string, objectKey: string, previewUrl: string | null) => {
+      const resource = await library.getResource(id);
+      assert.ok(resource);
+      assert.equal(resource.stage, "aplus_image");
+      assert.equal(resource.source.origin, "aplus");
+      assert.equal(resource.source.originKind, "aplus");
+      assert.equal(resource.source.objectKey, objectKey);
+      assert.equal(resource.previewUrl, previewUrl);
+      const { items } = await library.listResources({ scope: "image", stage: "aplus_image", suiteId: suite.id, query: "A+详情" });
+      assert.deepEqual(items.find((item) => item.id === id), resource);
+      const bytes = (await storage.get(objectKey))!.bytes;
+      if (previewUrl) {
+        const { width, height } = await sharp(bytes).metadata();
+        assert.ok(resource.summary.endsWith(` · ${width} × ${height}`));
+      }
+      assert.deepEqual((await editorApp.request("GET", `/api/library/resources/${encodeURIComponent(id)}/preview`)).raw, bytes);
+      if (previewUrl) assert.deepEqual((await editorApp.request("GET", previewUrl)).raw, bytes);
+    };
+    const previewUrl = `/api/suite-tasks/${taskId}/versions/${version.id}/preview`;
+    await assertLibraryImage(`task-version:${version.id}`, version.deliveryObjectKey!, `${previewUrl}/delivery`);
+    await assertLibraryImage(`process:${version.id}:0`, version.objectKey, null);
+    await pool.query("UPDATE suite_workbench.task_image_versions SET delivery_object_key = NULL WHERE id = $1", [version.id]);
+    await assertLibraryImage(`task-version:${version.id}`, version.objectKey, previewUrl);
+    await pool.query("UPDATE suite_workbench.task_image_versions SET delivery_object_key = $2 WHERE id = $1", [version.id, version.deliveryObjectKey]);
     const sessionPath = `/api/image-editor/sessions/${taskId}`;
     const draft = await editorApp.request("GET", `${sessionPath}?sourceVersionId=${version.id}`);
     assert.equal(draft.status, 200);
@@ -828,6 +854,7 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
     assert.ok(delivery);
     const { width, height } = await sharp(delivery.bytes).metadata();
     assert.deepEqual({ width, height }, deliverySize);
+    await assertLibraryImage(`edit-version:${editedImage.id}`, editedImage.deliveryObjectKey!, `/api/image-editor/tasks/${childId}/versions/${editedImage.id}/preview/delivery`);
 
     for (const [type, payload] of [
       ["change_text", { originalText: "旧文案", newText: "新文案", region: { x: 0.1, y: 0.1, width: 0.4, height: 0.2 } }],

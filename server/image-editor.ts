@@ -151,6 +151,7 @@ export interface ImageEditProviderCapabilities {
   redraw: boolean;
   erase: boolean;
   outpaint: boolean;
+  outpaintRatios?: readonly OutpaintRatio[];
   currentVersionInput: boolean;
   ocr?: boolean;
 }
@@ -581,9 +582,11 @@ export class ImageEditorService {
       typeof this.provider === "function" ? this.provider() : this.provider,
       this.resolveOcrProvider(),
     ]);
+    const { outpaintRatios, ...capabilities } = await provider?.capabilities() ?? {};
     return {
       provider: provider ? editProviderSnapshot(provider) : null,
-      capabilities: { ...(await provider?.capabilities()), ocr: Boolean(ocr) },
+      capabilities: { ...capabilities, ocr: Boolean(ocr) },
+      outpaintRatios: provider ? outpaintRatios : [],
     };
   }
 
@@ -778,6 +781,7 @@ export class ImageEditorService {
         const targetRatio = payload.targetRatio;
         if (typeof direction !== "string" || !Object.hasOwn(OUTPAINT_DIRECTION_LABELS, direction)) throw new Error("OUTPAINT_DIRECTION_INVALID");
         if (!isOutpaintRatio(targetRatio)) throw new Error("OUTPAINT_TARGET_RATIO_INVALID");
+        if (caps.outpaintRatios && !caps.outpaintRatios.includes(targetRatio)) throw new Error("OUTPAINT_RATIO_UNSUPPORTED");
         const dimensions = computeOutpaintCanvas(source.width, source.height, targetRatio);
         if (payload.targetWidth !== undefined && Number(payload.targetWidth) !== dimensions.targetWidth) throw new Error("OUTPAINT_TARGET_DIMENSIONS_INVALID");
         if (payload.targetHeight !== undefined && Number(payload.targetHeight) !== dimensions.targetHeight) throw new Error("OUTPAINT_TARGET_DIMENSIONS_INVALID");

@@ -1,4 +1,5 @@
 import type { AplusImageVersionMetadata, AplusTaskMetadata, DetailSizePresets } from "../../shared/aplus";
+import type { OutpaintRatio } from "../../shared/image-editor";
 import type { ListingConfig, ListingContent, ListingRules } from "../../shared/listing-config";
 import type { ModelChannelInput, ModelChannelSnapshot, ModelPreferences, ModelSettingsView } from "../../shared/model-settings";
 import type {
@@ -266,7 +267,7 @@ export const suiteApi = {
   getTaskVersions(taskId: string) { return request<{ versions: ApiTaskVersion[]; attempts: ApiTaskAttempt[] }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/versions`); },
   selectTaskVersion(taskId: string, versionId: string, selection: "current" | "final") { return request<ApiTaskVersion>(`/api/suite-tasks/${encodeURIComponent(taskId)}/versions/${encodeURIComponent(versionId)}/select`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ selection }) }); },
   retryAttempt(attemptId: string) { return request<{ batchId: string; status: string }>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({}) }); },
-  imageEditorCapabilities() { return request<{ provider: { name: string; version: string; capabilitiesVersion: string; channel?: ModelChannelSnapshot } | null; capabilities: Record<string, boolean> }>("/api/image-editor/capabilities"); },
+  imageEditorCapabilities() { return request<{ provider: { name: string; version: string; capabilitiesVersion: string; channel?: ModelChannelSnapshot } | null; capabilities: Record<string, boolean>; outpaintRatios?: OutpaintRatio[] }>("/api/image-editor/capabilities"); },
   getImageEditDraft(sessionId: string, sourceVersionId: string) { return request<{ sessionId: string; operations: Array<Record<string, unknown>>; summary: string; productInputs: ApiImageEditProductInput[] }>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}?sourceVersionId=${encodeURIComponent(sourceVersionId)}`); },
   uploadImageEditRestoreInput(sessionId: string, sourceVersionId: string, file: File) {
     const body = new FormData();

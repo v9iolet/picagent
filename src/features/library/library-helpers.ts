@@ -27,6 +27,8 @@ export const stageLabel = (stage: ApiLibraryResource["stage"]) => ({
 
 export const sourceOriginLabel = (resource: ApiLibraryResource) => {
   const isEditorDerived = resource.source?.generatedBy === "image_editor";
+  const isAplus = resource.source?.origin === "aplus" || resource.source?.originKind === "aplus" || resource.stage === "aplus_image";
+  if (isAplus) return isEditorDerived ? "编辑生成 · A+详情" : "A+详情";
   const isReplica =
     resource.source?.origin === "replica" ||
     resource.source?.originKind === "replica" ||
