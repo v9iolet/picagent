@@ -10,6 +10,7 @@ import { createSuiteStudioApp } from "../server/app.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
+import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
 import { MemoryPlatformRepository } from "../server/repositories/memory-platform-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
@@ -19,6 +20,7 @@ import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { waitUntil } from "../server/suite-pipeline.js";
 import type { ImageEditRequest, TaskImageVersion } from "../server/types.js";
 import { readZipEntries } from "../server/zip.js";
+import { makeAplusEditorSourceResolver } from "./aplus-editor-fixture.js";
 
 const fakeSize = { width: 120, height: 80 };
 const modules = ["hero", "selling_points", "usage_scene"];
@@ -37,7 +39,7 @@ function checkError(response: AppResponse, status: number, code: string) {
   assert.equal(response.body.error.code, code);
 }
 
-async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?: (call: number) => Promise<Buffer | void>) {
+async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?: (call: number) => Promise<Buffer | void>, language = "en") {
   const repository = new MemorySuiteRepository();
   const pipelines = new MemoryPipelineRepository();
   const tasks = new MemoryTaskRepository();
@@ -56,11 +58,12 @@ async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?:
   }]);
   const generated = await sharp({ create: { ...fakeSize, channels: 3, background: "navy" } }).png().toBuffer();
   const calls: ImageEditRequest[] = [];
+  const fakeEditorProvider = { edit: async () => ({ bytes: generated, mimeType: "image/png" }) };
   const editor = new ImageEditorService(editorTasks, {
     name: "fake-editor", version: "1", capabilitiesVersion: "1",
     capabilities: () => ({ imageToImage: true, addText: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
-    edit: async () => ({ bytes: generated, mimeType: "image/png", ...fakeSize }),
-  }, storage, async () => ({ bytes: generated, mimeType: "image/png", ...fakeSize }));
+    edit: (command, source) => requestImageEditorEdit(fakeEditorProvider, storage, "fake", defaultImageOptions("gpt-image-2"), command, source),
+  }, storage, makeAplusEditorSourceResolver(repository, tasks, editorTasks, storage));
   const app = createSuiteStudioApp({
     repository, storage, taskRepository: tasks, pipelineRepository: pipelines, promptRepository: prompts, platformRepository: platforms,
     imageEditorApi: createImageEditorApi(editor), imageGenerationConcurrency: 1, imageRetryDelayMs: 0,
@@ -78,7 +81,7 @@ async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?:
         return {
           schemaVersion: "aplus-plan-v1", taskName: "随行杯详情", globalPlan: "深蓝背景",
           modules: modules.map((moduleCode) => ({
-            moduleCode, copyRequirements: "出门随行",
+            moduleCode, copyRequirements: language === "none" ? "" : "出门随行",
             imagePrompts: Object.fromEntries(sizePresets.map((preset) => [preset, `构图：${moduleCode}/${preset}`])),
           })),
         };
@@ -95,7 +98,7 @@ async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?:
   }
   const payload = {
     suiteId: draft.id, inputImageIds, productInfo: "磨砂杯身", platform: "amazon", targetMarket: "美国",
-    language: "en", sizePresets, modules, resolution: "2K",
+    language, sizePresets, modules, resolution: "2K",
   };
   const started = await app.request("POST", "/api/aplus", { headers: { "idempotency-key": "plan" }, body: payload });
   const { suiteId, runId } = data<{ suiteId: string; runId: string }>(started, 202);
@@ -249,9 +252,25 @@ test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿�
     sourceCardId = childTask.id;
     sourceVersionId = version.id;
   }
-  const state = data<{ cards: Array<{ versionId: string; deliveryObjectKey: string; deliverySize: unknown }> }>(await f.app.request("GET", `${f.path}/studio-state`));
+  const state = data<{ cards: Array<{ versionId: string; deliveryObjectKey: string; actions: string[] }> }>(await f.app.request("GET", `${f.path}/studio-state`));
   assert.equal(state.cards[0].versionId, sourceVersionId);
   assert.deepEqual(await dimensions(f.storage, state.cards[0].deliveryObjectKey), expected);
+  assert.deepEqual(state.cards[0].actions, ["change_text"]);
+});
+
+test("不加文字的 A+ 批次生成后不提供改字操作", async () => {
+  const f = await fixture(["aplus_standard"], undefined, "none");
+  data(await f.confirm(), 202);
+  assert.equal((await f.waitForRun())?.status, "completed");
+
+  const { cards } = data<{ cards: Array<{ previewUrl: string | null; actions: string[] }> }>(
+    await f.app.request("GET", `${f.path}/studio-state`),
+  );
+  assert.equal(cards.length, modules.length);
+  for (const card of cards) {
+    assert.ok(card.previewUrl);
+    assert.deepEqual(card.actions, []);
+  }
 });
 
 test("A+ 结果顺序持久化到两端，长图和 ZIP 按该顺序使用交付图", async () => {

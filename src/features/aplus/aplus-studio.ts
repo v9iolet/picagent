@@ -20,6 +20,7 @@ export type AplusConfig = Omit<AplusPlanInputSummary, "imageHashes" | "productCa
 export type AplusPlanModule = { moduleCode: AplusModuleCode; copyRequirements: string };
 
 export type AplusResultCard = ResolvedDeliverySlot & {
+  actions: "change_text"[];
   moduleCode: AplusModuleCode;
   sizePreset: AplusSizePresetKey;
   sortOrder: number;

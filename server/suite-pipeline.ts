@@ -8,7 +8,7 @@ import { resolveDeliverySlots, type DeliveryEditChildLike } from "../shared/work
 import { errorMessages, fail } from "./api-errors.js";
 import { ok, asRecord, dataOf, now, type AppResponse } from "./api-response.js";
 import type { ListingRepository } from "./listing-copy.js";
-import { aplusPlanningView, publicAplusRun } from "./aplus/aplus-plan.js";
+import { aplusPlanningView, publicAplusRun, readAplusRunConfig } from "./aplus/aplus-plan.js";
 import { resolvePublishedProductCardSnapshot } from "./product-cards-api.js";
 import { buildReplicaReferencePreviewUrl } from "./replica/replica-pipeline.js";
 import type {
@@ -703,6 +703,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       deps.taskRepository?.listBatches(suite.id) ?? [],
       deps.taskRepository?.listSlots(suite.id) ?? [],
     ]);
+    const aplusLanguage = isAplus && latestPipeline ? readAplusRunConfig(latestPipeline)?.inputSnapshot.language : undefined;
     const activeTasks = tasks.filter((task) => task.status !== "archived");
     const taskAggregates = await Promise.all(
       activeTasks.map(async (task) => {
@@ -778,6 +779,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
             const latestAttempt = task.attempts.at(-1);
             return {
               ...card,
+              actions: aplusLanguage && aplusLanguage !== "none" && card.previewUrl ? ["change_text"] : [],
               moduleCode: task.moduleCode,
               sizePreset: task.sizePreset,
               sortOrder: task.sortOrder,

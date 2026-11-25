@@ -35,7 +35,7 @@ export function AplusResultCards({
   refresh: () => Promise<void>;
   onNotice: (notice: string) => void;
 }) {
-  const [editor, setEditor] = useState<{ card: AplusResultCard; initialTool?: "restore_product" } | null>(null);
+  const [editor, setEditor] = useState<{ card: AplusResultCard; initialTool?: "restore_product" | "change_text" } | null>(null);
   const [dragged, setDragged] = useState<AplusModuleCode | null>(null);
   const [preview, setPreview] = useState<AplusSizePresetKey | null>(null);
   const [previewError, setPreviewError] = useState(false);
@@ -167,6 +167,9 @@ export function AplusResultCards({
                         <button type="button" disabled={locked} onClick={() => { setDialogError(""); setPrompt(""); setRedraw(card); }}>重绘</button>
                         <button type="button" disabled={locked || !card.previewUrl} onClick={() => setEditor({ card })}>图片编辑</button>
                         <button type="button" disabled={locked || !card.previewUrl} onClick={() => setEditor({ card, initialTool: "restore_product" })}>商品还原</button>
+                        {card.actions.includes("change_text") && (
+                          <button type="button" disabled={locked} onClick={() => setEditor({ card, initialTool: "change_text" })}>AI 改字</button>
+                        )}
                         <button type="button" disabled={locked} onClick={() => { setDialogError(""); setDeleting(card); }}>删除</button>
                       </div>
                     </div>
