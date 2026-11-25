@@ -3,11 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } f
 import { applyNodeChanges, Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, type Edge, type Node, type NodeProps, type Viewport, useNodesState, useReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { defaultImageOptions } from "../../shared/model-settings";
-import { CHANGE_TEXT_MAX_LENGTH, CHANGE_TEXT_MAX_OPERATIONS, normalizeChangeTextReplacement } from "../../shared/image-editor";
+import { CHANGE_TEXT_MAX_LENGTH, CHANGE_TEXT_MAX_OPERATIONS, computeOutpaintCanvas, isOutpaintRatio, normalizeChangeTextReplacement, OUTPAINT_RATIOS, type OutpaintRatio } from "../../shared/image-editor";
 import {
   applyStyleOverrideToPrompt,
   computeLineageHighlight,
-  computeOutpaintPreviewBox,
   computeWorkbenchLanes,
   extractCardPromptPreview,
   SUPPORTED_OUTPUT_LANGUAGES,
@@ -763,7 +762,7 @@ export function ImageEditorModal({
   const [textOperationId, setTextOperationId] = useState(() => freshOperationId("add_text"));
   const [brush, setBrush] = useState(42);
   const [expand, setExpand] = useState("all");
-  const [ratio, setRatio] = useState("original");
+  const [ratio, setRatio] = useState<OutpaintRatio>("1:1");
   const [instruction, setInstruction] = useState("");
   const [addTextPrompt, setAddTextPrompt] = useState("");
   const [redrawPrompt, setRedrawPrompt] = useState("");
@@ -1201,7 +1200,7 @@ export function ImageEditorModal({
         break;
       case "outpaint":
         setExpand(String(payload.direction ?? "all"));
-        setRatio(String(payload.targetRatio ?? "original"));
+        setRatio(isOutpaintRatio(payload.targetRatio) ? payload.targetRatio : "1:1");
         break;
       case "re_edit":
         setInstruction(String(payload.prompt ?? ""));
@@ -1296,15 +1295,15 @@ export function ImageEditorModal({
   const capabilityAvailable = (_value: EditTool, capability: string) => capabilities?.[capability] !== false;
   const capabilityReady = tool === "regenerate" ? capabilities?.currentVersionInput !== false : !capabilities || capabilityAvailable(tool, activeCapability ?? "");
   const outpaintBox = useMemo(
-    () => computeOutpaintPreviewBox(version.width || 1024, version.height || 1024, expand as "all" | "horizontal" | "vertical" | "left" | "right", ratio as "original" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9"),
-    [version.width, version.height, expand, ratio],
+    () => computeOutpaintCanvas(version.width || 1024, version.height || 1024, ratio),
+    [version.width, version.height, ratio],
   );
   const targetSize = { width: outpaintBox.targetWidth, height: outpaintBox.targetHeight };
   const quickDirectives: Record<string, string[]> = {
     inpaint: ["保持商品本体轮廓与颜色严格不变", "替换为极简柔和影棚光影", "增强材质高光与真实质感", "补充柔和自然桌面接触阴影"],
     erase: ["无痕移除杂物与水印，自然延续周围纹理", "清除多余瑕疵与反光斑点，保持原光影"],
     add_text: ["现代无衬线商业排版，清晰高对比，与画面光影融合", "极简高端品牌副标题排版，居中对齐"],
-    re_edit: ["严格保持商品外观与比例不变，仅优化整体商业光影质感", "提升画面明暗层次与电商点击吸引力"],
+    re_edit: ["优化整体商业光影质感", "提升画面明暗层次与电商点击吸引力"],
   };
   const appendQuickDirective = (phrase: string) => {
     const append = (prev: string) => (prev.trim() ? `${prev.trim()}；${phrase}` : phrase);
@@ -1428,10 +1427,10 @@ export function ImageEditorModal({
                       <div
                         className="wb-outpaint-origin"
                         style={{
-                          left: `${outpaintBox.innerX * 100}%`,
-                          top: `${outpaintBox.innerY * 100}%`,
-                          width: `${outpaintBox.innerWidth * 100}%`,
-                          height: `${outpaintBox.innerHeight * 100}%`,
+                          left: `${outpaintBox.sourceOffset.left / targetSize.width * 100}%`,
+                          top: `${outpaintBox.sourceOffset.top / targetSize.height * 100}%`,
+                          width: `${(version.width || 1024) / targetSize.width * 100}%`,
+                          height: `${(version.height || 1024) / targetSize.height * 100}%`,
                         }}
                       >
                         <img src={version.previewUrl} alt="原图锚点" />
@@ -1440,7 +1439,7 @@ export function ImageEditorModal({
                     <div className="wb-outpaint-caption">
                       <span>待扩展画幅预览</span>
                       <strong>{targetSize.width} × {targetSize.height}</strong>
-                      <small>原图锚点：{outpaintBox.anchor === "left" ? "左侧" : outpaintBox.anchor === "right" ? "右侧" : "居中"}</small>
+                      <small>原图居中</small>
                     </div>
                   </div>
                 )}
@@ -1483,6 +1482,7 @@ export function ImageEditorModal({
             </div>
           </div>
           <aside className="wb-editor-options">
+            {["inpaint", "erase", "expand"].includes(tool) && <p role="status">当前模型对选区控制有限</p>}
             {tool === "re_edit" && (
               <>
                 <label>
@@ -1595,9 +1595,9 @@ export function ImageEditorModal({
             )}
             {tool === "expand" && (
               <>
-                <label>扩图方向<select value={expand} onChange={(event) => setExpand(event.target.value)}><option value="all">四周</option><option value="horizontal">左右</option><option value="vertical">上下</option><option value="left">向左</option><option value="right">向右</option></select></label>
-                <label>目标比例<select value={ratio} onChange={(event) => setRatio(event.target.value)}><option value="original">原比例</option><option value="1:1">1:1</option><option value="3:4">3:4</option><option value="4:3">4:3</option><option value="9:16">9:16</option><option value="16:9">16:9</option></select></label>
-                <output>目标尺寸 {targetSize.width} × {targetSize.height}</output>
+                <label>扩图重点<select value={expand} onChange={(event) => setExpand(event.target.value)}><option value="all">四周</option><option value="horizontal">左右</option><option value="vertical">上下</option><option value="left">左侧</option><option value="right">右侧</option></select></label>
+                <label>目标比例<select value={ratio} onChange={(event) => { if (isOutpaintRatio(event.target.value)) setRatio(event.target.value); }}>{OUTPAINT_RATIOS.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+                <output>扩边画布 {targetSize.width} × {targetSize.height}</output>
               </>
             )}
             {tool === "regenerate" && <p>再次生成只在当前卡片下新增版本，不创建子卡片。</p>}

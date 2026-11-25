@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   applyStyleOverrideToPrompt,
   computeLineageHighlight,
-  computeOutpaintPreviewBox,
   computeWorkbenchLanes,
   evaluateDeliveryCompliance,
   extractCardPromptPreview,
@@ -246,21 +245,6 @@ test("evaluateDeliveryCompliance scores finalized high-res suites and flags reso
   assert.ok(warned.score < 100);
   assert.equal(warned.checks.find((c) => c.id === "resolution")?.status, "warn");
   assert.equal(warned.checks.find((c) => c.id === "slots")?.status, "warn");
-});
-
-test("computeOutpaintPreviewBox computes target dimensions and anchor box for aspect ratio expansion", () => {
-  const wide = computeOutpaintPreviewBox(1000, 1000, "right", "16:9");
-  assert.equal(wide.targetHeight, 1000);
-  assert.equal(wide.targetWidth, Math.ceil(1000 * (16 / 9)));
-  assert.equal(wide.anchor, "left");
-  assert.equal(wide.innerX, 0);
-  assert.ok(wide.innerWidth < 1);
-
-  const tall = computeOutpaintPreviewBox(1000, 1000, "all", "9:16");
-  assert.equal(tall.targetWidth, 1000);
-  assert.equal(tall.targetHeight, Math.ceil(1000 / (9 / 16)));
-  assert.equal(tall.anchor, "center");
-  assert.ok(tall.innerY > 0 && tall.innerHeight < 1);
 });
 
 test("resolveDeliverySlots compares real Date timestamps (node-postgres timestamptz) instead of falling back to UUID order", () => {

@@ -1,6 +1,6 @@
 import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import type { AplusImageSize, AplusImageVersionMetadata } from "../shared/aplus.js";
-import { CHANGE_TEXT_MAX_LENGTH, CHANGE_TEXT_MAX_OPERATIONS, normalizeChangeTextReplacement } from "../shared/image-editor.js";
+import { CHANGE_TEXT_MAX_LENGTH, CHANGE_TEXT_MAX_OPERATIONS, computeOutpaintCanvas, isOutpaintRatio, normalizeChangeTextReplacement, type OutpaintRatio } from "../shared/image-editor.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import sharp from "sharp";
@@ -19,7 +19,14 @@ interface OcrProviderSnapshot { name: string; version: string; channel?: ModelCh
 interface EditProviderSnapshot extends OcrProviderSnapshot { capabilitiesVersion: string }
 
 export interface OcrSnapshot { provider?: OcrProviderSnapshot; sourceVersionId: string; status: "succeeded" | "failed"; blocks: OcrTextBlock[]; error?: string }
-export interface OutpaintSpec { direction: "all" | "horizontal" | "vertical" | "left" | "right"; targetRatio: "original" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9"; targetWidth: number; targetHeight: number; anchor: "center" | "left" | "right" }
+export interface OutpaintSpec {
+  direction?: "all" | "horizontal" | "vertical" | "left" | "right";
+  targetRatio: OutpaintRatio;
+  targetWidth: number;
+  targetHeight: number;
+  anchor?: "center" | "left" | "right";
+  sourceOffset: { left: number; top: number };
+}
 
 export interface EditOperation {
   operationId: string;
@@ -166,24 +173,6 @@ export interface ImageSource {
   productInputs?: ReadonlyArray<ImageEditAttachedInput>;
 }
 
-const OUTPAINT_RATIOS: Record<OutpaintSpec["targetRatio"], number | null> = {
-  original: null,
-  "1:1": 1,
-  "3:4": 3 / 4,
-  "4:3": 4 / 3,
-  "9:16": 9 / 16,
-  "16:9": 16 / 9,
-};
-
-function outpaintDimensions(source: Pick<ImageSource, "width" | "height">, direction: OutpaintSpec["direction"], targetRatio: OutpaintSpec["targetRatio"]) {
-  const sourceRatio = source.width / source.height;
-  const ratio = OUTPAINT_RATIOS[targetRatio] ?? sourceRatio;
-  if (!Number.isFinite(ratio) || ratio <= 0) throw new Error("OUTPAINT_TARGET_RATIO_INVALID");
-  if (targetRatio === "original") return { targetWidth: source.width, targetHeight: source.height, anchor: direction === "left" ? "left" : direction === "right" ? "right" : "center" as const };
-  if (sourceRatio < ratio) return { targetWidth: Math.max(source.width, Math.ceil(source.height * ratio)), targetHeight: source.height, anchor: direction === "left" ? "left" : direction === "right" ? "right" : "center" as const };
-  return { targetWidth: source.width, targetHeight: Math.max(source.height, Math.ceil(source.width / ratio)), anchor: direction === "left" ? "left" : direction === "right" ? "right" : "center" as const };
-}
-
 async function renderMaskPng(source: Pick<ImageSource, "width" | "height">, strokes: NormalizedStroke[], feather: number) {
   const paths = strokes.map((stroke) => {
     const points = stroke.points.map((point) => `${point.x * source.width},${point.y * source.height}`).join(" ");
@@ -197,10 +186,27 @@ async function renderMaskPng(source: Pick<ImageSource, "width" | "height">, stro
   }).join("");
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${source.width}" height="${source.height}"><rect width="100%" height="100%" fill="black"/>${paths}</svg>`;
   const rendered = await sharp(Buffer.from(svg)).removeAlpha().grayscale().raw().toBuffer({ resolveWithObject: true });
-  const sigma = feather > 0 ? Math.max(0.3, feather * Math.min(source.width, source.height) / 12) : undefined;
-  const output = sharp(rendered.data, { raw: { width: rendered.info.width, height: rendered.info.height, channels: 1 } }).toColourspace("b-w");
+  const { width, height } = rendered.info;
+  let left = width;
+  let top = height;
+  let right = 0;
+  let bottom = 0;
+  // Use the painted area before feathering. Half coverage excludes antialiasing left after erasing.
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (rendered.data[y * width + x] < 128) continue;
+      left = Math.min(left, x);
+      right = Math.max(right, x + 1);
+      top = Math.min(top, y);
+      bottom = y + 1;
+    }
+  }
+  if (left >= right || top >= bottom) throw new Error("MASK_SELECTION_REQUIRED");
+  const region = { x: left / width, y: top / height, width: (right - left) / width, height: (bottom - top) / height };
+  const sigma = feather > 0 ? Math.max(0.3, feather * Math.min(width, height) / 12) : undefined;
+  const output = sharp(rendered.data, { raw: { width, height, channels: 1 } }).toColourspace("b-w");
   if (sigma) output.blur(sigma);
-  return output.png().toBuffer();
+  return { bytes: await output.png().toBuffer(), region };
 }
 
 type EditSubmission = { snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt; duplicate: boolean };
@@ -417,18 +423,12 @@ function describeNormalizedRegion(region: unknown): string {
   return `${vertical}${horizontal}区域（横向约 ${xStart}%–${xEnd}%，纵向约 ${yStart}%–${yEnd}%）`;
 }
 
-const OUTPAINT_DIRECTION_LABELS: Record<string, string> = {
-  all: "向四周",
-  horizontal: "向左右",
-  vertical: "向上下",
-  left: "向左",
-  right: "向右",
-};
-
-const OUTPAINT_ANCHOR_LABELS: Record<string, string> = {
-  center: "居中",
-  left: "居左",
-  right: "居右",
+const OUTPAINT_DIRECTION_LABELS = {
+  all: "四周",
+  horizontal: "左右",
+  vertical: "上下",
+  left: "左侧",
+  right: "右侧",
 };
 
 const EDIT_PAYLOAD_FIELDS: Record<ImageEditOperationType, readonly string[]> = {
@@ -448,9 +448,9 @@ const CHANGE_TEXT_INSTRUCTION = "仅编辑下列文字。按原文字和位置�
 const RESTORE_PRODUCT_HEADER = "仅修正待编辑图中的商品外观，保持原图的构图、背景、文字、版式和光影不变。";
 const IMAGE_EDIT_INSTRUCTIONS = {
   add_text: "在{{region}}新增文字“{{text}}”{{requirement}}。",
-  redraw: "仅重绘蒙版白色选区{{requirement}}，蒙版以外的商品与背景画面严格保持不变。",
-  erase: "仅消除蒙版白色选区中的目标并自然补全周围背景{{requirement}}，蒙版以外画面严格保持不变。",
-  outpaint: "{{direction}}扩展画面至比例 {{ratio}}{{dimensions}}，原图主体锚点保持{{anchor}}并自然延续背景纹理与光影{{requirement}}。",
+  redraw: "仅重绘{{region}}{{requirement}}，选区以外的商品与背景画面严格保持不变。",
+  erase: "仅消除{{region}}中的目标并自然补全周围背景{{requirement}}，选区以外画面严格保持不变。",
+  outpaint: "仅补全灰色扩展区，自然延续原图边缘的背景纹理、光影与透视，保持原图画面不变{{requirement}}。",
   restore_product: "以提供的商品外观依据图还原商品的形状、结构比例、颜色、材质、细节和可见标识，保持商品在原构图中的位置和视角。不可补造依据图无法确认的配件、标识或细节。",
 };
 
@@ -504,7 +504,7 @@ export function buildImageEditPrompt(
     const modification = wrapper.includes("{{instruction}}")
       ? wrapper.replaceAll("{{instruction}}", () => instruction)
       : `${wrapper}\n${instruction}`;
-    return [template?.body ?? RE_EDIT_PROMPT_HEADER, modification].join("\n");
+    return [template?.body || RE_EDIT_PROMPT_HEADER, modification].join("\n");
   }
   if (operations[0]?.type === "change_text") return buildChangeTextPrompt(operations, template);
   const instructions = operations.map((operation, index) => {
@@ -512,31 +512,37 @@ export function buildImageEditPrompt(
     const req = typeof operation.payload.prompt === "string" ? operation.payload.prompt.trim() : "";
     const requirement = req ? `（${req}）` : "";
     const render = (instruction: string, values: Record<string, string>) => prefix
-      + (template?.userPromptTemplate || instruction).replace(/\{\{(\w+)\}\}/g, (_, key: string) => values[key] ?? "");
+      + instruction.replace(/\{\{(\w+)\}\}/g, (_, key: string) => values[key] ?? "");
     switch (operation.type) {
       case "add_text":
-        return render(IMAGE_EDIT_INSTRUCTIONS.add_text, {
+        return render(template?.userPromptTemplate || IMAGE_EDIT_INSTRUCTIONS.add_text, {
           region: operation.payload.region ? describeNormalizedRegion(operation.payload.region) : "画面指定区域",
           text: String(operation.payload.text ?? "").trim(),
           requirement: req ? `，排版与视觉要求：${req}` : "",
         });
       case "redraw":
-        return render(IMAGE_EDIT_INSTRUCTIONS.redraw, { requirement: req ? `：${req}` : "" });
-      case "erase":
-        return render(IMAGE_EDIT_INSTRUCTIONS.erase, { requirement });
+      case "erase": {
+        const region = describeNormalizedRegion(operation.payload.region);
+        const instruction = (template?.userPromptTemplate || IMAGE_EDIT_INSTRUCTIONS[operation.type])
+          .replaceAll("蒙版白色选区", "{{region}}")
+          .replaceAll("蒙版以外", "选区以外");
+        const selection = instruction.includes("{{region}}") ? "" : `选区为${region}。\n`;
+        return selection + render(instruction, { region, requirement: operation.type === "redraw" && req ? `：${req}` : requirement });
+      }
       case "outpaint": {
-        const dir = OUTPAINT_DIRECTION_LABELS[String(operation.payload.direction ?? "all")] ?? "向四周";
-        const targetRatio = String(operation.payload.targetRatio ?? "original");
-        const tw = Number(operation.payload.targetWidth);
-        const th = Number(operation.payload.targetHeight);
-        const dims = Number.isFinite(tw) && Number.isFinite(th) && tw > 0 && th > 0 ? `，目标尺寸 ${tw}×${th}` : "";
-        const anchor = OUTPAINT_ANCHOR_LABELS[String(operation.payload.anchor ?? "center")] ?? "居中";
-        return render(IMAGE_EDIT_INSTRUCTIONS.outpaint, { direction: dir, ratio: targetRatio, dimensions: dims, anchor, requirement });
+        const { targetRatio, targetWidth, targetHeight } = operation.payload;
+        const direction = OUTPAINT_DIRECTION_LABELS[operation.payload.direction as keyof typeof OUTPAINT_DIRECTION_LABELS];
+        const dimensions = `，画布尺寸 ${targetWidth}×${targetHeight}`;
+        const framing = `待编辑图已扩边至 ${targetRatio}${dimensions}，原图居中，周围的灰色填充区域是唯一要编辑的区域。`;
+        const focus = direction && direction !== "四周" ? `如${direction}有灰色扩展区，优先延续该方向的构图。` : "";
+        return `${framing}${focus}\n${render(template?.userPromptTemplate || IMAGE_EDIT_INSTRUCTIONS.outpaint, {
+          direction: `向${direction ?? "四周"}`, ratio: String(targetRatio), dimensions, anchor: "居中", requirement,
+        })}`;
       }
       case "re_edit":
         return `${prefix}${req || operation.summary}`;
       case "restore_product":
-        return render(IMAGE_EDIT_INSTRUCTIONS.restore_product, {});
+        return render(template?.userPromptTemplate || IMAGE_EDIT_INSTRUCTIONS.restore_product, {});
     }
   });
   const header = operations[0]?.type === "restore_product" ? RESTORE_PRODUCT_HEADER : IMAGE_EDIT_PROMPT_HEADER;
@@ -769,24 +775,26 @@ export class ImageEditorService {
       if (operation.type === "outpaint") {
         const direction = payload.direction;
         const targetRatio = payload.targetRatio;
-        if (direction !== "all" && direction !== "horizontal" && direction !== "vertical" && direction !== "left" && direction !== "right") throw new Error("OUTPAINT_DIRECTION_INVALID");
-        if (typeof targetRatio !== "string" || !Object.prototype.hasOwnProperty.call(OUTPAINT_RATIOS, targetRatio)) throw new Error("OUTPAINT_TARGET_RATIO_INVALID");
-        const dimensions = outpaintDimensions(source, direction, targetRatio as OutpaintSpec["targetRatio"]);
+        if (typeof direction !== "string" || !Object.hasOwn(OUTPAINT_DIRECTION_LABELS, direction)) throw new Error("OUTPAINT_DIRECTION_INVALID");
+        if (!isOutpaintRatio(targetRatio)) throw new Error("OUTPAINT_TARGET_RATIO_INVALID");
+        const dimensions = computeOutpaintCanvas(source.width, source.height, targetRatio);
         if (payload.targetWidth !== undefined && Number(payload.targetWidth) !== dimensions.targetWidth) throw new Error("OUTPAINT_TARGET_DIMENSIONS_INVALID");
         if (payload.targetHeight !== undefined && Number(payload.targetHeight) !== dimensions.targetHeight) throw new Error("OUTPAINT_TARGET_DIMENSIONS_INVALID");
         payload.targetWidth = dimensions.targetWidth;
         payload.targetHeight = dimensions.targetHeight;
-        payload.anchor = dimensions.anchor;
+        payload.sourceOffset = dimensions.sourceOffset;
+        payload.anchor = "center";
       }
       if (operation.type === "redraw" || operation.type === "erase") {
         const strokes = operation.payload.strokes as NormalizedStroke[];
         const feather = operation.payload.feather === undefined ? 0 : Number(operation.payload.feather);
         if (!Number.isFinite(feather) || feather < 0 || feather > 1) throw new Error("MASK_FEATHER_INVALID");
-        const bytes = await renderMaskPng(source, strokes, feather);
+        const { bytes, region } = await renderMaskPng(source, strokes, feather);
         const sha256 = createHash("sha256").update(bytes).digest("hex");
         const objectKey = `image-edits/masks/${operation.sourceVersionId}/${operation.operationId}-${sha256}.png`;
         await this.storage.put({ key: objectKey, bytes, contentType: "image/png" });
         payload.feather = feather;
+        payload.region = region;
         payload.mask = { width: source.width, height: source.height, mimeType: "image/png", sha256, objectKey, feather, strokes: structuredClone(strokes) } satisfies MaskSnapshot;
       }
       return { ...operation, payload };
@@ -797,7 +805,7 @@ export class ImageEditorService {
     const snapshot: EditSnapshot = {
       id: randomUUID(), sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId,
       parentVersionId: input.parentVersionId ?? input.sourceVersionId, summary, sourcePrompt, tool: materialized[0].type,
-      attachedInputs: structuredClone(attachedInputs), maskApplied: materialized.some((operation) => Boolean(operation.payload.mask)),
+      attachedInputs: structuredClone(attachedInputs), maskApplied: false,
       promptTemplateVersionId: template?.templateVersionId ?? null,
       operations: structuredClone(materialized), provider: editProviderSnapshot(provider),
       createdAt: new Date().toISOString(), schemaVersion: "image-edit-snapshot-v1",
