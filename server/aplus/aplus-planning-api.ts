@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
   isAplusPlanStale,
+  normalizeAplusLanguage,
   normalizeAplusProductInfo,
+  normalizeAplusTargetMarket,
   validateAplusModuleCodes,
   validateAplusSizePresets,
 } from "../../shared/aplus.js";
@@ -52,9 +54,8 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
     const sourceId = body.suiteId ?? defaultSourceId;
     const { modules, sizePresets, resolution } = body;
     const platform = typeof body.platform === "string" ? body.platform.trim() : "";
-    const targetMarket = typeof body.targetMarket === "string" ? body.targetMarket.trim() : "";
-    const languageOption = SUPPORTED_OUTPUT_LANGUAGES.find(({ value }) => value === body.language);
-    const language = languageOption?.code ?? body.language;
+    const targetMarket = typeof body.targetMarket === "string" ? normalizeAplusTargetMarket(body.targetMarket) : "";
+    const language = typeof body.language === "string" ? normalizeAplusLanguage(body.language) : "";
     if (resolution !== "1K" && resolution !== "2K") return rejected("APLUS_INVALID_RESOLUTION");
     if (typeof language !== "string" || !allowedLanguages.has(language)) return rejected("APLUS_INVALID_LANGUAGE");
     if (!targetMarket) return rejected("APLUS_TARGET_MARKET_REQUIRED");
@@ -255,7 +256,7 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
       const previous = await loadRun(previousSuiteId);
       if (!previous.ok) return previous.response;
       const { run } = previous.value;
-      if (run.currentPhase !== "awaiting_confirmation" && !(run.currentPhase === "aplus_planning" && run.status === "failed")) {
+      if (!awaitingConfirmation(run) && !(run.currentPhase === "aplus_planning" && run.status === "failed")) {
         return fail("APLUS_PLAN_ACTION_NOT_ALLOWED", 409);
       }
     }
@@ -341,6 +342,24 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
     if (!awaitingConfirmation(run) || !config.planSnapshot) return rejected("APLUS_PLAN_ACTION_NOT_ALLOWED", 409);
     const body = asRecord(payload);
     if (body.resolution !== "1K" && body.resolution !== "2K") return rejected("APLUS_INVALID_RESOLUTION");
+    if (typeof body.platform !== "string" || !body.platform.trim()) return rejected("PLATFORM_NOT_FOUND");
+    if (typeof body.targetMarket !== "string" || !body.targetMarket.trim()) return rejected("APLUS_TARGET_MARKET_REQUIRED");
+    if (typeof body.language !== "string" || !allowedLanguages.has(normalizeAplusLanguage(body.language))) return rejected("APLUS_INVALID_LANGUAGE");
+    if (!validateAplusModuleCodes(body.modules)) return rejected("APLUS_INVALID_MODULES");
+    if (!Array.isArray(body.sizePresets) || !body.sizePresets.length || !body.sizePresets.every((preset) => typeof preset === "string")) {
+      return rejected("APLUS_INVALID_SIZE_PRESETS");
+    }
+    if (typeof body.productInfo !== "string" || Array.from(body.productInfo).length > 1000) return rejected("APLUS_INVALID_PRODUCT_INFO");
+    if (body.productCardId != null && typeof body.productCardId !== "string") return rejected("PRODUCT_CARD_NOT_AVAILABLE");
+    if (body.productCardRevision != null && (!Number.isSafeInteger(body.productCardRevision) || Number(body.productCardRevision) < 1)) {
+      return rejected("PRODUCT_CARD_NOT_AVAILABLE");
+    }
+    if (
+      (body.suiteId !== undefined && (typeof body.suiteId !== "string" || !uuid.test(body.suiteId))) ||
+      !Array.isArray(body.inputImageIds) || body.inputImageIds.length < 1 || body.inputImageIds.length > 6 ||
+      !body.inputImageIds.every((id) => typeof id === "string" && uuid.test(id)) ||
+      new Set(body.inputImageIds).size !== body.inputImageIds.length
+    ) return rejected("APLUS_INVALID_INPUT_IMAGES");
     const parsed = await readInputs(body, suiteId);
     if (
       !parsed.ok || isAplusPlanStale(config.inputSnapshot, parsed.value.inputSnapshot) ||
@@ -349,5 +368,5 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
     return { ok: true as const, value: { run, config, planSnapshot: config.planSnapshot, resolution: parsed.value.resolution } };
   }
 
-  return { start, editPlan, resume, prepareConfirmation };
+  return { start, editPlan, resume, prepareConfirmation, loadRun };
 }

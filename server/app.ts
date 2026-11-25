@@ -1,6 +1,8 @@
 import { planSnapshotView, isStructurePlanV2, taskView, taskAttemptView, taskSlotView, taskVersionView, taskBatchView } from "./suite-views.js";
 import { createSuitePipeline } from "./suite-pipeline.js";
 import { createAplusPlanningApi } from "./aplus/aplus-planning-api.js";
+import { createAplusGenerationApi } from "./aplus/aplus-generation-api.js";
+import { storeAplusDelivery } from "./aplus/aplus-image.js";
 import { fail, errorMessages } from "./api-errors.js";
 import { ok, asRecord, dataOf, type AppResponse } from "./api-response.js";
 export type { AppResponse } from "./api-response.js";
@@ -44,7 +46,7 @@ import {
 } from "../shared/workbench-delivery.js";
 import { createZipBuffer } from "./zip.js";
 import type { ImageEditorApiResponse } from "./image-editor-api.js";
-import { declareImageEditInputs, imageEditProductInputs } from "./image-editor.js";
+import { declareImageEditInputs, imageEditProductInputs, type ImageEditVersionCompletedListener } from "./image-editor.js";
 import type {
   BaseImageVersion,
   CategoryPromptItem,
@@ -388,7 +390,7 @@ function safeDecodePathParam(value: string): string | null {
   }
 }
 
-export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; productCardRepository?: ProductCardRepository; productOnboardingRepository?: ProductOnboardingRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>; clearFinalVersions?(childTaskIds: string[]): Promise<void>; setOnVersionCompleted?(listener: (childTask: { id: string; sourceCardId: string }) => Promise<void>): void }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
+export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; productCardRepository?: ProductCardRepository; productOnboardingRepository?: ProductOnboardingRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>; clearFinalVersions?(childTaskIds: string[]): Promise<void>; setOnVersionCompleted?(listener: ImageEditVersionCompletedListener): void }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
   const imageGenerationConcurrency = Math.max(1, Math.floor(Number.isFinite(deps.imageGenerationConcurrency) ? deps.imageGenerationConcurrency! : 3));
   const imageRetryDelayMs = Math.max(0, Math.floor(Number.isFinite(deps.imageRetryDelayMs) ? deps.imageRetryDelayMs! : 1500));
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
@@ -593,6 +595,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (latestPlanSnapshot) taskPlans.set(latestPlanSnapshot.id, latestPlanSnapshot);
     for (const [index, task] of tasks.entries()) {
       const providerName = channel ? "openai-compatible-image" : provider ? "image-provider" : "unconfigured";
+      const generationParams = task.generationParams ?? {};
+      const isAplusTask = task.originKind === "aplus";
+      const aplusRequestSize = isAplusTask && typeof generationParams.requestSize === "string" ? generationParams.requestSize : null;
+      const aplusSizeFields = isAplusTask ? {
+        ratio: generationParams.ratio,
+        generatedSize: generationParams.generatedSize,
+      } : {};
       if (failedAttempt) {
         attempts.push({
           ...failedAttempt, id: randomUUID(), slotId: slots[index].id, attemptNo: 1,
@@ -618,7 +627,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits",
           requestSummary: {
             n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((image) => image.role),
-            size: resolveClosestImageSize(width, height, imageOptions), quality: imageOptions.quality ?? "high",
+            size: aplusRequestSize ?? resolveClosestImageSize(width, height, imageOptions), quality: imageOptions.quality ?? "high",
+            ...aplusSizeFields,
           },
           promptSnapshot: { ...version.promptSnapshot, finalPrompt, providerPrompt, inputImages },
           promptSha256: createHash("sha256").update(finalPrompt).digest("hex"),
@@ -637,16 +647,33 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const taskPlan = task.planSnapshotId ? taskPlans.get(task.planSnapshotId) : null;
       const useOriginalImages = taskPlan?.requestSummary.useOriginalImages === true;
       let sourceKind: "base" | "original" | "library" = "original"; let sourceObjectKey = ""; let sourceBaseVersionId: string | null = null; let sourceInputImageId: string | null = null; let sourceLibraryReferenceId: string | null = null; let sourceResourceVersionId: string | null = null;
-      const generationParams = task.generationParams ?? {};
       const materialRefs = Array.isArray(generationParams.productMaterialRefs) ? generationParams.productMaterialRefs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 3) : [];
       const inputImages: Array<{ bytes: Buffer; mimeType: string; filename: string; role: string; objectKey: string; resourceId?: string; resourceVersionId?: string; libraryReferenceId?: string }> = [];
       const currentTaskVersionId = sourceVersionIds[task.id];
       const isReplicaTask = task.originKind === "replica";
+      const aplusPromptMeta = isAplusTask ? asRecord(generationParams.aplusPromptSnapshot) : null;
       const replicaPromptMeta = isReplicaTask ? asRecord(generationParams.replicaPromptSnapshot) : null;
       const replicaCloneLevel = isReplicaTask ? resolveReplicaCloneLevel(generationParams) : "high";
       let replicaProductCount = 0;
 
-      if (isReplicaTask) {
+      if (isAplusTask) {
+        for (const imageId of task.referenceImageIds ?? []) {
+          const original = await deps.repository.getInputImage(suiteId, imageId);
+          if (!original) throw new Error("TASK_INVALID_SOURCE");
+          const stored = await deps.storage.get(original.originalObjectKey);
+          if (!stored) throw new Error("TASK_INVALID_SOURCE");
+          inputImages.push({
+            bytes: stored.bytes,
+            mimeType: stored.contentType,
+            filename: `product-${inputImages.length + 1}.${extensionForImageMime(stored.contentType)}`,
+            role: "product",
+            objectKey: original.originalObjectKey,
+          });
+        }
+        if (!inputImages.length) throw new Error("TASK_INVALID_SOURCE");
+        sourceObjectKey = inputImages[0].objectKey;
+        sourceInputImageId = task.sourceInputImageId;
+      } else if (isReplicaTask) {
         const replicaProducts = await replicaRepository.listProductImages(suiteId);
         replicaProductCount = replicaProducts.length;
         for (const [productIndex, product] of replicaProducts.entries()) {
@@ -767,7 +794,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }
 
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
-      const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import" && task.originKind !== "replica";
+      const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import" && !isReplicaTask && !isAplusTask;
       const replicaRolePrefix = isReplicaTask ? buildReplicaRolePrefix(replicaProductCount, replicaCloneLevel) : null;
       const finalPrompt = isReplicaTask
         ? (task.promptDraft.startsWith(replicaRolePrefix!) ? task.promptDraft : `${replicaRolePrefix}\n${task.promptDraft}`)
@@ -785,9 +812,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         ? { ...(task.globalStyleCard ?? {}), promptPrefix: activeStyleOverride, overridden: true }
         : (task.globalStyleCard ?? {});
       const effectiveTemplateVersionId =
-        (isReplicaTask && typeof replicaPromptMeta?.templateVersionId === "string"
-          ? replicaPromptMeta.templateVersionId
-          : null) ?? planTemplateVersionId;
+        (typeof aplusPromptMeta?.templateVersionId === "string" ? aplusPromptMeta.templateVersionId : null) ??
+        (typeof replicaPromptMeta?.templateVersionId === "string" ? replicaPromptMeta.templateVersionId : null) ??
+        planTemplateVersionId;
       const effectivePromptSha256 =
         isReplicaTask || shouldApplyStyleOverride
           ? createHash("sha256").update(finalPrompt).digest("hex")
@@ -807,7 +834,42 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
             styleSketch: replicaProductCount === 0,
           }
         : {};
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, ...replicaFrozenFields, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, replicaReferenceId: task.replicaReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      const aplusFrozenFields = isAplusTask ? {
+        ...aplusPromptMeta, moduleCode: task.moduleCode, sizePreset: task.sizePreset, sortOrder: task.sortOrder,
+      } : {};
+      const size = aplusRequestSize ?? resolveImageSize(
+        typeof generationParams.size === "string" ? generationParams.size : "1K",
+        typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4",
+        imageOptions.sizeMode,
+      );
+      const styleOverride = shouldApplyStyleOverride ? activeStyleOverride : null;
+      attempts.push({
+        id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits",
+        requestSummary: {
+          n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role),
+          size, quality: generationParams.quality ?? "medium", ...aplusSizeFields,
+        },
+        promptSnapshot: {
+          prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId,
+          planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId,
+          reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null,
+          referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [],
+          globalStyleCard: effectiveGlobalStyleCard, styleOverride, ...replicaFrozenFields, ...aplusFrozenFields,
+          finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs,
+          explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot,
+        },
+        promptSha256: effectivePromptSha256,
+        contextSnapshot: {
+          channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId,
+          templateVersionId: effectiveTemplateVersionId, reversePlanId: task.reversePlanId ?? null,
+          reverseReferenceId: task.reverseReferenceId ?? null, replicaReferenceId: task.replicaReferenceId ?? null,
+          sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null,
+          globalStyleCard: effectiveGlobalStyleCard, styleOverride,
+          inputImages: inputImages.map(({ objectKey, mimeType, filename, role }) => ({ objectKey, mimeType, filename, role })),
+        },
+        sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId,
+        status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null,
+      });
     }
     const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
     if (!reservation.duplicate) {
@@ -839,8 +901,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const executeTaskAttempt = async (attempt: TaskGenerationAttempt, task: SuiteTask, slot: TaskResultSlot, provider: ImageProvider | undefined) => {
     if (!deps.taskRepository) return;
     const finish = new Date().toISOString();
-    if (!provider) { await deps.taskRepository.failAttempt(attempt.id, "TASK_IMAGE_PROVIDER_NOT_CONFIGURED", errorMessages.TASK_IMAGE_PROVIDER_NOT_CONFIGURED, finish); return; }
     try {
+      if (task.originKind === "aplus" && (await deps.taskRepository.getAttempt(attempt.id))?.status !== "running") return;
+      if (!provider) { await deps.taskRepository.failAttempt(attempt.id, "TASK_IMAGE_PROVIDER_NOT_CONFIGURED", errorMessages.TASK_IMAGE_PROVIDER_NOT_CONFIGURED, finish); return; }
       const source = await deps.storage.get(attempt.sourceObjectKey);
       if (!source) { await deps.taskRepository.failAttempt(attempt.id, "TASK_INVALID_SOURCE", errorMessages.TASK_INVALID_SOURCE, finish); return; }
       const snapshotInputs = Array.isArray(attempt.contextSnapshot.inputImages) ? attempt.contextSnapshot.inputImages as Array<Record<string, unknown>> : [];
@@ -864,15 +927,20 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         if (imageRetryDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, imageRetryDelayMs));
         }
+        if (task.originKind === "aplus" && (await deps.taskRepository.getAttempt(attempt.id))?.status !== "running") return;
         generated = await provider.edit(editRequest);
       }
+      if (task.originKind === "aplus" && (await deps.taskRepository.getAttempt(attempt.id))?.status !== "running") return;
       const processed = await processGeneratedImage(generated.bytes);
       const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
       await deps.storage.put({ key: objectKey, bytes: processed.bytes, contentType: processed.mimeType });
       if (task.originKind === "replica") {
         await clearReplicaCardFinalLocks(task);
       }
-      await deps.taskRepository.completeAttempt({ attemptId: attempt.id, slotId: slot.id, taskId: task.id, objectKey, processObjectKeys: [], sha256: processed.sha256, width: processed.width, height: processed.height, mimeType: processed.mimeType, completedAt: new Date().toISOString() });
+      const delivery = task.originKind === "aplus" && task.sizePreset
+        ? await storeAplusDelivery(deps.storage, task.sizePreset, processed, objectKey)
+        : {};
+      await deps.taskRepository.completeAttempt({ attemptId: attempt.id, slotId: slot.id, taskId: task.id, objectKey, processObjectKeys: [], sha256: processed.sha256, width: processed.width, height: processed.height, mimeType: processed.mimeType, completedAt: new Date().toISOString(), ...delivery });
       const latestRun = await pipelineRepository.getLatestRun(task.suiteId);
       if (latestRun && (latestRun.status === "partial_failed" || latestRun.status === "failed")) {
         const activeTasks = (await deps.taskRepository.listTasks(task.suiteId)).filter((item) => item.status !== "archived");
@@ -957,10 +1025,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     return null;
   };
 
-  deps.imageEditorApi?.setOnVersionCompleted?.(async (childTask) => {
+  deps.imageEditorApi?.setOnVersionCompleted?.(async (childTask, generated) => {
     const rootTask = await resolveRootTaskForEditCard(childTask.sourceCardId);
     if (rootTask?.originKind === "replica") {
       await clearReplicaCardFinalLocks(rootTask);
+    }
+    if (rootTask?.originKind === "aplus" && rootTask.sizePreset) {
+      return storeAplusDelivery(deps.storage, rootTask.sizePreset, generated, generated.objectKey);
     }
   });
   const pipeline = createSuitePipeline({
@@ -984,17 +1055,24 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     request,
   });
   const promptRepository = deps.promptRepository;
+  const aplusPrompts = promptRepository && {
+    listPublished: (stage: PromptStage) => promptRepository.listPublished(stage),
+    getPublishedVersion: (versionId: string, stage: PromptStage) => observedPromptLoad(promptRepository, versionId, stage),
+  };
   const aplusPlanning = createAplusPlanningApi({
     repository: deps.repository,
     storage: deps.storage,
     pipelines: pipelineRepository,
     platforms: deps.platformRepository,
     productCards: productCardRepository,
-    prompts: promptRepository && {
-      listPublished: (stage) => promptRepository.listPublished(stage),
-      getPublishedVersion: (versionId, stage) => observedPromptLoad(promptRepository, versionId, stage),
-    },
+    prompts: aplusPrompts,
     resolveVision,
+  });
+  const aplusGeneration = createAplusGenerationApi({
+    planning: aplusPlanning, repository: deps.repository, tasks: deps.taskRepository,
+    pipelines: pipelineRepository, prompts: aplusPrompts,
+    resolveImageOptions: async () => (await resolveImage()).imageOptions,
+    createBatch: (suiteId, tasks, key) => createTaskBatch(suiteId, tasks, "batch", key),
   });
 
   async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
@@ -1058,13 +1136,14 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
 
     if (method === "POST" && path === "/api/aplus") return aplusPlanning.start(idempotencyKey, options.body);
-    const aplusMatch = path.match(/^\/api\/aplus\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/(studio-state|plan|replan|resume)$/i);
+    const aplusMatch = path.match(/^\/api\/aplus\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/(studio-state|plan|replan|confirm|resume)$/i);
     if (aplusMatch) {
       const [, suiteId, action] = aplusMatch;
       if (method === "GET" && action === "studio-state") return pipeline.getStudioState(suiteId, "aplus");
       if (method === "PATCH" && action === "plan") return aplusPlanning.editPlan(suiteId, options.body);
       if (method === "POST" && action === "replan") return aplusPlanning.start(idempotencyKey, options.body, suiteId);
-      if (method === "POST" && action === "resume") return aplusPlanning.resume(suiteId, idempotencyKey);
+      if (method === "POST" && action === "confirm") return aplusGeneration.confirm(suiteId, options.body, idempotencyKey);
+      if (method === "POST" && action === "resume") return aplusGeneration.resume(suiteId, idempotencyKey);
     }
 
     if (method === "POST" && path === "/api/replicas") return replicaPipeline.createReplica(idempotencyKey, options.body);
@@ -2202,7 +2281,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         const currentVersion = history.versions.find((version) => version.isCurrent);
         const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);
         const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (current?.sourceRevision ?? 0);
-        const useCurrentVersionAsSource = current?.originKind !== "replica" && currentVersion && sourceUnchanged;
+        const useCurrentVersionAsSource = current?.originKind !== "replica" && current?.originKind !== "aplus" && currentVersion && sourceUnchanged;
         const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, useCurrentVersionAsSource ? { [task.id]: currentVersion.id } : {});
         return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
       }

@@ -5,6 +5,11 @@ export class MemoryTaskRepository implements TaskRepository {
   private tasks = new Map<string, SuiteTask>(); private batches = new Map<string, TaskGenerationBatch>();
   private slots = new Map<string, TaskResultSlot>(); private attempts = new Map<string, TaskGenerationAttempt>();
   private versions = new Map<string, TaskImageVersion>(); private batchKeys = new Map<string, string>(); private layouts = new Map<string, CanvasLayout>(); private reverseKeys = new Map<string, string[]>(); private customTaskKeys = new Map<string, string>();
+  async createAplusTasks(tasks: SuiteTask[]) {
+    for (const task of tasks) {
+      if (!this.tasks.has(task.id)) this.tasks.set(task.id, structuredClone(task));
+    }
+  }
   async createCustomTask(input: { suiteId: string; planSnapshotId: string | null; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }) {
     if (input.idempotencyKey) {
       const existingId = this.customTaskKeys.get(`${input.suiteId}:${input.idempotencyKey}`);

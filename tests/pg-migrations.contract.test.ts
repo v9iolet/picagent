@@ -3,12 +3,15 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Client, Pool, escapeIdentifier, type PoolClient, type QueryResultRow } from "pg";
+import sharp from "sharp";
+import { defaultImageOptions } from "../shared/model-settings.js";
 import { createSuiteStudioApp } from "../server/app.js";
 import { loadPostgresConfig } from "../server/config.js";
 import { ImageEditorService } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import type { ListingImage, ListingJob, ListingVersion } from "../server/listing-copy.js";
 import { runMigrations } from "../server/migrations.js";
+import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
 import { PostgresImageEditorRepository } from "../server/repositories/postgres-image-editor-repository.js";
 import { PostgresLibraryRepository } from "../server/repositories/postgres-library-repository.js";
 import { PostgresTaskRepository } from "../server/repositories/postgres-task-repository.js";
@@ -20,7 +23,8 @@ import { importPromptRecordsWithPolicy, parseNormalizedPromptMarkdown } from "..
 import { PostgresPlatformRepository } from "../server/repositories/postgres-platform-repository.js";
 import { PostgresSuiteRepository } from "../server/repositories/postgres-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
-import type { SuitePipelineRun } from "../server/types.js";
+import { waitUntil } from "../server/suite-pipeline.js";
+import type { ImageEditRequest, SuitePipelineRun } from "../server/types.js";
 import { APLUS_MODULES } from "../shared/aplus.js";
 import { resolveAplusPromptTemplate } from "../server/aplus/aplus-prompt.js";
 
@@ -653,13 +657,14 @@ test("031 extends origin, task origin_kind, pipeline phase, adds replica tables,
   });
 });
 
-test("041 seeds editable A+ sizes and preserves A+ rows and template stages on migration replay", { skip }, async () => {
+test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切，044–046 启动重放保留数据", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const suites = new PostgresSuiteRepository(pool);
     const tasks = new PostgresTaskRepository(pool);
     const pipelines = new PostgresPipelineRepository(pool);
     const platforms = new PostgresPlatformRepository(pool);
-    const app = createSuiteStudioApp({ repository: suites, storage: new MemoryStorage(), platformRepository: platforms });
+    const storage = new MemoryStorage();
+    const app = createSuiteStudioApp({ repository: suites, storage, platformRepository: platforms });
     const response = await app.request("GET", "/api/platforms");
     assert.equal(response.status, 200);
     const profiles: Awaited<ReturnType<typeof platforms.listEnabled>> = response.body.data;
@@ -673,6 +678,10 @@ test("041 seeds editable A+ sizes and preserves A+ rows and template stages on m
       assert.deepEqual((await platforms.find(code))?.detailSizePresets, expected, code);
     }
     const configured = { options: ["aplus_standard", "16:9"], default: "16:9" };
+    for (const malformed of [{ options: "bad", default: "1:1" }, { options: common }, { options: [3], default: "3:4" }]) {
+      await pool.query("UPDATE suite_workbench.platform_profiles SET detail_size_presets=$1 WHERE code='amazon'", [malformed]);
+      assert.deepEqual((await platforms.find("amazon"))?.detailSizePresets, profiles.find((profile) => profile.code === "amazon")?.detailSizePresets);
+    }
     await pool.query("UPDATE suite_workbench.platform_profiles SET detail_size_presets=$1 WHERE code='amazon'", [configured]);
 
     const creationKey = "aplus-planning-contract";
@@ -683,12 +692,16 @@ test("041 seeds editable A+ sizes and preserves A+ rows and template stages on m
     assert.equal((await suites.findAplusSuiteByIdempotencyKey(creationKey))?.id, suite.id);
     assert.equal((await suites.createSuite("重复提交", creationKey, "aplus")).id, suite.id);
     const taskId = randomUUID();
-    await pool.query(
-      `INSERT INTO suite_workbench.suite_tasks
-         (id,suite_id,ordinal,image_type,title,purpose,prompt_draft,generation_params_json,status,origin_kind,module_code,size_preset,sort_order,created_at,updated_at)
-       VALUES ($1,$2,1,'detail','首屏主视觉','展示商品','提示词','{}','pending','aplus','hero','aplus_standard',1,$3,$3)`,
-      [taskId, suite.id, timestamp],
-    );
+    const taskRow = {
+      id: taskId, suiteId: suite.id, planSnapshotId: null, planItemId: null, ordinal: 1,
+      title: "首屏主视觉", purpose: "展示商品", promptDraft: "提示词", sourceInputImageId: null, promptRevision: 1,
+      generationParams: { size: "1K", requestSize: "1664x1024" }, archivedAt: null,
+      moduleCode: "hero", sizePreset: "aplus_standard", sortOrder: 1, imageType: "detail", originKind: "aplus",
+      status: "pending", createdAt: timestamp, updatedAt: timestamp,
+    } as const;
+    await tasks.createAplusTasks([taskRow]);
+    await tasks.createAplusTasks([taskRow]);
+    assert.equal((await tasks.listTasks(suite.id)).length, 1);
     const task = await tasks.getTask(taskId);
     assert.equal(task?.originKind, "aplus");
     assert.equal(task.moduleCode, "hero");
@@ -711,13 +724,23 @@ test("041 seeds editable A+ sizes and preserves A+ rows and template stages on m
     const batchId = randomUUID();
     const slotId = randomUUID();
     const attemptId = randomUUID();
+    const productInputs = ["product", "product_primary", "product_detail"].map((role, index) => ({
+      objectKey: `suites/${suite.id}/inputs/product-${index + 1}/original`, role,
+    }));
+    const normalizedProducts = productInputs.map(({ objectKey }) => ({ objectKey, role: "product" }));
+    const productBytes = await Promise.all(["red", "green", "blue"].map((background) =>
+      sharp({ create: { width: 80, height: 60, channels: 3, background } }).png().toBuffer()));
+    for (const [index, { objectKey }] of productInputs.entries()) {
+      await storage.put({ key: objectKey, bytes: productBytes[index], contentType: "image/png" });
+    }
     await tasks.beginBatch({
       batch: { id: batchId, suiteId: suite.id, kind: "single", requestedCount: 1, taskIds: [taskId], status: "running", idempotencyKey: "image", createdAt: timestamp, startedAt: timestamp, finishedAt: null },
       slots: [{ id: slotId, batchId, taskId, slotOrdinal: 1, retryOfSlotId: null, status: "generating", selectedVersionId: null, createdAt: timestamp, completedAt: null }],
       attempts: [{
         id: attemptId, slotId, attemptNo: 1, provider: "fake", model: "fake", endpoint: "/v1/images/edits",
-        requestSummary: {}, promptSnapshot: {}, promptSha256: "a".repeat(64), contextSnapshot: {}, sourceKind: "original",
-        sourceObjectKey: "original.png", sourceInputImageId: null, sourceBaseVersionId: null, status: "running",
+        requestSummary: {}, promptSnapshot: {}, promptSha256: "a".repeat(64),
+        contextSnapshot: { inputImages: [...productInputs, { objectKey: "reference.png", role: "reference" }] }, sourceKind: "original",
+        sourceObjectKey: productInputs[0].objectKey, sourceInputImageId: null, sourceBaseVersionId: null, status: "running",
         errorCode: null, errorMessage: null, externalRequestId: null, startedAt: timestamp, finishedAt: null,
       }],
     });
@@ -732,9 +755,69 @@ test("041 seeds editable A+ sizes and preserves A+ rows and template stages on m
     assert.deepEqual(version.generatedSize, generatedSize);
     assert.deepEqual(version.deliverySize, deliverySize);
     assert.equal(version.deliveryObjectKey, "delivery.png");
+    const prompts = new PostgresPromptRepository(pool);
+    const editor = new PostgresImageEditorRepository(pool);
+    const original = await sharp({ create: { ...generatedSize, channels: 3, background: "navy" } }).png().toBuffer();
+    await storage.put({ key: version.objectKey, bytes: original, contentType: "image/png" });
+    const editorCalls: ImageEditRequest[] = [];
+    const fakeProvider = {
+      async edit(request: ImageEditRequest) {
+        editorCalls.push(request);
+        return { bytes: original, mimeType: "image/png" };
+      },
+    };
+    const service = new ImageEditorService(editor, {
+      name: "fake", version: "1", capabilitiesVersion: "1",
+      capabilities: () => ({ addText: true, imageToImage: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
+      edit: (command, source) => requestImageEditorEdit(fakeProvider, storage, "fake", defaultImageOptions("gpt-image-2"), command, source),
+    }, storage, async (sourceVersionId) => {
+      const source = await editor.getSourceVersion(sourceVersionId);
+      const object = source && await storage.get(source.objectKey);
+      if (!source || !object) return null;
+      const { width, height } = await sharp(object.bytes).metadata();
+      return { ...source, bytes: object.bytes, width, height };
+    }, undefined, (cardId, versionId) => editor.validateSource(cardId, versionId), prompts,
+    async (sourceVersionId) => (await editor.getSourceVersion(sourceVersionId))?.productInputs ?? null);
+    const editorApp = createSuiteStudioApp({ repository: suites, storage, taskRepository: tasks, imageEditorApi: createImageEditorApi(service) });
+    const sessionPath = `/api/image-editor/sessions/${taskId}`;
+    const draft = await editorApp.request("GET", `${sessionPath}?sourceVersionId=${version.id}`);
+    assert.equal(draft.status, 200);
+    const candidates = draft.body.data.productInputs as Array<{ objectKey: string; thumbnailUrl: string }>;
+    assert.deepEqual(candidates.map(({ objectKey }) => objectKey), productInputs.map(({ objectKey }) => objectKey));
+    for (const { thumbnailUrl } of candidates) {
+      const thumbnail = await editorApp.request("GET", thumbnailUrl);
+      assert.equal(thumbnail.status, 200);
+      assert.equal((await sharp(thumbnail.raw!).metadata()).format, "webp");
+    }
+    const restore = await editorApp.request("POST", `${sessionPath}/operations`, { body: { operation: {
+      operationId: "restore", type: "restore_product", order: 1, summary: "商品还原",
+      sourceCardId: taskId, sourceVersionId: version.id, parentVersionId: version.id, payload: {},
+    } } });
+    assert.equal(restore.status, 200);
+    const submitted = await editorApp.request("POST", `${sessionPath}/submit`, {
+      headers: { "idempotency-key": "aplus-image-restore" },
+      body: { tool: "restore_product", sourceCardId: taskId, sourceVersionId: version.id, operationIds: ["restore"] },
+    });
+    assert.equal(submitted.status, 202, JSON.stringify(submitted.body));
+    const childId = submitted.body.data.childTask.id;
+    const child = await waitUntil(() => service.getTask(childId), (result) => Boolean(result && result.task.status !== "generating"), 5_000);
+    assert.equal(child?.task.status, "succeeded", child?.task.errorCode ?? undefined);
+    const [editedImage] = child!.versions;
+    assert.deepEqual(child?.snapshot?.attachedInputs, normalizedProducts);
+    assert.deepEqual(editorCalls.map(({ images }) => images?.map(({ role, bytes }) => [role, bytes])), [
+      [["source", original], ...productBytes.map((bytes) => ["product", bytes])],
+    ]);
+    assert.match(editorCalls[0].prompt, /^第 1 张为待编辑图，其余为商品外观依据/);
+    assert.deepEqual((await editor.getSourceVersion(editedImage.id))?.productInputs, normalizedProducts);
+    assert.deepEqual(editedImage.generatedSize, generatedSize);
+    assert.deepEqual(editedImage.deliverySize, deliverySize);
+    assert.notEqual(editedImage.deliveryObjectKey, editedImage.objectKey);
+    const delivery = await storage.get(editedImage.deliveryObjectKey!);
+    assert.ok(delivery);
+    const { width, height } = await sharp(delivery.bytes).metadata();
+    assert.deepEqual({ width, height }, deliverySize);
 
     const stages = ["aplus_plan", "aplus_module_rule", "aplus_image", "aplus_ai_write"] as const;
-    const prompts = new PostgresPromptRepository(pool);
     for (const stage of stages) {
       const templateId = randomUUID();
       const versionId = randomUUID();
@@ -751,13 +834,22 @@ test("041 seeds editable A+ sizes and preserves A+ rows and template stages on m
       );
       await pool.query("UPDATE prompt_library.prompt_templates SET published_version_id=$1 WHERE id=$2", [versionId, templateId]);
     }
-    await runMigrations(pool);
+    const editorPromptCodes = new Set(["image-editor.restore_product", "image-editor.change_text"]);
+    const publishedEditorPrompts = async () => (await prompts.listPublished("task_image"))
+      .filter(({ code }) => editorPromptCodes.has(code))
+      .map(({ code, templateVersionId, versionNo }) => [code, templateVersionId, versionNo]);
+    const editorPrompts = await publishedEditorPrompts();
+    assert.equal(editorPrompts.length, 2);
+    await runMigrations(pool, { recoverStaleAttempts: true });
+    assert.deepEqual(await publishedEditorPrompts(), editorPrompts);
     assert.deepEqual((await platforms.find("amazon"))?.detailSizePresets, configured);
     assert.equal((await suites.getSuite(suite.id))?.origin, "aplus");
     assert.equal((await tasks.getTask(taskId))?.originKind, "aplus");
     assert.equal((await pipelines.getRun(run.id))?.currentPhase, "awaiting_confirmation");
     assert.equal((await pipelines.resumeRun(edited, "current-confirm", "image_generating", edited.config))?.currentPhase, "image_generating");
     assert.deepEqual((await tasks.listTaskVersions(taskId)).versions[0], version);
+    assert.deepEqual((await editor.listVersions(childId))[0], editedImage);
+    assert.deepEqual((await editor.getSourceVersion(editedImage.id))?.productInputs, normalizedProducts);
     for (const stage of stages) {
       const { rows: [template] } = await pool.query<{ stage: string }>(
         "SELECT stage FROM prompt_library.prompt_templates WHERE code=$1", [`test.${stage}`],

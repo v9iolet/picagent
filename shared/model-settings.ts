@@ -80,3 +80,35 @@ export interface ModelChannelSnapshot {
 }
 
 export const capabilityLabels = { image: "生图", vision: "多模态" } as const;
+
+export function matchNearestAspectRatio(
+  width: number,
+  height: number,
+  supportedRatios: string[],
+): string {
+  const candidates = supportedRatios
+    .map((label) => {
+      const match = /^(\d+):(\d+)$/.exec(label.trim());
+      if (!match) return null;
+      const w = Number(match[1]);
+      const h = Number(match[2]);
+      if (!w || !h) return null;
+      return { label: label.trim(), value: w / h };
+    })
+    .filter((item): item is { label: string; value: number } => Boolean(item));
+  if (candidates.length === 0) return "1:1";
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return candidates[0].label;
+  }
+  const targetLog = Math.log(width / height);
+  let best = candidates[0];
+  let bestDist = Math.abs(targetLog - Math.log(best.value));
+  for (let i = 1; i < candidates.length; i += 1) {
+    const dist = Math.abs(targetLog - Math.log(candidates[i].value));
+    if (dist < bestDist) {
+      best = candidates[i];
+      bestDist = dist;
+    }
+  }
+  return best.label;
+}
