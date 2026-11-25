@@ -19,9 +19,11 @@ interface EditProviderSnapshot extends OcrProviderSnapshot { capabilitiesVersion
 
 export interface OcrSnapshot { provider?: OcrProviderSnapshot; sourceVersionId: string; status: "succeeded" | "failed"; blocks: OcrTextBlock[]; error?: string }
 export interface OutpaintSpec {
+  direction?: "all" | "horizontal" | "vertical" | "left" | "right";
   targetRatio: OutpaintRatio;
   targetWidth: number;
   targetHeight: number;
+  anchor?: "center" | "left" | "right";
   sourceOffset: { left: number; top: number };
 }
 
@@ -484,7 +486,7 @@ export function buildImageEditPrompt(
     const modification = wrapper.includes("{{instruction}}")
       ? wrapper.replaceAll("{{instruction}}", () => instruction)
       : `${wrapper}\n${instruction}`;
-    return [template?.body ?? RE_EDIT_PROMPT_HEADER, modification].join("\n");
+    return [template?.body || RE_EDIT_PROMPT_HEADER, modification].join("\n");
   }
   if (operations[0]?.type === "change_text") return buildChangeTextPrompt(operations, template);
   const instructions = operations.map((operation, index) => {

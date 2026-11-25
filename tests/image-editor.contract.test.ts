@@ -330,6 +330,56 @@ test("outpaint adds margins when the source matches the target ratio, including 
   });
 });
 
+test("regenerate replays legacy original-ratio outpaint with its frozen prompt and unpadded source", { timeout: 5000 }, async () => {
+  const repository = new MemoryImageEditorRepository();
+  const storage = new MemoryStorage();
+  const bytes = await sharp({ create: { width: 1024, height: 1360, channels: 3, background: "white" } }).png().toBuffer();
+  const legacySource = { ...source, bytes, width: 1024, height: 1360 };
+  const originalOperation = { ...operation("outpaint"), payload: {
+    direction: "all", targetRatio: "original", targetWidth: 1024, targetHeight: 1360, anchor: "center",
+  } };
+  const command: ImageEditCommand = {
+    type: "outpaint", sourceVersionId: "version-1", prompt: "向四周扩展画面至原比例", operations: [originalOperation], maskApplied: false,
+  };
+  const providerSnapshot = { name: "fake-image-editor", version: "1", capabilitiesVersion: "1" };
+  const createdAt = new Date().toISOString();
+  const snapshot = {
+    id: "legacy-snapshot", sourceCardId: "parent", sourceVersionId: "version-1", parentVersionId: "version-1",
+    summary: originalOperation.summary, sourcePrompt: "来源版本的生成提示词", operations: command.operations, maskApplied: false,
+    provider: providerSnapshot, createdAt, schemaVersion: "image-edit-snapshot-v1" as const,
+  };
+  const childTask = {
+    id: "legacy-child", sourceCardId: "parent", sourceVersionId: "version-1", parentVersionId: "version-1",
+    summary: snapshot.summary, snapshotId: snapshot.id, status: "generating" as const, currentVersionId: null, finalVersionId: null,
+    errorCode: null, errorMessage: null, createdAt, updatedAt: createdAt,
+  };
+  await repository.submit({ idempotencyKey: "legacy-first", snapshot, childTask, attempt: {
+    id: "legacy-attempt", childTaskId: childTask.id, snapshotId: snapshot.id, attemptNo: 1, status: "generating",
+    command, provider: providerSnapshot, errorCode: null, errorMessage: null, createdAt, completedAt: null,
+  } });
+  await repository.completeAttempt({
+    attemptId: "legacy-attempt", objectKey: "legacy-result", sha256: "legacy-hash", width: 1024, height: 1360, mimeType: "image/png", completedAt: createdAt,
+  });
+
+  const requested = Promise.withResolvers<ImageEditRequest>();
+  const service = new ImageEditorService(repository, provider({
+    edit: (replayed, input) => requestImageEditorEdit({
+      async edit(request) {
+        requested.resolve(request);
+        return { bytes, mimeType: "image/png" };
+      },
+    }, storage, "gpt-image-2", defaultImageOptions("gpt-image-2"), replayed, input),
+  }), storage, async () => legacySource);
+  const replay = await service.regenerate({ childTaskId: childTask.id, idempotencyKey: "legacy-replay" });
+  assert.equal(replay.attempt.snapshotId, snapshot.id);
+  assert.deepEqual(replay.attempt.command.operations, [originalOperation]);
+  const request = await requested.promise;
+  assert.equal(request.prompt, command.prompt);
+  assert.equal(request.size, "1024x1360");
+  assert.deepEqual(request.image, bytes);
+  assert.equal(Object.hasOwn(request, "mask"), false);
+});
+
 test("regenerate replays the frozen redraw prompt, source, fallback and attached inputs on the same child task", async () => {
   const repository = new MemoryImageEditorRepository();
   const storage = new MemoryStorage();
@@ -441,6 +491,22 @@ test("AI editing uses the frozen prompt for missing or blank input and wraps onl
   assert.match(prompt, /^严格保持待编辑图中未指定修改的商品主体外观/);
   assert.equal(prompt.slice(prompt.indexOf("\n") + 1), `只执行以下修改：${instruction}`);
   assert.ok(!prompt.includes(frozen));
+  assert.equal(buildImageEditPrompt([{ ...operation(), payload: { prompt: instruction } }], frozen, {
+    body: "", userPromptTemplate: "",
+  }), prompt);
+});
+
+test("AI editing rejects a non-string prompt before creating a child task", async () => {
+  const repository = new MemoryImageEditorRepository();
+  const service = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source);
+  await service.upsertOperation({ sessionId: "session", operation: { ...operation(), payload: { prompt: 42 } } });
+  const response = await createImageEditorApi(service).request("POST", "/api/image-editor/sessions/session/submit", {
+    headers: { "idempotency-key": "invalid-prompt" },
+    body: { sourceCardId: "parent", sourceVersionId: "version-1", tool: "re_edit" },
+  });
+  assert.equal(response.status, 409);
+  assert.equal((response.body as { error: { code: string } }).error.code, "RE_EDIT_PROMPT_INVALID");
+  assert.deepEqual(await repository.listChildTasks(), []);
 });
 
 test("regenerate reads a legacy re_edit snapshot and replays its original command", async () => {

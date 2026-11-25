@@ -1486,6 +1486,31 @@ test("048 publishes the three fallback prompts and preserves user-published vers
   });
 });
 
+test("048 replays after the original fallback templates are republished through the API", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const app = createSuiteStudioApp({ repository: new PostgresSuiteRepository(pool), storage: new MemoryStorage(), promptRepository: prompts });
+    const fallbackCodes = ["image-editor.redraw", "image-editor.erase", "image-editor.outpaint"];
+    const active = (await prompts.listPublished("task_image")).filter(({ code }) => fallbackCodes.includes(code));
+    assert.equal(active.length, fallbackCodes.length);
+    const originals = [];
+    for (const current of active) {
+      const [original] = await prompts.listVersions(current.templateId);
+      assert.equal(original.status, "retired");
+      const response = await app.request("POST", `/api/prompt-templates/${original.templateVersionId}/publish`);
+      assert.equal(response.status, 200);
+      originals.push(original);
+    }
+
+    await runMigrations(pool);
+    for (const original of originals) {
+      assert.ok(await prompts.getPublishedVersion(original.templateVersionId, "task_image"));
+      const history = await prompts.listVersions(original.templateId);
+      assert.deepEqual(history.map(({ versionNo, status }) => [versionNo, status]), [[1, "published"], [2, "retired"]]);
+    }
+  });
+});
+
 test("044 preserves the published product restoration template v2 on migration replay", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);

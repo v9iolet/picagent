@@ -1303,7 +1303,7 @@ export function ImageEditorModal({
     inpaint: ["保持商品本体轮廓与颜色严格不变", "替换为极简柔和影棚光影", "增强材质高光与真实质感", "补充柔和自然桌面接触阴影"],
     erase: ["无痕移除杂物与水印，自然延续周围纹理", "清除多余瑕疵与反光斑点，保持原光影"],
     add_text: ["现代无衬线商业排版，清晰高对比，与画面光影融合", "极简高端品牌副标题排版，居中对齐"],
-    re_edit: ["严格保持商品外观与比例不变，仅优化整体商业光影质感", "提升画面明暗层次与电商点击吸引力"],
+    re_edit: ["优化整体商业光影质感", "提升画面明暗层次与电商点击吸引力"],
   };
   const appendQuickDirective = (phrase: string) => {
     const append = (prev: string) => (prev.trim() ? `${prev.trim()}；${phrase}` : phrase);

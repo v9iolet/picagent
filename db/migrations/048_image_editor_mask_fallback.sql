@@ -14,6 +14,10 @@ BEGIN
     JOIN prompt_library.prompt_template_versions v ON v.id = t.published_version_id
     WHERE t.lifecycle_status = 'active' AND v.status = 'published'
       AND v.version_no = 1 AND v.source_file = 'db/migrations/042_image_editor_submission.sql'
+      AND NOT EXISTS (
+        SELECT 1 FROM prompt_library.prompt_template_versions v2
+        WHERE v2.template_id = t.id AND v2.source_file = 'db/migrations/048_image_editor_mask_fallback.sql'
+      )
     FOR UPDATE OF t, v
   LOOP
     next_version_id := gen_random_uuid();
