@@ -720,6 +720,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     const resolvedCards = resolveDeliverySlots(taskAggregates, imageEditChildren, {
       defaultTemplateVersionId: snapshot?.templateVersionId ?? null,
       preferLatestByTime: isReplica || isAplus,
+      currentVersionsOnly: isAplus,
     });
     const [replicaReferences, replicaProducts] = isReplica && deps.replicaRepository
       ? await Promise.all([
@@ -784,7 +785,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
               errorCode: latestAttempt?.status === "failed" ? latestAttempt.errorCode : null,
               errorMessage: latestAttempt?.status === "failed" ? latestAttempt.errorMessage : null,
             };
-          })
+          }).sort((a, b) => (a.sortOrder ?? a.slotIndex) - (b.sortOrder ?? b.slotIndex))
         : resolvedCards;
     let pipeline = latestPipeline;
     if (

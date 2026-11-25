@@ -2,6 +2,7 @@ import { planSnapshotView, isStructurePlanV2, taskView, taskAttemptView, taskSlo
 import { createSuitePipeline } from "./suite-pipeline.js";
 import { createAplusPlanningApi } from "./aplus/aplus-planning-api.js";
 import { createAplusGenerationApi } from "./aplus/aplus-generation-api.js";
+import { createAplusResultsApi } from "./aplus/aplus-results-api.js";
 import { storeAplusDelivery } from "./aplus/aplus-image.js";
 import { APLUS_ADDITIONAL_PROMPT_MAX_LENGTH } from "../shared/aplus.js";
 import { fail, errorMessages } from "./api-errors.js";
@@ -46,6 +47,7 @@ import {
   type DeliveryExportPresetId,
 } from "../shared/workbench-delivery.js";
 import { createZipBuffer } from "./zip.js";
+import { composeVerticalImages } from "./delivery-image.js";
 import type { ImageEditorApiResponse } from "./image-editor-api.js";
 import { declareImageEditInputs, imageEditProductInputs, type ImageEditVersionCompletedListener } from "./image-editor.js";
 import type {
@@ -1081,6 +1083,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     resolveImageOptions: async () => (await resolveImage()).imageOptions,
     createBatch: (suiteId, tasks, key) => createTaskBatch(suiteId, tasks, "batch", key),
   });
+  const aplusResults = createAplusResultsApi({
+    repository: deps.repository, tasks: deps.taskRepository, storage: deps.storage,
+    getStudioState: (suiteId) => pipeline.getStudioState(suiteId, "aplus"),
+  });
 
   async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
     if (/^\/api\/listing-copies(?:[/?]|$)/.test(path)) return listing.request(method, path, options.body);
@@ -1155,6 +1161,14 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (method === "POST" && action === "replan") return aplusPlanning.start(idempotencyKey, options.body, suiteId);
       if (method === "POST" && action === "confirm") return aplusGeneration.confirm(suiteId, options.body, idempotencyKey);
       if (method === "POST" && action === "resume") return aplusGeneration.resume(suiteId, idempotencyKey);
+    }
+    const aplusResultMatch = path.match(/^\/api\/aplus\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/(order|long-image|export)(?:\?(.*))?$/i);
+    if (aplusResultMatch) {
+      const [, suiteId, action, query] = aplusResultMatch;
+      if (method === "PATCH" && action === "order") return aplusResults.reorder(suiteId, options.body);
+      if (method === "GET" && (action === "long-image" || action === "export")) {
+        return aplusResults.exportResult(suiteId, action, new URLSearchParams(query).get("preset"));
+      }
     }
 
     if (method === "POST" && path === "/api/replicas") return replicaPipeline.createReplica(idempotencyKey, options.body);
@@ -1941,29 +1955,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       let stitchedDetailPath: string | null = null;
       if (stitchDetail && detailForStitch.length > 0) {
         const targetWidth = preset.detailWidth ?? 1200;
-        const resizedSlices = await Promise.all(
-          detailForStitch.map((sliceBytes) =>
-            sharp(sliceBytes)
-              .resize({ width: targetWidth, withoutEnlargement: false })
-              .png()
-              .toBuffer({ resolveWithObject: true }),
-          ),
-        );
-        const totalHeight = resizedSlices.reduce((sum, slice) => sum + slice.info.height, 0);
-        let top = 0;
-        const composites = resizedSlices.map((slice) => {
-          const entry = { input: slice.data, top, left: 0 };
-          top += slice.info.height;
-          return entry;
-        });
-        let stitched = sharp({
-          create: {
-            width: targetWidth,
-            height: Math.max(1, totalHeight),
-            channels: 4,
-            background: { r: 255, g: 255, b: 255, alpha: 1 },
-          },
-        }).composite(composites);
+        let stitched = await composeVerticalImages(detailForStitch, targetWidth);
         const stitchFmt: DeliveryExportFormat = formatRaw === "original" ? "png" : formatRaw;
         if (stitchFmt === "jpeg") stitched = stitched.flatten({ background: { r: 255, g: 255, b: 255 } }).jpeg({ quality, mozjpeg: true });
         else if (stitchFmt === "webp") stitched = stitched.webp({ quality });

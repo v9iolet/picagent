@@ -203,7 +203,7 @@ function aplusDeliveryMetadata({ generatedSize, deliverySize, deliveryObjectKey 
 export function resolveDeliverySlots(
   tasks: DeliveryTaskLike[],
   imageEditChildren: DeliveryEditChildLike[] = [],
-  options: { defaultTemplateVersionId?: string | null; preferLatestByTime?: boolean } = {},
+  options: { defaultTemplateVersionId?: string | null; preferLatestByTime?: boolean; currentVersionsOnly?: boolean } = {},
 ): ResolvedDeliverySlot[] {
   const activeTasks = tasks
     .filter((task) => task.status !== "archived")
@@ -256,7 +256,7 @@ export function resolveDeliverySlots(
       return String(b.task.id ?? "").localeCompare(String(a.task.id ?? ""));
     });
 
-    const editFinalCandidate = children
+    const editFinalCandidate = options.currentVersionsOnly ? undefined : children
       .map((child) => {
         const finalId = typeof child.task.finalVersionId === "string" ? child.task.finalVersionId : null;
         if (!finalId) return null;
@@ -265,7 +265,7 @@ export function resolveDeliverySlots(
       })
       .find((entry): entry is { child: DeliveryEditChildLike; version: DeliveryEditChildLike["versions"][number] } => Boolean(entry));
 
-    const parentFinal = task.versions.find((version) => version.isFinal) ?? null;
+    const parentFinal = options.currentVersionsOnly ? null : task.versions.find((version) => version.isFinal) ?? null;
 
     const editCurrentCandidates = children
       .map((child) => {

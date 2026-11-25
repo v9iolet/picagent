@@ -8,7 +8,7 @@ import sharp from "sharp";
 import { createServer } from "vite";
 import { createSuiteStudioApp } from "../server/app.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
-import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
+import { imageEditProductInputs, ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { dispatchInputImageUpload } from "../server/multipart.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { MemoryPlatformRepository } from "../server/repositories/memory-platform-repository.js";
@@ -17,6 +17,7 @@ import { MemoryPromptRepository } from "../server/repositories/memory-prompt-rep
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
+import { readZipEntries } from "../server/zip.js";
 import { APLUS_MODULES } from "../shared/aplus.js";
 import { emptyProductCardFields } from "../shared/product-card.js";
 
@@ -50,19 +51,37 @@ async function startOfflineAplus(t) {
     mainImageBackground: "flexible", mainImageStrategy: "", galleryStrategy: "",
     textStrategy: "", modelStrategy: "", sourceNote: "",
   };
-  const output = await sharp({ create: { width: 120, height: 80, channels: 3, background: "navy" } }).png().toBuffer();
+  const dimensions = { width: 120, height: 80 };
+  const solid = (background) => sharp({ create: { ...dimensions, channels: 3, background } }).png().toBuffer();
+  const [hero, usage, restored] = await Promise.all(["navy", "red", "lime"].map(solid));
   let planningInput = null;
   let nextPlan = 0;
   const confirmations = [];
   const imageCalls = [];
+  const editorCalls = [];
   const storage = new MemoryStorage();
+  const suites = new MemorySuiteRepository();
   const editor = new ImageEditorService(new MemoryImageEditorRepository(), {
     name: "fake-editor", version: "1", capabilitiesVersion: "1",
     capabilities: () => ({ imageToImage: true, addText: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
-    edit: async () => ({ bytes: output, mimeType: "image/png", width: 120, height: 80 }),
-  }, storage);
+    edit: async (command) => {
+      editorCalls.push(command);
+      return { bytes: restored, mimeType: "image/png", ...dimensions };
+    },
+  }, storage, async (versionId) => {
+    for (const suite of await suites.listSuites()) {
+      for (const task of await studioTasks.listTasks(suite.id)) {
+        const { versions } = await studioTasks.listTaskVersions(task.id);
+        const version = versions.find(({ id }) => id === versionId);
+        if (!version) continue;
+        const image = await storage.get(version.objectKey);
+        return { bytes: image.bytes, mimeType: image.contentType, ...dimensions, productInputs: imageEditProductInputs(version.contextSnapshot.inputImages) };
+      }
+    }
+    return null;
+  });
   const app = createSuiteStudioApp({
-    repository: new MemorySuiteRepository(), storage, productCardRepository: cards,
+    repository: suites, storage, productCardRepository: cards,
     imageEditorApi: createImageEditorApi(editor),
     promptRepository: prompts, taskRepository: studioTasks,
     platformRepository: new MemoryPlatformRepository([
@@ -74,7 +93,7 @@ async function startOfflineAplus(t) {
       supportsMultipleImages: true,
       async edit(request) {
         imageCalls.push(request);
-        return { bytes: output, mimeType: "image/png" };
+        return { bytes: request.prompt.includes('"moduleCode": "usage_scene"') ? usage : hero, mimeType: "image/png" };
       },
     },
     llmClient: {
@@ -133,11 +152,15 @@ async function startOfflineAplus(t) {
   });
   await vite.listen();
   t.after(() => vite.close());
-  return { baseUrl: vite.resolvedUrls.local[0], app, card, confirmations, imageCalls };
+  return { baseUrl: vite.resolvedUrls.local[0], app, card, confirmations, imageCalls, editorCalls };
+}
+
+async function firstPixel(bytes) {
+  return [...await sharp(bytes).extract({ left: 0, top: 0, width: 1, height: 1 }).removeAlpha().raw().toBuffer()];
 }
 
 test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批次", async (t) => {
-  const { baseUrl, card, confirmations, imageCalls } = await startOfflineAplus(t);
+  const { baseUrl, card, confirmations, imageCalls, editorCalls } = await startOfflineAplus(t);
   const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
@@ -236,6 +259,50 @@ test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批�
   await editor.waitFor();
   await editor.getByRole("button", { name: "关闭图片编辑器" }).click();
 
+  const web = groups.first();
+  const mobile = groups.nth(1);
+  const batchId = new URL(firstUrl).searchParams.get("suite");
+  async function readLongPreview() {
+    const imageResponse = page.waitForResponse((response) => response.url().includes("/long-image?preset=aplus_premium_web"));
+    await web.getByRole("button", { name: "预览详情长图" }).click();
+    const dialog = page.getByRole("dialog", { name: /Web 端.*详情长图/ });
+    await dialog.getByRole("img", { name: "详情长图" }).waitFor();
+    const response = await imageResponse;
+    assert.equal(response.status(), 200);
+    const bytes = await response.body();
+    await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+    return bytes;
+  }
+
+  assert.deepEqual(await firstPixel(await readLongPreview()), [255, 0, 0]);
+  await web.getByRole("img", { name: "拖动排序 首屏主视觉" }).dragTo(web.locator("article").first());
+  await web.locator("article").first().getByText("首屏主视觉", { exact: true }).waitFor();
+  assert.deepEqual(await mobile.locator(".aplus-card-body strong").allTextContents(), ["首屏主视觉", "使用场景图"]);
+  assert.deepEqual(await firstPixel(await readLongPreview()), [0, 0, 128]);
+  const [longDownload] = await Promise.all([
+    page.waitForEvent("download"), web.getByRole("button", { name: "下载详情长图" }).click(),
+  ]);
+  const longMetadata = await sharp(await longDownload.path()).metadata();
+  assert.deepEqual([longMetadata.width, longMetadata.height], [1464, 1200]);
+
+  await web.getByRole("button", { name: "商品还原", exact: true }).first().click();
+  await editor.getByRole("group", { name: "商品外观依据" }).waitFor();
+  assert.equal(await editor.getByRole("radio", { name: "使用全部商品原图" }).isChecked(), true);
+  await editor.getByRole("radio", { name: "原图 1" }).waitFor();
+  await editor.getByRole("button", { name: "还原商品", exact: true }).click();
+  await editor.waitFor({ state: "hidden" });
+  const restoredCard = web.locator("article").first();
+  await restoredCard.locator('img[src^="/api/image-editor/tasks/"][src$="/preview/delivery"]').waitFor();
+  assert.equal(editorCalls[0].type, "restore_product");
+  assert.deepEqual(editorCalls[0].attachedInputs.map(({ role }) => role), ["product"]);
+  assert.deepEqual(await firstPixel(await readLongPreview()), [0, 255, 0]);
+
+  const [zipDownload] = await Promise.all([page.waitForEvent("download"), button("下载 ZIP").click()]);
+  const zip = readZipEntries(await readFile(await zipDownload.path()));
+  assert.equal(zip.size, 7);
+  assert.deepEqual(await firstPixel(zip.get("aplus_premium_web/01_hero.png")), [0, 255, 0]);
+  assert.deepEqual(await firstPixel(zip.get("aplus_premium_mobile/01_hero.png")), [0, 0, 128]);
+
   await button("改名").click();
   await page.getByLabel("任务名").fill("通勤随行杯 A+");
   await button("保存").click();
@@ -266,7 +333,7 @@ test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批�
   await button("确认删除").click();
   await page.getByText("已完成 · 3 张", { exact: true }).waitFor();
 
-  await page.goto(url(`/create/canvas/${new URL(firstUrl).searchParams.get("suite")}`));
+  await page.goto(url(`/create/canvas/${batchId}`));
   await page.getByText("A+详情批次暂不支持在生图画布中打开。").waitFor();
   assert.deepEqual(errors, []);
 });

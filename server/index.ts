@@ -84,7 +84,7 @@ const resolveImageSource = async (versionId: string): Promise<ImageSource | null
   const object = await storage.get(version.objectKey);
   if (!object) return null;
   const { width, height } = await sharp(object.bytes).metadata();
-  return { bytes: object.bytes, mimeType: version.mimeType, width, height, generationPrompt: version.generationPrompt, productInputs: version.productInputs };
+  return { ...version, bytes: object.bytes, width, height };
 };
 const imageEditorApi = createImageEditorApi(new ImageEditorService(
   imageEditorRepository, resolveImageEditorProvider, storage, resolveImageSource, resolveOcrProvider,

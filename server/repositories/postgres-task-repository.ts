@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import type { AplusModuleCode } from "../../shared/aplus.js";
 import type { CanvasLayout, CompleteTaskAttemptInput, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskPreviewVersion, TaskRepository, TaskResultSlot } from "../types.js";
 
 const taskCols = `id,suite_id AS "suiteId",plan_snapshot_id AS "planSnapshotId",plan_item_id AS "planItemId",ordinal,image_type AS "imageType",title,purpose,prompt_draft AS "promptDraft",prompt_revision AS "promptRevision",source_input_image_id AS "sourceInputImageId",generation_params_json AS "generationParams",status,archived_at AS "archivedAt",created_at AS "createdAt",updated_at AS "updatedAt",category_code AS "categoryCode",reference_image_ids_json AS "referenceImageIds",fact_refs_json AS "factRefs",global_style_card_json AS "globalStyleCard",prompt_sha256 AS "promptSha256",origin_kind AS "originKind",reverse_plan_id AS "reversePlanId",reverse_reference_id AS "reverseReferenceId",reverse_prompt_version_id AS "reversePromptVersionId",reverse_task_group_id AS "reverseTaskGroupId",replica_reference_id AS "replicaReferenceId",replica_reference_object_key AS "replicaReferenceObjectKey",source_library_reference_id AS "sourceLibraryReferenceId",source_resource_version_id AS "sourceResourceVersionId",source_revision AS "sourceRevision",module_code AS "moduleCode",size_preset AS "sizePreset",sort_order AS "sortOrder"`;
@@ -34,6 +35,27 @@ export class PostgresTaskRepository implements TaskRepository {
     } finally {
       client.release();
     }
+  }
+  async reorderAplusModules(suiteId: string, modules: AplusModuleCode[]) {
+    const result = await this.pool.query(
+      `WITH active AS MATERIALIZED (
+         SELECT id, module_code FROM suite_workbench.suite_tasks
+         WHERE suite_id = $1 AND origin_kind = 'aplus' AND status <> 'archived'
+         ORDER BY id FOR UPDATE
+       ), requested AS (
+         SELECT module_code, sort_order FROM unnest($2::text[]) WITH ORDINALITY AS m(module_code, sort_order)
+       )
+       UPDATE suite_workbench.suite_tasks AS task
+       SET sort_order = requested.sort_order, updated_at = now()
+       FROM active JOIN requested USING (module_code)
+       WHERE task.id = active.id
+         AND (SELECT count(DISTINCT module_code) FROM active) = cardinality($2::text[])
+         AND NOT EXISTS (
+           SELECT 1 FROM active LEFT JOIN requested USING (module_code) WHERE requested.module_code IS NULL
+         )`,
+      [suiteId, modules],
+    );
+    return Boolean(result.rowCount);
   }
   async createCustomTask(input: { suiteId: string; planSnapshotId: string | null; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }) {
     const client = await this.pool.connect();

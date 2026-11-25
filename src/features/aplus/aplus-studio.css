@@ -252,8 +252,28 @@
   margin-top: 20px;
 }
 
-.aplus-results-group h3 {
+.aplus-results-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-bottom: 9px;
+}
+
+.aplus-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.aplus-result-card.is-dragging {
+  opacity: 0.55;
+}
+
+.aplus-long-image img {
+  display: block;
+  width: 100%;
 }
 
 .aplus-result-grid {

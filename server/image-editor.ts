@@ -1,5 +1,5 @@
 import type { ModelChannelSnapshot } from "../shared/model-settings.js";
-import type { AplusImageSize, AplusImageVersionMetadata } from "../shared/aplus.js";
+import type { AplusImageSize, AplusImageVersionMetadata, AplusSizePresetKey } from "../shared/aplus.js";
 import { CHANGE_TEXT_MAX_LENGTH, CHANGE_TEXT_MAX_OPERATIONS, computeOutpaintCanvas, isOutpaintRatio, normalizeChangeTextReplacement, type OutpaintRatio } from "../shared/image-editor.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -157,7 +157,7 @@ export interface ImageEditProviderCapabilities {
 
 export interface ImageEditProvider extends EditProviderSnapshot {
   capabilities(): Promise<ImageEditProviderCapabilities> | ImageEditProviderCapabilities;
-  edit(command: ImageEditCommand, source: { bytes: Buffer; mimeType: string; width: number; height: number }): Promise<{ bytes: Buffer; mimeType: string; width: number; height: number }>;
+  edit(command: ImageEditCommand, source: ImageSource): Promise<{ bytes: Buffer; mimeType: string; width: number; height: number }>;
 }
 
 export interface OcrProvider extends OcrProviderSnapshot {
@@ -171,6 +171,7 @@ export interface ImageSource {
   height: number;
   generationPrompt?: string;
   productInputs?: ReadonlyArray<ImageEditAttachedInput>;
+  aplus?: { preset: AplusSizePresetKey; resolution: "1K" | "2K" };
 }
 
 async function renderMaskPng(source: Pick<ImageSource, "width" | "height">, strokes: NormalizedStroke[], feather: number) {

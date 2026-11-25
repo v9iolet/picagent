@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import type { AplusSizePresetKey } from "../../shared/aplus.js";
 import { imageEditProductInputs, removeDraftOperations, upsertDraftOperation, type CompleteImageEditAttemptInput, type EditDraft, type EditOperation, type EditSnapshot, type EditSubmissionInput, type ImageEditAttempt, type ImageEditChildTask, type ImageEditVersion, type ImageEditorRepository } from "../image-editor.js";
 
 const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -13,7 +14,10 @@ export class PostgresImageEditorRepository implements ImageEditorRepository {
   constructor(private readonly pool: Pool) {}
   async getSourceVersion(versionId: string) {
     if (!UUID_RE.test(versionId)) return null;
-    const result = await this.pool.query<{ objectKey: string; mimeType: string; generationPrompt: string; inputImages: unknown }>(
+    const result = await this.pool.query<{
+      objectKey: string; mimeType: string; generationPrompt: string; inputImages: unknown;
+      aplusPreset: AplusSizePresetKey | null; resolution: string | null;
+    }>(
       `WITH RECURSIVE edit_lineage(id) AS (
          SELECT $1::uuid
          UNION
@@ -51,12 +55,18 @@ export class PostgresImageEditorRepository implements ImageEditorRepository {
          FROM suite_workbench.task_image_versions
          WHERE id = $1
        )
-       SELECT source.*, (SELECT context_snapshot_json->'inputImages' FROM task_lineage ORDER BY depth DESC LIMIT 1) AS "inputImages"
-       FROM source`, [versionId, UUID_RE.source],
+       SELECT source.*, root.context_snapshot_json->'inputImages' AS "inputImages",
+              t.size_preset AS "aplusPreset", t.generation_params_json->>'size' AS resolution
+       FROM source
+       LEFT JOIN (SELECT * FROM task_lineage ORDER BY depth DESC LIMIT 1) root ON true
+       LEFT JOIN suite_workbench.suite_tasks t ON t.id = root.task_id AND t.origin_kind = 'aplus'`, [versionId, UUID_RE.source],
     );
     if (!result.rows.length) return null;
-    const { inputImages, ...source } = result.rows[0];
-    return { ...source, productInputs: imageEditProductInputs(inputImages) };
+    const { inputImages, aplusPreset, resolution, ...source } = result.rows[0];
+    return {
+      ...source, productInputs: imageEditProductInputs(inputImages),
+      ...(aplusPreset ? { aplus: { preset: aplusPreset, resolution: resolution === "2K" ? "2K" as const : "1K" as const } } : {}),
+    };
   }
   async validateSource(sourceCardId: string, sourceVersionId: string) {
     if (!UUID_RE.test(sourceVersionId)) throw new Error("SOURCE_VERSION_NOT_FOUND");

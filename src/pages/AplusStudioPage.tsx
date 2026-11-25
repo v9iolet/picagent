@@ -512,6 +512,7 @@ function AplusWorkspace({
           {state && state.cards.length > 0 && (
             <AplusResultCards
               suiteId={state.suite.id}
+              suiteName={state.suite.name}
               cards={state.cards}
               sizes={batchSizes}
               disabled={busy}
