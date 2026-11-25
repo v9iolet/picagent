@@ -917,9 +917,16 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
   });
 });
 
-test("043 publishes all A+ templates at v1, matches Markdown imports and preserves later publishes on replay", { skip }, async () => {
+test("043 and 050 publish A+ templates matching Markdown imports and preserve later publishes on replay", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);
+    const tunedCodes = new Set([
+      "aplus.plan", "aplus.image",
+      "aplus.module.accessories", "aplus.module.brand_story", "aplus.module.comparison",
+      "aplus.module.craftsmanship", "aplus.module.detail_closeup", "aplus.module.hero",
+      "aplus.module.ingredients", "aplus.module.multi_angle", "aplus.module.selling_points",
+      "aplus.module.spec_table", "aplus.module.usage_scene",
+    ]);
     const singleStages = [
       { stage: "aplus_plan", file: "aplus-plan.md" },
       { stage: "aplus_image", file: "aplus-image.md" },
@@ -940,7 +947,8 @@ test("043 publishes all A+ templates at v1, matches Markdown imports and preserv
       assert.ok(template, file);
       const sourceFile = `prompt/normalized/${file}`;
       const record = parseNormalizedPromptMarkdown(await readFile(sourceFile, "utf8"), sourceFile);
-      assert.deepEqual(template, { ...record, status: "published", versionNo: 1, usedBy: template.usedBy });
+      const versionNo = tunedCodes.has(record.code) ? 2 : 1;
+      assert.deepEqual(template, { ...record, status: "published", versionNo, usedBy: template.usedBy });
       assert.ok(template.usedBy?.length, file);
       return record;
     }));
@@ -950,7 +958,10 @@ test("043 publishes all A+ templates at v1, matches Markdown imports and preserv
       assert.deepEqual(reimported, published.map(({ template }) => template));
     }
     for (const record of records) {
-      assert.deepEqual((await prompts.listVersions(record.templateId)).map(({ versionNo }) => versionNo), [1]);
+      const versions = await prompts.listVersions(record.templateId);
+      assert.deepEqual(versions.map(({ versionNo, status }) => [versionNo, status]), tunedCodes.has(record.code)
+        ? [[1, "retired"], [2, "published"]]
+        : [[1, "published"]]);
     }
 
     const plan = await resolveAplusPromptTemplate(prompts, "aplus_plan");
