@@ -227,7 +227,7 @@ test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-
   await page.locator('.pa-rail-item.is-active[href="/"]').waitFor({ state: "visible" });
   assert.equal(await page.locator(".pa-brand").getAttribute("href"), "/");
 
-  // Verify de-AI-ified hero heading, InfoTip popover, 4 compact quick entry pills, and no drafts tab when N=0
+  // Verify de-AI-ified hero heading, InfoTip popover, 5 compact quick entry pills, and no drafts tab when N=0
   await page.getByRole("heading", { name: "新品信息建档", exact: true }).waitFor({ state: "visible" });
   assert.equal(await page.locator(".home-hero-badge").count(), 0, "Legacy ✨ badge must be removed");
   assert.equal(await page.locator(".home-empty-box").count(), 0, "Legacy dashed empty box must be removed");
@@ -237,7 +237,7 @@ test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-
     "Drafts tab must be hidden when draft count is 0",
   );
   const quickEntryTitles = await page.locator(".home-quick-pill .home-quick-left span").allInnerTexts();
-  assert.deepEqual(quickEntryTitles, ["商品套图", "爆品图复刻", "生图画布", "商品库"]);
+  assert.deepEqual(quickEntryTitles, ["商品套图", "爆品图复刻", "生成 A+", "生图画布", "商品库"]);
 
   // Verify Home InfoTip opens on click and closes on Escape
   const homeInfoBtn = page.getByRole("button", { name: "建档说明" });
@@ -482,13 +482,15 @@ test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-
   assert.equal(await cardPane.locator(`#onboarding-${sessionId}-name`).inputValue(), "星河真空保温随行杯 500ml（旗舰版）");
   assert.equal(await publishBtn.isDisabled(), false, "Publish button must be enabled when all 6 required fields are filled");
 
-  // 7. Click "保存到商品库" -> transitions to completed read-only state + success banner with 4 actions
+  // 7. Click "保存到商品库" -> transitions to completed read-only state + success banner with 5 actions
   await publishBtn.click();
   const completedBanner = page.locator('[data-testid="onboarding-completed-banner"]');
   await completedBanner.waitFor({ state: "visible" });
   assert.match(await completedBanner.innerText(), /星河真空保温随行杯 500ml（旗舰版）/);
   await completedBanner.getByRole("button", { name: "去生成商品套图" }).waitFor({ state: "visible" });
   await completedBanner.getByRole("button", { name: "去爆品图复刻" }).waitFor({ state: "visible" });
+  const completedAplus = completedBanner.getByRole("button", { name: "生成 A+", exact: true });
+  await completedAplus.waitFor({ state: "visible" });
   await completedBanner.getByRole("button", { name: "在商品库查看" }).waitFor({ state: "visible" });
   await completedBanner.getByRole("button", { name: "继续录入新品" }).waitFor({ state: "visible" });
 
@@ -508,6 +510,11 @@ test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-
   const productCardId = sessionRes.body.data.productCardId;
   assert.ok(productCardId, "Completed session should have productCardId");
 
+  const aplusUrl = new URL(`/create/aplus?productCardId=${encodeURIComponent(productCardId)}`, baseUrl).href;
+  await completedAplus.click();
+  await page.waitForURL(aplusUrl);
+  await page.goBack();
+
   // Verify quick jump to Suite Studio carries ?productCardId=<id>
   await completedBanner.getByRole("button", { name: "去生成商品套图" }).click();
   await page.waitForFunction(
@@ -526,6 +533,12 @@ test("HomePage Agent onboarding: v2 landing, unified + menu upload, InfoTip, on-
   const recentCard = page.locator(`.home-recent-card[data-recent-card-id="${productCardId}"]`);
   await recentCard.waitFor({ state: "visible" });
   assert.match(await recentCard.innerText(), /星河真空保温随行杯 500ml（旗舰版）/);
+
+  const recentAplus = recentCard.getByRole("button", { name: "生成 A+", exact: true });
+  await recentAplus.waitFor({ state: "visible" });
+  await recentAplus.click();
+  await page.waitForURL(aplusUrl);
+  await page.goBack();
 
   // Verify quick jump to Replica Studio from recent card ("去复刻")
   await recentCard.getByRole("button", { name: "去复刻", exact: true }).click();

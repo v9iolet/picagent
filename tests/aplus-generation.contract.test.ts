@@ -206,14 +206,21 @@ test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿�
   };
   const { versions: [first] } = await f.tasks.listTaskVersions(task.id);
   await assertDelivery(first);
+  const preview = `/api/suite-tasks/${task.id}/versions/${first.id}/preview`;
+  const generatedResponse = await f.app.request("GET", preview);
+  const deliveryResponse = await f.app.request("GET", `${preview}/delivery`);
+  assert.deepEqual(generatedResponse.raw, (await f.storage.get(first.objectKey))?.bytes);
+  assert.deepEqual(deliveryResponse.raw, (await f.storage.get(first.deliveryObjectKey!))?.bytes);
+  checkError(await f.app.request("GET", `/api/suite-tasks/unknown/versions/${first.id}/preview/delivery`), 404, "INVALID_TASK_VERSION");
   const redrawn = await f.app.request("POST", `/api/suite-tasks/${task.id}/generation`, {
-    headers: { "idempotency-key": "redraw" }, body: { promptDraft: `${task.promptDraft}\n保留磨砂纹理` },
+    headers: { "idempotency-key": "redraw" }, body: { additionalPrompt: "保留磨砂纹理" },
   });
   data(redrawn, 202);
   const history = await waitUntil(() => f.tasks.listTaskVersions(task.id), ({ versions }) => versions.length === 2, 5000);
   const current = history.versions[0];
   assert.equal(current.isCurrent, true);
-  assert.match(f.calls.at(-1)!.prompt, /保留磨砂纹理/);
+  assert.match(f.calls.at(-1)!.prompt, /单卡人工补充：保留磨砂纹理/);
+  assert.equal((await f.tasks.getTask(task.id))?.promptDraft, task.promptDraft);
   await assertDelivery(current);
 
   let sourceCardId = task.id;
@@ -234,12 +241,38 @@ test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿�
     assert.equal(result?.task.status, "succeeded");
     const [version] = result!.versions;
     await assertDelivery(version);
+    const preview = `/api/image-editor/tasks/${childTask.id}/versions/${version.id}/preview`;
+    assert.deepEqual((await f.app.request("GET", preview)).raw, (await f.storage.get(version.objectKey))?.bytes);
+    assert.deepEqual((await f.app.request("GET", `${preview}/delivery`)).raw, (await f.storage.get(version.deliveryObjectKey!))?.bytes);
     sourceCardId = childTask.id;
     sourceVersionId = version.id;
   }
   const state = data<{ cards: Array<{ versionId: string; deliveryObjectKey: string; deliverySize: unknown }> }>(await f.app.request("GET", `${f.path}/studio-state`));
   assert.equal(state.cards[0].versionId, sourceVersionId);
   assert.deepEqual(await dimensions(f.storage, state.cards[0].deliveryObjectKey), expected);
+});
+
+test("A+ 单卡重绘拒绝非文本及超过 500 字的附加提示词", async () => {
+  const f = await fixture(["aplus_standard"]);
+  data(await f.confirm(), 202);
+  assert.equal((await f.waitForRun())?.status, "completed");
+  const [task] = await f.tasks.listTasks(f.suiteId);
+  const path = `/api/suite-tasks/${task.id}/generation`;
+  const generate = (additionalPrompt: unknown) => f.app.request("POST", path, {
+    headers: { "idempotency-key": "redraw-prompt-length" }, body: { additionalPrompt },
+  });
+
+  for (const invalid of [null, 7, {}, "细".repeat(501), " ".repeat(501)]) {
+    checkError(await generate(invalid), 400, "APLUS_INVALID_ADDITIONAL_PROMPT");
+  }
+  assert.equal(f.calls.length, modules.length);
+  assert.equal((await f.tasks.listBatches(f.suiteId)).length, 1);
+
+  const boundary = "细".repeat(500);
+  data(await generate(boundary), 202);
+  await waitUntil(() => f.tasks.listTaskVersions(task.id), ({ versions }) => versions.length === 2, 5000);
+  assert.ok(f.calls.at(-1)?.prompt.includes(`单卡人工补充：${boundary}`));
+  assert.equal((await f.tasks.getTask(task.id))?.promptDraft, task.promptDraft);
 });
 
 test("通用比例沿用生成图，续跑跳过当前版本及原样保留请求尺寸", async () => {

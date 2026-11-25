@@ -258,9 +258,8 @@ test("商品套图：切到生图画布再切回自动恢复记录、展示多�
     await page.getByRole("button", { name: "一键生成套图与商品上架文案（2张）", exact: true }).click();
 
     const batch = page.getByRole("region", { name: "生成批次" });
-    await batch.locator('[data-status="running"]').waitFor();
     await batch.locator('[data-copy-status="running"]').waitFor({ timeout: 10000 });
-    assert.match(await batch.locator('[data-status="running"]').textContent(), /生成图片中/);
+    await batch.locator('[data-status="running"]').filter({ hasText: "生成图片中" }).waitFor();
     assert.equal(await batch.locator('[data-copy-status="running"]').textContent(), "生成文案中…");
 
     const progressBar = batch.getByRole("progressbar", { name: "套图生成进度" });

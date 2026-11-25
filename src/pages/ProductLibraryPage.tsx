@@ -550,6 +550,18 @@ export function ProductLibraryPage({
                             >
                               去复刻
                             </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                navigate(
+                                  `/create/aplus?productCardId=${encodeURIComponent(item.id)}`,
+                                );
+                              }}
+                            >
+                              生成 A+
+                            </button>
                           </div>
                         )}
                       </div>
@@ -708,6 +720,17 @@ export function ProductLibraryPage({
                               }
                             >
                               去复刻
+                            </button>
+                            <button
+                              className="btn btn-sm"
+                              type="button"
+                              onClick={() =>
+                                navigate(
+                                  `/create/aplus?productCardId=${encodeURIComponent(selectedDetail.id)}`,
+                                )
+                              }
+                            >
+                              生成 A+
                             </button>
                           </>
                         ) : (

@@ -267,7 +267,7 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await page.goto(url + "reverse");
   await page.waitForURL("**/create/replica");
   const tools = page.getByRole("navigation", { name: "创作功能" });
-  assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图复刻"]);
+  assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图复刻", "A+详情"]);
   assert.equal(await tools.getByRole("link", { name: "爆品图复刻", exact: true }).getAttribute("aria-current"), "page");
 
   await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();

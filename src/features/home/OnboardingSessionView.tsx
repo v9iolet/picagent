@@ -614,6 +614,17 @@ export function OnboardingSessionView({
                         className="btn btn-sm"
                         onClick={() =>
                           navigate(
+                            `/create/aplus?productCardId=${encodeURIComponent(session.productCardId!)}`,
+                          )
+                        }
+                      >
+                        生成 A+
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() =>
+                          navigate(
                             `/products?selected=${encodeURIComponent(session.productCardId!)}`,
                           )
                         }

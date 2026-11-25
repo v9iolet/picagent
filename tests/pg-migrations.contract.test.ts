@@ -817,6 +817,20 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
     const { width, height } = await sharp(delivery.bytes).metadata();
     assert.deepEqual({ width, height }, deliverySize);
 
+    const previewTasks = [
+      { path: "/api/suite-tasks", taskId, versionId: version.id },
+      { path: "/api/image-editor/tasks", taskId: childId, versionId: editedImage.id },
+    ];
+    for (const target of previewTasks) {
+      for (const format of ["preview", "preview/delivery"]) {
+        for (const [taskId, versionId] of [["invalid", target.versionId], [target.taskId, "invalid"]]) {
+          const preview = await editorApp.request("GET", `${target.path}/${taskId}/versions/${versionId}/${format}`);
+          assert.equal(preview.status, 404);
+          assert.equal(preview.body.error.code, "INVALID_TASK_VERSION");
+        }
+      }
+    }
+
     const stages = ["aplus_plan", "aplus_module_rule", "aplus_image", "aplus_ai_write"] as const;
     for (const stage of stages) {
       const templateId = randomUUID();

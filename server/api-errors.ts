@@ -13,6 +13,7 @@ export const errorMessages: Record<string, string> = {
   APLUS_INVALID_LANGUAGE: "输出语言无效",
   APLUS_INVALID_RESOLUTION: "请选择 1K 或 2K 分辨率",
   APLUS_INVALID_PRODUCT_INFO: "商品卖点与生成要求须为 1000 字以内的文本",
+  APLUS_INVALID_ADDITIONAL_PROMPT: "附加提示词须为 500 字以内的文本",
   APLUS_PRODUCT_INFO_REQUIRED: "未选商品信息卡时，请填写商品卖点与生成要求",
   APLUS_INVALID_SIZE_PRESETS: "请选择当前平台支持的详情尺寸，仅高级 A+ 两端可同时勾选",
   APLUS_PLAN_OUTPUT_INVALID: "模型返回的 A+ 方案格式有误，请重试规划",

@@ -3,6 +3,7 @@ import { createSuitePipeline } from "./suite-pipeline.js";
 import { createAplusPlanningApi } from "./aplus/aplus-planning-api.js";
 import { createAplusGenerationApi } from "./aplus/aplus-generation-api.js";
 import { storeAplusDelivery } from "./aplus/aplus-image.js";
+import { APLUS_ADDITIONAL_PROMPT_MAX_LENGTH } from "../shared/aplus.js";
 import { fail, errorMessages } from "./api-errors.js";
 import { ok, asRecord, dataOf, type AppResponse } from "./api-response.js";
 export type { AppResponse } from "./api-response.js";
@@ -89,10 +90,16 @@ export interface SuiteStudioApp {
   upload(suiteId: string, file: UploadFile): Promise<AppResponse>;
   preview(suiteId: string, imageId: string, kind: "original" | "thumbnail"): Promise<AppResponse>;
   previewBaseVersion(suiteId: string, imageId: string, versionId: string): Promise<AppResponse>;
-  previewTaskVersion(taskId: string, versionId: string): Promise<AppResponse>;
+  previewTaskVersion(taskId: string, versionId: string, delivery?: boolean): Promise<AppResponse>;
   previewLibraryResource(resourceId: string): Promise<AppResponse>;
   previewReverseReference(planId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
   previewReplicaReference(suiteId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+export function hasValidTaskVersionIds(taskId: string, versionId: string): boolean {
+  return UUID_PATTERN.test(taskId) && UUID_PATTERN.test(versionId);
 }
 
 function extensionForImageMime(mimeType: string): string {
@@ -1109,13 +1116,16 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return fail(error instanceof Error ? error.message : "LLM_FAILED", 502);
       }
     }
-    const editVersionPreviewMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
+    const editVersionPreviewMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview(\/delivery)?$/);
     if (method === "GET" && editVersionPreviewMatch) {
+      const [, taskId, versionId, delivery] = editVersionPreviewMatch;
+      if (!hasValidTaskVersionIds(taskId, versionId)) return fail("INVALID_TASK_VERSION", 404);
       if (!deps.imageEditorApi) return fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
-      const taskRes = await deps.imageEditorApi.request("GET", `/api/image-editor/tasks/${editVersionPreviewMatch[1]}`);
-      const taskData = dataOf(taskRes) as { versions?: Array<{ id?: string; objectKey?: string }> } | null;
-      const version = taskRes.status === 200 ? taskData?.versions?.find((item) => item.id === editVersionPreviewMatch[2]) : null;
-      return version?.objectKey ? previewObject(version.objectKey, deps.storage) : fail("NOT_FOUND", 404);
+      const taskRes = await deps.imageEditorApi.request("GET", `/api/image-editor/tasks/${taskId}`);
+      const taskData = dataOf(taskRes) as { versions?: Array<{ id?: string; objectKey?: string; deliveryObjectKey?: string }> } | null;
+      const version = taskRes.status === 200 ? taskData?.versions?.find((item) => item.id === versionId) : null;
+      const objectKey = delivery ? version?.deliveryObjectKey : version?.objectKey;
+      return objectKey ? previewObject(objectKey, deps.storage) : fail("NOT_FOUND", 404);
     }
     const selectEditVersionMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/select$/);
     if (path.startsWith("/api/image-editor/")) {
@@ -1211,7 +1221,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const body = asRecord(options.body, { allowArrays: true });
       let suite = typeof body.targetSuiteId === "string" ? await deps.repository.getSuite(body.targetSuiteId) : null;
       if (typeof body.targetSuiteId === "string" && !suite) return fail("INVALID_SUITE_ID", 404);
-      if (suite?.origin === "replica") return fail("INVALID_SUITE_ORIGIN", 400, "复刻批次不支持导入画布任务");
+      if (suite?.origin === "replica" || suite?.origin === "aplus") {
+        const label = suite.origin === "aplus" ? "A+详情批次" : "复刻批次";
+        return fail("INVALID_SUITE_ORIGIN", 400, `${label}不支持导入画布任务`);
+      }
       if (!suite) suite = await deps.repository.createSuite(typeof body.name === "string" && body.name.trim() ? body.name.trim() : `爆品图反推 ${new Date().toISOString().slice(0, 10)}`, `${idempotencyKey}:suite`, "canvas");
       const taskGroupId = typeof body.taskGroupId === "string" ? body.taskGroupId : randomUUID();
       const result = await deps.taskRepository.createReverseTasks({ suiteId: suite.id, reversePlanId: plan.id, taskGroupId, mode: plan.mode, idempotencyKey, items: items.map(({ reference, prompt }) => ({ referenceId: reference.id, ordinal: reference.ordinal, filename: reference.filename, promptVersionId: prompt.id, prompt: prompt.prompt })) });
@@ -2265,6 +2278,11 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const task = await deps.taskRepository.getTask(taskGenerationMatch[1]);
       if (!task || task.status === "archived") return fail("INVALID_SUITE_TASK", 404);
       const body = asRecord(options.body, { allowArrays: true });
+      const rawAdditionalPrompt = body.additionalPrompt;
+      if (task.originKind === "aplus" && rawAdditionalPrompt !== undefined &&
+        (typeof rawAdditionalPrompt !== "string" || rawAdditionalPrompt.length > APLUS_ADDITIONAL_PROMPT_MAX_LENGTH)) {
+        return fail("APLUS_INVALID_ADDITIONAL_PROMPT", 400);
+      }
       if (typeof body.editSourceVersionId === "string") {
         try {
           const { versions } = await deps.taskRepository.listTaskVersions(task.id);
@@ -2276,13 +2294,20 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }
       if (typeof body.promptDraft === "string") await deps.taskRepository.updateTask(task.id, { promptDraft: body.promptDraft });
       const current = await deps.taskRepository.getTask(task.id);
+      if (!current || current.status === "archived") return fail("INVALID_SUITE_TASK", 404);
+      const additionalPrompt = current.originKind === "aplus" && typeof rawAdditionalPrompt === "string"
+        ? rawAdditionalPrompt.trim() : "";
+      const prompt = additionalPrompt ? `${current.promptDraft}\n\n单卡人工补充：${additionalPrompt}` : current.promptDraft;
+      const generationTask = additionalPrompt
+        ? { ...current, promptDraft: prompt, promptSha256: createHash("sha256").update(prompt).digest("hex") }
+        : current;
       try {
         const history = await deps.taskRepository.listTaskVersions(task.id);
         const currentVersion = history.versions.find((version) => version.isCurrent);
         const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);
         const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (current?.sourceRevision ?? 0);
-        const useCurrentVersionAsSource = current?.originKind !== "replica" && current?.originKind !== "aplus" && currentVersion && sourceUnchanged;
-        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, useCurrentVersionAsSource ? { [task.id]: currentVersion.id } : {});
+        const useCurrentVersionAsSource = current.originKind !== "replica" && current.originKind !== "aplus" && currentVersion && sourceUnchanged;
+        const result = await createTaskBatch(task.suiteId, [generationTask], "single", idempotencyKey, undefined, useCurrentVersionAsSource ? { [task.id]: currentVersion.id } : {});
         return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
       }
       catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
@@ -2326,8 +2351,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }
       return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
     }
-    const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
-    if (method === "GET" && taskPreviewMatch) return await previewTaskVersion(taskPreviewMatch[1], taskPreviewMatch[2]);
+    const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview(\/delivery)?$/);
+    if (method === "GET" && taskPreviewMatch) return await previewTaskVersion(taskPreviewMatch[1], taskPreviewMatch[2], Boolean(taskPreviewMatch[3]));
 
     const removeImageMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)$/);
     if (method === "DELETE" && removeImageMatch) {
@@ -2562,11 +2587,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     return previewObject(version.objectKey, deps.storage);
   };
 
-  const previewTaskVersion = async (taskId: string, versionId: string) => {
+  const previewTaskVersion = async (taskId: string, versionId: string, delivery = false) => {
+    if (!hasValidTaskVersionIds(taskId, versionId)) return fail("INVALID_TASK_VERSION", 404);
     if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
     const history = await deps.taskRepository.listTaskVersions(taskId);
     const version = history.versions.find((item) => item.id === versionId);
-    return version ? previewObject(version.objectKey, deps.storage) : fail("INVALID_TASK_VERSION", 404);
+    const objectKey = delivery ? version?.deliveryObjectKey : version?.objectKey;
+    return objectKey ? previewObject(objectKey, deps.storage) : fail("INVALID_TASK_VERSION", 404);
   };
 
   const previewLibraryResource = async (resourceId: string) => {

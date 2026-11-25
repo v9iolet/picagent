@@ -1881,7 +1881,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
   }, [selectedNodeId, canvasFilter, mode, rebuildGraph]);
 
   useEffect(() => {
-    if (workbench?.suite.origin === "replica") return;
+    if (workbench?.suite.origin === "replica" || workbench?.suite.origin === "aplus") return;
     const ordinaryTaskRunning = workbench?.tasks.some((task) => task.status === "generating");
     const editChildRunning = workbench?.imageEditChildren?.some((child) => String(child.task.status) === "generating");
     if (!ordinaryTaskRunning && !editChildRunning) return;
@@ -2096,10 +2096,11 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     );
   }
 
-  if (workbench.suite.origin === "replica") {
+  if (workbench.suite.origin === "replica" || workbench.suite.origin === "aplus") {
+    const batchLabel = workbench.suite.origin === "aplus" ? "A+详情批次" : "复刻批次";
     return (
-      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "生图画布", to: "/create/canvas" }]} statusText="复刻批次暂不支持画布模式" statusTone="error">
-        <div className="flow-loading">复刻批次暂不支持在生图画布中打开。<button type="button" className="pa-topbar-btn" onClick={() => navigate("/create/canvas")}>返回画布列表</button></div>
+      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "生图画布", to: "/create/canvas" }]} statusText={`${batchLabel}暂不支持画布模式`} statusTone="error">
+        <div className="flow-loading">{batchLabel}暂不支持在生图画布中打开。<button type="button" className="pa-topbar-btn" onClick={() => navigate("/create/canvas")}>返回画布列表</button></div>
       </AppShell>
     );
   }

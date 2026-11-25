@@ -22,6 +22,7 @@ import {
 const QUICK_ENTRIES = [
   { key: "suite", title: "商品套图", to: "/create/suite", icon: "grid" },
   { key: "replica", title: "爆品图复刻", to: "/create/replica", icon: "compare" },
+  { key: "aplus", title: "生成 A+", to: "/create/aplus", icon: "layers" },
   { key: "canvas", title: "生图画布", to: "/create/canvas", icon: "columns" },
   { key: "products", title: "商品库", to: "/products", icon: "box" },
 ] as const;
@@ -343,6 +344,15 @@ export function HomeLandingView({
                           }
                         >
                           去复刻
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() =>
+                            navigate(`/create/aplus?productCardId=${encodeURIComponent(card.id)}`)
+                          }
+                        >
+                          生成 A+
                         </button>
                       </div>
                     </div>

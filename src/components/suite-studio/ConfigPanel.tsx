@@ -14,7 +14,7 @@ import { Icon } from "../../pages/shared";
 import { ProductCardPickerModal } from "../product-card-picker/ProductCardPickerModal";
 import { SelectedProductCardBar } from "../product-card-picker/SelectedProductCardBar";
 import { toSelectedProductCardSummary } from "../product-card-picker/types";
-import { ProductImageGuideTip } from "../product-image-guide/ProductImageGuideTip";
+import { StudioProductImageUpload } from "./StudioProductImageUpload";
 import { InfoTip } from "../ui/InfoTip";
 import { totalImages, type Config } from "./studio";
 import { SellingPointLayoutModal } from "./SellingPointLayoutModal";
@@ -53,7 +53,6 @@ export function ConfigPanel({
   remove,
   generate,
 }: Props) {
-  const [drag, setDrag] = useState(false);
   const [showLayouts, setShowLayouts] = useState(false);
   const [showProductCardPicker, setShowProductCardPicker] = useState(false);
   const platformSelectId = useId();
@@ -91,55 +90,7 @@ export function ConfigPanel({
       <fieldset className="ss-scroll" disabled={busy}>
         <div className="ss-eyebrow">SUITE STUDIO</div>
         <h1>商品套图</h1>
-        <section>
-          <div className="pig-heading-row">
-            <div className="pig-heading-left">
-              <h2>商品原图</h2>
-              <ProductImageGuideTip label="商品原图上传说明" />
-            </div>
-            <small>{images.length} / 6</small>
-          </div>
-          <div
-            className={"ss-upload" + (drag ? " dragging" : "")}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDrag(true);
-            }}
-            onDragLeave={() => setDrag(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDrag(false);
-              if (canUpload && !busy) upload(Array.from(e.dataTransfer.files));
-            }}
-          >
-            {images.map((im) => (
-              <div className="ss-thumb" key={im.id}>
-                <img alt={im.originalFilename} src={im.thumbnailPreviewUrl} />
-                <button type="button" aria-label={"移除 " + im.originalFilename} onClick={() => remove(im)}>
-                  ×
-                </button>
-              </div>
-            ))}
-            {images.length < 6 && canUpload && (
-              <label className="ss-add">
-                <b>＋</b>上传原图
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  aria-label="上传商品原图"
-                  multiple
-                  onChange={(e) => {
-                    upload(Array.from(e.target.files ?? []));
-                    e.target.value = "";
-                  }}
-                />
-              </label>
-            )}
-          </div>
-          {!canUpload && (
-            <small>当前为历史批次原图；可移除后按所选原图生成新批次。</small>
-          )}
-        </section>
+        <StudioProductImageUpload images={images} busy={busy} canUpload={canUpload} upload={upload} remove={remove} />
         <section>
           <h2>生成设置</h2>
           <div className="ss-fields">

@@ -19,6 +19,10 @@ export const stageLabel = (stage: ApiLibraryResource["stage"]) => ({
   listing_copy: "上架文案",
   replica_prompt: "爆品图复刻",
   product_onboarding: "商品建档",
+  aplus_plan: "A+ 方案规划",
+  aplus_module_rule: "A+ 模块规则",
+  aplus_image: "A+ 图像包装",
+  aplus_ai_write: "A+ AI 帮写",
 } as Record<string, string>)[stage ?? ""] ?? "工作台资源";
 
 export const sourceOriginLabel = (resource: ApiLibraryResource) => {
