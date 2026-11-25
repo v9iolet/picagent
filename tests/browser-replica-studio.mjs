@@ -474,9 +474,9 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await editorDialog.waitFor();
   assert.equal(new URL(page.url()).pathname, "/create/replica");
   assert.equal(new URL(page.url()).searchParams.get("suite"), suiteId);
-  await editorDialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
+  await editorDialog.locator(".wb-editor-tools button", { hasText: "编辑文字" }).click();
   await editorDialog.getByRole("button", { name: /快充随行/ }).waitFor();
-  await editorDialog.getByLabel("新文字").fill("极速快充");
+  await editorDialog.getByLabel("新文字：快充随行").fill("极速快充");
   const editSubmitReq = page.waitForResponse(
     (res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/submit"),
   );
