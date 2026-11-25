@@ -1,7 +1,8 @@
+-- Startup replays this migration before 041 validates the expanded constraints.
 ALTER TABLE suite_workbench.suites
   DROP CONSTRAINT IF EXISTS suites_origin_check;
 ALTER TABLE suite_workbench.suites
-  ADD CONSTRAINT suites_origin_check CHECK (origin IN ('suite_studio', 'canvas', 'replica'));
+  ADD CONSTRAINT suites_origin_check CHECK (origin IN ('suite_studio', 'canvas', 'replica')) NOT VALID;
 
 CREATE TABLE IF NOT EXISTS suite_workbench.replica_references (
   id uuid PRIMARY KEY,
@@ -45,7 +46,7 @@ ALTER TABLE suite_workbench.suite_tasks
 ALTER TABLE suite_workbench.suite_tasks
   DROP CONSTRAINT IF EXISTS suite_tasks_origin_kind_check;
 ALTER TABLE suite_workbench.suite_tasks
-  ADD CONSTRAINT suite_tasks_origin_kind_check CHECK (origin_kind IN ('suite_plan', 'reverse_import', 'replica'));
+  ADD CONSTRAINT suite_tasks_origin_kind_check CHECK (origin_kind IN ('suite_plan', 'reverse_import', 'replica')) NOT VALID;
 CREATE INDEX IF NOT EXISTS suite_tasks_replica_reference_idx
   ON suite_workbench.suite_tasks (suite_id, replica_reference_id)
   WHERE origin_kind = 'replica';
@@ -54,4 +55,4 @@ ALTER TABLE suite_workbench.suite_pipeline_runs
   DROP CONSTRAINT IF EXISTS suite_pipeline_runs_current_phase_check;
 ALTER TABLE suite_workbench.suite_pipeline_runs
   ADD CONSTRAINT suite_pipeline_runs_current_phase_check
-  CHECK (current_phase IN ('base_refining', 'structure_planning', 'category_prompting', 'image_generating', 'replica_analyzing', 'done'));
+  CHECK (current_phase IN ('base_refining', 'structure_planning', 'category_prompting', 'image_generating', 'replica_analyzing', 'done')) NOT VALID;
