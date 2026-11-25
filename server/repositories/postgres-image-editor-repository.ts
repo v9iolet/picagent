@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { removeDraftOperations, upsertDraftOperation, type EditDraft, type EditOperation, type EditSnapshot, type EditSubmissionInput, type ImageEditAttempt, type ImageEditChildTask, type ImageEditVersion, type ImageEditorRepository } from "../image-editor.js";
+import { removeDraftOperations, upsertDraftOperation, type CompleteImageEditAttemptInput, type EditDraft, type EditOperation, type EditSnapshot, type EditSubmissionInput, type ImageEditAttempt, type ImageEditChildTask, type ImageEditVersion, type ImageEditorRepository } from "../image-editor.js";
 
 const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const draftRow = `session_id AS "sessionId",operations_json AS operations,summary`;
 const snapshotRow = `id,source_card_id AS "sourceCardId",source_version_id AS "sourceVersionId",parent_version_id AS "parentVersionId",summary,source_prompt AS "sourcePrompt",operations_json AS operations,provider_json AS provider,created_at AS "createdAt",schema_version AS "schemaVersion",tool,attached_inputs_json AS "attachedInputs",mask_applied AS "maskApplied",prompt_template_version_id AS "promptTemplateVersionId"`;
 const taskRow = `id,source_card_id AS "sourceCardId",source_version_id AS "sourceVersionId",parent_version_id AS "parentVersionId",snapshot_id AS "snapshotId",summary,status,current_version_id AS "currentVersionId",final_version_id AS "finalVersionId",error_code AS "errorCode",error_message AS "errorMessage",created_at AS "createdAt",updated_at AS "updatedAt"`;
 const attemptRow = `id,child_task_id AS "childTaskId",snapshot_id AS "snapshotId",attempt_no AS "attemptNo",command_json AS command,provider_json AS provider,status,error_code AS "errorCode",error_message AS "errorMessage",created_at AS "createdAt",completed_at AS "completedAt"`;
-const versionRow = `id,child_task_id AS "childTaskId",attempt_id AS "attemptId",version_number AS "versionNumber",object_key AS "objectKey",sha256,width,height,mime_type AS "mimeType",created_at AS "createdAt"`;
+const versionRow = `id,child_task_id AS "childTaskId",attempt_id AS "attemptId",version_number AS "versionNumber",object_key AS "objectKey",sha256,width,height,mime_type AS "mimeType",created_at AS "createdAt",generated_size_json AS "generatedSize",delivery_size_json AS "deliverySize",delivery_object_key AS "deliveryObjectKey"`;
 
 export class PostgresImageEditorRepository implements ImageEditorRepository {
   constructor(private readonly pool: Pool) {}
@@ -145,7 +145,44 @@ export class PostgresImageEditorRepository implements ImageEditorRepository {
     }
   }
   async appendAttempt(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }) { const c = await this.pool.connect(); try { await c.query("BEGIN"); await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.idempotencyKey]); const old = await c.query(`SELECT snapshot_id AS "snapshotId",child_task_id AS "childTaskId",attempt_id AS "attemptId" FROM suite_workbench.image_edit_idempotency WHERE idempotency_key=$1`, [input.idempotencyKey]); if (old.rowCount) { await c.query("COMMIT"); return { snapshot: (await this.getSnapshot(old.rows[0].snapshotId))!, childTask: (await this.getChildTask(old.rows[0].childTaskId))!, attempt: (await this.getAttempt(old.rows[0].attemptId))!, duplicate: true }; } const existing = await c.query<{ snapshotId: string }>(`SELECT snapshot_id AS "snapshotId" FROM suite_workbench.image_edit_child_tasks WHERE id=$1 FOR UPDATE`, [input.childTask.id]); if (!existing.rowCount || existing.rows[0].snapshotId !== input.snapshot.id) throw new Error("INVALID_IMAGE_EDIT_TASK"); const next = await c.query<{ n: number }>(`SELECT COALESCE(MAX(attempt_no),0)+1 AS n FROM suite_workbench.image_edit_attempts WHERE child_task_id=$1`, [input.childTask.id]); const attemptNo = Number(next.rows[0].n); await c.query(`INSERT INTO suite_workbench.image_edit_attempts(id,child_task_id,snapshot_id,attempt_no,command_json,provider_json,status,error_code,error_message,created_at,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [input.attempt.id,input.attempt.childTaskId,input.attempt.snapshotId,attemptNo,JSON.stringify(input.attempt.command),JSON.stringify(input.attempt.provider),input.attempt.status,input.attempt.errorCode,input.attempt.errorMessage,input.attempt.createdAt,input.attempt.completedAt]); await c.query(`UPDATE suite_workbench.image_edit_child_tasks SET status=$2,error_code=$3,error_message=$4,updated_at=$5 WHERE id=$1`, [input.childTask.id,input.childTask.status,input.childTask.errorCode,input.childTask.errorMessage,input.childTask.updatedAt]); await c.query(`INSERT INTO suite_workbench.image_edit_idempotency(idempotency_key,snapshot_id,child_task_id,attempt_id) VALUES($1,$2,$3,$4)`, [input.idempotencyKey,input.snapshot.id,input.childTask.id,input.attempt.id]); await c.query("COMMIT"); return { snapshot: input.snapshot, childTask: (await this.getChildTask(input.childTask.id))!, attempt: (await this.getAttempt(input.attempt.id))!, duplicate: false }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
-  async completeAttempt(input: { attemptId: string; objectKey: string; sha256: string; width: number; height: number; mimeType: string; completedAt: string }) { const c = await this.pool.connect(); try { await c.query("BEGIN"); const a = await c.query<ImageEditAttempt>(`SELECT ${attemptRow} FROM suite_workbench.image_edit_attempts WHERE id=$1 FOR UPDATE`, [input.attemptId]); if (!a.rowCount || a.rows[0].status !== "generating") throw new Error("INVALID_IMAGE_EDIT_ATTEMPT"); await c.query<ImageEditChildTask>(`SELECT ${taskRow} FROM suite_workbench.image_edit_child_tasks WHERE id=$1 FOR UPDATE`, [a.rows[0].childTaskId]); const n = await c.query<{ n: number }>(`SELECT COALESCE(MAX(version_number),0)+1 AS n FROM suite_workbench.image_edit_versions WHERE child_task_id=$1`, [a.rows[0].childTaskId]); const id = randomUUID(); await c.query(`INSERT INTO suite_workbench.image_edit_versions(id,child_task_id,attempt_id,version_number,object_key,sha256,width,height,mime_type,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [id,a.rows[0].childTaskId,a.rows[0].id,n.rows[0].n,input.objectKey,input.sha256,input.width,input.height,input.mimeType,input.completedAt]); await c.query(`UPDATE suite_workbench.image_edit_attempts SET status='succeeded',completed_at=$2 WHERE id=$1`, [input.attemptId,input.completedAt]); await c.query(`UPDATE suite_workbench.image_edit_child_tasks SET status='succeeded',current_version_id=$2,updated_at=$3 WHERE id=$1`, [a.rows[0].childTaskId,id,input.completedAt]); await c.query("COMMIT"); return { attempt: (await this.getAttempt(input.attemptId))!, version: (await this.listVersions(a.rows[0].childTaskId)).find((v) => v.id === id)!, childTask: (await this.getChildTask(a.rows[0].childTaskId))! }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
+  async completeAttempt(input: CompleteImageEditAttemptInput) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows: [attempt] } = await client.query<ImageEditAttempt>(
+        `SELECT ${attemptRow} FROM suite_workbench.image_edit_attempts WHERE id=$1 FOR UPDATE`, [input.attemptId],
+      );
+      if (!attempt || attempt.status !== "generating") throw new Error("INVALID_IMAGE_EDIT_ATTEMPT");
+      await client.query(`SELECT id FROM suite_workbench.image_edit_child_tasks WHERE id=$1 FOR UPDATE`, [attempt.childTaskId]);
+      const { rows: [next] } = await client.query<{ n: number }>(
+        `SELECT COALESCE(MAX(version_number),0)+1 AS n FROM suite_workbench.image_edit_versions WHERE child_task_id=$1`, [attempt.childTaskId],
+      );
+      const { rows: [version] } = await client.query<ImageEditVersion>(
+        `INSERT INTO suite_workbench.image_edit_versions
+          (id,child_task_id,attempt_id,version_number,object_key,sha256,width,height,mime_type,created_at,
+           generated_size_json,delivery_size_json,delivery_object_key)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING ${versionRow}`,
+        [randomUUID(), attempt.childTaskId, attempt.id, next.n, input.objectKey, input.sha256, input.width, input.height,
+          input.mimeType, input.completedAt, input.generatedSize ?? null, input.deliverySize ?? null, input.deliveryObjectKey ?? null],
+      );
+      const { rows: [completedAttempt] } = await client.query<ImageEditAttempt>(
+        `UPDATE suite_workbench.image_edit_attempts SET status='succeeded',completed_at=$2 WHERE id=$1 RETURNING ${attemptRow}`,
+        [attempt.id, input.completedAt],
+      );
+      const { rows: [childTask] } = await client.query<ImageEditChildTask>(
+        `UPDATE suite_workbench.image_edit_child_tasks SET status='succeeded',current_version_id=$2,updated_at=$3
+         WHERE id=$1 RETURNING ${taskRow}`,
+        [attempt.childTaskId, version.id, input.completedAt],
+      );
+      await client.query("COMMIT");
+      return { attempt: completedAttempt, version, childTask };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
   async failAttempt(id: string, code: string, message: string, completedAt: string) { const c = await this.pool.connect(); try { await c.query("BEGIN"); const a = await c.query<ImageEditAttempt>(`SELECT ${attemptRow} FROM suite_workbench.image_edit_attempts WHERE id=$1 FOR UPDATE`, [id]); if (!a.rowCount) throw new Error("INVALID_IMAGE_EDIT_ATTEMPT"); const task = await c.query<ImageEditChildTask>(`SELECT ${taskRow} FROM suite_workbench.image_edit_child_tasks WHERE id=$1 FOR UPDATE`, [a.rows[0].childTaskId]); if (!task.rowCount) throw new Error("INVALID_IMAGE_EDIT_TASK"); if (a.rows[0].status === "generating") { await c.query(`UPDATE suite_workbench.image_edit_attempts SET status='failed',error_code=$2,error_message=$3,completed_at=$4 WHERE id=$1 AND status='generating'`, [id,code,message,completedAt]); const running = await c.query(`SELECT 1 FROM suite_workbench.image_edit_attempts WHERE child_task_id=$1 AND status='generating' LIMIT 1`, [a.rows[0].childTaskId]); if (!running.rowCount) await c.query(`UPDATE suite_workbench.image_edit_child_tasks SET status='failed',error_code=$2,error_message=$3,updated_at=$4 WHERE id=$1 AND status='generating'`, [a.rows[0].childTaskId,code,message,completedAt]); } await c.query("COMMIT"); return { attempt: (await this.getAttempt(id))!, childTask: (await this.getChildTask(a.rows[0].childTaskId))! }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
   async listAttempts(childTaskId: string) { const r = await this.pool.query<ImageEditAttempt>(`SELECT ${attemptRow} FROM suite_workbench.image_edit_attempts WHERE child_task_id=$1 ORDER BY attempt_no`, [childTaskId]); return r.rows; }
   async listVersions(childTaskId: string) { const r = await this.pool.query<ImageEditVersion>(`SELECT ${versionRow} FROM suite_workbench.image_edit_versions WHERE child_task_id=$1 ORDER BY version_number DESC`, [childTaskId]); return r.rows; }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ok } from "./api-response.js";
-import { formatOcrErrorMessage, type ImageEditChildTask, type ImageEditorService } from "./image-editor.js";
+import { formatOcrErrorMessage, type ImageEditorService, type ImageEditVersionCompletedListener } from "./image-editor.js";
 import type { ErrorEnvelope, ResponseEnvelope } from "./types.js";
 
 export interface ImageEditorApiResponse { status: number; body: ResponseEnvelope<unknown> | ErrorEnvelope }
@@ -84,7 +84,7 @@ export function createImageEditorApi(service: ImageEditorService) {
     clearFinalVersions(childTaskIds: string[]) {
       return service.clearFinalVersions(childTaskIds);
     },
-    setOnVersionCompleted(listener: (childTask: ImageEditChildTask) => Promise<void>) {
+    setOnVersionCompleted(listener: ImageEditVersionCompletedListener) {
       service.setOnVersionCompleted(listener);
     },
   };

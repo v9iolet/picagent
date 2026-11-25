@@ -1,8 +1,9 @@
 import { listingFieldEnabled, type ListingContent, type ListingRules } from "./listing-config.js";
+import type { AplusImageVersionMetadata } from "./aplus.js";
 
 export type DeliverySourceRole = "edit_final" | "parent_final" | "edit_current" | "parent_current" | "pending";
 
-export interface DeliveryVersionLike {
+export interface DeliveryVersionLike extends AplusImageVersionMetadata {
   id: string;
   attemptId?: string;
   versionNumber: number;
@@ -45,7 +46,7 @@ export interface DeliveryEditChildLike {
   task: Record<string, unknown>;
   snapshot?: Record<string, unknown> | null;
   attempts?: Array<Record<string, unknown>>;
-  versions: Array<{
+  versions: Array<AplusImageVersionMetadata & {
     id: string;
     previewUrl?: string;
     versionNumber: number;
@@ -58,7 +59,7 @@ export interface DeliveryEditChildLike {
   }>;
 }
 
-export interface ResolvedDeliverySlot {
+export interface ResolvedDeliverySlot extends AplusImageVersionMetadata {
   slotIndex: number;
   typeOrdinal: number;
   imageType: "main" | "detail";
@@ -193,6 +194,10 @@ function timestampOf(value: unknown): number {
   if (typeof value !== "string" || !value) return 0;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function aplusDeliveryMetadata({ generatedSize, deliverySize, deliveryObjectKey }: AplusImageVersionMetadata): AplusImageVersionMetadata {
+  return { generatedSize, deliverySize, deliveryObjectKey };
 }
 
 export function resolveDeliverySlots(
@@ -374,6 +379,7 @@ export function resolveDeliverySlots(
         versionNumber: chosen.version.versionNumber,
         previewUrl,
         objectKey: chosen.version.objectKey ?? null,
+        ...(task.originKind === "aplus" && aplusDeliveryMetadata(chosen.version)),
         width: chosen.version.width ?? null,
         height: chosen.version.height ?? null,
         mimeType,
@@ -409,6 +415,7 @@ export function resolveDeliverySlots(
         versionNumber: chosen.versionNumber,
         previewUrl: chosen.previewUrl ?? null,
         objectKey: chosen.objectKey ?? null,
+        ...(task.originKind === "aplus" && aplusDeliveryMetadata(chosen)),
         width: chosen.width ?? null,
         height: chosen.height ?? null,
         mimeType,

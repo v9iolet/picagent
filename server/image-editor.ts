@@ -1,4 +1,5 @@
 import type { ModelChannelSnapshot } from "../shared/model-settings.js";
+import type { AplusImageSize, AplusImageVersionMetadata } from "../shared/aplus.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import sharp from "sharp";
@@ -77,7 +78,7 @@ export interface ImageEditAttempt {
   completedAt: string | null;
 }
 
-export interface ImageEditVersion {
+export interface ImageEditVersion extends AplusImageVersionMetadata {
   id: string;
   childTaskId: string;
   attemptId: string;
@@ -89,6 +90,21 @@ export interface ImageEditVersion {
   mimeType: string;
   createdAt: string;
 }
+
+export interface CompleteImageEditAttemptInput extends AplusImageVersionMetadata {
+  attemptId: string;
+  objectKey: string;
+  sha256: string;
+  width: number;
+  height: number;
+  mimeType: string;
+  completedAt: string;
+}
+
+export type ImageEditVersionCompletedListener = (
+  childTask: ImageEditChildTask,
+  generated: AplusImageSize & { bytes: Buffer; objectKey: string },
+) => Promise<AplusImageVersionMetadata | void>;
 
 export interface ImageEditCommand {
   type: ImageEditOperationType;
@@ -208,7 +224,7 @@ export interface ImageEditorRepository {
   getAttempt(id: string): Promise<ImageEditAttempt | null>;
   submit(input: EditSubmissionInput): Promise<EditSubmission>;
   appendAttempt?(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }): Promise<EditSubmission>;
-  completeAttempt(input: { attemptId: string; objectKey: string; sha256: string; width: number; height: number; mimeType: string; completedAt: string }): Promise<{ attempt: ImageEditAttempt; version: ImageEditVersion; childTask: ImageEditChildTask }>;
+  completeAttempt(input: CompleteImageEditAttemptInput): Promise<{ attempt: ImageEditAttempt; version: ImageEditVersion; childTask: ImageEditChildTask }>;
   failAttempt(attemptId: string, code: string, message: string, completedAt: string): Promise<{ attempt: ImageEditAttempt; childTask: ImageEditChildTask }>;
   listAttempts(childTaskId: string): Promise<ImageEditAttempt[]>;
   listVersions(childTaskId: string): Promise<ImageEditVersion[]>;
@@ -274,10 +290,12 @@ export class MemoryImageEditorRepository implements ImageEditorRepository {
     this.idempotency.set(input.idempotencyKey, { snapshotId: input.snapshot.id, childTaskId: input.childTask.id, attemptId: attempt.id });
     return { snapshot: input.snapshot, childTask: input.childTask, attempt, duplicate: false };
   }
-  async completeAttempt(input: { attemptId: string; objectKey: string; sha256: string; width: number; height: number; mimeType: string; completedAt: string }) {
+  async completeAttempt(input: CompleteImageEditAttemptInput) {
     const attempt = this.attempts.get(input.attemptId); if (!attempt || attempt.status !== "generating") throw new Error("INVALID_IMAGE_EDIT_ATTEMPT");
     const task = this.tasks.get(attempt.childTaskId); if (!task) throw new Error("INVALID_IMAGE_EDIT_TASK");
-    const versions = await this.listVersions(task.id); const version: ImageEditVersion = { id: randomUUID(), childTaskId: task.id, attemptId: attempt.id, versionNumber: versions.length + 1, objectKey: input.objectKey, sha256: input.sha256, width: input.width, height: input.height, mimeType: input.mimeType, createdAt: input.completedAt };
+    const versions = await this.listVersions(task.id);
+    const { attemptId, completedAt, ...image } = input;
+    const version: ImageEditVersion = { id: randomUUID(), childTaskId: task.id, attemptId, versionNumber: versions.length + 1, createdAt: completedAt, ...image };
     this.versions.set(version.id, version);
     const done = { ...attempt, status: "succeeded" as const, completedAt: input.completedAt }; this.attempts.set(attempt.id, done);
     const updated = { ...task, status: "succeeded" as const, currentVersionId: version.id, updatedAt: input.completedAt }; this.tasks.set(task.id, updated);
@@ -670,8 +688,8 @@ export class ImageEditorService {
     if (!result.duplicate) void this.execute(result.attempt, provider);
     return result;
   }
-  private onVersionCompleted?: (childTask: ImageEditChildTask) => Promise<void>;
-  setOnVersionCompleted(listener: (childTask: ImageEditChildTask) => Promise<void>) { this.onVersionCompleted = listener; }
+  private onVersionCompleted?: ImageEditVersionCompletedListener;
+  setOnVersionCompleted(listener: ImageEditVersionCompletedListener) { this.onVersionCompleted = listener; }
   async clearFinalVersions(childTaskIds: string[]) { if (childTaskIds.length) await this.repository.clearFinalVersions?.(childTaskIds); }
   async selectVersion(childTaskId: string, versionId: string, selection: "current" | "final") { return this.repository.selectVersion(childTaskId, versionId, selection); }
   async getTask(childTaskId: string) { const task = await this.repository.getChildTask(childTaskId); if (!task) return null; return { task, snapshot: await this.repository.getSnapshot(task.snapshotId), attempts: await this.repository.listAttempts(task.id), versions: await this.repository.listVersions(task.id) }; }
@@ -714,5 +732,23 @@ export class ImageEditorService {
   }
   private validateRect(rect: Record<string, unknown>) { if (!["x", "y", "width", "height"].every((key) => Number.isFinite(Number(rect[key])))) throw new Error("NORMALIZED_RECT_INVALID"); if (!this.inUnit(Number(rect.x)) || !this.inUnit(Number(rect.y)) || !this.inUnit(Number(rect.width)) || !this.inUnit(Number(rect.height)) || Number(rect.width) <= 0 || Number(rect.height) <= 0 || Number(rect.x) + Number(rect.width) > 1 || Number(rect.y) + Number(rect.height) > 1) throw new Error("NORMALIZED_RECT_INVALID"); }
   private inUnit(value: number) { return Number.isFinite(value) && value >= 0 && value <= 1; }
-  private async execute(attempt: ImageEditAttempt, provider: ImageEditProvider) { try { const source = await this.resolveSource(attempt.command.sourceVersionId); if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND"); const generated = await provider.edit(attempt.command, source); const objectKey = `image-edits/${attempt.childTaskId}/versions/${randomUUID()}.png`; await this.storage.put({ key: objectKey, bytes: generated.bytes, contentType: generated.mimeType }); const sha256 = createHash("sha256").update(generated.bytes).digest("hex"); const childBeforeComplete = await this.repository.getChildTask(attempt.childTaskId); if (childBeforeComplete && this.onVersionCompleted) await this.onVersionCompleted(childBeforeComplete); await this.repository.completeAttempt({ attemptId: attempt.id, objectKey, sha256, width: generated.width, height: generated.height, mimeType: generated.mimeType, completedAt: new Date().toISOString() }); } catch (error) { await this.repository.failAttempt(attempt.id, error instanceof Error ? error.message : "IMAGE_EDIT_FAILED", error instanceof Error ? error.message : "IMAGE_EDIT_FAILED", new Date().toISOString()).catch(() => undefined); } }
+  private async execute(attempt: ImageEditAttempt, provider: ImageEditProvider) {
+    try {
+      const source = await this.resolveSource(attempt.command.sourceVersionId);
+      if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND");
+      const generated = await provider.edit(attempt.command, source);
+      const objectKey = `image-edits/${attempt.childTaskId}/versions/${randomUUID()}.png`;
+      await this.storage.put({ key: objectKey, bytes: generated.bytes, contentType: generated.mimeType });
+      const sha256 = createHash("sha256").update(generated.bytes).digest("hex");
+      const child = await this.repository.getChildTask(attempt.childTaskId);
+      const delivery = child && await this.onVersionCompleted?.(child, { ...generated, objectKey });
+      await this.repository.completeAttempt({
+        attemptId: attempt.id, objectKey, sha256, width: generated.width, height: generated.height,
+        mimeType: generated.mimeType, completedAt: new Date().toISOString(), ...(delivery || {}),
+      });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "IMAGE_EDIT_FAILED";
+      await this.repository.failAttempt(attempt.id, code, code, new Date().toISOString()).catch(() => undefined);
+    }
+  }
 }

@@ -4,10 +4,15 @@ import type { PlatformProfile, PlatformRepository } from "../types.js";
 
 const columns = `code, name, to_jsonb(platform_profiles)->'listing_copy_rules' AS "listingCopyRules", to_jsonb(platform_profiles)->'detail_size_presets' AS "detailSizePresets", market_scope AS "marketScope", main_image_background AS "mainImageBackground", main_image_strategy AS "mainImageStrategy", gallery_strategy AS "galleryStrategy", text_strategy AS "textStrategy", model_strategy AS "modelStrategy", source_note AS "sourceNote", sort_order AS "sortOrder"`;
 
-type PlatformRow = Omit<PlatformProfile, "detailSizePresets"> & { detailSizePresets: DetailSizePresets | null };
+type PlatformRow = Omit<PlatformProfile, "detailSizePresets"> & { detailSizePresets: Partial<DetailSizePresets> | null };
 
 function toPlatformProfile(row: PlatformRow): PlatformProfile {
-  return { ...row, detailSizePresets: row.detailSizePresets ?? defaultDetailSizePresets(row.code, row.marketScope) };
+  const { detailSizePresets: presets } = row;
+  const detailSizePresets = Array.isArray(presets?.options) && presets.options.every((item) => typeof item === "string") &&
+    typeof presets.default === "string" && presets.options.includes(presets.default)
+    ? { options: presets.options, default: presets.default }
+    : defaultDetailSizePresets(row.code, row.marketScope);
+  return { ...row, detailSizePresets };
 }
 
 export class PostgresPlatformRepository implements PlatformRepository {

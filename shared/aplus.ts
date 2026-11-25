@@ -1,3 +1,5 @@
+import { SUPPORTED_OUTPUT_LANGUAGES } from "./workbench-delivery.js";
+
 export const APLUS_MODULES = [
   { code: "hero", name: "首屏主视觉", description: "传递核心价值", defaultSelected: true, sortOrder: 1 },
   { code: "selling_points", name: "核心卖点图", description: "突出差异优势", defaultSelected: true, sortOrder: 2 },
@@ -87,6 +89,16 @@ export function normalizeAplusProductInfo(value: string): string {
   return value.trim();
 }
 
+export function normalizeAplusLanguage(value: string): string {
+  const language = value.trim();
+  if (language === "不加文字") return "none";
+  return SUPPORTED_OUTPUT_LANGUAGES.find((option) => option.value === language)?.code ?? language;
+}
+
+export function normalizeAplusTargetMarket(value: string): string {
+  return value.trim();
+}
+
 export interface AplusPlanInputSummary {
   imageHashes: string[];
   productInfo: string;
@@ -110,8 +122,8 @@ export function isAplusPlanStale(snapshot: AplusPlanInputSummary, current: Aplus
     snapshot.productCardId !== current.productCardId ||
     snapshot.productCardRevision !== current.productCardRevision ||
     snapshot.platform !== current.platform ||
-    snapshot.targetMarket !== current.targetMarket ||
-    snapshot.language !== current.language ||
+    normalizeAplusTargetMarket(snapshot.targetMarket) !== normalizeAplusTargetMarket(current.targetMarket) ||
+    normalizeAplusLanguage(snapshot.language) !== normalizeAplusLanguage(current.language) ||
     !sameSet(snapshot.sizePresets, current.sizePresets) ||
     !sameSet(snapshot.modules, current.modules);
 }
