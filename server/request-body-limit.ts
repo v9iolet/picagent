@@ -16,6 +16,7 @@ export const PRODUCT_CARD_WRITE_BODY_MAX_BYTES = (6 * 16 + 4) * 1024 * 1024;
 const SUITE_INPUT_IMAGE_UPLOAD_RE = /^\/api\/suites\/[^/]+\/input-images$/;
 const LISTING_INPUT_IMAGE_UPLOAD_RE = /^\/api\/listing-copies\/[^/]+\/input-images$/;
 const IMAGE_EDITOR_OPERATION_RE = /^\/api\/image-editor\/sessions\/[^/]+\/operations$/;
+const IMAGE_EDITOR_RESTORE_INPUT_RE = /^\/api\/image-editor\/sessions\/[^/]+\/versions\/[^/]+\/restore-inputs$/;
 const PRODUCT_CARD_ITEM_RE = /^\/api\/product-cards\/[^/]+$/;
 const PRODUCT_ONBOARDING_MESSAGES_RE = /^\/api\/product-onboarding\/sessions\/[^/]+\/messages$/;
 const PRODUCT_ONBOARDING_DRAFT_RE = /^\/api\/product-onboarding\/sessions\/[^/]+\/draft$/;
@@ -31,7 +32,7 @@ export function resolveRequestBodyLimit(method: string | undefined, pathname: st
     ) {
       return PRODUCT_CARD_WRITE_BODY_MAX_BYTES;
     }
-    if (SUITE_INPUT_IMAGE_UPLOAD_RE.test(pathname) || LISTING_INPUT_IMAGE_UPLOAD_RE.test(pathname)) {
+    if (SUITE_INPUT_IMAGE_UPLOAD_RE.test(pathname) || LISTING_INPUT_IMAGE_UPLOAD_RE.test(pathname) || IMAGE_EDITOR_RESTORE_INPUT_RE.test(pathname)) {
       return SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES;
     }
     if (IMAGE_EDITOR_OPERATION_RE.test(pathname)) {

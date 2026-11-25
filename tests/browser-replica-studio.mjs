@@ -32,7 +32,9 @@ async function offlineReplicaStudio(t, gates = {}) {
   const libraryRepository = new MemoryLibraryRepository();
   const editorRepository = new MemoryImageEditorRepository();
 
-  const editorSource = { bytes: sampleResult, mimeType: "image/jpeg", width: 64, height: 64 };
+  const productInputs = ["test/replica-product-front.jpg", "test/replica-product-side.jpg"].map((objectKey) => ({ objectKey, role: "product" }));
+  for (const { objectKey } of productInputs) await storage.put({ key: objectKey, bytes: sampleProduct, contentType: "image/jpeg" });
+  const editorSource = { bytes: sampleResult, mimeType: "image/jpeg", width: 64, height: 64, productInputs };
   const editorService = new ImageEditorService(
     editorRepository,
     {
@@ -516,6 +518,18 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await promptDialog.getByRole("button", { name: "取消", exact: true }).click();
   await promptDialog.waitFor({ state: "hidden" });
 
+  await firstCard.getByRole("button", { name: "编辑图片", exact: true }).click();
+  await editorDialog.getByRole("button", { name: /^商品还原/ }).click();
+  await editorDialog.getByRole("radio", { name: "使用全部商品原图", checked: true }).waitFor();
+  await editorDialog.getByRole("radio", { name: "原图 2", exact: true }).check();
+  const restoreRequest = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await editorDialog.getByRole("button", { name: "还原商品", exact: true }).click();
+  const restored = await restoreRequest;
+  assert.equal(restored.status(), 202);
+  assert.deepEqual((await restored.json()).data.snapshot.attachedInputs, [{ objectKey: "test/replica-product-side.jpg", role: "product" }]);
+  await editorDialog.waitFor({ state: "hidden" });
+  await firstCard.getByText("已编辑 · v1", { exact: true }).waitFor();
+
   // 10. Single-card download & batch ZIP download
   const singleDownload = page.waitForEvent("download");
   await firstCard.getByRole("button", { name: "下载", exact: true }).click();
@@ -615,8 +629,7 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   // 15. Template library includes replica_prompt stage filter & label
   await page.goto(url + "templates");
   await page.getByRole("radio", { name: "爆品图复刻", exact: true }).check();
-  await page.locator(".template-card").first().waitFor();
-  assert.equal(await page.locator(".template-card .badge", { hasText: "爆品图复刻" }).count() >= 2, true);
+  await page.locator(".template-card .badge", { hasText: "爆品图复刻" }).nth(1).waitFor();
 });
 
 test("爆品图复刻：失败单卡展示错误原因并支持单卡重新生成恢复", async (t) => {

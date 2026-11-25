@@ -48,7 +48,9 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
   }));
   const storage = new MemoryStorage(),
     editorRepository = new MemoryImageEditorRepository();
-  const source = { bytes: sample, mimeType: "image/jpeg", width: 64, height: 64 };
+  const productInputs = [{ objectKey: "test/suite-product.jpg", role: "product" }];
+  await storage.put({ key: productInputs[0].objectKey, bytes: sample, contentType: "image/jpeg" });
+  const source = { bytes: sample, mimeType: "image/jpeg", width: 64, height: 64, productInputs };
   let ocrAttempts = 0;
   const recognizedTexts = ["折叠插脚", "随身携带", "限时优惠", "商品型号"];
   const editor = new ImageEditorService(
@@ -446,6 +448,18 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
     ).path,
     /\/generation$/,
   );
+  const second = cards.nth(1);
+  await second.getByRole("button", { name: "编辑图片", exact: true }).click();
+  await dialog.getByRole("button", { name: /^商品还原/ }).click();
+  await dialog.getByRole("radio", { name: "使用全部商品原图", checked: true }).waitFor();
+  await dialog.locator(".wb-restore-grid img").first().evaluate((image) => image.decode());
+  const restoreRequest = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await dialog.getByRole("button", { name: "还原商品", exact: true }).click();
+  const restored = await restoreRequest;
+  assert.equal(restored.status(), 202);
+  assert.deepEqual((await restored.json()).data.snapshot.attachedInputs, [{ objectKey: "test/suite-product.jpg", role: "product" }]);
+  await dialog.waitFor({ state: "hidden" });
+  await second.locator('img[src^="/api/image-editor/tasks/"]').waitFor();
   await platform.selectOption({ label: "淘宝" });
   assert.equal(await refine.count(), 0);
   await platformTip.click();

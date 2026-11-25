@@ -126,7 +126,7 @@ export function StudioImageEditorHost({
           onEditJobStarted(card.editChildTaskId, parentTaskId);
           onNotify("已提交再次生成，正在更新图片…");
         } else {
-          const result = await suiteApi.generateTask(card.parentTaskId);
+          const result = await suiteApi.regenerateTaskFromEdit(card.parentTaskId, card.versionId!);
           onClose();
           onRetryJobStarted(result.batchId, parentTaskId);
           onNotify("已提交单张生成。");

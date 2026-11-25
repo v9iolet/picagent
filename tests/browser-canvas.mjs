@@ -8,6 +8,7 @@ import { createServer } from "vite";
 import { createSuiteStudioApp } from "../server/app.js";
 import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
+import { dispatchInputImageUpload } from "../server/multipart.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
@@ -77,7 +78,9 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
             const version = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
             const edited = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
             let result;
-            if (upload && method === "POST") {
+            if (method === "POST" && path.endsWith("/restore-inputs")) {
+              result = await dispatchInputImageUpload(api, path, payload, req.headers);
+            } else if (upload && method === "POST") {
               const form = await new Response(payload, { headers: { "content-type": req.headers["content-type"] } }).formData();
               const file = form.get("file");
               result = await api.upload(upload[1], {
@@ -571,6 +574,32 @@ test("创作画布：将新文字手工改回原文会清理已存草稿", async
   await textTool.click();
   await dialog.getByText("已修改 0 条", { exact: true }).waitFor();
   assert.equal(await replacement.count(), 0);
+});
+
+test("创作画布：没有商品原图时上传依据图并完成商品还原", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId } = await seedGeneratedCanvas(api, 1);
+  await page.goto(url + `create/canvas/${suiteId}`);
+  await page.locator(".wb-task-card .wb-card-edit").first().click();
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  await dialog.getByRole("button", { name: /^商品还原/ }).click();
+  await dialog.getByText("当前图片没有商品原图，请上传一张依据图。").waitFor();
+  const restore = dialog.getByRole("button", { name: "还原商品", exact: true });
+  assert.equal(await restore.isDisabled(), true);
+  await dialog.getByLabel("上传", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+  const preview = dialog.getByRole("img", { name: "已上传的商品外观依据图" });
+  await preview.waitFor();
+  await preview.evaluate((image) => image.decode());
+  const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await restore.click();
+  const response = await submitted;
+  assert.equal(response.status(), 202);
+  const { snapshot } = (await response.json()).data;
+  assert.equal(snapshot.tool, "restore_product");
+  assert.equal(snapshot.attachedInputs.length, 1);
+  assert.match(snapshot.attachedInputs[0].objectKey, /\/restore-inputs\//);
+  await dialog.waitFor({ state: "hidden" });
+  await page.locator(".wb-edit-child-card .wb-card-state").filter({ hasText: /^已生成$/ }).waitFor();
 });
 
 test("图片资源库联动：画布单卡归档后 /assets 隐藏且预览仍 200；编辑器派生图进入 /assets 标注编辑生成并可软删除", async (t) => {

@@ -26,6 +26,19 @@
 | `general.repair.factuality` | 信息真实性返修 | `repair` | `task_image` | `信息虚构返修` |
 | `general.repair.design` | 商业设计完成度返修 | `repair` | `task_image` | `设计普通返修` |
 
+## A+详情
+
+| 文件 | Code | Stage | 用途 |
+|---|---|---|---|
+| `aplus-plan.md` | `aplus.plan` | `aplus_plan` | 视觉模型输出 `aplus-plan-v1` 方案 |
+| `aplus-module-<code>.md` | `aplus.module.<code>` | `aplus_module_rule` | 按 `applicability.moduleCode` 读取，只将所选规则拼入规划或 AI 帮写 |
+| `aplus-image.md` | `aplus.image` | `aplus_image` | 将画面、文案和尺寸与安全区包装成单张图的生成指令 |
+| `aplus-ai-write.md` | `aplus.ai-write` | `aplus_ai_write` | 视觉模型按商品卡选择补写表单文本 |
+
+16 个模块代码来自 [`APLUS_MODULES`](../../shared/aplus.ts)。方案在高级 A+ 两端共用文案，各自规划构图，`language=none` 时文案要求为空。视觉模型请求按提示词中列出的图片 ID 顺序附上原图缩略图，生图请求附上全部商品原图。
+
+迁移 `043_aplus_prompt_templates.sql` 发布这 19 份模板的首版。修改 Markdown 后可用 `npm run import-prompts -- --publish prompt/normalized/aplus-*.md` 导入并发布新版本。首版种子与导入使用相同的 Markdown 全文 SHA-256。迁移重跑会保留后续发布或退役状态。
+
 ## 清洗说明
 
 - 一个运行时模板对应一个文件。
