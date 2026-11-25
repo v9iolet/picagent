@@ -1,4 +1,5 @@
 import type { ModelChannelSnapshot } from "../shared/model-settings.js";
+import { CHANGE_TEXT_MAX_LENGTH, CHANGE_TEXT_MAX_OPERATIONS, normalizeChangeTextReplacement } from "../shared/image-editor.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import sharp from "sharp";
@@ -414,7 +415,7 @@ function buildChangeTextPrompt(
     const { x, y, width, height, rotation } = payload.region as NormalizedRect;
     return {
       originalText: String(payload.originalText),
-      newText: String(payload.newText),
+      newText: normalizeChangeTextReplacement(String(payload.newText)),
       boundingBox: {
         x: Number(x), y: Number(y), width: Number(width), height: Number(height),
         ...(typeof rotation === "number" && Number.isFinite(rotation) ? { rotation } : {}),
@@ -504,18 +505,25 @@ export class ImageEditorService {
     return provider;
   }
 
+  private async resolveOcrProvider() {
+    return typeof this.ocrProvider === "function" ? this.ocrProvider() : this.ocrProvider;
+  }
+
   async capabilities() {
-    const provider = typeof this.provider === "function" ? await this.provider() : this.provider;
+    const [provider, ocr] = await Promise.all([
+      typeof this.provider === "function" ? this.provider() : this.provider,
+      this.resolveOcrProvider(),
+    ]);
     return {
       provider: provider ? editProviderSnapshot(provider) : null,
-      capabilities: { ...(await provider?.capabilities()), ocr: Boolean(this.ocrProvider) },
+      capabilities: { ...(await provider?.capabilities()), ocr: Boolean(ocr) },
     };
   }
 
   async getDraft(sessionId: string) { return this.repository.getDraft(sessionId); }
 
   async recognize(sessionId: string, sourceVersionId: string) {
-    const ocr = typeof this.ocrProvider === "function" ? await this.ocrProvider() : this.ocrProvider;
+    const ocr = await this.resolveOcrProvider();
     if (!ocr) throw new Error("OCR_PROVIDER_UNAVAILABLE");
     const source = await this.resolveSource(sourceVersionId);
     if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND");
@@ -592,9 +600,11 @@ export class ImageEditorService {
       : selectedOperations;
     if (!operations.length) throw new Error("EDIT_OPERATIONS_REQUIRED");
     if (tool === "change_text") {
+      if (operations.length > CHANGE_TEXT_MAX_OPERATIONS) throw new Error("CHANGE_TEXT_TOO_MANY_OPERATIONS");
       const ocr = await this.repository.getOcrSnapshot(input.sessionId, input.sourceVersionId);
       operations.forEach((operation, index) => {
         operation.order = index + 1;
+        operation.payload.newText = normalizeChangeTextReplacement(String(operation.payload.newText));
         if (ocr) operation.payload.ocrSnapshot = structuredClone(ocr);
       });
     }
@@ -738,6 +748,8 @@ export class ImageEditorService {
       if (typeof originalText !== "string" || !originalText.trim() || typeof newText !== "string" || !region || typeof region !== "object") {
         throw new Error("CHANGE_TEXT_FIELDS_REQUIRED");
       }
+      if (originalText.length > CHANGE_TEXT_MAX_LENGTH) throw new Error("CHANGE_TEXT_ORIGINAL_TEXT_TOO_LONG");
+      if (newText.length > CHANGE_TEXT_MAX_LENGTH) throw new Error("CHANGE_TEXT_NEW_TEXT_TOO_LONG");
     }
   }
   private async appendAttempt(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }) {

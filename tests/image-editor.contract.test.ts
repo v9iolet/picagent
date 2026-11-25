@@ -125,6 +125,18 @@ test("current and final selections are independent", async () => {
   await service.selectVersion(submitted.childTask.id, first.id, "final"); const task = await repository.getChildTask(submitted.childTask.id); assert.equal(task?.currentVersionId, first.id); assert.equal(task?.finalVersionId, first.id);
 });
 
+test("OCR capability reports whether the configured resolver has a provider without running recognition", async () => {
+  let configured = false;
+  let recognitions = 0;
+  const ocr = { name: "fake-ocr", version: "1", recognize: async () => { recognitions++; return { blocks: [] }; } };
+  const service = new ImageEditorService(new MemoryImageEditorRepository(), provider(), new MemoryStorage(), async () => source,
+    async () => configured ? ocr : null);
+  assert.equal((await service.capabilities()).capabilities.ocr, false);
+  configured = true;
+  assert.equal((await service.capabilities()).capabilities.ocr, true);
+  assert.equal(recognitions, 0);
+});
+
 test("change_text allows manual submit without OCR, freezes OCR snapshot when present, and validates required fields", async () => {
   const repository = new MemoryImageEditorRepository();
   const service = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source, { name: "fake-ocr", version: "1", recognize: async () => ({ blocks: [{ id: "text-1", text: "旧文案", confidence: 0.99, bounds: { x: 0.1, y: 0.1, width: 0.3, height: 0.1 }, rotation: 0 }] }) });
@@ -165,7 +177,7 @@ test("change_text batches only changed rows and sends one source image without a
     const { originalText, newText, boundingBox } = row;
     await service.upsertOperation({ sessionId: "text-session", operation: {
       ...operation("change_text"), operationId: `line-${index}`, summary: originalText,
-      payload: { originalText, newText, region: boundingBox, mask: { objectKey: "ignore" }, attachedInputs: ["ignore"] },
+      payload: { originalText, newText: newText === "" ? " \t\n　" : newText, region: boundingBox, mask: { objectKey: "ignore" }, attachedInputs: ["ignore"] },
     } });
   }
   const input = { sourceCardId: "parent", sourceVersionId: "version-1", tool: "change_text" };
@@ -189,13 +201,48 @@ test("change_text batches only changed rows and sends one source image without a
   assert.match(call.prompt, /1\. 顶部左侧区域（横向约 10%–40%，纵向约 10%–20%）/);
   assert.match(call.prompt, /2\. 中部居中区域（横向约 30%–40%，纵向约 43%–53%）/);
   assert.match(call.prompt, /3\. 底部右侧区域（横向约 70%–90%，纵向约 70%–80%）：移除原文字，用周围背景自然填补。/);
-  assert.doesNotMatch(call.prompt, /保持原样|原始生图提示词/);
+  assert.doesNotMatch(call.prompt, /保持原样|原始生图提示词|替换为“\s*”/);
   const [result] = await service.listAllTasks();
   assert.deepEqual(result.snapshot?.operations.map(({ operationId, order }) => [operationId, order]), [
     ["line-1", 1], ["line-2", 2], ["line-3", 3],
   ]);
   assert.deepEqual(result.snapshot?.attachedInputs, []);
   assert.equal(result.snapshot?.maskApplied, false);
+  assert.equal(result.snapshot?.operations[2].payload.newText, "");
+});
+
+test("change_text accepts 50 changes and 500-character fields and reports which limit was exceeded", async () => {
+  const service = new ImageEditorService(new MemoryImageEditorRepository(), provider(), new MemoryStorage(), async () => source);
+  const api = createImageEditorApi(service);
+  const upsert = (operationId: string, originalText: string, newText: string) => service.upsertOperation({
+    sessionId: "limits",
+    operation: { ...operation("change_text"), operationId, payload: { originalText, newText, region: { x: 0.1, y: 0.1, width: 0.3, height: 0.1 } } },
+  });
+  const submit = (id: string, operationIds: string[]) => api.request("POST", "/api/image-editor/sessions/limits/submit", {
+    headers: { "idempotency-key": id },
+    body: { sourceCardId: "parent", sourceVersionId: "version-1", tool: "change_text", operationIds },
+  });
+  const expectError = async (id: string, operationIds: string[], code: string) => {
+    const result = await submit(id, operationIds);
+    assert.equal(result.status, 409);
+    assert.equal((result.body as { error: { code: string } }).error.code, code);
+  };
+  const original = "原".repeat(500);
+  const replacement = "新".repeat(500);
+  await upsert("oversized-original", original + "字", replacement);
+  await upsert("oversized-replacement", original, replacement + "字");
+  await expectError("original-limit", ["oversized-original"], "CHANGE_TEXT_ORIGINAL_TEXT_TOO_LONG");
+  await expectError("replacement-limit", ["oversized-replacement"], "CHANGE_TEXT_NEW_TEXT_TOO_LONG");
+
+  const changedIds = Array.from({ length: 50 }, (_, index) => `line-${index}`);
+  for (const id of changedIds) await upsert(id, original, replacement);
+  await upsert("one-too-many", "另一个原文", "另一个新文");
+  await upsert("unchanged", "同一行", "同一行");
+  await expectError("count-limit", [...changedIds, "one-too-many"], "CHANGE_TEXT_TOO_MANY_OPERATIONS");
+  assert.equal((await service.listAllTasks()).length, 0);
+  assert.equal((await submit("at-limits", [...changedIds, "unchanged"])).status, 202);
+  const [result] = await service.listAllTasks();
+  assert.equal(result.snapshot?.operations.length, 50);
 });
 
 test("redraw materializes a same-size grayscale mask with persisted metadata", async () => {

@@ -31,6 +31,7 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
     },
     storage,
     async (versionId) => ({ bytes: sample, mimeType: "image/jpeg", width: 64, height: 64, generationPrompt: `source:${versionId}` }),
+    async () => null,
   );
   const api = createSuiteStudioApp({
     repository: new MemorySuiteRepository(),
@@ -468,6 +469,16 @@ test("创作画布：未配 OCR 时可手工编辑文字，切换工具保留草
   assert.equal(await page.getByRole("button", { name: "卖点排版" }).count(), 0);
   assert.equal(await page.locator(".wb-card-vector-overlay").count(), 0);
 
+  const capabilitiesGate = Promise.withResolvers();
+  await page.route("**/api/image-editor/capabilities", async (route) => {
+    await capabilitiesGate.promise;
+    await route.continue();
+  });
+  t.after(() => capabilitiesGate.resolve());
+  const ocrRequests = [];
+  page.on("request", (request) => {
+    if (request.url().endsWith("/ocr")) ocrRequests.push(request.url());
+  });
   await page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit").first().click();
   const dialog = page.getByRole("dialog", { name: "图片编辑器" });
   await dialog.waitFor();
@@ -477,10 +488,17 @@ test("创作画布：未配 OCR 时可手工编辑文字，切换工具保留草
 
   const changeTextTool = dialog.locator(".wb-editor-tools button", { hasText: "编辑文字" });
   await changeTextTool.click();
-  await dialog.getByRole("status").filter({ hasText: "切换前的草稿会保留" }).waitFor();
-  await dialog.getByText("已修改 0 条", { exact: true }).waitFor();
+  try {
+    await dialog.getByRole("status").filter({ hasText: "正在检查文字识别能力" }).waitFor();
+    assert.deepEqual(ocrRequests, []);
+  } finally {
+    capabilitiesGate.resolve();
+  }
 
   await dialog.getByText(/当前未配置多模态识字模型/).waitFor();
+  await dialog.getByRole("status").filter({ hasText: "切换前的草稿会保留" }).waitFor();
+  await dialog.getByText("已修改 0 条", { exact: true }).waitFor();
+  assert.deepEqual(ocrRequests, []);
   assert.doesNotMatch(await dialog.innerText(), /fetch failed/);
 
   await addManualTextEdit(page, dialog, "旧卖点标题", "65W 便携快充");
@@ -509,6 +527,50 @@ test("创作画布：未配 OCR 时可手工编辑文字，切换工具保留草
 
   await page.locator(".wb-edit-child-card").first().waitFor();
   await page.locator(".wb-edit-child-card").first().locator(".wb-card-state").filter({ hasText: /^已生成$/ }).waitFor();
+  assert.deepEqual(ocrRequests, []);
+});
+
+test("创作画布：将新文字手工改回原文会清理已存草稿", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId, tasks: [taskId] } = await seedGeneratedCanvas(api, 1);
+  const workbench = await api.request("GET", `/api/suites/${suiteId}/workbench`);
+  const versionId = workbench.body.data.tasks.find((task) => task.id === taskId).versions[0].id;
+  const sessionPath = `/api/image-editor/sessions/${taskId}`;
+  const savedDraft = await api.request("POST", sessionPath + "/operations", {
+    body: { operation: {
+      operationId: "saved-change-text",
+      type: "change_text",
+      summary: "编辑旧标题",
+      sourceCardId: taskId,
+      sourceVersionId: versionId,
+      parentVersionId: versionId,
+      payload: { originalText: "旧标题", newText: "草稿标题", region: { x: 0.2, y: 0.2, width: 0.3, height: 0.15, rotation: 0 } },
+    } },
+  });
+  assert.equal(savedDraft.status, 200);
+
+  await page.goto(url + `create/canvas/${suiteId}`);
+  const edit = page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit");
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  const textTool = dialog.locator(".wb-editor-tools button", { hasText: "编辑文字" });
+  await edit.click();
+  await textTool.click();
+  const replacement = dialog.getByLabel("新文字：旧标题", { exact: true });
+  assert.equal(await replacement.inputValue(), "草稿标题");
+  assert.equal(await replacement.getAttribute("maxlength"), "500");
+  assert.equal(await dialog.getByLabel("原文字", { exact: true }).getAttribute("maxlength"), "500");
+
+  const removed = page.waitForResponse((response) => response.request().method() === "DELETE"
+    && response.url().endsWith(sessionPath + "/operations/saved-change-text"));
+  await replacement.fill("旧标题");
+  assert.equal((await removed).status(), 200);
+  const draft = await api.request("GET", sessionPath);
+  assert.deepEqual(draft.body.data.operations, []);
+  await dialog.getByRole("button", { name: "关闭图片编辑器" }).click();
+  await edit.click();
+  await textTool.click();
+  await dialog.getByText("已修改 0 条", { exact: true }).waitFor();
+  assert.equal(await replacement.count(), 0);
 });
 
 test("图片资源库联动：画布单卡归档后 /assets 隐藏且预览仍 200；编辑器派生图进入 /assets 标注编辑生成并可软删除", async (t) => {

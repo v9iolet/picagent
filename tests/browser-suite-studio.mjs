@@ -411,6 +411,9 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await dialog.getByLabel("新文字：折叠插脚").fill("折叠设计");
   await dialog.getByLabel("新文字：随身携带").fill("轻巧随行");
   await dialog.locator(".wb-text-edit-row").filter({ hasText: "限时优惠" }).getByRole("button", { name: "删除", exact: true }).click();
+  const deletedText = dialog.getByLabel("新文字：限时优惠");
+  assert.equal(await deletedText.inputValue(), "");
+  await deletedText.fill(" 　");
   await dialog.locator(".wb-text-edit-row").filter({ hasText: "商品型号" }).getByRole("button", { name: "重置", exact: true }).click();
   await dialog.getByText("已修改 3 条", { exact: true }).waitFor();
   assert.equal(fixture.calls.filter((x) => x.path.endsWith("/operations")).length, 0);
@@ -424,6 +427,7 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   assert.deepEqual(edits.map(({ payload }) => [payload.originalText, payload.newText]), [
     ["折叠插脚", "折叠设计"], ["随身携带", "轻巧随行"], ["限时优惠", ""],
   ]);
+  assert.equal(edits[2].summary, "删除文字：限时优惠");
   assert.deepEqual(submitted.request().postDataJSON().operationIds, edits.map((item) => item.operationId));
   await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
   await first.getByRole("combobox").selectOption("4K");

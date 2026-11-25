@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } f
 import { applyNodeChanges, Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, type Edge, type Node, type NodeProps, type Viewport, useNodesState, useReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { defaultImageOptions } from "../../shared/model-settings";
+import { CHANGE_TEXT_MAX_LENGTH, CHANGE_TEXT_MAX_OPERATIONS, normalizeChangeTextReplacement } from "../../shared/image-editor";
 import {
   applyStyleOverrideToPrompt,
   computeLineageHighlight,
@@ -782,6 +783,7 @@ export function ImageEditorModal({
   const ocrAutoTriggeredRef = useRef(false);
   const [translateLang, setTranslateLang] = useState("英文");
   const [translating, setTranslating] = useState(false);
+  const editorMounted = useRef(false);
   const [zoom, setZoom] = useState(1);
   const [holdCompareOriginal, setHoldCompareOriginal] = useState(false);
   const [textRegion, setTextRegion] = useState(DEFAULT_EDIT_TEXT_REGION);
@@ -802,6 +804,12 @@ export function ImageEditorModal({
   const activeOperations = operations.filter((item) => item.type === activeOperationType);
   const textChanges = textEdits.filter((item) => item.originalText.trim() && item.originalText !== item.newText);
   const translatableText = textEdits.filter((item) => item.originalText.trim());
+  const textEditLimitError = textChanges.length > CHANGE_TEXT_MAX_OPERATIONS
+    ? `每次最多修改 ${CHANGE_TEXT_MAX_OPERATIONS} 条文字`
+    : textChanges.some(({ originalText, newText }) => originalText.length > CHANGE_TEXT_MAX_LENGTH || newText.length > CHANGE_TEXT_MAX_LENGTH)
+      ? `原文字和新文字每条最多 ${CHANGE_TEXT_MAX_LENGTH} 个字符`
+      : "";
+  const checkingCapabilities = !capabilities && !capabilityError;
 
   const writeDraft = (write: () => Promise<unknown> | undefined) => {
     const pending = pendingDraftWrite.current.then(write).then(() => undefined);
@@ -855,10 +863,14 @@ export function ImageEditorModal({
         items: translatableText.map((row) => ({ id: row.operationId, text: row.originalText })),
         preserveBrandTerms: true,
       });
+      if (!editorMounted.current) return;
       const translations = new Map(result.translations.filter((row) => row.translatedText.trim()).map((row) => [row.id, row.translatedText]));
       setTextEdits((current) => current.map((row) => ({
         ...row, newText: translations.get(row.operationId) ?? row.newText,
       })));
+      for (const { operationId, originalText } of translatableText) {
+        if (translations.get(operationId) === originalText) removeSavedTextEdit(operationId);
+      }
     } catch (error) {
       setEditorError(error instanceof Error ? error.message : "图片文字翻译失败");
     } finally {
@@ -866,7 +878,11 @@ export function ImageEditorModal({
     }
   };
 
-  useEffect(() => { suiteApi.imageEditorCapabilities().then((result) => setCapabilities(result.capabilities)).catch(() => setCapabilityError("能力状态暂时不可用")); }, []);
+  useEffect(() => {
+    editorMounted.current = true;
+    suiteApi.imageEditorCapabilities().then((result) => setCapabilities(result.capabilities)).catch(() => setCapabilityError("能力状态暂时不可用"));
+    return () => { editorMounted.current = false; };
+  }, []);
   useEffect(() => {
     let mounted = true;
     suiteApi.getImageEditDraft(task.id).then((draft) => {
@@ -910,10 +926,10 @@ export function ImageEditorModal({
 
   useEffect(() => {
     if (tool !== "change_text") return;
-    if (capabilities?.ocr === false || ocrAutoTriggeredRef.current) return;
+    if (checkingCapabilities || capabilities?.ocr === false || ocrAutoTriggeredRef.current) return;
     ocrAutoTriggeredRef.current = true;
     void runOcr();
-  }, [capabilities, tool, runOcr]);
+  }, [capabilities, checkingCapabilities, tool, runOcr]);
   useEffect(() => {
     const transformer = transformerRef.current;
     if (!transformer) return;
@@ -1096,14 +1112,17 @@ export function ImageEditorModal({
     if (!activeOperationType) return;
     let finalOperations: DraftOperation[];
     if (activeOperationType === "change_text") {
-      if (!textChanges.length || translating) return;
-      finalOperations = textChanges.map(({ operationId, originalText, newText, region, prompt }) => ({
-        operationId,
-        type: "change_text",
-        summary: newText === "" ? `删除文字：${originalText}` : `编辑文字：${originalText} → ${newText}`,
-        sourceVersionId: version.id,
-        payload: { originalText, newText, region, ...(prompt ? { prompt } : {}) },
-      }));
+      if (!textChanges.length || translating || textEditLimitError) return;
+      finalOperations = textChanges.map(({ operationId, originalText, newText, region, prompt }) => {
+        const replacement = normalizeChangeTextReplacement(newText);
+        return {
+          operationId,
+          type: "change_text",
+          summary: replacement === "" ? `删除文字：${originalText}` : `编辑文字：${originalText} → ${replacement}`,
+          sourceVersionId: version.id,
+          payload: { originalText, newText: replacement, region, ...(prompt ? { prompt } : {}) },
+        };
+      });
     } else {
       const next = operationFor(activeOperationType);
       const multiple = activeOperationType === "add_text";
@@ -1214,8 +1233,14 @@ export function ImageEditorModal({
     }
   };
 
-  const updateTextEdit = (id: string, update: Partial<Pick<TextEditRow, "originalText" | "newText">>) => {
-    setTextEdits((current) => current.map((row) => row.operationId === id ? { ...row, ...update } : row));
+  const removeSavedTextEdit = (id: string) => {
+    if (activeOperations.some((item) => item.operationId === id)) void removeOperation(id);
+  };
+
+  const updateTextEdit = (row: TextEditRow, update: Partial<Pick<TextEditRow, "originalText" | "newText">>) => {
+    const next = { ...row, ...update };
+    setTextEdits((current) => current.map((item) => item.operationId === row.operationId ? { ...item, ...update } : item));
+    if (next.newText === next.originalText) removeSavedTextEdit(row.operationId);
   };
 
   const updateTextRegion = (node: Konva.Text, transformed = false) => {
@@ -1456,6 +1481,7 @@ export function ImageEditorModal({
                 </div>
                 <div className="wb-text-edit-status" role="status">
                   {capabilities?.ocr === false ? <span>当前未配置多模态识字模型。可以框选补充文字。</span>
+                    : checkingCapabilities ? <span>正在检查文字识别能力…</span>
                     : ocrLoading ? <span>正在识别整张图的文字…</span>
                     : !hasRecognizedText && (
                       <>
@@ -1480,30 +1506,27 @@ export function ImageEditorModal({
                   {textEdits.map((row) => {
                     const { operationId, originalText, newText, manual } = row;
                     const selected = selectedTextId === operationId;
-                    const deleted = Boolean(originalText.trim()) && newText === "";
+                    const deleted = Boolean(originalText.trim()) && newText.trim() === "";
                     const disabled = saving || translating;
                     return (
                       <div className={`wb-text-edit-row${selected ? " is-active" : ""}`} key={operationId}>
                         <button type="button" className="wb-text-edit-locate" aria-pressed={selected} onClick={() => selectTextEdit(row, true)}>
                           {manual ? "手工框选文字" : originalText}
                         </button>
-                        {manual && <label>原文字<input disabled={disabled} value={originalText} onFocus={() => selectTextEdit(row, true)} onChange={(event) => {
+                        {manual && <label>原文字<input disabled={disabled} maxLength={CHANGE_TEXT_MAX_LENGTH} value={originalText} onFocus={() => selectTextEdit(row, true)} onChange={(event) => {
                           const value = event.target.value;
-                          updateTextEdit(operationId, { originalText: value, ...(newText === originalText ? { newText: value } : {}) });
+                          updateTextEdit(row, { originalText: value, ...(newText === originalText ? { newText: value } : {}) });
                         }} /></label>}
-                        <label>新文字<textarea disabled={disabled} rows={1} aria-label={originalText ? `新文字：${originalText}` : "新文字"} value={newText}
+                        <label>新文字<textarea disabled={disabled} maxLength={CHANGE_TEXT_MAX_LENGTH} rows={1} aria-label={originalText ? `新文字：${originalText}` : "新文字"} value={newText}
                           placeholder={deleted ? "生成时删除这条文字" : undefined}
-                          onFocus={() => selectTextEdit(row, true)} onChange={(event) => updateTextEdit(operationId, { newText: event.target.value })} /></label>
+                          onFocus={() => selectTextEdit(row, true)} onChange={(event) => updateTextEdit(row, { newText: event.target.value })} /></label>
                         <div className="wb-text-edit-actions">
-                          <button type="button" className="wb-danger-link" disabled={disabled || !originalText.trim() || deleted} onClick={() => updateTextEdit(operationId, { newText: "" })}>删除</button>
-                          <button type="button" disabled={disabled || newText === originalText} onClick={() => {
-                            updateTextEdit(operationId, { newText: originalText });
-                            if (activeOperations.some((item) => item.operationId === operationId)) void removeOperation(operationId);
-                          }}>重置</button>
+                          <button type="button" className="wb-danger-link" disabled={disabled || !originalText.trim() || deleted} onClick={() => updateTextEdit(row, { newText: "" })}>删除</button>
+                          <button type="button" disabled={disabled || newText === originalText} onClick={() => updateTextEdit(row, { newText: originalText })}>重置</button>
                           {manual && <button type="button" disabled={disabled} onClick={() => {
                             setTextEdits((current) => current.filter((item) => item.operationId !== operationId));
                             if (selected) setSelectedTextId(null);
-                            if (activeOperations.some((item) => item.operationId === operationId)) void removeOperation(operationId);
+                            removeSavedTextEdit(operationId);
                           }}>移除框选</button>}
                         </div>
                       </div>
@@ -1548,13 +1571,14 @@ export function ImageEditorModal({
           </aside>
           <footer className="wb-editor-footer">
             <span>{tool === "change_text" ? `已修改 ${textChanges.length} 条` : `已加入对话 ${activeOperations.length} 项`}</span>
+            {tool === "change_text" && textEditLimitError && <strong role="alert">{textEditLimitError}</strong>}
             {editorError && <strong role="alert"><ModelSettingsMessage message={editorError} /></strong>}
             <button type="button" onClick={onClose}>取消</button>
             {activeOperationType && activeOperationType !== "change_text" && <button type="button" disabled={saving || loadingDraft || !capabilityReady} onClick={() => void addOperation()}>{saving ? "保存中…" : activeOperations.some((item) => item.operationId === operationFor(activeOperationType).operationId) ? "更新对话操作" : "添加到对话"}</button>}
             {tool === "regenerate" ? (
               <button type="button" className="wb-primary-action" disabled={saving || !capabilityReady} onClick={() => { setSaving(true); onRegenerate().then(onClose).catch((errorValue) => setEditorError(errorValue instanceof Error ? errorValue.message : "再次生成失败")).finally(() => setSaving(false)); }}>{saving ? "提交中…" : "再次生成当前版本"}</button>
             ) : (
-              <button type="button" className="wb-primary-action" disabled={saving || loadingDraft || !capabilityReady || (tool === "change_text" && (!textChanges.length || translating))} onClick={() => void submit()}>{saving ? "提交中…" : "开始生成（新建编辑子卡）"}</button>
+              <button type="button" className="wb-primary-action" disabled={saving || loadingDraft || !capabilityReady || (tool === "change_text" && (!textChanges.length || translating || Boolean(textEditLimitError)))} onClick={() => void submit()}>{saving ? "提交中…" : "开始生成（新建编辑子卡）"}</button>
             )}
           </footer>
         </div>
