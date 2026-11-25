@@ -10,6 +10,12 @@ import type { PromptTemplateRuntime } from "../prompt-library.js";
 import type { PromptRepository } from "../types.js";
 
 type AplusPromptStage = "aplus_plan" | "aplus_image" | "aplus_ai_write";
+const APLUS_PROMPT_CODES: Record<AplusPromptStage, string> = {
+  aplus_plan: "aplus.plan",
+  aplus_image: "aplus.image",
+  aplus_ai_write: "aplus.ai-write",
+};
+
 type PromptText = Pick<PromptTemplateRuntime, "body" | "userPromptTemplate">;
 type ModuleRuleTemplate = PromptText & Pick<PromptTemplateRuntime, "applicability">;
 
@@ -32,8 +38,9 @@ export async function resolveAplusPromptTemplate(
   const [stage, moduleCode] = selection;
   const published = await prompts.listPublished(stage);
   const matched = stage === "aplus_module_rule"
-    ? published.find((item) => item.applicability.moduleCode === moduleCode)
-    : published[0];
+    ? published.find((item) => item.applicability?.moduleCode === moduleCode) ??
+      published.find((item) => item.code === `aplus.module.${moduleCode}`)
+    : published.find((item) => item.code === APLUS_PROMPT_CODES[stage]) ?? published[0];
   return matched ? prompts.getPublishedVersion(matched.templateVersionId, stage) : null;
 }
 

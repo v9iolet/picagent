@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   renderAplusAiWritePrompt,
   renderAplusImagePrompt,
   renderAplusPlanPrompt,
+  resolveAplusPromptTemplate,
 } from "../server/aplus/aplus-prompt.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
+import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { APLUS_MODULES } from "../shared/aplus.js";
 import { emptyProductCardFields } from "../shared/product-card.js";
 
@@ -30,6 +33,39 @@ const input = {
   selectedModules: ["comparison", "hero"] as const,
   moduleRuleTemplates,
 };
+
+test("A+ 单模板阶段优先读取规范 code，缺少已发布的规范模板时使用该阶段的首项", async () => {
+  const prompts = new MemoryPromptRepository();
+  const stages = [
+    ["aplus_plan", planTemplate],
+    ["aplus_image", imageTemplate],
+    ["aplus_ai_write", aiWriteTemplate],
+  ] as const;
+
+  for (const [stage, canonical] of stages) {
+    const alternate = {
+      ...canonical,
+      code: `${canonical.code}.alternate`,
+      name: `A ${canonical.name}`,
+      templateId: randomUUID(),
+      templateVersionId: randomUUID(),
+    };
+    await prompts.importRecords([alternate, canonical]);
+    await prompts.publishVersion(alternate.templateVersionId);
+    assert.equal((await resolveAplusPromptTemplate(prompts, stage))?.templateVersionId, alternate.templateVersionId);
+
+    await prompts.publishVersion(canonical.templateVersionId);
+    assert.deepEqual((await prompts.listPublished(stage)).map(({ code }) => code), [alternate.code, canonical.code]);
+    assert.equal((await resolveAplusPromptTemplate(prompts, stage))?.templateVersionId, canonical.templateVersionId);
+  }
+});
+
+test("A+ 渲染按字面保留输入中的花括号和替换标记", () => {
+  const productInfo = "商品描述 {{unknown}} $& {{language}}";
+  const { userPrompt } = renderAplusPlanPrompt(planTemplate, { ...input, productInfo, sizePresets: ["aplus_standard"] });
+  assert.equal(userPrompt.match(/^商品卖点与生成要求：(.+)$/m)?.[1], productInfo);
+  assert.match(userPrompt, /^输出语言：英文$/m);
+});
 
 test("A+ 规划按所选顺序拼入对应模块规则，并保留原图与商品事实的来源", () => {
   const { systemPrompt, userPrompt } = renderAplusPlanPrompt(planTemplate, {
