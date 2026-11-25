@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
+  APLUS_PRODUCT_INFO_MAX_LENGTH,
+  type AplusModuleCode,
   isAplusPlanStale,
   normalizeAplusLanguage,
   normalizeAplusProductInfo,
@@ -23,7 +25,7 @@ import type {
   SuiteRepository,
 } from "../types.js";
 import { aplusPlanningView, readAplusRunConfig, validateAplusPlanOutput, type AplusRunConfig } from "./aplus-plan.js";
-import { renderAplusPlanPrompt, resolveAplusPromptTemplate } from "./aplus-prompt.js";
+import { renderAplusAiWritePrompt, renderAplusPlanPrompt, resolveAplusPromptTemplate } from "./aplus-prompt.js";
 
 interface AplusPlanningDependencies {
   repository: SuiteRepository;
@@ -50,19 +52,26 @@ function fallbackTaskName(date = new Date()) {
 }
 
 export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
-  async function readInputs(body: Record<string, unknown>, defaultSourceId?: string): Promise<Result<AplusRunConfig>> {
-    const sourceId = body.suiteId ?? defaultSourceId;
-    const { modules, sizePresets, resolution } = body;
+  function readVisionFields(body: Record<string, unknown>) {
+    const { modules } = body;
     const platform = typeof body.platform === "string" ? body.platform.trim() : "";
     const targetMarket = typeof body.targetMarket === "string" ? normalizeAplusTargetMarket(body.targetMarket) : "";
     const language = typeof body.language === "string" ? normalizeAplusLanguage(body.language) : "";
-    if (resolution !== "1K" && resolution !== "2K") return rejected("APLUS_INVALID_RESOLUTION");
-    if (typeof language !== "string" || !allowedLanguages.has(language)) return rejected("APLUS_INVALID_LANGUAGE");
+    if (!allowedLanguages.has(language)) return rejected("APLUS_INVALID_LANGUAGE");
     if (!targetMarket) return rejected("APLUS_TARGET_MARKET_REQUIRED");
     if (!validateAplusModuleCodes(modules)) return rejected("APLUS_INVALID_MODULES");
     const rawInfo = body.productInfo === undefined ? "" : body.productInfo;
-    if (typeof rawInfo !== "string" || Array.from(rawInfo).length > 1000) return rejected("APLUS_INVALID_PRODUCT_INFO");
-    const productInfo = normalizeAplusProductInfo(rawInfo);
+    if (typeof rawInfo !== "string" || Array.from(rawInfo).length > APLUS_PRODUCT_INFO_MAX_LENGTH) return rejected("APLUS_INVALID_PRODUCT_INFO");
+    return { ok: true as const, value: { platform, targetMarket, language, modules, productInfo: normalizeAplusProductInfo(rawInfo) } };
+  }
+
+  async function readInputs(body: Record<string, unknown>, defaultSourceId?: string): Promise<Result<AplusRunConfig>> {
+    const sourceId = body.suiteId ?? defaultSourceId;
+    const { sizePresets, resolution } = body;
+    if (resolution !== "1K" && resolution !== "2K") return rejected("APLUS_INVALID_RESOLUTION");
+    const fields = readVisionFields(body);
+    if (!fields.ok) return fields;
+    const { platform, targetMarket, language, modules, productInfo } = fields.value;
     if (typeof sourceId !== "string" || !uuid.test(sourceId)) return rejected("APLUS_INVALID_INPUT_IMAGES");
 
     const [profile, card, source] = await Promise.all([
@@ -76,19 +85,11 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
     if (!card.snapshot && !productInfo) return rejected("APLUS_PRODUCT_INFO_REQUIRED");
     if (!source) return rejected("INVALID_SUITE_ID", 404);
 
-    const images = await deps.repository.getInputImages(source.id);
-    const imageIds = body.inputImageIds === undefined ? images.map((item) => item.id) : body.inputImageIds;
-    if (
-      !Array.isArray(imageIds) || imageIds.length < 1 || imageIds.length > 6 ||
-      new Set(imageIds).size !== imageIds.length
-    ) return rejected("APLUS_INVALID_INPUT_IMAGES");
-    const imagesById = new Map(images.map((image) => [image.id, image]));
-    const sourceImages: InputImage[] = [];
-    for (const id of imageIds) {
-      const image = typeof id === "string" && imagesById.get(id);
-      if (!image) return rejected("APLUS_INVALID_INPUT_IMAGES");
-      sourceImages.push(image);
-    }
+    const savedImages = await deps.repository.getInputImages(source.id);
+    const imageIds = body.inputImageIds === undefined ? savedImages.map(({ id }) => id) : body.inputImageIds;
+    const images = selectInputImages(savedImages, imageIds);
+    if (!images.ok) return images;
+    const sourceImages = images.value;
     const inputSnapshot = {
       imageHashes: sourceImages.map((image) => image.sha256),
       productInfo,
@@ -113,6 +114,21 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
         listingCopyRules: profile.listingCopyRules ?? null,
       },
     };
+  }
+
+  function selectInputImages(images: InputImage[], imageIds: unknown): Result<InputImage[]> {
+    if (
+      !Array.isArray(imageIds) || imageIds.length < 1 || imageIds.length > 6 ||
+      new Set(imageIds).size !== imageIds.length
+    ) return rejected("APLUS_INVALID_INPUT_IMAGES");
+    const imagesById = new Map(images.map((image) => [image.id, image]));
+    const selected: InputImage[] = [];
+    for (const id of imageIds) {
+      const image = typeof id === "string" && imagesById.get(id);
+      if (!image) return rejected("APLUS_INVALID_INPUT_IMAGES");
+      selected.push(image);
+    }
+    return { ok: true, value: selected };
   }
 
   async function readObject(key: string) {
@@ -165,32 +181,46 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
     return inputs;
   }
 
+  async function readVisionImages(images: InputImage[], source: "thumbnail" | "generation") {
+    return Promise.all(images.map(async (image) => {
+      const object = source === "thumbnail"
+        ? await readObject(image.thumbnailObjectKey)
+        : await readObject(image.originalObjectKey.replace(/\/original$/, "/generation-input.jpg")) ??
+          await readObject(image.originalObjectKey);
+      if (!object) throw new Error("INPUT_OBJECT_NOT_FOUND");
+      return { id: image.id, sourceKind: "original" as const, sourceVersionId: null, mimeType: object.contentType, bytes: object.bytes };
+    }));
+  }
+
+  async function loadVisionPrompt(stage: "aplus_plan" | "aplus_ai_write", modules: AplusModuleCode[]) {
+    const prompts = deps.prompts;
+    if (!prompts) throw new Error("PROMPT_REPOSITORY_NOT_CONFIGURED");
+    const [template, rules] = await Promise.all([
+      resolveAplusPromptTemplate(prompts, stage),
+      Promise.all(modules.map((code) => resolveAplusPromptTemplate(prompts, "aplus_module_rule", code))),
+    ]);
+    if (!template || !rules.every((rule) => rule !== null)) throw new Error("PROMPT_TEMPLATE_NOT_FOUND");
+    return { template, rules };
+  }
+
   async function plan(run: SuitePipelineRun, config: AplusRunConfig, images: InputImage[]) {
     const input = config.inputSnapshot;
-    if (!deps.prompts) throw new Error("PROMPT_REPOSITORY_NOT_CONFIGURED");
-    const prompts = deps.prompts;
-    const [llm, template, rules] = await Promise.all([
+    const [llm, { template, rules }] = await Promise.all([
       deps.resolveVision(),
-      resolveAplusPromptTemplate(prompts, "aplus_plan"),
-      Promise.all(input.modules.map((code) => resolveAplusPromptTemplate(prompts, "aplus_module_rule", code))),
+      loadVisionPrompt("aplus_plan", input.modules),
     ]);
     if (!llm) throw new Error("LLM_NOT_CONFIGURED");
-    if (!template || !rules.every((rule) => rule !== null)) throw new Error("PROMPT_TEMPLATE_NOT_FOUND");
     const inputImageIds = images.map((image) => image.id);
     const prompt = renderAplusPlanPrompt(template, {
       ...input,
       inputImageIds,
-      productInfo: input.productInfo.replace(/【待补充[^】]*】/gu, "").trim(),
+      productInfo: input.productInfo.replace(/【待补充[^】]*】/gu, "").replace(/【待补充[^\n]*/gu, "").trim(),
       productCardSnapshot: config.productCardSnapshot,
       selectedModules: input.modules,
       moduleRuleTemplates: rules,
       listingCopyRules: config.listingCopyRules,
     });
-    const visionImages = await Promise.all(images.map(async (image) => {
-      const thumbnail = await readObject(image.thumbnailObjectKey);
-      if (!thumbnail) throw new Error("INPUT_OBJECT_NOT_FOUND");
-      return { id: image.id, sourceKind: "original" as const, sourceVersionId: null, mimeType: thumbnail.contentType, bytes: thumbnail.bytes };
-    }));
+    const visionImages = await readVisionImages(images, "thumbnail");
     const result = await llm.generatePlan({
       requestId: run.id,
       flow: "aplus-plan",
@@ -217,6 +247,60 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
         },
       } satisfies AplusRunConfig,
     }, run);
+  }
+
+  async function aiWrite(payload: unknown): Promise<AppResponse> {
+    const body = asRecord(payload);
+    const fields = readVisionFields(body);
+    if (!fields.ok) return fields.response;
+    const { suiteId, inputImageIds, productCardId } = body;
+    if (typeof suiteId !== "string" || !uuid.test(suiteId) || !Array.isArray(inputImageIds)) {
+      return fail("APLUS_INVALID_INPUT_IMAGES");
+    }
+    const { platform, modules } = fields.value;
+    const [profile, card, source] = await Promise.all([
+      platform ? deps.platforms?.find(platform) : null,
+      resolvePublishedProductCardSnapshot(productCardId, deps.productCards),
+      deps.repository.getSuite(suiteId),
+    ]);
+    if (!profile) return fail("PLATFORM_NOT_FOUND");
+    if (!card.ok) return card.response;
+    if (!source) return fail("INVALID_SUITE_ID", 404);
+    const images = selectInputImages(await deps.repository.getInputImages(source.id), inputImageIds);
+    if (!images.ok) return images.response;
+
+    try {
+      const llm = await deps.resolveVision();
+      if (!llm?.generateAplusAiWrite) return fail("LLM_NOT_CONFIGURED", 503);
+      const [{ template, rules }, visionImages] = await Promise.all([
+        loadVisionPrompt("aplus_ai_write", modules), readVisionImages(images.value, "generation"),
+      ]);
+      const prompt = renderAplusAiWritePrompt(template, {
+        ...fields.value,
+        platform: profile.code,
+        inputImageIds: visionImages.map(({ id }) => id),
+        productCardSnapshot: card.snapshot,
+        selectedModules: modules,
+        moduleRuleTemplates: rules,
+      });
+      const output = await llm.generateAplusAiWrite({
+        templateVersionId: template.templateVersionId, templateBody: prompt.systemPrompt, userPrompt: prompt.userPrompt, visionImages,
+      });
+      if (typeof output !== "string" || (!card.snapshot && !output.trim())) return fail("APLUS_AI_WRITE_FAILED", 502);
+      const characters = Array.from(output.trim());
+      return ok({
+        productInfo: characters.slice(0, APLUS_PRODUCT_INFO_MAX_LENGTH).join(""),
+        truncated: characters.length > APLUS_PRODUCT_INFO_MAX_LENGTH,
+      });
+    } catch (error) {
+      switch (error instanceof Error ? error.message : "") {
+        case "PROMPT_REPOSITORY_NOT_CONFIGURED": return fail("PROMPT_REPOSITORY_NOT_CONFIGURED", 503);
+        case "PROMPT_TEMPLATE_NOT_FOUND": return fail("PROMPT_TEMPLATE_NOT_FOUND", 404);
+        case "INPUT_OBJECT_NOT_FOUND": return fail("INPUT_OBJECT_NOT_FOUND", 404);
+        case "INPUT_OBJECT_READ_FAILED": return fail("INPUT_OBJECT_READ_FAILED", 502);
+        default: return fail("APLUS_AI_WRITE_FAILED", 502);
+      }
+    }
   }
 
   function markFailed(run: SuitePipelineRun, error: unknown) {
@@ -349,7 +433,7 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
     if (!Array.isArray(body.sizePresets) || !body.sizePresets.length || !body.sizePresets.every((preset) => typeof preset === "string")) {
       return rejected("APLUS_INVALID_SIZE_PRESETS");
     }
-    if (typeof body.productInfo !== "string" || Array.from(body.productInfo).length > 1000) return rejected("APLUS_INVALID_PRODUCT_INFO");
+    if (typeof body.productInfo !== "string" || Array.from(body.productInfo).length > APLUS_PRODUCT_INFO_MAX_LENGTH) return rejected("APLUS_INVALID_PRODUCT_INFO");
     if (body.productCardId != null && typeof body.productCardId !== "string") return rejected("PRODUCT_CARD_NOT_AVAILABLE");
     if (body.productCardRevision != null && (!Number.isSafeInteger(body.productCardRevision) || Number(body.productCardRevision) < 1)) {
       return rejected("PRODUCT_CARD_NOT_AVAILABLE");
@@ -368,5 +452,5 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
     return { ok: true as const, value: { run, config, planSnapshot: config.planSnapshot, resolution: parsed.value.resolution } };
   }
 
-  return { start, editPlan, resume, prepareConfirmation, loadRun };
+  return { start, aiWrite, editPlan, resume, prepareConfirmation, loadRun };
 }

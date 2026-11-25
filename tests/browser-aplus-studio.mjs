@@ -22,7 +22,7 @@ import { emptyProductCardFields } from "../shared/product-card.js";
 
 async function startOfflineAplus(t) {
   const prompts = new MemoryPromptRepository();
-  const names = ["aplus-plan", "aplus-image", ...APLUS_MODULES.map(({ code }) => `aplus-module-${code}`)];
+  const names = ["aplus-plan", "aplus-image", "aplus-ai-write", ...APLUS_MODULES.map(({ code }) => `aplus-module-${code}`)];
   const versions = await prompts.importRecords(await Promise.all(names.map(async (name) => {
     const path = `prompt/normalized/${name}.md`;
     return parseNormalizedPromptMarkdown(await readFile(path, "utf8"), path);
@@ -79,6 +79,9 @@ async function startOfflineAplus(t) {
     },
     llmClient: {
       provider: "fake", model: "fake-vision", isFake: true,
+      async generateAplusAiWrite() {
+        return "1. 产品名称：随行杯\n2. 核心卖点：磨砂杯身\n3. 适用人群：通勤者\n4. 期望场景：日常外出\n5. 具体参数：【待补充：容量】\n" + "文案".repeat(500);
+      },
       async generatePlan() {
         const { modules, sizePresets, language } = planningInput;
         return {
@@ -298,4 +301,58 @@ test("A+ 有缓存草稿时仍更新 URL 预选卡，375px 创作栏可完整显
   await page.getByText("指定商品信息卡已归档，请重新选择。", { exact: true }).waitFor();
   assert.equal(await selected.count(), 0);
   assert.equal(await sellingPoints.inputValue(), "保留本地生成要求");
+});
+
+test("A+ 无商品卡时帮写卖点，可撤销并可带待补充占位继续规划", async (t) => {
+  const { baseUrl } = await startOfflineAplus(t);
+  const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
+  const config = page.getByRole("complementary", { name: "A+详情配置" });
+  const aiWrite = config.getByRole("button", { name: "AI 帮写", exact: true });
+  const undo = config.getByRole("button", { name: "撤销帮写", exact: true });
+  const info = config.getByLabel("商品卖点&生成要求");
+  const plan = config.getByRole("button", { name: "生成策划方案", exact: true });
+  const warning = page.getByRole("dialog", { name: "还有待补充的商品信息" });
+  let releaseWrite;
+  const waiting = new Promise((resolve) => { releaseWrite = resolve; });
+  await page.route("**/api/aplus/ai-write", async (route) => {
+    await waiting;
+    await route.continue();
+  });
+  t.after(releaseWrite);
+
+  const startUrl = new URL("/create/aplus", baseUrl).href;
+  await page.goto(startUrl);
+  assert.equal(await aiWrite.isDisabled(), true);
+  await config.getByText("请先上传商品原图，再使用 AI 帮写。").waitFor();
+  await config.getByLabel("上传商品原图").setInputFiles("public/assets/gan65-product.jpg");
+  await config.locator(".ss-thumb").waitFor();
+  await info.fill("原有卖点：磨砂杯身");
+  await aiWrite.click();
+  const pending = config.getByRole("button", { name: "AI 帮写中…", exact: true });
+  await pending.waitFor();
+  assert.equal(await pending.isDisabled(), true);
+  assert.equal(await pending.getAttribute("aria-busy"), "true");
+  releaseWrite();
+  await config.getByText("AI 帮写结果超过 1000 字，已截断。").waitFor();
+  assert.match(await info.inputValue(), /【待补充：容量】/);
+  assert.equal(Array.from(await info.inputValue()).length, 1000);
+  await undo.click();
+  assert.equal(await info.inputValue(), "原有卖点：磨砂杯身");
+  await undo.waitFor({ state: "detached" });
+
+  await aiWrite.click();
+  await undo.waitFor();
+  await plan.click();
+  await warning.getByRole("button", { name: "去补充", exact: true }).click();
+  await warning.waitFor({ state: "detached" });
+  await info.evaluate((textarea) => new Promise((resolve) => requestAnimationFrame(resolve)));
+  assert.equal(await info.evaluate((textarea) => textarea === document.activeElement), true);
+  assert.equal(page.url(), startUrl);
+
+  await plan.click();
+  await warning.getByRole("button", { name: "继续", exact: true }).click();
+  await page.getByRole("button", { name: "确认出图", exact: true }).waitFor();
+  assert.notEqual(page.url(), startUrl);
 });

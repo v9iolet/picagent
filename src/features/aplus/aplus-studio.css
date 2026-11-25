@@ -72,9 +72,14 @@
   stroke-width: 1.7;
 }
 
+.aplus-product-info-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .aplus-char-count {
-  display: block;
-  text-align: right;
+  margin-left: auto;
 }
 
 .aplus-module-options {

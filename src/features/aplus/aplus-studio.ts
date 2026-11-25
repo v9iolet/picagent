@@ -89,6 +89,14 @@ export function makeAplusPayload(config: AplusConfig, images: ApiImage[]) {
   };
 }
 
+export function makeAplusAiWritePayload(config: AplusConfig, images: ApiImage[]) {
+  const { productInfo, productCard, modules, platform, targetMarket, language } = config;
+  return {
+    suiteId: images[0]?.suiteId, inputImageIds: images.map(({ id }) => id),
+    productInfo, productCardId: productCard?.cardId ?? null, modules, platform, targetMarket, language,
+  };
+}
+
 const path = (id: string) => `/api/aplus/${encodeURIComponent(id)}`;
 
 function write<T>(url: string, body: object, method: "POST" | "PATCH" = "POST", key = createIdempotencyKey()) {
@@ -104,6 +112,8 @@ type AplusPayload = ReturnType<typeof makeAplusPayload>;
 
 export const aplusApi = {
   state: (id: string) => request<AplusStudioState>(`${path(id)}/studio-state`),
+  aiWrite: (body: ReturnType<typeof makeAplusAiWritePayload>) =>
+    write<{ productInfo: string; truncated: boolean }>("/api/aplus/ai-write", body),
   start: (id: string | undefined, body: AplusPayload, key: string) =>
     write<AplusRun>(id ? `${path(id)}/replan` : "/api/aplus", body, "POST", key),
   savePlan: (id: string, modules: AplusPlanModule[]) =>
@@ -125,6 +135,7 @@ export type AplusDraft = {
   uploadSuiteId: string | null;
   planEdits: AplusPlanModule[] | null;
   job: AplusJob | null;
+  aiWrite?: { previousInfo: string; truncated: boolean };
 };
 
 export function newAplusDraft(): AplusDraft {

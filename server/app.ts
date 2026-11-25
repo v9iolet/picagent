@@ -1145,6 +1145,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
 
+    if (method === "POST" && path === "/api/aplus/ai-write") return aplusPlanning.aiWrite(options.body);
     if (method === "POST" && path === "/api/aplus") return aplusPlanning.start(idempotencyKey, options.body);
     const aplusMatch = path.match(/^\/api\/aplus\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/(studio-state|plan|replan|confirm|resume)$/i);
     if (aplusMatch) {

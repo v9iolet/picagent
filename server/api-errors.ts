@@ -18,6 +18,7 @@ export const errorMessages: Record<string, string> = {
   APLUS_INVALID_SIZE_PRESETS: "请选择当前平台支持的详情尺寸，仅高级 A+ 两端可同时勾选",
   APLUS_PLAN_OUTPUT_INVALID: "模型返回的 A+ 方案格式有误，请重试规划",
   APLUS_PLANNING_FAILED: "A+ 方案规划失败，请重试",
+  APLUS_AI_WRITE_FAILED: "AI 帮写失败，请重试",
   APLUS_PLAN_ACTION_NOT_ALLOWED: "当前阶段不支持该 A+ 方案操作",
   APLUS_INVALID_PLAN_EDIT: "请至少保留一个现有模块，并只修改文案要求或顺序",
   APLUS_PLAN_CHANGED: "A+ 方案已更新，请刷新后再试",

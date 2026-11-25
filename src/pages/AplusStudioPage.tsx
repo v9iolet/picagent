@@ -14,7 +14,7 @@ import { AplusPlanReview } from "../features/aplus/AplusPlanReview";
 import { AplusResultCards } from "../features/aplus/AplusResultCards";
 import { clearAplusWorkspace, readAplusBatch, readAplusWorkspace, saveAplusBatch, saveAplusWorkspace } from "../features/aplus/aplus-draft-store";
 import {
-  aplusApi, aplusPath, configForPlatform, currentPlanInput, makeAplusPayload, newAplusDraft,
+  aplusApi, aplusPath, configForPlatform, currentPlanInput, makeAplusAiWritePayload, makeAplusPayload, newAplusDraft,
   type AplusDraft, type AplusStudioState,
 } from "../features/aplus/aplus-studio";
 import { CreateToolsNav } from "../features/create/CreateToolsNav";
@@ -277,6 +277,29 @@ function AplusWorkspace({
     });
   }
 
+  function aiWrite() {
+    if (busy || !images.length || !profile || !config.modules.length) return;
+    void act("ai-write", async () => {
+      const { productInfo, truncated } = await aplusApi.aiWrite(makeAplusAiWritePayload(config, images));
+      const current = draftRef.current;
+      commitDraft({
+        ...current,
+        config: { ...current.config, productInfo },
+        aiWrite: { previousInfo: config.productInfo, truncated },
+      });
+    });
+  }
+
+  function undoAiWrite() {
+    const current = draftRef.current;
+    if (busy || !current.aiWrite) return;
+    commitDraft({
+      ...current,
+      config: { ...current.config, productInfo: current.aiWrite.previousInfo },
+      aiWrite: undefined,
+    });
+  }
+
   async function savePlan() {
     if (!suiteId || !state || !draftRef.current.planEdits) return;
     const saved = await aplusApi.savePlan(suiteId, draftRef.current.planEdits);
@@ -406,11 +429,15 @@ function AplusWorkspace({
           busy={busy}
           blocked={configBlocked}
           submitting={action === "plan"}
+          aiWriting={action === "ai-write"}
+          aiWrite={draft.aiWrite}
           stale={stale}
           awaitingConfirmation={awaiting}
           onChange={(next) => commitDraft({ ...draftRef.current, config: next })}
           onUpload={upload}
           onRemove={remove}
+          onAiWrite={aiWrite}
+          onUndoAiWrite={undoAiWrite}
           onSubmit={startPlan}
           onViewPlan={() => resultsRef.current?.scrollIntoView({ block: "start" })}
         />
