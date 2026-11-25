@@ -1,3 +1,4 @@
+import type { AplusImageVersionMetadata, AplusTaskMetadata, DetailSizePresets } from "../../shared/aplus";
 import type { ListingConfig, ListingContent, ListingRules } from "../../shared/listing-config";
 import type { ModelChannelInput, ModelChannelSnapshot, ModelPreferences, ModelSettingsView } from "../../shared/model-settings";
 import type {
@@ -25,7 +26,7 @@ export interface ApiImage {
   currentBaseVersionId: string | null; createdAt: string; originalPreviewUrl: string; thumbnailPreviewUrl: string;
 }
 export interface ApiSuite {
-  id: string; name: string; status: "draft" | "in_progress"; origin?: "suite_studio" | "canvas" | "replica";
+  id: string; name: string; status: "draft" | "in_progress"; origin?: "suite_studio" | "canvas" | "replica" | "aplus";
   styleOverride?: string | null; styleOverrideUpdatedAt?: string | null;
   coverPreviewUrl?: string | null; inputImageCount?: number; taskCount?: number; isDemo?: boolean;
   createdAt: string; updatedAt: string; inputImages: ApiImage[];
@@ -45,7 +46,7 @@ export interface ApiPromptInputField {
 }
 export interface ApiPromptTemplate {
   templateId: string; templateVersionId: string; versionNo: number; code: string; name: string;
-  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy" | "replica_prompt" | "product_onboarding"; executionTarget: "llm" | "image_model";
+  kind: string; stage: "base_refine" | "plan" | "structure_plan" | "category_prompt" | "task_image" | "reverse_prompt" | "listing_copy" | "replica_prompt" | "product_onboarding" | "aplus_plan" | "aplus_module_rule" | "aplus_image" | "aplus_ai_write"; executionTarget: "llm" | "image_model";
   inputSchema: ApiPromptInputField[]; applicability: Record<string, unknown>;
   usedBy?: string[]; status?: "draft" | "published" | "retired";
 }
@@ -56,6 +57,7 @@ export interface ApiPlatformProfile {
   mainImageStrategy: string; galleryStrategy: string; textStrategy: string; modelStrategy: string;
   sourceNote: string; sortOrder: number;
   listingCopyRules?: ListingRules;
+  detailSizePresets: DetailSizePresets;
 }
 export interface ApiRagChunk { id: string; version: string; title: string; summary: string; sourceKind: string; sourceAssetPaths: string[]; contentSha256: string; fieldValues?: Record<string, unknown> }
 export interface ApiPlanItem { id: string; ordinal: number; imageType: "main" | "detail"; title: string; purpose: string; prompt: string }
@@ -78,11 +80,11 @@ export interface ApiPlanSnapshot { id: string; revisionNumber: number; revisionK
 export interface ApiPlanAttempt { id: string; status: "running" | "succeeded" | "failed"; provider: { name: string; model: string; isFake: boolean; channel?: ModelChannelSnapshot }; errorCode: string | null; errorMessage: string | null; snapshot: ApiPlanSnapshot | null }
 export interface ApiPlanState { attempt: ApiPlanAttempt | null; snapshot: ApiPlanSnapshot | null }
 export type ApiTaskStatus = "incomplete" | "pending" | "generating" | "generated" | "refining" | "failed" | "archived";
-export interface ApiTaskVersion { id: string; taskId: string; slotId: string; attemptId: string; versionNumber: number; objectKey: string; processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string; promptSnapshot: Record<string, unknown>; contextSnapshot: Record<string, unknown>; isCurrent: boolean; isFinal: boolean; createdAt: string; previewUrl: string }
+export interface ApiTaskVersion extends AplusImageVersionMetadata { id: string; taskId: string; slotId: string; attemptId: string; versionNumber: number; objectKey: string; processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string; promptSnapshot: Record<string, unknown>; contextSnapshot: Record<string, unknown>; isCurrent: boolean; isFinal: boolean; createdAt: string; previewUrl: string }
 export interface ApiTaskAttempt { id: string; slotId: string; attemptNo: number; provider: string; model: string; endpoint: string; requestSummary: Record<string, unknown>; promptSnapshot: Record<string, unknown>; promptSha256: string; contextSnapshot: Record<string, unknown>; sourceKind: "base" | "original" | "library"; sourceObjectKey: string; sourceInputImageId: string | null; sourceBaseVersionId: string | null; sourceLibraryReferenceId?: string | null; sourceResourceVersionId?: string | null; status: "running" | "succeeded" | "failed"; errorCode: string | null; errorMessage: string | null; externalRequestId: string | null; startedAt: string; finishedAt: string | null }
 export interface ApiTaskSlot { id: string; batchId: string; taskId: string; slotOrdinal: number; retryOfSlotId: string | null; status: "pending" | "generating" | "succeeded" | "failed"; selectedVersionId: string | null; createdAt: string; completedAt: string | null }
 export interface ApiProductMaterialRef { libraryReferenceId: string; resourceId: string; resourceVersionId: string; order: number; title?: string; previewUrl?: string }
-export interface ApiSuiteTask { id: string; suiteId: string; planSnapshotId: string | null; planItemId: string | null; ordinal: number; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; promptRevision: number; sourceInputImageId: string | null; generationParams: Record<string, unknown>; status: ApiTaskStatus; archivedAt: string | null; createdAt: string; updatedAt: string; originKind?: "suite_plan" | "reverse_import" | "replica"; reversePlanId?: string | null; reverseReferenceId?: string | null; reversePromptVersionId?: string | null; reverseTaskGroupId?: string | null; replicaReferenceId?: string | null; replicaReferenceObjectKey?: string | null; sourceLibraryReferenceId?: string | null; sourceResourceVersionId?: string | null; sourceRevision?: number; versions: ApiTaskVersion[]; attempts: ApiTaskAttempt[]; slots: ApiTaskSlot[] }
+export interface ApiSuiteTask extends AplusTaskMetadata { id: string; suiteId: string; planSnapshotId: string | null; planItemId: string | null; ordinal: number; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; promptRevision: number; sourceInputImageId: string | null; generationParams: Record<string, unknown>; status: ApiTaskStatus; archivedAt: string | null; createdAt: string; updatedAt: string; originKind?: "suite_plan" | "reverse_import" | "replica" | "aplus"; reversePlanId?: string | null; reverseReferenceId?: string | null; reversePromptVersionId?: string | null; reverseTaskGroupId?: string | null; replicaReferenceId?: string | null; replicaReferenceObjectKey?: string | null; sourceLibraryReferenceId?: string | null; sourceResourceVersionId?: string | null; sourceRevision?: number; versions: ApiTaskVersion[]; attempts: ApiTaskAttempt[]; slots: ApiTaskSlot[] }
 export interface ApiTaskBatch { id: string; suiteId: string; kind: "batch" | "single" | "retry"; requestedCount: number; taskIds: string[]; status: "running" | "completed" | "partial" | "failed"; idempotencyKey: string; createdAt: string; startedAt: string | null; finishedAt: string | null }
 export interface ApiCanvasLayout { id: string; suiteId: string; layoutVersion: number; viewport: { x: number; y: number; zoom: number }; nodes: Array<{ nodeId: string; x: number; y: number; width?: number; height?: number; groupKey?: string; hidden?: boolean }>; groups: Array<{ groupKey: string; x: number; y: number; width: number; height: number; collapsed?: boolean }>; updatedAt: string }
 export interface ApiWorkbench { suite: ApiSuite; inputImages: ApiImage[]; planSnapshot: ApiPlanSnapshot | null; tasks: ApiSuiteTask[]; batches: ApiTaskBatch[]; imageEditChildren?: Array<{ task: Record<string, unknown>; snapshot: Record<string, unknown> | null; attempts: Array<Record<string, unknown> & { provider?: { name: string; version: string; channel?: ModelChannelSnapshot } }>; versions: Array<{ id: string; previewUrl?: string; versionNumber: number; width?: number; height?: number; mimeType?: string; objectKey?: string; attemptId?: string; createdAt?: string }> }>; layout: ApiCanvasLayout | null; planStyleGuide?: string; styleOverride?: string | null; effectiveStyleGuide?: string }
@@ -167,7 +169,7 @@ export const modelSettingsApi = {
 };
 
 export const suiteApi = {
-  create(name: string, origin?: Exclude<ApiSuite["origin"], "replica">) { return request<ApiSuite>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name, origin }) }); },
+  create(name: string, origin?: "suite_studio" | "canvas") { return request<ApiSuite>("/api/suites", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name, origin }) }); },
   rename(id: string, name: string) { return request<ApiSuite>(`/api/suites/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ name }) }); },
   delete(id: string) { return request<{ id: string }>(`/api/suites/${encodeURIComponent(id)}`, { method: "DELETE" }); },
   list() { return request<ApiSuite[]>("/api/suites"); },

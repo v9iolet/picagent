@@ -651,6 +651,117 @@ test("031 extends origin, task origin_kind, pipeline phase, adds replica tables,
   });
 });
 
+test("041 seeds editable A+ sizes and preserves A+ rows and template stages on migration replay", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const suites = new PostgresSuiteRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const pipelines = new PostgresPipelineRepository(pool);
+    const platforms = new PostgresPlatformRepository(pool);
+    const app = createSuiteStudioApp({ repository: suites, storage: new MemoryStorage(), platformRepository: platforms });
+    const response = await app.request("GET", "/api/platforms");
+    assert.equal(response.status, 200);
+    const profiles: Awaited<ReturnType<typeof platforms.listEnabled>> = response.body.data;
+    assert.equal(profiles.length, 16);
+    const common = ["1:1", "3:4", "9:16", "16:9"];
+    for (const { code, marketScope, detailSizePresets } of profiles) {
+      const expected = code === "amazon"
+        ? { options: ["aplus_premium_web", "aplus_premium_mobile", "aplus_standard", ...common], default: "aplus_standard" }
+        : { options: common, default: marketScope === "domestic" ? "3:4" : "1:1" };
+      assert.deepEqual(detailSizePresets, expected, code);
+      assert.deepEqual((await platforms.find(code))?.detailSizePresets, expected, code);
+    }
+    const configured = { options: ["aplus_standard", "16:9"], default: "16:9" };
+    await pool.query("UPDATE suite_workbench.platform_profiles SET detail_size_presets=$1 WHERE code='amazon'", [configured]);
+
+    const suite = await suites.createSuite("PG A+ 批次", undefined, "aplus");
+    assert.equal(suite.origin, "aplus");
+    const taskId = randomUUID();
+    await pool.query(
+      `INSERT INTO suite_workbench.suite_tasks
+         (id,suite_id,ordinal,image_type,title,purpose,prompt_draft,generation_params_json,status,origin_kind,module_code,size_preset,sort_order,created_at,updated_at)
+       VALUES ($1,$2,1,'detail','首屏主视觉','展示商品','提示词','{}','pending','aplus','hero','aplus_standard',1,$3,$3)`,
+      [taskId, suite.id, timestamp],
+    );
+    const task = await tasks.getTask(taskId);
+    assert.equal(task?.originKind, "aplus");
+    assert.equal(task.moduleCode, "hero");
+    assert.equal(task.sizePreset, "aplus_standard");
+    assert.equal(task.sortOrder, 1);
+    const { run } = await pipelines.createRun({ ...runningPipeline(suite.id), currentPhase: "aplus_planning" });
+    assert.equal(run.currentPhase, "aplus_planning");
+    assert.equal((await pipelines.updateRun(run.id, {
+      currentPhase: "awaiting_confirmation", status: "waiting_human_input",
+    }))?.currentPhase, "awaiting_confirmation");
+
+    const batchId = randomUUID();
+    const slotId = randomUUID();
+    const attemptId = randomUUID();
+    await tasks.beginBatch({
+      batch: { id: batchId, suiteId: suite.id, kind: "single", requestedCount: 1, taskIds: [taskId], status: "running", idempotencyKey: "image", createdAt: timestamp, startedAt: timestamp, finishedAt: null },
+      slots: [{ id: slotId, batchId, taskId, slotOrdinal: 1, retryOfSlotId: null, status: "generating", selectedVersionId: null, createdAt: timestamp, completedAt: null }],
+      attempts: [{
+        id: attemptId, slotId, attemptNo: 1, provider: "fake", model: "fake", endpoint: "/v1/images/edits",
+        requestSummary: {}, promptSnapshot: {}, promptSha256: "a".repeat(64), contextSnapshot: {}, sourceKind: "original",
+        sourceObjectKey: "original.png", sourceInputImageId: null, sourceBaseVersionId: null, status: "running",
+        errorCode: null, errorMessage: null, externalRequestId: null, startedAt: timestamp, finishedAt: null,
+      }],
+    });
+    const generatedSize = { width: 1024, height: 640 };
+    const deliverySize = { width: 970, height: 600 };
+    const { version } = await tasks.completeAttempt({
+      attemptId, slotId, taskId, completedAt: timestamp, processObjectKeys: [], sha256: "b".repeat(64),
+      objectKey: "generated.png", mimeType: "image/png", ...generatedSize,
+      generatedSize, deliverySize, deliveryObjectKey: "delivery.png",
+    });
+    assert.equal(version.objectKey, "generated.png");
+    assert.deepEqual(version.generatedSize, generatedSize);
+    assert.deepEqual(version.deliverySize, deliverySize);
+    assert.equal(version.deliveryObjectKey, "delivery.png");
+
+    const stages = ["aplus_plan", "aplus_module_rule", "aplus_image", "aplus_ai_write"] as const;
+    const prompts = new PostgresPromptRepository(pool);
+    for (const stage of stages) {
+      const templateId = randomUUID();
+      const versionId = randomUUID();
+      const target = stage === "aplus_image" ? "image_model" : "llm";
+      await pool.query(
+        "INSERT INTO prompt_library.prompt_templates (id,code,name,kind,stage,execution_target) VALUES ($1,$2,$2,'planner',$3,$4)",
+        [templateId, `test.${stage}`, stage, target],
+      );
+      await pool.query(
+        `INSERT INTO prompt_library.prompt_template_versions
+           (id,template_id,version_no,name,kind,stage,execution_target,body,status,source_file,source_heading,source_sha256)
+         VALUES ($1,$2,1,$3,'planner',$3,$4,'Fixture prompt','published','aplus-fixture.md',$5,$6)`,
+        [versionId, templateId, stage, target, stage, "a".repeat(64)],
+      );
+      await pool.query("UPDATE prompt_library.prompt_templates SET published_version_id=$1 WHERE id=$2", [versionId, templateId]);
+    }
+    await runMigrations(pool);
+    assert.deepEqual((await platforms.find("amazon"))?.detailSizePresets, configured);
+    assert.equal((await suites.getSuite(suite.id))?.origin, "aplus");
+    assert.equal((await tasks.getTask(taskId))?.originKind, "aplus");
+    assert.equal((await pipelines.getRun(run.id))?.currentPhase, "awaiting_confirmation");
+    assert.deepEqual((await tasks.listTaskVersions(taskId)).versions[0], version);
+    for (const stage of stages) {
+      const { rows: [template] } = await pool.query<{ stage: string }>(
+        "SELECT stage FROM prompt_library.prompt_templates WHERE code=$1", [`test.${stage}`],
+      );
+      assert.equal(template.stage, stage);
+      assert.equal((await prompts.listPublished(stage))[0]?.stage, stage);
+    }
+    const transaction = await pool.connect();
+    try {
+      await transaction.query("BEGIN");
+      await assert.rejects(transaction.query("UPDATE prompt_library.prompt_templates SET stage='invalid' WHERE code='test.aplus_plan'"), {
+        code: "23514", constraint: "prompt_templates_stage_check",
+      });
+    } finally {
+      await transaction.query("ROLLBACK");
+      transaction.release();
+    }
+  });
+});
+
 test("PG replica repository normalizes null remark, creates replica tasks, recovers replica_analyzing runs, and keeps 032 prompt import idempotent", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const suites = new PostgresSuiteRepository(pool);

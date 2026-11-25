@@ -1,6 +1,6 @@
 import type { ApiSuite } from "../../api/client";
 
-export type GenerationHistoryOrigin = "suite_studio" | "canvas" | "replica";
+export type GenerationHistoryOrigin = NonNullable<ApiSuite["origin"]>;
 
 export type GenerationHistoryPipelineStatus =
   | "running"
