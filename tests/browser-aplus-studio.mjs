@@ -8,9 +8,10 @@ import sharp from "sharp";
 import { createServer } from "vite";
 import { createSuiteStudioApp } from "../server/app.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
-import { imageEditProductInputs, ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
+import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { dispatchInputImageUpload } from "../server/multipart.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
+import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
 import { MemoryPlatformRepository } from "../server/repositories/memory-platform-repository.js";
 import { MemoryProductCardRepository } from "../server/repositories/memory-product-card-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
@@ -19,7 +20,11 @@ import { MemoryTaskRepository } from "../server/repositories/memory-task-reposit
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { readZipEntries } from "../server/zip.js";
 import { APLUS_MODULES } from "../shared/aplus.js";
+import { defaultImageOptions } from "../shared/model-settings.js";
 import { emptyProductCardFields } from "../shared/product-card.js";
+import { makeAplusEditorSourceResolver } from "./aplus-editor-fixture.js";
+
+const ocrBounds = { x: 0.16, y: 0.12, width: 0.25, height: 0.1 };
 
 async function startOfflineAplus(t) {
   const prompts = new MemoryPromptRepository();
@@ -51,34 +56,33 @@ async function startOfflineAplus(t) {
     mainImageBackground: "flexible", mainImageStrategy: "", galleryStrategy: "",
     textStrategy: "", modelStrategy: "", sourceNote: "",
   };
-  const dimensions = { width: 120, height: 80 };
+  const dimensions = { width: 2496, height: 1024 };
   const solid = (background) => sharp({ create: { ...dimensions, channels: 3, background } }).png().toBuffer();
-  const [hero, usage, restored] = await Promise.all(["navy", "red", "lime"].map(solid));
+  const [hero, usage, restored, changedText] = await Promise.all(["navy", "red", "lime", "cyan"].map(solid));
   let planningInput = null;
   let nextPlan = 0;
   const confirmations = [];
   const imageCalls = [];
   const editorCalls = [];
+  const ocrCalls = [];
   const storage = new MemoryStorage();
   const suites = new MemorySuiteRepository();
-  const editor = new ImageEditorService(new MemoryImageEditorRepository(), {
+  const editorTasks = new MemoryImageEditorRepository();
+  const editor = new ImageEditorService(editorTasks, {
     name: "fake-editor", version: "1", capabilitiesVersion: "1",
     capabilities: () => ({ imageToImage: true, addText: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
-    edit: async (command) => {
-      editorCalls.push(command);
-      return { bytes: restored, mimeType: "image/png", ...dimensions };
+    edit: (command, source) => requestImageEditorEdit({
+      async edit(request) {
+        editorCalls.push(request);
+        return { bytes: command.type === "change_text" ? changedText : restored, mimeType: "image/png" };
+      },
+    }, storage, "fake", defaultImageOptions("gpt-image-2"), command, source),
+  }, storage, makeAplusEditorSourceResolver(suites, studioTasks, editorTasks, storage), {
+    name: "fake-ocr", version: "1",
+    async recognize(source) {
+      ocrCalls.push(source);
+      return { blocks: [{ id: "title", text: "Original headline", confidence: 0.99, bounds: ocrBounds, rotation: 0 }] };
     },
-  }, storage, async (versionId) => {
-    for (const suite of await suites.listSuites()) {
-      for (const task of await studioTasks.listTasks(suite.id)) {
-        const { versions } = await studioTasks.listTaskVersions(task.id);
-        const version = versions.find(({ id }) => id === versionId);
-        if (!version) continue;
-        const image = await storage.get(version.objectKey);
-        return { bytes: image.bytes, mimeType: image.contentType, ...dimensions, productInputs: imageEditProductInputs(version.contextSnapshot.inputImages) };
-      }
-    }
-    return null;
   });
   const app = createSuiteStudioApp({
     repository: suites, storage, productCardRepository: cards,
@@ -152,15 +156,15 @@ async function startOfflineAplus(t) {
   });
   await vite.listen();
   t.after(() => vite.close());
-  return { baseUrl: vite.resolvedUrls.local[0], app, card, confirmations, imageCalls, editorCalls };
+  return { baseUrl: vite.resolvedUrls.local[0], app, card, confirmations, imageCalls, editorCalls, ocrCalls };
 }
 
 async function firstPixel(bytes) {
   return [...await sharp(bytes).extract({ left: 0, top: 0, width: 1, height: 1 }).removeAlpha().raw().toBuffer()];
 }
 
-test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批次", async (t) => {
-  const { baseUrl, card, confirmations, imageCalls, editorCalls } = await startOfflineAplus(t);
+test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可切换批次", async (t) => {
+  const { baseUrl, card, confirmations, imageCalls, editorCalls, ocrCalls } = await startOfflineAplus(t);
   const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
@@ -285,16 +289,54 @@ test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批�
   const longMetadata = await sharp(await longDownload.path()).metadata();
   assert.deepEqual([longMetadata.width, longMetadata.height], [1464, 1200]);
 
+  const heroCard = web.locator("article").first();
+  const oldDeliveryUrl = await heroCard.locator(".aplus-card-image img").getAttribute("src");
+  assert.ok(oldDeliveryUrl.endsWith("/preview/delivery"));
+  const sourceUrl = oldDeliveryUrl.slice(0, -"/delivery".length);
+  await heroCard.getByRole("button", { name: "AI 改字", exact: true }).click();
+  const replacement = editor.getByLabel("新文字：Original headline", { exact: true });
+  await replacement.waitFor();
+  assert.equal(await editor.locator(".wb-editor-canvas img").getAttribute("src"), sourceUrl);
+  const sourceBytes = await (await page.request.get(url(sourceUrl))).body();
+  assert.equal(ocrCalls.length, 1);
+  assert.deepEqual(ocrCalls[0].bytes, sourceBytes);
+  assert.deepEqual([ocrCalls[0].width, ocrCalls[0].height], [2496, 1024]);
+
+  await replacement.fill("New headline");
+  const submitEdit = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await editor.getByRole("button", { name: "开始生成（新建编辑子卡）", exact: true }).click();
+  const submitted = await submitEdit;
+  assert.equal(submitted.status(), 202);
+  const { snapshot } = (await submitted.json()).data;
+  assert.equal(snapshot.tool, "change_text");
+  assert.equal(snapshot.operations.length, 1);
+  const { originalText, newText, region, ocrSnapshot } = snapshot.operations[0].payload;
+  assert.equal(originalText, "Original headline");
+  assert.equal(newText, "New headline");
+  assert.deepEqual(region, { ...ocrBounds, rotation: 0 });
+  assert.equal(sourceUrl, `/api/suite-tasks/${snapshot.sourceCardId}/versions/${ocrSnapshot.sourceVersionId}/preview`);
+  await editor.waitFor({ state: "hidden" });
+  const editedImage = heroCard.locator('img[src^="/api/image-editor/tasks/"][src$="/preview/delivery"]');
+  await editedImage.waitFor();
+  const editedDeliveryUrl = await editedImage.getAttribute("src");
+  const editedDelivery = await (await page.request.get(url(editedDeliveryUrl))).body();
+  const editedMetadata = await sharp(editedDelivery).metadata();
+  assert.deepEqual([editedMetadata.width, editedMetadata.height], [1464, 600]);
+  assert.deepEqual(await firstPixel(editedDelivery), [0, 255, 255]);
+  assert.equal(editorCalls[0].size, "2496x1024");
+  assert.deepEqual(editorCalls[0].image, sourceBytes);
+  assert.deepEqual(editorCalls[0].images.map(({ role }) => role), ["source"]);
+  assert.deepEqual(await firstPixel(await readLongPreview()), [0, 255, 255]);
+
   await web.getByRole("button", { name: "商品还原", exact: true }).first().click();
   await editor.getByRole("group", { name: "商品外观依据" }).waitFor();
   assert.equal(await editor.getByRole("radio", { name: "使用全部商品原图" }).isChecked(), true);
   await editor.getByRole("radio", { name: "原图 1" }).waitFor();
   await editor.getByRole("button", { name: "还原商品", exact: true }).click();
   await editor.waitFor({ state: "hidden" });
-  const restoredCard = web.locator("article").first();
-  await restoredCard.locator('img[src^="/api/image-editor/tasks/"][src$="/preview/delivery"]').waitFor();
-  assert.equal(editorCalls[0].type, "restore_product");
-  assert.deepEqual(editorCalls[0].attachedInputs.map(({ role }) => role), ["product"]);
+  await heroCard.locator(`img[src$="/preview/delivery"]:not([src="${editedDeliveryUrl}"])`).waitFor();
+  assert.match(editorCalls[1].prompt, /其余为商品外观依据/);
+  assert.deepEqual(editorCalls[1].images.map(({ role }) => role), ["source", "product"]);
   assert.deepEqual(await firstPixel(await readLongPreview()), [0, 255, 0]);
 
   const [zipDownload] = await Promise.all([page.waitForEvent("download"), button("下载 ZIP").click()]);
@@ -322,6 +364,9 @@ test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批�
   await button("方案已失效，重新规划").click();
   await button("确认出图").waitFor();
   assert.notEqual(page.url(), secondUrl);
+  await button("确认出图").click();
+  await page.getByText("已完成 · 6 张", { exact: true }).waitFor();
+  assert.equal(await button("AI 改字").count(), 0);
 
   const feedRequest = page.waitForRequest((request) => request.url().includes("/api/suites/feed?origin=aplus"));
   await button("生成记录").click();
