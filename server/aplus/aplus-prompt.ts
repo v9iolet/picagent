@@ -103,15 +103,22 @@ export function renderAplusImagePrompt(template: PromptText, input: {
   language: string;
   sizePreset: AplusSizePresetKey;
   generatedSize: AplusImageSize;
+  generatedRatio?: string;
 }): string {
   const preset = APLUS_SIZE_PRESETS[input.sizePreset];
   const noText = input.language === "none";
+  const { generatedSize } = input;
+  const deliverySize = preset.deliverySize ?? generatedSize;
+  const ratioChange = (deliverySize.width / deliverySize.height) / (generatedSize.width / generatedSize.height);
+  const safeWidth = Math.floor(100 * Math.min(1, ratioChange));
+  const safeHeight = Math.floor(100 * Math.min(1, 1 / ratioChange));
   const sizeAndSafeArea = {
     预设: preset.key,
     交付比例: preset.ratio,
-    生成尺寸: input.generatedSize,
-    交付尺寸: preset.deliverySize ?? input.generatedSize,
-    安全区: "商品主体、关键部位及文字放在中心安全区，边缘只保留可裁切的背景或非关键装饰。",
+    生成比例: input.generatedRatio ?? preset.ratio,
+    生成尺寸: generatedSize,
+    交付尺寸: deliverySize,
+    安全区: `商品主体、关键部位及文字放在宽度 ${safeWidth}% × 高度 ${safeHeight}% 的中心安全区内并留出边距，边缘只保留可裁切的背景或非关键装饰。`,
   };
   const userPrompt = render(template.userPromptTemplate, {
     moduleCode: JSON.stringify(input.moduleCode),

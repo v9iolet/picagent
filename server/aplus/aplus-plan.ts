@@ -7,7 +7,7 @@ import {
 import type { ListingRules } from "../../shared/listing-config.js";
 import type { ProductCardSnapshot } from "../../shared/product-card.js";
 import { asRecord } from "../api-response.js";
-import type { InputImage, LlmModelSnapshot, SuitePipelineRun } from "../types.js";
+import type { InputImage, LlmModelSnapshot, SuitePipelineRun, SuiteTask } from "../types.js";
 
 export interface AplusPlanModule {
   moduleCode: AplusModuleCode;
@@ -35,6 +35,7 @@ export type AplusRunConfig = SuitePipelineRun["config"] & {
   resolution: "1K" | "2K";
   listingCopyRules: ListingRules | null;
   planSnapshot?: AplusPlanSnapshot;
+  generation?: { confirmationKey: string | null; tasks: SuiteTask[] };
 };
 
 export function readAplusRunConfig(run: SuitePipelineRun): AplusRunConfig | null {

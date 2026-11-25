@@ -11,6 +11,30 @@ const versionCols = `id,task_id AS "taskId",slot_id AS "slotId",attempt_id AS "a
 
 export class PostgresTaskRepository implements TaskRepository {
   constructor(private readonly pool: Pool) {}
+  async createAplusTasks(tasks: SuiteTask[]) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const task of tasks) {
+        await client.query(
+          `INSERT INTO suite_workbench.suite_tasks
+            (id,suite_id,ordinal,image_type,title,purpose,prompt_draft,source_input_image_id,generation_params_json,
+             status,reference_image_ids_json,prompt_sha256,origin_kind,module_code,size_preset,sort_order,created_at,updated_at)
+           VALUES ($1,$2,$3,'detail',$4,$5,$6,$7,$8,'pending',$9,$10,'aplus',$11,$12,$13,$14,$14)
+           ON CONFLICT (id) DO NOTHING`,
+          [task.id, task.suiteId, task.ordinal, task.title, task.purpose, task.promptDraft, task.sourceInputImageId,
+            JSON.stringify(task.generationParams), JSON.stringify(task.referenceImageIds ?? []), task.promptSha256,
+            task.moduleCode, task.sizePreset, task.sortOrder, task.createdAt],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
   async createCustomTask(input: { suiteId: string; planSnapshotId: string | null; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }) {
     const client = await this.pool.connect();
     try {

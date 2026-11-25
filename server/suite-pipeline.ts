@@ -719,7 +719,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     const imageEditChildren = await loadSuiteImageEditChildren(activeTasks);
     const resolvedCards = resolveDeliverySlots(taskAggregates, imageEditChildren, {
       defaultTemplateVersionId: snapshot?.templateVersionId ?? null,
-      preferLatestByTime: isReplica,
+      preferLatestByTime: isReplica || isAplus,
     });
     const [replicaReferences, replicaProducts] = isReplica && deps.replicaRepository
       ? await Promise.all([
@@ -771,7 +771,21 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
             ...(styleSketch ? { styleSketch: true as const } : { styleSketch: false as const }),
           };
         })
-      : resolvedCards;
+      : isAplus
+        ? resolvedCards.map((card) => {
+            const task = taskAggregateById.get(card.parentTaskId)!;
+            const latestAttempt = task.attempts.at(-1);
+            return {
+              ...card,
+              moduleCode: task.moduleCode,
+              sizePreset: task.sizePreset,
+              sortOrder: task.sortOrder,
+              taskStatus: task.status,
+              errorCode: latestAttempt?.status === "failed" ? latestAttempt.errorCode : null,
+              errorMessage: latestAttempt?.status === "failed" ? latestAttempt.errorMessage : null,
+            };
+          })
+        : resolvedCards;
     let pipeline = latestPipeline;
     if (
       pipeline &&
