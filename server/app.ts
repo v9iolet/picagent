@@ -3,6 +3,7 @@ import { createSuitePipeline } from "./suite-pipeline.js";
 import { createAplusPlanningApi } from "./aplus/aplus-planning-api.js";
 import { createAplusGenerationApi } from "./aplus/aplus-generation-api.js";
 import { storeAplusDelivery } from "./aplus/aplus-image.js";
+import { APLUS_ADDITIONAL_PROMPT_MAX_LENGTH } from "../shared/aplus.js";
 import { fail, errorMessages } from "./api-errors.js";
 import { ok, asRecord, dataOf, type AppResponse } from "./api-response.js";
 export type { AppResponse } from "./api-response.js";
@@ -93,6 +94,12 @@ export interface SuiteStudioApp {
   previewLibraryResource(resourceId: string): Promise<AppResponse>;
   previewReverseReference(planId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
   previewReplicaReference(suiteId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+export function hasValidTaskVersionIds(taskId: string, versionId: string): boolean {
+  return UUID_PATTERN.test(taskId) && UUID_PATTERN.test(versionId);
 }
 
 function extensionForImageMime(mimeType: string): string {
@@ -1111,11 +1118,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     }
     const editVersionPreviewMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview(\/delivery)?$/);
     if (method === "GET" && editVersionPreviewMatch) {
+      const [, taskId, versionId, delivery] = editVersionPreviewMatch;
+      if (!hasValidTaskVersionIds(taskId, versionId)) return fail("INVALID_TASK_VERSION", 404);
       if (!deps.imageEditorApi) return fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
-      const taskRes = await deps.imageEditorApi.request("GET", `/api/image-editor/tasks/${editVersionPreviewMatch[1]}`);
+      const taskRes = await deps.imageEditorApi.request("GET", `/api/image-editor/tasks/${taskId}`);
       const taskData = dataOf(taskRes) as { versions?: Array<{ id?: string; objectKey?: string; deliveryObjectKey?: string }> } | null;
-      const version = taskRes.status === 200 ? taskData?.versions?.find((item) => item.id === editVersionPreviewMatch[2]) : null;
-      const objectKey = editVersionPreviewMatch[3] ? version?.deliveryObjectKey : version?.objectKey;
+      const version = taskRes.status === 200 ? taskData?.versions?.find((item) => item.id === versionId) : null;
+      const objectKey = delivery ? version?.deliveryObjectKey : version?.objectKey;
       return objectKey ? previewObject(objectKey, deps.storage) : fail("NOT_FOUND", 404);
     }
     const selectEditVersionMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/select$/);
@@ -2269,6 +2278,11 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const task = await deps.taskRepository.getTask(taskGenerationMatch[1]);
       if (!task || task.status === "archived") return fail("INVALID_SUITE_TASK", 404);
       const body = asRecord(options.body, { allowArrays: true });
+      const rawAdditionalPrompt = body.additionalPrompt;
+      if (task.originKind === "aplus" && rawAdditionalPrompt !== undefined &&
+        (typeof rawAdditionalPrompt !== "string" || rawAdditionalPrompt.length > APLUS_ADDITIONAL_PROMPT_MAX_LENGTH)) {
+        return fail("APLUS_INVALID_ADDITIONAL_PROMPT", 400);
+      }
       if (typeof body.editSourceVersionId === "string") {
         try {
           const { versions } = await deps.taskRepository.listTaskVersions(task.id);
@@ -2281,8 +2295,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (typeof body.promptDraft === "string") await deps.taskRepository.updateTask(task.id, { promptDraft: body.promptDraft });
       const current = await deps.taskRepository.getTask(task.id);
       if (!current || current.status === "archived") return fail("INVALID_SUITE_TASK", 404);
-      const additionalPrompt = current.originKind === "aplus" && typeof body.additionalPrompt === "string"
-        ? body.additionalPrompt.trim() : "";
+      const additionalPrompt = current.originKind === "aplus" && typeof rawAdditionalPrompt === "string"
+        ? rawAdditionalPrompt.trim() : "";
       const prompt = additionalPrompt ? `${current.promptDraft}\n\n单卡人工补充：${additionalPrompt}` : current.promptDraft;
       const generationTask = additionalPrompt
         ? { ...current, promptDraft: prompt, promptSha256: createHash("sha256").update(prompt).digest("hex") }
@@ -2574,6 +2588,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   };
 
   const previewTaskVersion = async (taskId: string, versionId: string, delivery = false) => {
+    if (!hasValidTaskVersionIds(taskId, versionId)) return fail("INVALID_TASK_VERSION", 404);
     if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
     const history = await deps.taskRepository.listTaskVersions(taskId);
     const version = history.versions.find((item) => item.id === versionId);

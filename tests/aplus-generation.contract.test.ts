@@ -252,6 +252,29 @@ test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿�
   assert.deepEqual(await dimensions(f.storage, state.cards[0].deliveryObjectKey), expected);
 });
 
+test("A+ 单卡重绘拒绝非文本及超过 500 字的附加提示词", async () => {
+  const f = await fixture(["aplus_standard"]);
+  data(await f.confirm(), 202);
+  assert.equal((await f.waitForRun())?.status, "completed");
+  const [task] = await f.tasks.listTasks(f.suiteId);
+  const path = `/api/suite-tasks/${task.id}/generation`;
+  const generate = (additionalPrompt: unknown) => f.app.request("POST", path, {
+    headers: { "idempotency-key": "redraw-prompt-length" }, body: { additionalPrompt },
+  });
+
+  for (const invalid of [null, 7, {}, "细".repeat(501), " ".repeat(501)]) {
+    checkError(await generate(invalid), 400, "APLUS_INVALID_ADDITIONAL_PROMPT");
+  }
+  assert.equal(f.calls.length, modules.length);
+  assert.equal((await f.tasks.listBatches(f.suiteId)).length, 1);
+
+  const boundary = "细".repeat(500);
+  data(await generate(boundary), 202);
+  await waitUntil(() => f.tasks.listTaskVersions(task.id), ({ versions }) => versions.length === 2, 5000);
+  assert.ok(f.calls.at(-1)?.prompt.includes(`单卡人工补充：${boundary}`));
+  assert.equal((await f.tasks.getTask(task.id))?.promptDraft, task.promptDraft);
+});
+
 test("通用比例沿用生成图，续跑跳过当前版本及原样保留请求尺寸", async () => {
   let releaseInterruptedCall!: () => void;
   const interruptedCall = new Promise<void>((resolve) => { releaseInterruptedCall = resolve; });

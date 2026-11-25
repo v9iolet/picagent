@@ -52,6 +52,7 @@ export function AplusConfigPanel({
   return (
     <aside className="ss-panel" aria-label="A+详情配置">
       <fieldset className="ss-scroll" disabled={busy}>
+        <div className="ss-eyebrow">A+ STUDIO</div>
         <h1>A+详情</h1>
         <StudioProductImageUpload images={images} busy={busy} canUpload upload={onUpload} remove={onRemove} />
         <section>
@@ -63,7 +64,21 @@ export function AplusConfigPanel({
               onRemove={() => onChange({ ...config, productCard: null })}
             />
           ) : (
-            <button type="button" onClick={() => setPickerOpen(true)}>选择商品信息卡</button>
+            <div className="pcp-trigger-wrap">
+              <button
+                type="button"
+                className="pcp-trigger-btn"
+                aria-haspopup="dialog"
+                disabled={busy}
+                onClick={() => setPickerOpen(true)}
+              >
+                <span className="pcp-trigger-left">
+                  <Icon name="box" />
+                  <span>选择商品信息卡（选填）</span>
+                </span>
+                <span className="pcp-trigger-arrow" aria-hidden="true">›</span>
+              </button>
+            </div>
           )}
         </section>
         <section>

@@ -68,6 +68,7 @@ async function startOfflineAplus(t) {
     platformRepository: new MemoryPlatformRepository([
       { ...profile, code: "amazon", name: "Amazon", marketScope: "overseas", sortOrder: 1 },
       { ...profile, code: "taobao", name: "淘宝", marketScope: "domestic", sortOrder: 2 },
+      { ...profile, code: "shopify", name: "Shopify", marketScope: "overseas", sortOrder: 3 },
     ]),
     provider: {
       supportsMultipleImages: true,
@@ -92,7 +93,10 @@ async function startOfflineAplus(t) {
   });
 
   const vite = await createServer({
+    cacheDir: "node_modules/.vite-browser-aplus-studio",
+    configFile: false,
     server: { host: "127.0.0.1", port: 0, watch: null },
+    esbuild: { jsx: "automatic" },
     plugins: [{
       name: "offline-aplus-api",
       configureServer(server) {
@@ -126,7 +130,7 @@ async function startOfflineAplus(t) {
   });
   await vite.listen();
   t.after(() => vite.close());
-  return { baseUrl: vite.resolvedUrls.local[0], card, confirmations, imageCalls };
+  return { baseUrl: vite.resolvedUrls.local[0], app, card, confirmations, imageCalls };
 }
 
 test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批次", async (t) => {
@@ -171,6 +175,9 @@ test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批�
   await button("方案已失效，重新规划").waitFor();
   assert.equal(await config.getByRole("checkbox", { name: /普通 A\+/ }).count(), 0);
   assert.equal(await config.getByRole("checkbox", { name: "3:4", exact: true }).isChecked(), true);
+  await platform.selectOption("shopify");
+  assert.equal(await config.getByRole("checkbox", { name: "1:1", exact: true }).isChecked(), true);
+  assert.equal(await config.getByRole("checkbox", { name: "3:4", exact: true }).isChecked(), false);
   await platform.selectOption("amazon");
   assert.equal(await config.getByRole("checkbox", { name: /普通 A\+/ }).isChecked(), true);
   await config.getByRole("checkbox", { name: /高级 A\+（Web 端）/ }).check();
@@ -215,7 +222,9 @@ test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批�
   const delivery = await sharp(await download.path()).metadata();
   assert.deepEqual([delivery.width, delivery.height], [1464, 600]);
   await groups.first().getByRole("button", { name: "重绘", exact: true }).first().click();
-  await page.getByLabel("附加提示词（选填）").fill("增强杯盖细节");
+  const redrawPrompt = page.getByLabel("附加提示词（选填）");
+  assert.equal(await redrawPrompt.getAttribute("maxlength"), "500");
+  await redrawPrompt.fill("增强杯盖细节");
   await button("确认重绘").click();
   await page.getByText("图片已更新", { exact: true }).waitFor();
   assert.match(imageCalls.at(-1).prompt, /单卡人工补充：增强杯盖细节/);
@@ -257,4 +266,36 @@ test("A+ 从商品库选卡，调整方案后出图，生成记录可切换批�
   await page.goto(url(`/create/canvas/${new URL(firstUrl).searchParams.get("suite")}`));
   await page.getByText("A+详情批次暂不支持在生图画布中打开。").waitFor();
   assert.deepEqual(errors, []);
+});
+
+test("A+ 有缓存草稿时仍更新 URL 预选卡，375px 创作栏可完整显示", async (t) => {
+  const { baseUrl, app, card } = await startOfflineAplus(t);
+  const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 375, height: 844 } });
+  const config = page.getByRole("complementary", { name: "A+详情配置" });
+  const selected = config.locator("[data-selected-product-card-bar]");
+  await page.goto(new URL(`/create/aplus?productCardId=${card.id}`, baseUrl).href);
+  await selected.getByText(card.name, { exact: true }).waitFor();
+  const tools = page.getByRole("navigation", { name: "创作功能" });
+  assert.ok(await tools.evaluate((nav) => nav.scrollWidth <= nav.clientWidth), "创作栏不能横向溢出");
+
+  const sellingPoints = config.getByLabel("商品卖点&生成要求");
+  await sellingPoints.fill("保留本地生成要求");
+  const cardPath = `/api/product-cards/${card.id}`;
+  const revisedName = "更新后的磨砂随行杯";
+  const revised = await app.request("PATCH", cardPath, { body: { name: revisedName } });
+  assert.equal(revised.status, 200, JSON.stringify(revised.body));
+  await page.reload();
+  await selected.getByText(revisedName, { exact: true }).waitFor();
+  assert.equal(await sellingPoints.inputValue(), "保留本地生成要求");
+
+  const archived = await app.request("POST", `${cardPath}/archive`);
+  assert.equal(archived.status, 200, JSON.stringify(archived.body));
+  await page.reload();
+  const picker = config.getByRole("button", { name: "选择商品信息卡（选填）", exact: true });
+  await picker.waitFor();
+  await page.getByText("指定商品信息卡已归档，请重新选择。", { exact: true }).waitFor();
+  assert.equal(await selected.count(), 0);
+  assert.equal(await sellingPoints.inputValue(), "保留本地生成要求");
 });

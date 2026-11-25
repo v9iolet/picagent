@@ -4,7 +4,8 @@ import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { Client as MinioClient } from "minio";
 import { Pool } from "pg";
-import { createSuiteStudioApp } from "./app.js";
+import { createSuiteStudioApp, hasValidTaskVersionIds } from "./app.js";
+import { fail } from "./api-errors.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { dispatchInputImageUpload } from "./multipart.js";
@@ -164,6 +165,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       ? await app.preview(inputMatch[1], inputMatch[2], inputMatch[3] as "original" | "thumbnail")
       : baseMatch
         ? await app.previewBaseVersion(baseMatch[1], baseMatch[2], baseMatch[3])
+      : editTaskMatch && !hasValidTaskVersionIds(editTaskMatch[1], editTaskMatch[2])
+        ? fail("INVALID_TASK_VERSION", 404)
       : editTaskMatch?.[3]
         ? await app.request("GET", requestUrl.pathname)
       : editTaskMatch

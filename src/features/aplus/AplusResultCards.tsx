@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { APLUS_MODULES, APLUS_SIZE_PRESETS, type AplusSizePresetKey } from "../../../shared/aplus";
+import { APLUS_ADDITIONAL_PROMPT_MAX_LENGTH, APLUS_MODULES, APLUS_SIZE_PRESETS, type AplusSizePresetKey } from "../../../shared/aplus";
 import { suiteApi } from "../../api/client";
 import { StudioDialog } from "../../components/suite-studio/StudioDialog";
 import {
@@ -105,7 +105,16 @@ export function AplusResultCards({
               setRedraw(null);
             });
           }}>
-            <label>附加提示词（选填）<textarea rows={4} value={prompt} disabled={working} onChange={(event) => setPrompt(event.target.value)} /></label>
+            <label>
+              附加提示词（选填）
+              <textarea
+                rows={4}
+                maxLength={APLUS_ADDITIONAL_PROMPT_MAX_LENGTH}
+                value={prompt}
+                disabled={working}
+                onChange={(event) => setPrompt(event.target.value)}
+              />
+            </label>
             {dialogError && <p role="alert">{dialogError}</p>}
             <button className="ss-primary" type="submit" disabled={working}>确认重绘</button>
           </form>

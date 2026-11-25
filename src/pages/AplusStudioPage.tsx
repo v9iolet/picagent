@@ -80,7 +80,7 @@ function AplusWorkspace({
   const [profiles, setProfiles] = useState<ApiPlatformProfile[]>([]);
   const [loading, setLoading] = useState(Boolean(suiteId && !state));
   const [batchError, setBatchError] = useState("");
-  const [loadingCard, setLoadingCard] = useState(Boolean(initialProductCardId && !savedDraft));
+  const [loadingCard, setLoadingCard] = useState(Boolean(initialProductCardId));
   const [historyOpen, setHistoryOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [action, setAction] = useState("");
@@ -127,23 +127,35 @@ function AplusWorkspace({
   }, []);
 
   useEffect(() => {
-    if (!initialProductCardId || savedDraft) return;
+    setLoadingCard(Boolean(initialProductCardId));
+    if (!initialProductCardId) return;
     let active = true;
-    productCardsApi.get(initialProductCardId).then((card) => {
+
+    function clearPreselectedCard() {
+      const current = draftRef.current;
+      if (current.config.productCard?.cardId === initialProductCardId) {
+        commitDraft({ ...current, config: { ...current.config, productCard: null } });
+      }
+    }
+
+    void productCardsApi.get(initialProductCardId).then((card) => {
       if (!active) return;
       if (card.status === "published") {
         const current = draftRef.current;
         commitDraft({ ...current, config: { ...current.config, productCard: toSelectedProductCardSummary(card) } });
       } else {
+        clearPreselectedCard();
         setNotice("指定商品信息卡已归档，请重新选择。");
       }
     }).catch((error) => {
-      if (active) setNotice(message(error));
+      if (!active) return;
+      clearPreselectedCard();
+      setNotice(message(error));
     }).finally(() => {
       if (active) setLoadingCard(false);
     });
     return () => { active = false; };
-  }, [commitDraft, initialProductCardId, savedDraft]);
+  }, [commitDraft, initialProductCardId]);
 
   const refresh = useCallback(async () => {
     if (!suiteId) return;

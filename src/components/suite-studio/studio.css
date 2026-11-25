@@ -1148,6 +1148,7 @@
   }
   .ss-tools {
     flex-direction: row;
+    flex-wrap: wrap;
     padding: 2px 8px;
   }
   .ss-tools a {
