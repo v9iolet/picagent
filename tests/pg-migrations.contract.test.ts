@@ -1415,6 +1415,28 @@ test("042 persists editor snapshot metadata and consumes only submitted drafts w
   });
 });
 
+test("044 preserves the published product restoration template v2 on migration replay", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const original = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.restore_product");
+    assert.ok(original);
+    assert.equal(original.versionNo, 1);
+
+    const draft = await prompts.copyVersion(original.templateVersionId);
+    assert.ok(draft);
+    assert.equal(draft.versionNo, 2);
+    const instruction = "依据商品原图还原商品细节，保留待编辑图的构图和背景。";
+    await prompts.updateDraft(draft.templateVersionId, { userPromptTemplate: instruction });
+    await prompts.publishVersion(draft.templateVersionId);
+
+    await runMigrations(pool);
+    const current = (await prompts.listPublished("task_image")).find((item) => item.code === original.code);
+    assert.equal(current?.templateVersionId, draft.templateVersionId);
+    assert.equal((await prompts.getPublishedVersion(draft.templateVersionId, "task_image"))?.userPromptTemplate, instruction);
+    assert.deepEqual((await prompts.listVersions(original.templateId)).map(({ versionNo, status }) => [versionNo, status]), [[1, "retired"], [2, "published"]]);
+  });
+});
+
 test("035 idempotently retires unused templates, preserves read-by-id & library filtering, and keeps active edit/publish working", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);

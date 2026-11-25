@@ -16,6 +16,7 @@ import { MemoryLibraryRepository } from "../server/repositories/memory-library-r
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
+import { APLUS_MODULES } from "../shared/aplus.js";
 
 function createPromptBackedLibrary(prompts) {
   const base = new MemoryLibraryRepository();
@@ -164,9 +165,11 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
   await page.goto(`${baseUrl}/templates`, { waitUntil: "networkidle" });
   await page.waitForSelector(".template-card");
 
-  // 1. Default filter is "在用" and shows only the 7 active templates, each with a usedBy badge
+  // 1. Default filter is "在用" and shows the original templates plus A+ planning, image, AI writing and module rules.
+  const expectedActiveCount = 7 + 3 + APLUS_MODULES.length;
+  const expectedRetiredCount = 20;
   const activeCount = await page.locator(".template-card").count();
-  assert.equal(activeCount, 7, `Expected 7 active templates by default, got ${activeCount}`);
+  assert.equal(activeCount, expectedActiveCount, "Expected only active templates by default");
 
   const allCardsText = await page.locator(".template-list-grid").innerText();
   for (const label of [
@@ -177,6 +180,10 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
     "爆品图复刻·参考风格",
     "爆品图复刻·高度复刻",
     "首页·商品信息建档",
+    "A+详情·方案规划",
+    "A+详情·模块规则",
+    "A+详情·出图",
+    "A+详情·AI 帮写",
   ]) {
     assert.ok(allCardsText.includes(label), `Expected active template list to display feature badge "${label}"`);
   }
@@ -198,9 +205,7 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
 
   // 3. Switch to "已下架" and verify retired templates load and scroll to the very last item
   await page.locator(".style-filter-panel label", { hasText: "已下架" }).click();
-  await page.waitForFunction(() => document.querySelectorAll(".template-card").length >= 20);
-  const retiredCount = await page.locator(".template-card").count();
-  assert.equal(retiredCount, 20, `Expected 20 retired normalized templates, got ${retiredCount}`);
+  await page.waitForFunction((count) => document.querySelectorAll(".template-card").length === count, expectedRetiredCount);
 
   const lastRetiredCard = page.locator(".template-card").last();
   await lastRetiredCard.scrollIntoViewIfNeeded();
@@ -210,7 +215,7 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
     scrollTop: el.scrollTop,
   }));
   assert.ok(retiredScroll.scrollHeight > retiredScroll.clientHeight, "Retired template list must be scrollable");
-  assert.ok(retiredScroll.scrollTop > 200, `Expected substantial scrollTop for 20 retired cards, got ${retiredScroll.scrollTop}`);
+  assert.ok(retiredScroll.scrollTop > 200, `Expected substantial scrollTop for ${expectedRetiredCount} retired cards, got ${retiredScroll.scrollTop}`);
   const lastRetiredBox = await lastRetiredCard.boundingBox();
   assert.ok(lastRetiredBox, "Last retired card must have a bounding box");
   assert.ok(
@@ -220,7 +225,7 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
 
   // 4. Switch back to "在用" and verify copy -> edit -> save -> draft filter -> publish flow still works
   await page.locator(".style-filter-panel label", { hasText: "在用" }).click();
-  await page.waitForFunction(() => document.querySelectorAll(".template-card").length === 7);
+  await page.waitForFunction((count) => document.querySelectorAll(".template-card").length === count, expectedActiveCount);
   await page.locator(".template-card", { hasText: "套图·白底精修" }).click();
   await page.getByRole("button", { name: "复制新草稿" }).click();
   await page.getByRole("button", { name: "保存草稿" }).waitFor({ state: "visible" });
@@ -231,7 +236,7 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
   assert.match(await page.locator(".template-card").first().innerText(), /v2/);
   await page.getByRole("button", { name: "发布此版本" }).click();
   await page.locator(".style-filter-panel label", { hasText: "在用" }).click();
-  await page.waitForFunction(() => document.querySelectorAll(".template-card").length === 7);
+  await page.waitForFunction((count) => document.querySelectorAll(".template-card").length === count, expectedActiveCount);
   await page.locator(".template-card", { hasText: "套图·白底精修" }).click();
   await page.waitForFunction(() =>
     Array.from(document.querySelectorAll(".style-version-row")).some((row) =>
