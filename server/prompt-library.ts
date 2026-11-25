@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
-export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt", "listing_copy", "replica_prompt", "product_onboarding"] as const;
+export const PROMPT_STAGES = [
+  "base_refine", "plan", "structure_plan", "category_prompt", "task_image",
+  "reverse_prompt", "listing_copy", "replica_prompt", "product_onboarding",
+  "aplus_plan", "aplus_module_rule", "aplus_image", "aplus_ai_write",
+] as const;
 export type PromptStage = (typeof PROMPT_STAGES)[number];
 export type PromptVersionStatus = "draft" | "published" | "retired";
 

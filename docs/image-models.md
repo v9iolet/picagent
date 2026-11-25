@@ -1,4 +1,10 @@
-gpt-image-2
+# 生图模型渠道与能力实测记录
+
+本文汇总云飞渠道的接口资料，以及项目在默认生图渠道 omyai（`omyai-生图`）上的实测记录。实测时使用的默认模型是 `gpt-image-2.5-flare-special`，能力以各节注明的渠道、模型和账号分组为准。
+
+## 云飞渠道接口资料
+
+### gpt-image-2
 图像生成
 01
 文生图
@@ -415,3 +421,22 @@ npx tsx scripts/probe-gpt-image-size.ts --case-set high-res --dry-run
 ```
 
 真实运行需另获授权，将 `--dry-run` 换为 `--output /tmp/<新的文件名>.jsonl`。脚本只允许对上述实测模型和端点发请求，并拒绝覆盖已有输出。脱敏 JSONL 包含模型与渠道快照、请求开始时间、参考图 SHA-256、HTTP 状态、实际宽高及耗时。原始结果表分别见本地票 `01-gpt-image-size-probe.md`、`12-image-ratio-options.md`、`14-high-res-ratio-probe.md` 的 Comments。
+
+### 蒙版语义
+
+**灰度和 RGBA 两种蒙版编码都未能约束编辑范围。** 该结论仅适用于本次测试的 `omyai-生图` 渠道及 `gpt-image-2.5-flare-special` 模型。
+
+2026-11-25（北京时间），使用默认渠道 `omyai-生图` 的 `gpt-image-2.5-flare-special` 请求 `https://omyai.vip/v1/images/edits`。用同一张 1024×1024 的合成来源图和同一个矩形选区，分别以灰度 PNG（白色为编辑区）和 RGBA PNG（alpha=0 为编辑区）各做一次局部重绘和消除。每次请求 `size=1024x1024`、`quality=medium`、`n=1`、`response_format=b64_json`，共 4 次，无重试。
+
+来源图有三个相同的红圆，选区只覆盖右圆。两种编码使用相同的重绘及消除提示词，只指明处理蒙版内的红圆，分别要求变蓝和移除。按相同坐标比较输出与来源图，计算 RGB 三通道平均绝对差（MAE，0–255，0 表示完全一致）。另取每个红圆中心半径 48 像素内的区域计算 MAE，避免大面积浅色背景掩盖选区外红圆的变化。
+
+本地样图与原始数据位于主检出目录的 `.scratch/image-editor-upgrade/mask-probe-2026-11-25/`，含 `reference.png`、`mask-grayscale.png`、`mask-rgba.png`、下表列出的 4 张结果图和 `results.jsonl`。复现脚本见 [scripts/probe-gpt-image-mask.ts](../scripts/probe-gpt-image-mask.ts)。使用 `--dry-run` 可核对默认渠道和四个用例，真实运行需另获授权并传入 `--live --output <新目录>`。
+
+四次请求均返回 HTTP 200 和 1024×1024 的图片。
+
+| 编码 | 工具 | 样图文件 | 选区外 MAE | 选区内 MAE | 左圆 / 中圆 / 右圆 MAE | 目视结果 |
+| --- | --- | --- | ---: | ---: | --- | --- |
+| 灰度 | 局部重绘 | `grayscale-redraw.png` | 6.221 | 58.641 | 125.407 / 125.769 / 125.590 | 三个圆全部变蓝 |
+| 灰度 | 消除 | `grayscale-erase.png` | 7.351 | 62.328 | 136.702 / 136.794 / 136.810 | 三个圆全部消失 |
+| RGBA | 局部重绘 | `rgba-redraw.png` | 7.808 | 63.969 | 138.559 / 138.476 / 138.353 | 三个圆全部变蓝 |
+| RGBA | 消除 | `rgba-erase.png` | 7.272 | 62.563 | 137.099 / 137.021 / 137.058 | 三个圆全部消失 |

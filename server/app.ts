@@ -1083,7 +1083,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (method === "GET" && suiteListMatch) {
       const canvasOnly = new URLSearchParams(suiteListMatch[1]).get("view") === "canvas";
       const suites = await deps.repository.listSuites();
-      const enriched = await Promise.all(suites.map(async (suite) => {
+      const visibleSuites = canvasOnly ? suites.filter(({ origin }) => origin !== "replica" && origin !== "aplus") : suites;
+      const enriched = await Promise.all(visibleSuites.map(async (suite) => {
         const [inputImages, tasks] = await Promise.all([
           deps.repository.getInputImages(suite.id),
           deps.taskRepository ? deps.taskRepository.listTasks(suite.id) : Promise.resolve([]),
@@ -1115,7 +1116,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           isDemo: suite.name.includes("演示") || suite.name.includes("Demo"),
         };
       }));
-      return ok(canvasOnly ? enriched.filter((suite) => suite.origin !== "replica" && (suite.origin === "canvas" || suite.taskCount > 0)) : enriched);
+      return ok(canvasOnly ? enriched.filter((suite) => suite.origin === "canvas" || suite.taskCount > 0) : enriched);
     }
     const enrichLibraryResource = (resource: import("./types.js").LibraryResource): import("./types.js").LibraryResource => {
       if (resource.resourceType !== "prompt_template") return resource;

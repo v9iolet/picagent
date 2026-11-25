@@ -10,7 +10,7 @@ export interface ImageOptions {
 }
 
 export function defaultImageOptions(modelId: string): ImageOptions {
-  // omyai 的 flare-special 验证记录见 docs/gpt-image-2.md；系列默认值可由渠道显式覆盖。
+  // omyai 的 flare-special 验证记录见 docs/image-models.md；系列默认值可由渠道显式覆盖。
   return /^gpt-image-2(?:[.-]|$)/i.test(modelId)
     ? { sizes: ["1K", "2K", "4K"], aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "16:9", "9:16"], sizeMode: "pixels" }
     : { sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "tier" };

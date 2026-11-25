@@ -857,7 +857,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     const offset = Math.max(0, Number.isFinite(parsedOffset) ? parsedOffset : 0);
     const rawOrigin = query.get("origin")?.trim();
     const originFilter = rawOrigin || "suite_studio";
-    if (originFilter !== "suite_studio" && originFilter !== "canvas" && originFilter !== "replica") {
+    if (originFilter !== "suite_studio" && originFilter !== "canvas" && originFilter !== "replica" && originFilter !== "aplus") {
       return fail("INVALID_SUITE_ORIGIN", 400);
     }
     const keyword = (query.get("keyword") ?? "").trim().toLowerCase();

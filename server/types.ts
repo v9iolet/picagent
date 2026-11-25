@@ -1,3 +1,4 @@
+import type { AplusImageVersionMetadata, AplusTaskMetadata, DetailSizePresets } from "../shared/aplus.js";
 import type { ListingConfigInput } from "../shared/listing-config.js";
 import type { ImageQuality, ModelChannelSnapshot } from "../shared/model-settings.js";
 import type {
@@ -11,7 +12,7 @@ import type {
 import type { PromptStage } from "./prompt-library.js";
 
 export type SuiteStatus = "draft" | "in_progress";
-export type SuiteOrigin = "suite_studio" | "canvas" | "replica";
+export type SuiteOrigin = "suite_studio" | "canvas" | "replica" | "aplus";
 
 export interface Suite {
   id: string;
@@ -84,6 +85,7 @@ export interface PromptRepository {
 
 export interface PlatformProfile {
   listingCopyRules?: import("../shared/listing-config.js").ListingRules;
+  detailSizePresets: DetailSizePresets;
   code: string;
   name: string;
   marketScope: "overseas" | "domestic";
@@ -327,7 +329,7 @@ export interface PlanSnapshot {
 }
 
 export type SuitePipelineStatus = "running" | "waiting_base_refine_decision" | "waiting_human_input" | "completed" | "partial_failed" | "failed";
-export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "replica_analyzing" | "done";
+export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "replica_analyzing" | "aplus_planning" | "awaiting_confirmation" | "done";
 export interface SuitePipelineRun {
   id: string;
   suiteId: string;
@@ -423,7 +425,7 @@ export type TaskBatchKind = "batch" | "single" | "retry";
 export type TaskBatchStatus = "running" | "completed" | "partial" | "failed";
 export type TaskSlotStatus = "pending" | "generating" | "succeeded" | "failed";
 
-export interface SuiteTask {
+export interface SuiteTask extends AplusTaskMetadata {
   id: string; suiteId: string; planSnapshotId: string | null; planItemId: string | null; ordinal: number;
   imageType: TaskImageType; title: string; purpose: string; promptDraft: string;
   promptRevision: number; sourceInputImageId: string | null; generationParams: Record<string, unknown>;
@@ -433,7 +435,7 @@ export interface SuiteTask {
   factRefs?: string[];
   globalStyleCard?: Record<string, unknown>;
   promptSha256?: string;
-  originKind?: "suite_plan" | "reverse_import" | "replica";
+  originKind?: "suite_plan" | "reverse_import" | "replica" | "aplus";
   reversePlanId?: string | null;
   reverseReferenceId?: string | null;
   reversePromptVersionId?: string | null;
@@ -461,11 +463,23 @@ export interface TaskGenerationAttempt {
   errorCode: string | null; errorMessage: string | null; externalRequestId: string | null;
   startedAt: string; finishedAt: string | null;
 }
-export interface TaskImageVersion {
+export interface TaskImageVersion extends AplusImageVersionMetadata {
   id: string; taskId: string; slotId: string; attemptId: string; versionNumber: number; objectKey: string;
   processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string;
   promptSnapshot: Record<string, unknown>; contextSnapshot: Record<string, unknown>;
   isCurrent: boolean; isFinal: boolean; createdAt: string; previewUrl: string;
+}
+export interface CompleteTaskAttemptInput extends AplusImageVersionMetadata {
+  attemptId: string;
+  slotId: string;
+  taskId: string;
+  objectKey: string;
+  processObjectKeys: string[];
+  sha256: string;
+  width: number;
+  height: number;
+  mimeType: string;
+  completedAt: string;
 }
 export interface TaskPreviewVersion {
   taskId: string;
@@ -507,7 +521,7 @@ export interface TaskRepository {
   getSlot(slotId: string): Promise<TaskResultSlot | null>;
   listSlots(suiteId: string): Promise<TaskResultSlot[]>;
   getAttempt(attemptId: string): Promise<TaskGenerationAttempt | null>;
-  completeAttempt(input: { attemptId: string; slotId: string; taskId: string; objectKey: string; processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string; completedAt: string }): Promise<{ attempt: TaskGenerationAttempt; version: TaskImageVersion }>;
+  completeAttempt(input: CompleteTaskAttemptInput): Promise<{ attempt: TaskGenerationAttempt; version: TaskImageVersion }>;
   failAttempt(attemptId: string, code: string, message: string, completedAt: string): Promise<TaskGenerationAttempt>;
   selectVersion(taskId: string, versionId: string, selection: "current" | "final"): Promise<TaskImageVersion | null>;
   clearFinalVersion?(taskId: string): Promise<void>;
