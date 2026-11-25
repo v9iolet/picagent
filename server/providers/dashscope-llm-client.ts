@@ -103,7 +103,7 @@ export function buildPlanUserContent(input: PlanLlmInput): VisionContent[] {
     baseImages: input.baseVersionIds,
     visualReferences: (input.visionImages ?? []).map((image) => ({ id: image.id, sourceKind: image.sourceKind, sourceVersionId: image.sourceVersionId, mimeType: image.mimeType })),
   };
-  const renderedUserPrompt = (input.userPromptTemplate?.trim() || "{{dynamic_input}}\n{{selected_chunks}}\n{{input_images}}\n{{base_images}}\n{{visual_references}}")
+  const renderedUserPrompt = input.userPrompt ?? (input.userPromptTemplate?.trim() || "{{dynamic_input}}\n{{selected_chunks}}\n{{input_images}}\n{{base_images}}\n{{visual_references}}")
     .replaceAll("{{dynamic_input}}", JSON.stringify(input.dynamicInput))
     .replaceAll("{{human_input}}", JSON.stringify(input.humanInput))
     .replaceAll("{{selected_chunks}}", JSON.stringify(user.selectedChunks))

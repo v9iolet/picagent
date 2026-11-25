@@ -8,6 +8,7 @@ import { resolveDeliverySlots, type DeliveryEditChildLike } from "../shared/work
 import { errorMessages, fail } from "./api-errors.js";
 import { ok, asRecord, dataOf, now, type AppResponse } from "./api-response.js";
 import type { ListingRepository } from "./listing-copy.js";
+import { aplusPlanningView, publicAplusRun } from "./aplus/aplus-plan.js";
 import { resolvePublishedProductCardSnapshot } from "./product-cards-api.js";
 import { buildReplicaReferencePreviewUrl } from "./replica/replica-pipeline.js";
 import type {
@@ -22,6 +23,7 @@ import type {
   StorageAdapter,
   StructurePlanV2,
   SuitePipelineRun,
+  SuiteOrigin,
   SuiteRepository,
   SuiteTask,
   TaskRepository,
@@ -538,6 +540,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       return latest?.status === "running" ? fail("PIPELINE_ALREADY_RUNNING", 409) : fail("INVALID_PIPELINE_START");
     }
     const isClone = typeof body.cloneFrom === "string" || Boolean(cloneSpec);
+    if (suite?.origin === "aplus" && !isClone) return fail("INVALID_SUITE_ORIGIN", 400);
     if (suite && !isClone) {
       const existing = (await pipelineRepository.listRuns(suite.id)).find(
         (item) => item.idempotencyKey === idempotencyKey,
@@ -619,6 +622,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     if (!idempotencyKey?.trim()) return fail("MISSING_IDEMPOTENCY_KEY");
     const suite = await deps.repository.getSuite(suiteId);
     if (!suite) return fail("INVALID_SUITE_ID", 404);
+    if (suite.origin === "aplus") return fail("INVALID_SUITE_ORIGIN", 400);
     const current = await pipelineRepository.getLatestRun(suite.id);
     if (!current) return fail("PIPELINE_NOT_FOUND", 404);
     const body = asRecord(payload, { allowArrays: true });
@@ -685,17 +689,19 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     return ok({ suiteId: suite.id, pipeline: updated }, 202);
   }
 
-  async function getStudioState(suiteId: string) {
-    if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
+  async function getStudioState(suiteId: string, expectedOrigin?: SuiteOrigin) {
     const suite = await deps.repository.getSuite(suiteId);
     if (!suite) return fail("INVALID_SUITE_ID", 404);
+    if (expectedOrigin && suite.origin !== expectedOrigin) return fail("INVALID_SUITE_ORIGIN", 400);
+    const isAplus = suite.origin === "aplus";
+    if (!deps.taskRepository && !isAplus) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
     const [inputImages, latestPipeline, snapshot, tasks, batches, slots] = await Promise.all([
       deps.repository.getInputImages(suite.id),
       pipelineRepository.getLatestRun(suite.id),
       deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null),
-      deps.taskRepository.listTasks(suite.id),
-      deps.taskRepository.listBatches(suite.id),
-      deps.taskRepository.listSlots(suite.id),
+      deps.taskRepository?.listTasks(suite.id) ?? [],
+      deps.taskRepository?.listBatches(suite.id) ?? [],
+      deps.taskRepository?.listSlots(suite.id) ?? [],
     ]);
     const activeTasks = tasks.filter((task) => task.status !== "archived");
     const taskAggregates = await Promise.all(
@@ -825,13 +831,14 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       ?? await listingRepository.findLatestBySuiteId(suite.id);
     return ok({
       suite,
-      pipeline,
+      pipeline: isAplus ? publicAplusRun(pipeline) : pipeline,
       listingCopy,
       inputImages,
       planning,
       cards,
       progress: { total, completed: done, percent: total ? Math.round((done / total) * 100) : 0 },
       batches,
+      ...(isAplus ? aplusPlanningView(pipeline) : {}),
       ...(isReplica
         ? {
             styleSketch,
@@ -931,7 +938,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           : 0;
       return {
         suite,
-        pipeline,
+        pipeline: suite.origin === "aplus" ? publicAplusRun(pipeline) : pipeline,
         card,
         thumbnails,
         taskCount: activeTasks.length || fallbackReplicaCount,

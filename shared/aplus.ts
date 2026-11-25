@@ -82,3 +82,36 @@ export function validateAplusSizePresets(value: unknown, platformPresets: Detail
     (value.length === 1 || APLUS_SIZE_PRESETS[key].canCombine),
   );
 }
+
+export function normalizeAplusProductInfo(value: string): string {
+  return value.trim();
+}
+
+export interface AplusPlanInputSummary {
+  imageHashes: string[];
+  productInfo: string;
+  productCardId: string | null;
+  productCardRevision: number | null;
+  platform: string;
+  targetMarket: string;
+  language: string;
+  sizePresets: AplusSizePresetKey[];
+  modules: AplusModuleCode[];
+}
+
+export function isAplusPlanStale(snapshot: AplusPlanInputSummary, current: AplusPlanInputSummary): boolean {
+  const sameOrder = (left: readonly string[], right: readonly string[]) =>
+    left.length === right.length && left.every((item, index) => item === right[index]);
+  const sameSet = (left: readonly string[], right: readonly string[]) =>
+    sameOrder([...left].sort(), [...right].sort());
+
+  return !sameOrder(snapshot.imageHashes, current.imageHashes) ||
+    normalizeAplusProductInfo(snapshot.productInfo) !== normalizeAplusProductInfo(current.productInfo) ||
+    snapshot.productCardId !== current.productCardId ||
+    snapshot.productCardRevision !== current.productCardRevision ||
+    snapshot.platform !== current.platform ||
+    snapshot.targetMarket !== current.targetMarket ||
+    snapshot.language !== current.language ||
+    !sameSet(snapshot.sizePresets, current.sizePresets) ||
+    !sameSet(snapshot.modules, current.modules);
+}

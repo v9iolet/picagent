@@ -4,22 +4,29 @@ import type { BaseGenerationAttemptInput, BaseGenerationSuccessInput, BaseImageV
 export class MemorySuiteRepository implements SuiteRepository {
   private suites = new Map<string, Suite>();
   private images = new Map<string, InputImage>();
-  private suiteIdempotency = new Map<string, Suite>();
+  private suiteIdempotency = new Map<string, string>();
   private imageIdempotency = new Map<string, InputImage>();
   private attempts = new Map<string, GenerationAttempt>();
   private generationIdempotency = new Map<string, string>();
   private versions = new Map<string, BaseImageVersion>();
 
   async createSuite(name: string, idempotencyKey?: string, origin: SuiteOrigin = "suite_studio") {
-    if (idempotencyKey && this.suiteIdempotency.has(idempotencyKey)) return this.suiteIdempotency.get(idempotencyKey)!;
+    const key = idempotencyKey ? JSON.stringify([origin === "aplus", idempotencyKey]) : undefined;
+    const existingId = key ? this.suiteIdempotency.get(key) : undefined;
+    const existing = existingId ? this.suites.get(existingId) : undefined;
+    if (existing) return existing;
     const now = new Date().toISOString();
     const suite = { id: randomUUID(), name, status: "draft" as const, origin, createdAt: now, updatedAt: now };
     this.suites.set(suite.id, suite);
-    if (idempotencyKey) this.suiteIdempotency.set(idempotencyKey, suite);
+    if (key) this.suiteIdempotency.set(key, suite.id);
     return suite;
   }
   async listSuites() { return [...this.suites.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)); }
   async getSuite(id: string) { return this.suites.get(id) ?? null; }
+  async findAplusSuiteByIdempotencyKey(key: string) {
+    const id = this.suiteIdempotency.get(JSON.stringify([true, key]));
+    return id ? this.getSuite(id) : null;
+  }
   async renameSuite(suiteId: string, name: string) {
     const suite = this.suites.get(suiteId);
     if (!suite) return null;

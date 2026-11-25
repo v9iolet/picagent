@@ -51,6 +51,7 @@ export interface ErrorEnvelope { error: { code: string; message: string; missing
 
 export interface SuiteRepository {
   createSuite(name: string, idempotencyKey?: string, origin?: SuiteOrigin): Promise<Suite>;
+  findAplusSuiteByIdempotencyKey(key: string): Promise<Suite | null>;
   listSuites(): Promise<Suite[]>;
   getSuite(id: string): Promise<Suite | null>;
   renameSuite?(suiteId: string, name: string): Promise<Suite | null>;
@@ -194,7 +195,8 @@ export interface RagClient {
 }
 export interface PlanLlmInput {
   requestId?: string; templateVersionId: string; templateBody: string; userPromptTemplate?: string; dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>;
-  chunks: RagChunk[]; inputImageIds: string[]; baseVersionIds: string[]; visionImages?: PlanVisionImage[]; platformProfile?: PlatformProfile; flow?: "plan" | "category-prompt" | "listing-copy";
+  chunks: RagChunk[]; inputImageIds: string[]; baseVersionIds: string[]; visionImages?: PlanVisionImage[]; platformProfile?: PlatformProfile; flow?: "plan" | "category-prompt" | "listing-copy" | "aplus-plan";
+  userPrompt?: string;
 }
 export interface CategoryPromptLlmInput extends PlanLlmInput {
   categoryCode: string;
@@ -354,8 +356,9 @@ export interface PipelineRepository {
   getLatestRun(suiteId: string): Promise<SuitePipelineRun | null>;
   listRuns(suiteId: string): Promise<SuitePipelineRun[]>;
   resumeRun(previous: SuitePipelineRun, key: string, phase: SuitePipelinePhase, config: SuitePipelineRun["config"]): Promise<SuitePipelineRun | null>;
-  updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>): Promise<SuitePipelineRun | null>;
+  updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>, expected?: PipelineRunVersion): Promise<SuitePipelineRun | null>;
 }
+export type PipelineRunVersion = Pick<SuitePipelineRun, "config" | "currentPhase" | "status" | "resumeCount">;
 export interface PlanAttempt {
   id: string; suiteId: string; idempotencyKey: string; status: PlanAttemptStatus; templateVersionId: string;
   dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>; selectedChunks: RagChunkRef[]; inputImageIds: string[]; baseVersionIds: string[];

@@ -1,5 +1,6 @@
 import { planSnapshotView, isStructurePlanV2, taskView, taskAttemptView, taskSlotView, taskVersionView, taskBatchView } from "./suite-views.js";
 import { createSuitePipeline } from "./suite-pipeline.js";
+import { createAplusPlanningApi } from "./aplus/aplus-planning-api.js";
 import { fail, errorMessages } from "./api-errors.js";
 import { ok, asRecord, dataOf, type AppResponse } from "./api-response.js";
 export type { AppResponse } from "./api-response.js";
@@ -937,6 +938,19 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     resolveImageOptions: async () => (await resolveImage()).imageOptions,
     request,
   });
+  const promptRepository = deps.promptRepository;
+  const aplusPlanning = createAplusPlanningApi({
+    repository: deps.repository,
+    storage: deps.storage,
+    pipelines: pipelineRepository,
+    platforms: deps.platformRepository,
+    productCards: productCardRepository,
+    prompts: promptRepository && {
+      listPublished: (stage) => promptRepository.listPublished(stage),
+      getPublishedVersion: (versionId, stage) => observedPromptLoad(promptRepository, versionId, stage),
+    },
+    resolveVision,
+  });
 
   async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
     if (/^\/api\/listing-copies(?:[/?]|$)/.test(path)) return listing.request(method, path, options.body);
@@ -997,6 +1011,16 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       return res;
     }
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
+
+    if (method === "POST" && path === "/api/aplus") return aplusPlanning.start(idempotencyKey, options.body);
+    const aplusMatch = path.match(/^\/api\/aplus\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/(studio-state|plan|replan|resume)$/i);
+    if (aplusMatch) {
+      const [, suiteId, action] = aplusMatch;
+      if (method === "GET" && action === "studio-state") return pipeline.getStudioState(suiteId, "aplus");
+      if (method === "PATCH" && action === "plan") return aplusPlanning.editPlan(suiteId, options.body);
+      if (method === "POST" && action === "replan") return aplusPlanning.start(idempotencyKey, options.body, suiteId);
+      if (method === "POST" && action === "resume") return aplusPlanning.resume(suiteId, idempotencyKey);
+    }
 
     if (method === "POST" && path === "/api/replicas") return replicaPipeline.createReplica(idempotencyKey, options.body);
     const replicaStudioStateMatch = path.match(/^\/api\/replicas\/([^/]+)\/studio-state$/);
@@ -2177,6 +2201,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const [suiteId, inputImageId] = removeImageMatch.slice(1);
       const image = await deps.repository.getInputImage(suiteId, inputImageId);
       if (!image) return fail("INVALID_INPUT_IMAGE", 404);
+      if ((await deps.repository.getSuite(suiteId))?.origin === "aplus") return fail("INPUT_IMAGE_HAS_HISTORY", 409);
       try {
         const removed = await deps.repository.removeInputImage(suiteId, inputImageId);
         if (!removed) return fail("INVALID_INPUT_IMAGE", 404);
@@ -2362,6 +2387,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const upload = async (suiteId: string, file: UploadFile): Promise<AppResponse> => {
     const suite = await deps.repository.getSuite(suiteId);
     if (!suite) return fail("INVALID_SUITE_ID", 404);
+    if (suite.origin === "aplus") return fail("INPUT_IMAGE_HAS_HISTORY", 409);
     if (file.idempotencyKey && uploadIdempotency.has(`${suiteId}:${file.idempotencyKey}`)) return ok(uploadIdempotency.get(`${suiteId}:${file.idempotencyKey}`)!, 201);
     const images = await deps.repository.getInputImages(suiteId);
     if (images.length >= 6 && !file.idempotencyKey) return fail("TOO_MANY_IMAGES", 400);
