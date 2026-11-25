@@ -15,7 +15,7 @@ import {
   type LaneLayoutOptions,
   type ResolvedDeliverySlot,
 } from "../../shared/workbench-delivery";
-import { modelSettingsApi, suiteApi, type ApiCanvasLayout, type ApiImageEditSelection, type ApiImageEditTool, type ApiLibraryResource, type ApiPromptTemplateCopy, type ApiProductMaterialRef, type ApiSuiteTask, type ApiTaskVersion, type ApiWorkbench } from "../api/client";
+import { modelSettingsApi, suiteApi, type ApiCanvasLayout, type ApiImageEditProductInput, type ApiImageEditSelection, type ApiImageEditTool, type ApiLibraryResource, type ApiPromptTemplateCopy, type ApiProductMaterialRef, type ApiSuiteTask, type ApiTaskVersion, type ApiWorkbench } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { BeforeAfterLightbox, type LightboxPreview } from "../components/BeforeAfterLightbox";
 import { CustomTaskModal } from "../components/CustomTaskModal";
@@ -60,7 +60,7 @@ type BoardData = {
   onSelectVersion?: (task: ApiSuiteTask, versionId: string, selection: "current" | "final") => void;
 };
 type BoardNode = Node<BoardData>;
-type EditTool = "re_edit" | "regenerate" | "add_text" | "change_text" | "inpaint" | "erase" | "expand";
+type EditTool = "re_edit" | "regenerate" | "add_text" | "change_text" | "inpaint" | "erase" | "expand" | "restore_product";
 type MaskStroke = { mode: "draw" | "erase"; points: Array<{ x: number; y: number }>; size: number };
 type DraftOperation = { operationId: string; type: ApiImageEditTool; summary: string; sourceVersionId: string; payload: Record<string, unknown> };
 const editOperationType = (tool: Exclude<EditTool, "regenerate">): ApiImageEditTool => tool === "inpaint" ? "redraw" : tool === "expand" ? "outpaint" : tool;
@@ -765,6 +765,10 @@ export function ImageEditorModal({
   const [redrawPrompt, setRedrawPrompt] = useState("");
   const [erasePrompt, setErasePrompt] = useState("移除选区中的目标，并根据周围画面自然补全背景，保持原有光线、纹理和透视关系");
   const [operations, setOperations] = useState<DraftOperation[]>([]);
+  const [productInputs, setProductInputs] = useState<ApiImageEditProductInput[]>([]);
+  const [restoreInput, setRestoreInput] = useState<string | null>(null);
+  const [uploadingRestoreInput, setUploadingRestoreInput] = useState(false);
+  const [productInputsError, setProductInputsError] = useState(false);
   const workingDrafts = useRef<Partial<Record<ApiImageEditTool, DraftOperation>>>({});
   const pendingDraftWrite = useRef(Promise.resolve());
   const [loadingDraft, setLoadingDraft] = useState(true);
@@ -897,13 +901,15 @@ export function ImageEditorModal({
   useEffect(() => { suiteApi.imageEditorCapabilities().then((result) => setCapabilities(result.capabilities)).catch(() => setCapabilityError("能力状态暂时不可用")); }, []);
   useEffect(() => {
     let mounted = true;
-    suiteApi.getImageEditDraft(task.id).then((draft) => {
+    suiteApi.getImageEditDraft(task.id, version.id).then((draft) => {
       if (!mounted) return;
       const restored = (draft.operations as unknown as DraftOperation[]).filter((item) => item.sourceVersionId === version.id);
       setOperations(restored);
+      setProductInputs(draft.productInputs ?? []);
+      setProductInputsError(false);
       const reEdit = restored.find((item) => item.type === "re_edit");
       if (reEdit) setInstruction(String(reEdit.payload.prompt ?? ""));
-    }).catch(() => undefined).finally(() => { if (mounted) setLoadingDraft(false); });
+    }).catch(() => { if (mounted) setProductInputsError(true); }).finally(() => { if (mounted) setLoadingDraft(false); });
     return () => { mounted = false; };
   }, [task.id, version.id]);
 
@@ -1052,6 +1058,8 @@ export function ImageEditorModal({
         });
       case "outpaint":
         return operation(`扩图：${expand} · ${ratio}`, { direction: expand, targetRatio: ratio });
+      case "restore_product":
+        return operation("商品还原", restoreInput ? { referenceObjectKeys: [restoreInput] } : {});
     }
   };
 
@@ -1061,7 +1069,21 @@ export function ImageEditorModal({
     if (tool === "change_text" && (!originalText.trim() || !newText.trim() || !changeTextPrompt.trim())) return "请确认原文字、新文字和替换要求";
     if (tool === "inpaint" && (!strokes.length || !redrawPrompt.trim())) return "请绘制选区并填写重绘要求";
     if (tool === "erase" && !strokes.length) return "请先绘制要清除的选区";
+    if (tool === "restore_product" && !restoreInput && !productInputs.length) return "请上传一张商品外观依据图";
     return "";
+  };
+
+  const uploadRestoreInput = async (file: File) => {
+    setUploadingRestoreInput(true);
+    setEditorError("");
+    try {
+      const uploaded = await suiteApi.uploadImageEditRestoreInput(task.id, version.id, file);
+      setRestoreInput(uploaded.objectKey);
+    } catch (error) {
+      setEditorError(error instanceof Error ? error.message : "依据图上传失败");
+    } finally {
+      setUploadingRestoreInput(false);
+    }
   };
 
   const addOperation = async () => {
@@ -1091,7 +1113,7 @@ export function ImageEditorModal({
       void writeDraft(() => onOperationAdded?.(next, next.summary)).catch(() => setEditorError("对话操作同步失败，请重试"));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [activeOperationType, saving, loadingDraft, text, originalText, newText, textRegion, strokes, feather, expand, ratio, instruction, addTextPrompt, changeTextPrompt, redrawPrompt, erasePrompt, textOperationId, changeTextOperationId, operations]);
+  }, [activeOperationType, saving, loadingDraft, text, originalText, newText, textRegion, strokes, feather, expand, ratio, instruction, addTextPrompt, changeTextPrompt, redrawPrompt, erasePrompt, textOperationId, changeTextOperationId, restoreInput, operations]);
 
   const submit = async () => {
     if (!activeOperationType) return;
@@ -1152,6 +1174,9 @@ export function ImageEditorModal({
         break;
       case "re_edit":
         setInstruction(String(payload.prompt ?? ""));
+        break;
+      case "restore_product":
+        setRestoreInput(Array.isArray(payload.referenceObjectKeys) ? String(payload.referenceObjectKeys[0] ?? "") || null : null);
         break;
     }
     if ((item.type === "add_text" || item.type === "change_text") && payload.region && typeof payload.region === "object") {
@@ -1224,6 +1249,7 @@ export function ImageEditorModal({
     ["inpaint", "局部重绘", "redraw"],
     ["erase", "消除笔", "erase"],
     ["expand", "扩图", "outpaint"],
+    ["restore_product", "商品还原", "imageToImage"],
   ];
   const activeCapability = toolList.find(([value]) => value === tool)?.[2];
   const capabilityAvailable = (_value: EditTool, capability: string) => capabilities?.[capability] !== false;
@@ -1506,6 +1532,46 @@ export function ImageEditorModal({
               </>
             )}
             {tool === "regenerate" && <p>再次生成只在当前卡片下新增版本，不创建子卡片。</p>}
+            {tool === "restore_product" && (
+              <fieldset className="wb-restore-inputs" disabled={saving || loadingDraft || uploadingRestoreInput}>
+                <legend>商品外观依据</legend>
+                {loadingDraft && <small>正在读取商品原图…</small>}
+                {productInputsError && <small>商品原图读取失败，可以上传依据图。</small>}
+                {!loadingDraft && !productInputsError && !productInputs.length && <small>当前图片没有商品原图，请上传一张依据图。</small>}
+                {productInputs.length > 0 && (
+                  <>
+                    <label className="wb-restore-choice">
+                      <input type="radio" name="restore-input" checked={restoreInput === null} onChange={() => { setRestoreInput(null); setEditorError(""); }} />
+                      使用全部商品原图
+                    </label>
+                    <div className="wb-restore-grid">
+                      {productInputs.map(({ objectKey, thumbnailUrl }, index) => (
+                        <label className="wb-restore-choice" key={objectKey}>
+                          <img src={thumbnailUrl} alt="" />
+                          <input type="radio" name="restore-input" checked={restoreInput === objectKey} onChange={() => { setRestoreInput(objectKey); setEditorError(""); }} />
+                          原图 {index + 1}
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                )}
+                {restoreInput && !productInputs.some((input) => input.objectKey === restoreInput) && (
+                  <div className="wb-restore-uploaded">
+                    <img src={suiteApi.imageEditRestoreInputThumbnail(task.id, version.id, restoreInput)} alt="已上传的商品外观依据图" />
+                    <span>已选上传图</span>
+                  </div>
+                )}
+                <label>
+                  {uploadingRestoreInput ? "上传中…" : "上传"}
+                  <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => {
+                    const file = event.currentTarget.files?.[0];
+                    event.currentTarget.value = "";
+                    if (file) void uploadRestoreInput(file);
+                  }} />
+                </label>
+                <small>PNG、JPG 或 WebP，最大 10 MB</small>
+              </fieldset>
+            )}
             <div className="wb-editor-operations">
               {activeOperations.map((item) => (
                 <div key={item.operationId}>
@@ -1519,11 +1585,11 @@ export function ImageEditorModal({
             <span>已加入对话 {activeOperations.length} 项</span>
             {editorError && <strong role="alert"><ModelSettingsMessage message={editorError} /></strong>}
             <button type="button" onClick={onClose}>取消</button>
-            {activeOperationType && <button type="button" disabled={saving || loadingDraft || !capabilityReady} onClick={() => void addOperation()}>{saving ? "保存中…" : activeOperations.some((item) => item.operationId === operationFor(activeOperationType).operationId) ? "更新对话操作" : "添加到对话"}</button>}
+            {activeOperationType && tool !== "restore_product" && <button type="button" disabled={saving || loadingDraft || !capabilityReady} onClick={() => void addOperation()}>{saving ? "保存中…" : activeOperations.some((item) => item.operationId === operationFor(activeOperationType).operationId) ? "更新对话操作" : "添加到对话"}</button>}
             {tool === "regenerate" ? (
               <button type="button" className="wb-primary-action" disabled={saving || !capabilityReady} onClick={() => { setSaving(true); onRegenerate().then(onClose).catch((errorValue) => setEditorError(errorValue instanceof Error ? errorValue.message : "再次生成失败")).finally(() => setSaving(false)); }}>{saving ? "提交中…" : "再次生成当前版本"}</button>
             ) : (
-              <button type="button" className="wb-primary-action" disabled={saving || loadingDraft || !capabilityReady} onClick={() => void submit()}>{saving ? "提交中…" : "开始生成（新建编辑子卡）"}</button>
+              <button type="button" className="wb-primary-action" disabled={saving || loadingDraft || !capabilityReady || (tool === "restore_product" && (uploadingRestoreInput || (!restoreInput && !productInputs.length)))} onClick={() => void submit()}>{saving ? "提交中…" : tool === "restore_product" ? "还原商品" : "开始生成（新建编辑子卡）"}</button>
             )}
           </footer>
         </div>
@@ -1833,12 +1899,14 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     await suiteApi.upsertImageEditOperation(task.id, operation as unknown as Record<string, unknown>, instruction);
   };
 
-  const regenerateTask = async (task: ApiSuiteTask) => {
+  const regenerateTask = async (task: ApiSuiteTask, editSourceVersionId?: string) => {
     const child = latestWorkbench.current?.imageEditChildren?.find((item) => String(item.task.id) === task.id);
     if (child) {
       const latest = child.attempts[child.attempts.length - 1];
       if (latest && String(latest.status) === "failed") await suiteApi.retryImageEdit(String(latest.id));
       else await suiteApi.regenerateImageEditTask(task.id);
+    } else if (editSourceVersionId) {
+      await suiteApi.regenerateTaskFromEdit(task.id, editSourceVersionId);
     } else {
       const failed = [...task.attempts].reverse().find((attempt) => attempt.status === "failed");
       if (task.status === "failed" && failed) await suiteApi.retryTaskAttempt(failed.id);
@@ -2242,7 +2310,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
           version={editor.version}
           onClose={() => setEditor(null)}
           onOperationAdded={(operation, instruction) => persistEditOperation(editor.task, operation, instruction)}
-          onRegenerate={() => regenerateTask(editor.task)}
+          onRegenerate={() => regenerateTask(editor.task, editor.version.id)}
           onSubmit={(spec, instruction) => submitEdit(editor.task, spec, instruction)}
         />
       )}

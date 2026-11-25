@@ -216,6 +216,7 @@ test("resolveRequestBodyLimit scopes large limits strictly to replica, image-edi
   assert.equal(resolveRequestBodyLimit("POST", "/api/listing-copies/draft/input-images"), SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES);
   assert.equal(resolveRequestBodyLimit("POST", "/api/listing-copies/job-1/input-images"), SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES);
   assert.equal(resolveRequestBodyLimit("POST", "/api/image-editor/sessions/s1/operations"), IMAGE_EDITOR_OPERATION_BODY_MAX_BYTES);
+  assert.equal(resolveRequestBodyLimit("POST", "/api/image-editor/sessions/s1/versions/v1/restore-inputs"), SINGLE_IMAGE_UPLOAD_BODY_MAX_BYTES);
 
   // Ordinary JSON routes and non-POST methods fall back to the 1 MiB default.
   assert.equal(resolveRequestBodyLimit("POST", "/api/suites"), DEFAULT_REQUEST_BODY_MAX_BYTES);

@@ -1078,6 +1078,10 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
       ],
     });
     const task = created[0];
+    const productInputs = [
+      { objectKey: `replicas/${replicaSuite.id}/products/front/original`, role: "product" },
+      { objectKey: `replicas/${replicaSuite.id}/products/side/original`, role: "product" },
+    ];
     const batchId = randomUUID();
     const slotId = randomUUID();
     const attemptId = randomUUID();
@@ -1118,7 +1122,11 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
           requestSummary: {},
           promptSnapshot: { prompt: "PG 复刻提示词" },
           promptSha256: "b".repeat(64),
-          contextSnapshot: {},
+          contextSnapshot: { inputImages: [
+            { ...productInputs[0], role: "product_primary" },
+            { objectKey: `replicas/${replicaSuite.id}/references/${refId}/original`, role: "replica_reference" },
+            { ...productInputs[1], role: "product_detail" },
+          ] },
           sourceKind: "original",
           sourceObjectKey: `replicas/${replicaSuite.id}/references/${refId}/original`,
           sourceInputImageId: null,
@@ -1192,8 +1200,13 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
     assert.equal(await editorRepo.validateSource(task.id, version.id), true);
     assert.equal(await editorRepo.validateSource(randomUUID(), version.id), false);
     assert.deepEqual(await editorRepo.getSourceVersion(version.id), {
-      objectKey: version.objectKey, mimeType: "image/png", generationPrompt: "PG 复刻提示词",
+      objectKey: version.objectKey, mimeType: "image/png", generationPrompt: "PG 复刻提示词", productInputs,
     });
+    const prompts = new PostgresPromptRepository(pool);
+    const restoreTemplate = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.restore_product");
+    assert.ok(restoreTemplate);
+    const restore = await prompts.getPublishedVersion(restoreTemplate.templateVersionId, "task_image");
+    assert.match(restore?.body ?? "", /保持原图的构图、背景、文字/);
     const snapId = randomUUID();
     const childId = randomUUID();
     const editAttemptId = randomUUID();
@@ -1206,6 +1219,9 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
         parentVersionId: version.id,
         summary: "测试编辑",
         sourcePrompt: "PG 复刻提示词",
+        tool: "restore_product",
+        attachedInputs: [productInputs[1]],
+        promptTemplateVersionId: restoreTemplate.templateVersionId,
         operations: [],
         provider: { name: "fake", version: "1", capabilitiesVersion: "1" },
         createdAt: timestamp,
@@ -1232,7 +1248,7 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
         snapshotId: snapId,
         attemptNo: 1,
         status: "generating",
-        command: { type: "re_edit", sourceVersionId: version.id, prompt: "测试编辑", operations: [] },
+        command: { type: "restore_product", sourceVersionId: version.id, prompt: "测试编辑", operations: [], attachedInputs: [productInputs[1]] },
         provider: { name: "fake", version: "1", capabilitiesVersion: "1" },
         errorCode: null,
         errorMessage: null,
@@ -1240,6 +1256,10 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
         completedAt: null,
       },
     });
+    const snapshot = await editorRepo.getSnapshot(snapId);
+    assert.equal(snapshot?.tool, "restore_product");
+    assert.deepEqual(snapshot?.attachedInputs, [productInputs[1]]);
+    assert.equal(snapshot.promptTemplateVersionId, restoreTemplate.templateVersionId);
     const completedEdit = await editorRepo.completeAttempt({
       attemptId: editAttemptId,
       objectKey: `image-edits/${childId}/versions/v1.png`,
@@ -1250,7 +1270,7 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
       completedAt: timestamp,
     });
     assert.deepEqual(await editorRepo.getSourceVersion(completedEdit.version.id), {
-      objectKey: completedEdit.version.objectKey, mimeType: "image/png", generationPrompt: "测试编辑",
+      objectKey: completedEdit.version.objectKey, mimeType: "image/png", generationPrompt: "测试编辑", productInputs,
     });
     assert.equal(await editorRepo.validateSource(childId, completedEdit.version.id), true);
     await editorRepo.selectVersion(childId, completedEdit.version.id, "final");
@@ -1347,7 +1367,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
     const prompts = new PostgresPromptRepository(pool);
     const library = new PostgresLibraryRepository(pool);
 
-    const editorCodes = ["image-editor.add_text", "image-editor.change_text", "image-editor.erase", "image-editor.outpaint", "image-editor.redraw"];
+    const editorCodes = ["image-editor.add_text", "image-editor.change_text", "image-editor.erase", "image-editor.outpaint", "image-editor.redraw", "image-editor.restore_product"];
     // Legacy reverse templates are retired; current replica, onboarding and editor templates remain published.
     const initialPublished = await prompts.listPublished();
     assert.deepEqual(
