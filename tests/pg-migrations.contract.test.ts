@@ -1342,6 +1342,33 @@ test("042 persists editor snapshot metadata and consumes only submitted drafts w
   });
 });
 
+test("045 publishes the batch text-edit prompt and respects subsequent published versions", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const current = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.change_text");
+    assert.ok(current);
+    assert.equal(current.versionNo, 2);
+    const template = await prompts.getPublishedVersion(current.templateVersionId, "task_image");
+    assert.match(template?.body ?? "", /^严格保持输入图片中的商品主体外观/);
+    assert.match(template?.userPromptTemplate ?? "", /newText 为空时移除原文字，用周围背景自然填补/);
+    const history = await prompts.listVersions(current.templateId);
+    assert.deepEqual(history.map(({ versionNo, status }) => [versionNo, status]), [[1, "retired"], [2, "published"]]);
+    assert.match(history[0].userPromptTemplate, /将\{\{region\}\}的原文字/);
+
+    await runMigrations(pool);
+    assert.equal((await prompts.listVersions(current.templateId)).length, 2);
+    assert.ok(await prompts.getPublishedVersion(current.templateVersionId, "task_image"));
+    const custom = await prompts.copyVersion(current.templateVersionId);
+    assert.ok(custom);
+    const instruction = "以原图字体呈现全部替换文字。";
+    await prompts.updateDraft(custom.templateVersionId, { userPromptTemplate: instruction });
+    await prompts.publishVersion(custom.templateVersionId);
+    await runMigrations(pool);
+    assert.equal((await prompts.getPublishedVersion(custom.templateVersionId, "task_image"))?.userPromptTemplate, instruction);
+    assert.equal((await prompts.listVersions(current.templateId)).length, 3);
+  });
+});
+
 test("035 idempotently retires unused templates, preserves read-by-id & library filtering, and keeps active edit/publish working", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);

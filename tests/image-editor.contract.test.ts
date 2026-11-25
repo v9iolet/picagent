@@ -143,6 +143,61 @@ test("change_text allows manual submit without OCR, freezes OCR snapshot when pr
   assert.equal(frozen.sourceVersionId, "version-1"); assert.equal(frozen.status, "succeeded");
 });
 
+test("change_text batches only changed rows and sends one source image without a mask", async () => {
+  const repository = new MemoryImageEditorRepository();
+  const storage = new MemoryStorage();
+  const bytes = await sharp({ create: { width: 100, height: 100, channels: 3, background: "#ffffff" } }).png().toBuffer();
+  const editSource = { ...source, bytes, generationPrompt: "原始生图提示词" };
+  const calls: ImageEditRequest[] = [];
+  const service = new ImageEditorService(repository, provider({
+    edit: (command, image) => requestImageEditorEdit({
+      edit: async (request) => { calls.push(request); return { bytes, mimeType: image.mimeType }; },
+    }, storage, "gpt-image-2", defaultImageOptions("gpt-image-2"), command, image),
+  }), storage, async () => editSource);
+  const api = createImageEditorApi(service);
+  const rows = [
+    { originalText: "保持原样", newText: "保持原样", boundingBox: { x: 0.41, y: 0.1, width: 0.2, height: 0.1 } },
+    { originalText: "标题", newText: '新“标题”\n第二行', boundingBox: { x: 0.1, y: 0.1, width: 0.3, height: 0.1, rotation: 0 } },
+    { originalText: "商品卖点", newText: "快充", boundingBox: { x: 0.3, y: 0.43, width: 0.1, height: 0.1, rotation: 5 } },
+    { originalText: "过期标签", newText: "", boundingBox: { x: 0.7, y: 0.7, width: 0.2, height: 0.1 } },
+  ];
+  for (const [index, row] of rows.entries()) {
+    const { originalText, newText, boundingBox } = row;
+    await service.upsertOperation({ sessionId: "text-session", operation: {
+      ...operation("change_text"), operationId: `line-${index}`, summary: originalText,
+      payload: { originalText, newText, region: boundingBox, mask: { objectKey: "ignore" }, attachedInputs: ["ignore"] },
+    } });
+  }
+  const input = { sourceCardId: "parent", sourceVersionId: "version-1", tool: "change_text" };
+  const submit = (id: string, operationIds: string[]) => api.request("POST", "/api/image-editor/sessions/text-session/submit", {
+    headers: { "idempotency-key": id },
+    body: { ...input, operationIds },
+  });
+  assert.equal((await submit("unchanged", ["line-0"])).status, 409);
+  assert.equal(calls.length, 0);
+  assert.equal((await submit("batch", ["line-0", "line-1", "line-2", "line-3"])).status, 202);
+  await settle();
+
+  const [call] = calls;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(call.images?.map(({ bytes, role }) => [bytes, role]), [[bytes, "source"]]);
+  assert.equal(call.mask, undefined);
+  assert.equal(call.maskMimeType, undefined);
+  assert.match(call.prompt, /^严格保持输入图片中的商品主体外观/);
+  assert.match(call.prompt, /newText 为空时移除原文字，用周围背景自然填补/);
+  assert.ok(call.prompt.includes(JSON.stringify(rows.slice(1), null, 2)));
+  assert.match(call.prompt, /1\. 顶部左侧区域（横向约 10%–40%，纵向约 10%–20%）/);
+  assert.match(call.prompt, /2\. 中部居中区域（横向约 30%–40%，纵向约 43%–53%）/);
+  assert.match(call.prompt, /3\. 底部右侧区域（横向约 70%–90%，纵向约 70%–80%）：移除原文字，用周围背景自然填补。/);
+  assert.doesNotMatch(call.prompt, /保持原样|原始生图提示词/);
+  const [result] = await service.listAllTasks();
+  assert.deepEqual(result.snapshot?.operations.map(({ operationId, order }) => [operationId, order]), [
+    ["line-1", 1], ["line-2", 2], ["line-3", 3],
+  ]);
+  assert.deepEqual(result.snapshot?.attachedInputs, []);
+  assert.equal(result.snapshot?.maskApplied, false);
+});
+
 test("redraw materializes a same-size grayscale mask with persisted metadata", async () => {
   const repository = new MemoryImageEditorRepository(); const storage = new MemoryStorage(); const service = new ImageEditorService(repository, provider(), storage, async () => source);
   await service.upsertOperation({ sessionId: "session", operation: { ...operation("redraw"), payload: { prompt: "局部重绘", strokes: [{ points: [{ x: 0.1, y: 0.2 }, { x: 0.8, y: 0.9 }], width: 0.12 }], feather: 0.25 } } });

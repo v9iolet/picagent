@@ -396,13 +396,50 @@ const EDIT_PAYLOAD_FIELDS: Record<ImageEditOperationType, readonly string[]> = {
 };
 
 const IMAGE_EDIT_PROMPT_HEADER = "严格保持输入图片中的商品主体外观、结构比例、材质细节、光影色调、背景构图及未指定修改的文字与元素不变，仅执行以下局部修改：";
+const CHANGE_TEXT_INSTRUCTION = "仅编辑下列文字。按原文字和位置找到每一条，准确替换为 newText，保持原有排版、字体风格、颜色、透视与光影。newText 为空时移除原文字，用周围背景自然填补，延续纹理和光影。坐标相对整张图归一化，以左上角为原点。";
 const IMAGE_EDIT_INSTRUCTIONS = {
-  change_text: "将{{region}}的原文字“{{originalText}}”替换为“{{newText}}”，保持原有排版、字体风格、颜色与光影一致{{requirement}}。",
   add_text: "在{{region}}新增文字“{{text}}”{{requirement}}。",
   redraw: "仅重绘蒙版白色选区{{requirement}}，蒙版以外的商品与背景画面严格保持不变。",
   erase: "仅消除蒙版白色选区中的目标并自然补全周围背景{{requirement}}，蒙版以外画面严格保持不变。",
   outpaint: "{{direction}}扩展画面至比例 {{ratio}}{{dimensions}}，原图主体锚点保持{{anchor}}并自然延续背景纹理与光影{{requirement}}。",
 };
+
+function buildChangeTextPrompt(
+  operations: ReadonlyArray<EditOperation>,
+  template?: { body: string; userPromptTemplate: string } | null,
+): string {
+  const customInstruction = template?.userPromptTemplate;
+  const legacyTemplate = customInstruction?.match(/\{\{(?:region|originalText|newText|requirement)\}\}/) ? customInstruction : undefined;
+  const changes = operations.map(({ payload }) => {
+    const { x, y, width, height, rotation } = payload.region as NormalizedRect;
+    return {
+      originalText: String(payload.originalText),
+      newText: String(payload.newText),
+      boundingBox: {
+        x: Number(x), y: Number(y), width: Number(width), height: Number(height),
+        ...(typeof rotation === "number" && Number.isFinite(rotation) ? { rotation } : {}),
+      },
+    };
+  });
+  const positions = changes.map(({ originalText, newText, boundingBox }, index) => {
+    const region = describeNormalizedRegion(boundingBox);
+    if (newText === "") return `${index + 1}. ${region}：移除原文字，用周围背景自然填补。`;
+    const prompt = operations[index].payload.prompt;
+    const requirement = typeof prompt === "string" && prompt.trim() ? `（${prompt.trim()}）` : "";
+    const values = { region, originalText, newText, requirement };
+    const replacement = legacyTemplate
+      ? legacyTemplate.replace(/\{\{(\w+)\}\}/g, (_, key: keyof typeof values) => values[key] ?? "")
+      : `将原文字“${originalText}”替换为“${newText}”${requirement}。`;
+    return `${index + 1}. ${region}：${replacement}`;
+  });
+  return [
+    template?.body ?? IMAGE_EDIT_PROMPT_HEADER,
+    legacyTemplate ? CHANGE_TEXT_INSTRUCTION : customInstruction || CHANGE_TEXT_INSTRUCTION,
+    JSON.stringify(changes, null, 2),
+    "文字位置：",
+    ...positions,
+  ].join("\n");
+}
 
 export function buildImageEditPrompt(
   operations: ReadonlyArray<EditOperation>,
@@ -412,6 +449,7 @@ export function buildImageEditPrompt(
   if (operations.length === 1 && operations[0].type === "re_edit") {
     return String(operations[0].payload.prompt ?? sourcePrompt);
   }
+  if (operations[0]?.type === "change_text") return buildChangeTextPrompt(operations, template);
   const instructions = operations.map((operation, index) => {
     const prefix = operations.length > 1 ? `${index + 1}. ` : "";
     const req = typeof operation.payload.prompt === "string" ? operation.payload.prompt.trim() : "";
@@ -419,13 +457,6 @@ export function buildImageEditPrompt(
     const render = (instruction: string, values: Record<string, string>) => prefix
       + (template?.userPromptTemplate || instruction).replace(/\{\{(\w+)\}\}/g, (_, key: string) => values[key] ?? "");
     switch (operation.type) {
-      case "change_text":
-        return render(IMAGE_EDIT_INSTRUCTIONS.change_text, {
-          region: describeNormalizedRegion(operation.payload.region),
-          originalText: String(operation.payload.originalText ?? "").trim(),
-          newText: String(operation.payload.newText ?? "").trim(),
-          requirement,
-        });
       case "add_text":
         return render(IMAGE_EDIT_INSTRUCTIONS.add_text, {
           region: operation.payload.region ? describeNormalizedRegion(operation.payload.region) : "画面指定区域",
@@ -544,24 +575,29 @@ export class ImageEditorService {
     const source = await this.resolveSource(input.sourceVersionId); if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND");
     const provider = await this.requireProvider();
     const sourcePrompt = source.generationPrompt ?? "";
-    const operations = await Promise.all(draftOperations.map(async (operation, i) => {
+    const selectedOperations = draftOperations.map((operation, index) => {
       if (!Object.hasOwn(EDIT_PAYLOAD_FIELDS, operation.type) || !operation.payload || typeof operation.payload !== "object" || Array.isArray(operation.payload)) {
         throw new Error("INVALID_IMAGE_EDIT_OPERATION");
       }
       const payload = Object.fromEntries(EDIT_PAYLOAD_FIELDS[operation.type]
         .filter((field) => Object.hasOwn(operation.payload, field))
         .map((field) => [field, operation.payload[field]]));
-      if (operation.type === "change_text") {
-        const ocr = await this.repository.getOcrSnapshot(input.sessionId, input.sourceVersionId);
-        if (ocr) {
-          payload.ocrSnapshot = structuredClone(ocr);
-        }
-      }
-      return { ...operation, order: i + 1, sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId, parentVersionId: input.parentVersionId ?? input.sourceVersionId, payload };
-    }));
+      return { ...operation, order: index + 1, sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId, parentVersionId: input.parentVersionId ?? input.sourceVersionId, payload };
+    });
     const caps = await provider.capabilities();
-    this.assertCapabilities(operations, caps);
-    for (const operation of operations) this.validateOperation(operation);
+    this.assertCapabilities(selectedOperations, caps);
+    for (const operation of selectedOperations) this.validateOperation(operation);
+    const operations = tool === "change_text"
+      ? selectedOperations.filter(({ payload }) => payload.originalText !== payload.newText)
+      : selectedOperations;
+    if (!operations.length) throw new Error("EDIT_OPERATIONS_REQUIRED");
+    if (tool === "change_text") {
+      const ocr = await this.repository.getOcrSnapshot(input.sessionId, input.sourceVersionId);
+      operations.forEach((operation, index) => {
+        operation.order = index + 1;
+        if (ocr) operation.payload.ocrSnapshot = structuredClone(ocr);
+      });
+    }
     const template = await this.resolveEditPrompt(operations[0].type);
     const materialized = await Promise.all(operations.map(async (operation) => {
       const payload = { ...operation.payload };
@@ -590,7 +626,8 @@ export class ImageEditorService {
       }
       return { ...operation, payload };
     }));
-    const summary = input.summary ?? draftOperations.map((operation) => operation.summary).join("；");
+    const summary = (selectedOperations.length === operations.length ? input.summary : undefined)
+      ?? operations.map((operation) => operation.summary).join("；");
     const prompt = buildImageEditPrompt(materialized, sourcePrompt, template);
     const snapshot: EditSnapshot = {
       id: randomUUID(), sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId,
@@ -683,7 +720,7 @@ export class ImageEditorService {
     const region = operation.payload.region;
     if (region && typeof region === "object") this.validateRect(region as Record<string, unknown>);
     const prompt = typeof operation.payload.prompt === "string" ? operation.payload.prompt.trim() : "";
-    if (["re_edit", "add_text", "change_text", "redraw", "erase"].includes(operation.type) && !prompt) throw new Error(`${operation.type.toUpperCase()}_PROMPT_REQUIRED`);
+    if (["re_edit", "add_text", "redraw", "erase"].includes(operation.type) && !prompt) throw new Error(`${operation.type.toUpperCase()}_PROMPT_REQUIRED`);
     if (["redraw", "erase"].includes(operation.type)) {
       if (!Array.isArray(operation.payload.strokes) || !operation.payload.strokes.length) throw new Error("MASK_STROKES_REQUIRED");
       for (const stroke of operation.payload.strokes) {
@@ -697,9 +734,10 @@ export class ImageEditorService {
       const mask = operation.payload.mask; if (mask && typeof mask === "object") { const value = mask as Record<string, unknown>; if (value.mimeType !== "image/png" || !Number.isInteger(value.width) || !Number.isInteger(value.height)) throw new Error("MASK_METADATA_INVALID"); }
     }
     if (operation.type === "change_text") {
-      const originalText = typeof operation.payload.originalText === "string" ? operation.payload.originalText.trim() : "";
-      const newText = typeof operation.payload.newText === "string" ? operation.payload.newText.trim() : "";
-      if (!originalText || !newText || !operation.payload.region) throw new Error("CHANGE_TEXT_FIELDS_REQUIRED");
+      const { originalText, newText } = operation.payload;
+      if (typeof originalText !== "string" || !originalText.trim() || typeof newText !== "string" || !region || typeof region !== "object") {
+        throw new Error("CHANGE_TEXT_FIELDS_REQUIRED");
+      }
     }
   }
   private async appendAttempt(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }) {

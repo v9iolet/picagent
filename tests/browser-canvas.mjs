@@ -130,6 +130,19 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
 const cardDescription = "用柔和侧光照亮商品，保留右侧留白。";
 const longStyle = "保留商品轮廓与材质，以柔和侧光展示真实质感。".repeat(110);
 
+async function addManualTextEdit(page, dialog, originalText, newText) {
+  await dialog.getByRole("button", { name: "框选补充" }).click();
+  const canvas = dialog.locator(".konvajs-content");
+  await canvas.waitFor();
+  const { x, y, width, height } = await canvas.boundingBox();
+  await page.mouse.move(x + width * 0.2, y + height * 0.2);
+  await page.mouse.down();
+  await page.mouse.move(x + width * 0.5, y + height * 0.35, { steps: 5 });
+  await page.mouse.up();
+  await dialog.getByLabel("原文字", { exact: true }).fill(originalText);
+  await dialog.getByLabel(`新文字：${originalText}`, { exact: true }).fill(newText);
+}
+
 async function seedGeneratedCanvas(api, taskCount) {
   const created = await api.request("POST", "/api/suites", { body: { name: "桌面交付测试", origin: "canvas" } });
   assert.equal(created.status, 201);
@@ -446,7 +459,7 @@ test("默认生图模型：套图配置、新建任务与检查器可选七种�
   await card.getByText("9:16", { exact: true }).waitFor();
 });
 
-test("创作画布：未配 OCR 时可手工改文字，切换工具保留草稿，提交只使用当前工具", async (t) => {
+test("创作画布：未配 OCR 时可手工编辑文字，切换工具保留草稿，提交只使用当前工具", async (t) => {
   const { api, url, page } = await offlineCanvas(t);
   const { suiteId } = await seedGeneratedCanvas(api, 2);
   await page.goto(url + `create/canvas/${suiteId}`);
@@ -462,23 +475,20 @@ test("创作画布：未配 OCR 时可手工改文字，切换工具保留草稿
   await dialog.getByRole("button", { name: "添加到对话" }).click();
   await dialog.getByRole("button", { name: "更新对话操作" }).waitFor();
 
-  const changeTextTool = dialog.locator(".wb-editor-tools button", { hasText: "改文字" });
+  const changeTextTool = dialog.locator(".wb-editor-tools button", { hasText: "编辑文字" });
   await changeTextTool.click();
   await dialog.getByRole("status").filter({ hasText: "切换前的草稿会保留" }).waitFor();
-  await dialog.getByText("已加入对话 0 项", { exact: true }).waitFor();
+  await dialog.getByText("已修改 0 条", { exact: true }).waitFor();
 
   await dialog.getByText(/当前未配置多模态识字模型/).waitFor();
   assert.doesNotMatch(await dialog.innerText(), /fetch failed/);
 
-  await dialog.getByLabel("原文字").fill("旧卖点标题");
-  await dialog.getByLabel("新文字").fill("65W 便携快充");
-  await dialog.getByRole("button", { name: "添加到对话" }).click();
-  await dialog.getByRole("button", { name: "更新对话操作" }).waitFor();
+  await addManualTextEdit(page, dialog, "旧卖点标题", "65W 便携快充");
   const reEditTool = dialog.locator(".wb-editor-tools button", { hasText: "重新编辑" });
   await reEditTool.click();
   assert.equal(await dialog.getByLabel("版本详细提示词").inputValue(), "保留在重新编辑里的草稿");
   await changeTextTool.click();
-  assert.equal(await dialog.getByLabel("新文字").inputValue(), "65W 便携快充");
+  assert.equal(await dialog.getByLabel("新文字：旧卖点标题").inputValue(), "65W 便携快充");
   const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));
   await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
   const response = await submitted;
@@ -488,11 +498,13 @@ test("创作画布：未配 OCR 时可手工改文字，切换工具保留草稿
   assert.equal(selection.operationIds.length, 1);
   const draft = await api.request("GET", `/api/image-editor/sessions/${selection.sourceCardId}`);
   assert.deepEqual(draft.body.data.operations.map((item) => item.type), ["re_edit"]);
-  assert.deepEqual((await response.json()).data.snapshot.operations[0].payload, {
-    originalText: "旧卖点标题", newText: "65W 便携快充",
-    region: { x: 0.36, y: 0.42, width: 0.28, height: 0.1, rotation: 0 },
-    prompt: "保持原有排版、字体感觉、颜色、透视和光影，只替换文字内容",
-  });
+  const { originalText, newText, region } = (await response.json()).data.snapshot.operations[0].payload;
+  assert.equal(originalText, "旧卖点标题");
+  assert.equal(newText, "65W 便携快充");
+  assert.equal(region.rotation, 0);
+  for (const [key, value] of Object.entries({ x: 0.2, y: 0.2, width: 0.3, height: 0.15 })) {
+    assert.ok(Math.abs(region[key] - value) < 0.02, `Unexpected manual region ${key}: ${region[key]}`);
+  }
   await dialog.waitFor({ state: "hidden" });
 
   await page.locator(".wb-edit-child-card").first().waitFor();
@@ -535,9 +547,8 @@ test("图片资源库联动：画布单卡归档后 /assets 隐藏且预览仍 2
   await page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit").first().click();
   const editorDialog = page.getByRole("dialog", { name: "图片编辑器" });
   await editorDialog.waitFor();
-  await editorDialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
-  await editorDialog.getByLabel("原文字").fill("旧标题");
-  await editorDialog.getByLabel("新文字").fill("新品主图");
+  await editorDialog.locator(".wb-editor-tools button", { hasText: "编辑文字" }).click();
+  await addManualTextEdit(page, editorDialog, "旧标题", "新品主图");
   await editorDialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
   await editorDialog.waitFor({ state: "hidden" });
   await page.locator(".wb-edit-child-card").first().locator(".wb-card-state").filter({ hasText: /^已生成$/ }).waitFor();
