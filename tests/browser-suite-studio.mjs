@@ -48,7 +48,11 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
   }));
   const storage = new MemoryStorage(),
     editorRepository = new MemoryImageEditorRepository();
-  const source = { bytes: sample, mimeType: "image/jpeg", width: 64, height: 64 };
+  const productInputs = [{ objectKey: "test/suite-product.jpg", role: "product" }];
+  await storage.put({ key: productInputs[0].objectKey, bytes: sample, contentType: "image/jpeg" });
+  const source = { bytes: sample, mimeType: "image/jpeg", width: 64, height: 64, productInputs };
+  let ocrAttempts = 0;
+  const recognizedTexts = ["折叠插脚", "随身携带", "限时优惠", "商品型号"];
   const editor = new ImageEditorService(
     editorRepository,
     {
@@ -63,17 +67,18 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
     {
       name: "offline OCR",
       version: "1",
-      recognize: async () => ({
-        blocks: [
-          {
-            id: "line1",
-            text: "折叠插脚",
+      recognize: async () => {
+        if (++ocrAttempts === 1) throw new Error("OCR_TIMEOUT");
+        return {
+          blocks: recognizedTexts.map((text, index) => ({
+            id: `line-${index + 1}`,
+            text,
             confidence: 1,
-            bounds: { x: 0.1, y: 0.1, width: 0.5, height: 0.2 },
+            bounds: { x: 0.1, y: 0.1 + index * 0.2, width: 0.5, height: 0.12 },
             rotation: 0,
-          },
-        ],
-      }),
+          })),
+        };
+      },
     },
   );
   const app = createSuiteStudioApp({
@@ -98,6 +103,10 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
       provider: "fake",
       model: "offline",
       isFake: true,
+      async translateTexts({ items }) {
+        const translations = ["Foldable plug", "Portable", "Limited offer", "Model number"];
+        return items.map(({ id, text }, index) => ({ id, originalText: text, translatedText: translations[index] }));
+      },
       async generatePlan(input) {
         const id = input.inputImageIds[0],
           groups = JSON.parse(input.dynamicInput.category_groups);
@@ -380,20 +389,48 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await dialog.waitFor();
   assert.equal(new URL(page.url()).pathname, `/create/suite/${suiteId}`);
   assert.equal(await dialog.isVisible(), true);
-  await dialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
-  await dialog.getByRole("button", { name: /折叠插脚/ }).waitFor();
-  await dialog.getByLabel("新文字").fill("折叠设计");
-  const opReq = page.waitForResponse((res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/operations"));
+  await dialog.locator(".wb-editor-tools button", { hasText: "编辑文字" }).click();
+  await dialog.getByRole("status").filter({ hasText: "文字识别请求超时" }).waitFor();
+  await dialog.getByRole("button", { name: "重新识别" }).click();
+  const firstText = dialog.getByRole("button", { name: "折叠插脚", exact: true });
+  await firstText.waitFor();
+  await dialog.getByRole("button", { name: "放大画布" }).click();
+  await dialog.getByRole("button", { name: "放大画布" }).click();
+  const lastText = dialog.getByRole("button", { name: "商品型号", exact: true });
+  await lastText.click();
+  assert.equal(await lastText.getAttribute("aria-pressed"), "true");
+  assert.ok(await dialog.locator(".wb-editor-canvas-scroll").evaluate((element) => element.scrollTop > 0));
+  await firstText.click();
+  assert.equal(await firstText.getAttribute("aria-pressed"), "true");
+  const inputs = dialog.locator(".wb-text-edit-row textarea");
+  assert.deepEqual(await inputs.evaluateAll((fields) => fields.map((field) => field.value)), ["折叠插脚", "随身携带", "限时优惠", "商品型号"]);
+  const generate = dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" });
+  assert.equal(await generate.isDisabled(), true);
+  await dialog.getByLabel("翻译目标语言").selectOption("英文");
+  await dialog.getByRole("button", { name: "一键翻译", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".wb-text-edit-row textarea")?.value === "Foldable plug");
+  assert.deepEqual(await inputs.evaluateAll((fields) => fields.map((field) => field.value)), ["Foldable plug", "Portable", "Limited offer", "Model number"]);
+  await dialog.getByLabel("新文字：折叠插脚").fill("折叠设计");
+  await dialog.getByLabel("新文字：随身携带").fill("轻巧随行");
+  await dialog.locator(".wb-text-edit-row").filter({ hasText: "限时优惠" }).getByRole("button", { name: "删除", exact: true }).click();
+  const deletedText = dialog.getByLabel("新文字：限时优惠");
+  assert.equal(await deletedText.inputValue(), "");
+  await deletedText.fill(" 　");
+  await dialog.locator(".wb-text-edit-row").filter({ hasText: "商品型号" }).getByRole("button", { name: "重置", exact: true }).click();
+  await dialog.getByText("已修改 3 条", { exact: true }).waitFor();
+  assert.equal(fixture.calls.filter((x) => x.path.endsWith("/operations")).length, 0);
   const submitReq = page.waitForResponse((res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/submit"));
-  await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
-  await Promise.all([opReq, submitReq]);
+  await generate.click();
+  const submitted = await submitReq;
+  assert.equal(submitted.status(), 202);
   await dialog.waitFor({ state: "hidden" });
   assert.equal(new URL(page.url()).pathname, `/create/suite/${suiteId}`);
-  assert.equal(
-    fixture.calls.find((x) => x.path.endsWith("/operations")).body.operation.payload.newText,
-    "折叠设计",
-  );
-  assert.ok(fixture.calls.some((x) => x.path.endsWith("/submit")));
+  const edits = fixture.calls.filter((x) => x.path.endsWith("/operations")).map((x) => x.body.operation);
+  assert.deepEqual(edits.map(({ payload }) => [payload.originalText, payload.newText]), [
+    ["折叠插脚", "折叠设计"], ["随身携带", "轻巧随行"], ["限时优惠", ""],
+  ]);
+  assert.equal(edits[2].summary, "删除文字：限时优惠");
+  assert.deepEqual(submitted.request().postDataJSON().operationIds, edits.map((item) => item.operationId));
   await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
   await first.getByRole("combobox").selectOption("4K");
   const regenReq = page.waitForResponse(
@@ -411,6 +448,18 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
     ).path,
     /\/generation$/,
   );
+  const second = cards.nth(1);
+  await second.getByRole("button", { name: "编辑图片", exact: true }).click();
+  await dialog.getByRole("button", { name: /^商品还原/ }).click();
+  await dialog.getByRole("radio", { name: "使用全部商品原图", checked: true }).waitFor();
+  await dialog.locator(".wb-restore-grid img").first().evaluate((image) => image.decode());
+  const restoreRequest = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await dialog.getByRole("button", { name: "还原商品", exact: true }).click();
+  const restored = await restoreRequest;
+  assert.equal(restored.status(), 202);
+  assert.deepEqual((await restored.json()).data.snapshot.attachedInputs, [{ objectKey: "test/suite-product.jpg", role: "product" }]);
+  await dialog.waitFor({ state: "hidden" });
+  await second.locator('img[src^="/api/image-editor/tasks/"]').waitFor();
   await platform.selectOption({ label: "淘宝" });
   assert.equal(await refine.count(), 0);
   await platformTip.click();

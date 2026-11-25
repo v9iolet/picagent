@@ -92,8 +92,11 @@ export type ApiLibraryResourceType = "prompt_template" | "input_image" | "base_i
 export interface ApiLibraryResource { id: string; resourceType: ApiLibraryResourceType; title: string; summary: string; mimeType: string | null; previewUrl: string | null; suiteId: string | null; taskId: string | null; imageVersionId: string | null; baseVersionId: string | null; templateVersionId: string | null; resourceVersionId: string; stage: ApiPromptTemplate["stage"] | null; source: Record<string, unknown>; status?: "draft" | "published" | "archived" | "retired"; usedBy?: string[]; promptSnapshot?: Record<string, unknown> | null; createdAt: string; updatedAt: string }
 export interface ApiLibraryReference { id: string; suiteId: string; resourceId: string; resourceType: ApiLibraryResourceType; targetType: "plan" | "task"; targetId: string; resourceVersionId: string; snapshot: Record<string, unknown>; createdAt: string; createdBy: string | null; archivedAt: string | null }
 
-export type ApiImageEditTool = "re_edit" | "add_text" | "change_text" | "redraw" | "erase" | "outpaint";
+export type ApiImageEditTool = "re_edit" | "add_text" | "change_text" | "redraw" | "erase" | "outpaint" | "restore_product";
 export type ApiImageEditSelection = { sourceVersionId: string; tool: ApiImageEditTool; operationIds: string[] };
+export type ApiImageEditProductInput = { objectKey: string; thumbnailUrl: string };
+const restoreInputsPath = (sessionId: string, versionId: string) =>
+  `/api/image-editor/sessions/${encodeURIComponent(sessionId)}/versions/${encodeURIComponent(versionId)}/restore-inputs`;
 
 type CryptoSource = {
   randomUUID?: () => string;
@@ -255,6 +258,7 @@ export const suiteApi = {
   updateTask(taskId: string, body: Partial<Pick<ApiSuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status">>) { return request<ApiSuiteTask>(`/api/suite-tasks/${encodeURIComponent(taskId)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
   generateBatch(suiteId: string, taskIds?: string[]) { return request<{ batchId: string; status: string; requestedCount?: number }>(`/api/suites/${encodeURIComponent(suiteId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(taskIds ? { taskIds } : {}) }); },
   generateTask(taskId: string, promptDraft?: string) { return request<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(promptDraft === undefined ? {} : { promptDraft }) }); },
+  regenerateTaskFromEdit(taskId: string, editSourceVersionId: string) { return request<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ editSourceVersionId }) }); },
   retryTaskAttempt(attemptId: string) {
     return request<{ batchId: string }>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`, { method: "POST", headers: { "idempotency-key": createIdempotencyKey() } });
   },
@@ -263,7 +267,15 @@ export const suiteApi = {
   selectTaskVersion(taskId: string, versionId: string, selection: "current" | "final") { return request<ApiTaskVersion>(`/api/suite-tasks/${encodeURIComponent(taskId)}/versions/${encodeURIComponent(versionId)}/select`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ selection }) }); },
   retryAttempt(attemptId: string) { return request<{ batchId: string; status: string }>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({}) }); },
   imageEditorCapabilities() { return request<{ provider: { name: string; version: string; capabilitiesVersion: string; channel?: ModelChannelSnapshot } | null; capabilities: Record<string, boolean> }>("/api/image-editor/capabilities"); },
-  getImageEditDraft(sessionId: string) { return request<{ sessionId: string; operations: Array<Record<string, unknown>>; summary: string }>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}`); },
+  getImageEditDraft(sessionId: string, sourceVersionId: string) { return request<{ sessionId: string; operations: Array<Record<string, unknown>>; summary: string; productInputs: ApiImageEditProductInput[] }>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}?sourceVersionId=${encodeURIComponent(sourceVersionId)}`); },
+  uploadImageEditRestoreInput(sessionId: string, sourceVersionId: string, file: File) {
+    const body = new FormData();
+    body.append("file", file);
+    return request<ApiImageEditProductInput>(restoreInputsPath(sessionId, sourceVersionId), { method: "POST", body });
+  },
+  imageEditRestoreInputThumbnail(sessionId: string, sourceVersionId: string, objectKey: string) {
+    return `${restoreInputsPath(sessionId, sourceVersionId)}/${encodeURIComponent(objectKey)}/thumbnail`;
+  },
   upsertImageEditOperation(sessionId: string, operation: Record<string, unknown>, summary?: string) { return request<Record<string, unknown>>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/operations`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ operation, summary }) }); },
   removeImageEditOperation(sessionId: string, operationId: string) { return request<Record<string, unknown>>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(operationId)}`, { method: "DELETE" }); },
   submitImageEdit(sessionId: string, body: ApiImageEditSelection & { sourceCardId: string; parentVersionId?: string; summary?: string }) { return request<Record<string, unknown>>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/submit`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },

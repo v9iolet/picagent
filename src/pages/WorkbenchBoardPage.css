@@ -1,3 +1,57 @@
+.wb-restore-inputs {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.wb-restore-inputs legend {
+  padding: 0;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.wb-restore-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.wb-restore-inputs .wb-restore-choice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.wb-restore-choice input[type="radio"] {
+  width: auto;
+  margin: 0;
+}
+
+.wb-restore-grid img,
+.wb-restore-uploaded img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+  background: #f3f4f6;
+  border-radius: 6px;
+}
+
+.wb-restore-uploaded {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.wb-restore-uploaded img {
+  width: 60px;
+}
+
 .pa-wb-main {
   flex: 1;
   min-height: 0;
@@ -404,31 +458,22 @@
   color: var(--pa-accent);
 }
 
-.wb-translate-box {
-  padding: 10px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in oklch, var(--pa-accent) 28%, var(--pa-border));
-  background: #f8fbff;
-  display: grid;
-  gap: 8px;
+.wb-text-edit-canvas-scroll {
+  align-items: safe center;
+  justify-content: safe center;
 }
 
-.wb-translate-head {
+.wb-text-edit-status {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
-}
-
-.wb-translate-head strong {
+  color: var(--pa-muted);
   font-size: 12px;
-  color: var(--pa-ink);
 }
 
-.wb-translate-head span {
-  font-size: 10px;
-  color: var(--pa-accent);
-  font-weight: 600;
+.wb-text-edit-status:empty {
+  display: none;
 }
 
 .wb-translate-controls {
@@ -458,47 +503,63 @@
   cursor: not-allowed;
 }
 
-.wb-translate-rows {
+.wb-text-edit-list {
+  display: grid;
+  gap: 8px;
+}
+
+.wb-text-edit-row {
   display: grid;
   gap: 6px;
-  max-height: 180px;
-  overflow-y: auto;
-}
-
-.wb-translate-row {
-  display: grid;
-  gap: 3px;
-}
-
-.wb-translate-row small {
-  font-size: 10px;
-  color: var(--pa-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.wb-translate-row input {
-  height: 26px;
-  padding: 0 7px;
-  border-radius: 6px;
+  min-width: 0;
+  padding: 8px;
   border: 1px solid var(--pa-border);
+  border-radius: 8px;
   background: #fff;
-  font-size: 11px;
 }
 
-.wb-translate-apply {
-  height: 28px;
-  border-radius: 7px;
-  border: 1px solid var(--pa-accent);
-  background: #fff;
-  color: var(--pa-accent);
-  font-size: 11px;
+.wb-text-edit-row.is-active {
+  border-color: var(--pa-accent);
+  background: var(--pa-accent-soft);
+}
+
+.wb-text-edit-locate {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--pa-ink);
+  font-size: 12px;
   font-weight: 650;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
-.wb-translate-apply:disabled {
+.wb-text-edit-row label > textarea {
+  min-height: 42px;
+  font-size: 12px;
+}
+
+.wb-text-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.wb-text-edit-actions button,
+.wb-text-edit-status button {
+  min-height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--pa-border);
+  padding: 0 6px;
+  background: #fff;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.wb-text-edit-actions button:disabled,
+.wb-text-edit-status button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }

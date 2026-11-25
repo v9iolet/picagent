@@ -3,8 +3,12 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import sharp from "sharp";
-import { buildImageEditPrompt, ImageEditorService, MemoryImageEditorRepository, type EditOperation, type ImageEditProvider, type ImageSource } from "../server/image-editor.js";
+import { buildImageEditPrompt, imageEditProductInputs, ImageEditorService, MemoryImageEditorRepository, type EditOperation, type ImageEditProvider, type ImageSource } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
+import { createSuiteStudioApp } from "../server/app.js";
+import { dispatchInputImageUpload } from "../server/multipart.js";
+import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
+import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { DashScopeOcrProvider } from "../server/providers/dashscope-ocr-provider.js";
 import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
 import type { ImageEditRequest } from "../server/types.js";
@@ -125,6 +129,18 @@ test("current and final selections are independent", async () => {
   await service.selectVersion(submitted.childTask.id, first.id, "final"); const task = await repository.getChildTask(submitted.childTask.id); assert.equal(task?.currentVersionId, first.id); assert.equal(task?.finalVersionId, first.id);
 });
 
+test("OCR capability reports whether the configured resolver has a provider without running recognition", async () => {
+  let configured = false;
+  let recognitions = 0;
+  const ocr = { name: "fake-ocr", version: "1", recognize: async () => { recognitions++; return { blocks: [] }; } };
+  const service = new ImageEditorService(new MemoryImageEditorRepository(), provider(), new MemoryStorage(), async () => source,
+    async () => configured ? ocr : null);
+  assert.equal((await service.capabilities()).capabilities.ocr, false);
+  configured = true;
+  assert.equal((await service.capabilities()).capabilities.ocr, true);
+  assert.equal(recognitions, 0);
+});
+
 test("change_text allows manual submit without OCR, freezes OCR snapshot when present, and validates required fields", async () => {
   const repository = new MemoryImageEditorRepository();
   const service = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source, { name: "fake-ocr", version: "1", recognize: async () => ({ blocks: [{ id: "text-1", text: "旧文案", confidence: 0.99, bounds: { x: 0.1, y: 0.1, width: 0.3, height: 0.1 }, rotation: 0 }] }) });
@@ -141,6 +157,99 @@ test("change_text allows manual submit without OCR, freezes OCR snapshot when pr
   const submitted = await service.submit({ sessionId: "ocr-session", idempotencyKey: "with-ocr", sourceCardId: "parent", sourceVersionId: "version-1" });
   const frozen = submitted.snapshot.operations[0].payload.ocrSnapshot as { sourceVersionId: string; status: string };
   assert.equal(frozen.sourceVersionId, "version-1"); assert.equal(frozen.status, "succeeded");
+});
+
+test("change_text batches only changed rows and sends one source image without a mask", async () => {
+  const repository = new MemoryImageEditorRepository();
+  const storage = new MemoryStorage();
+  const bytes = await sharp({ create: { width: 100, height: 100, channels: 3, background: "#ffffff" } }).png().toBuffer();
+  const editSource: ImageSource = {
+    ...source, bytes, generationPrompt: "原始生图提示词",
+    productInputs: [{ objectKey: "product/original.jpg", role: "product" }],
+  };
+  const calls: ImageEditRequest[] = [];
+  const service = new ImageEditorService(repository, provider({
+    edit: (command, image) => requestImageEditorEdit({
+      edit: async (request) => { calls.push(request); return { bytes, mimeType: image.mimeType }; },
+    }, storage, "gpt-image-2", defaultImageOptions("gpt-image-2"), command, image),
+  }), storage, async () => editSource);
+  const api = createImageEditorApi(service);
+  const rows = [
+    { originalText: "保持原样", newText: "保持原样", boundingBox: { x: 0.41, y: 0.1, width: 0.2, height: 0.1 } },
+    { originalText: "标题", newText: '新“标题”\n第二行', boundingBox: { x: 0.1, y: 0.1, width: 0.3, height: 0.1, rotation: 0 } },
+    { originalText: "商品卖点", newText: "快充", boundingBox: { x: 0.3, y: 0.43, width: 0.1, height: 0.1, rotation: 5 } },
+    { originalText: "过期标签", newText: "", boundingBox: { x: 0.7, y: 0.7, width: 0.2, height: 0.1 } },
+  ];
+  for (const [index, row] of rows.entries()) {
+    const { originalText, newText, boundingBox } = row;
+    await service.upsertOperation({ sessionId: "text-session", operation: {
+      ...operation("change_text"), operationId: `line-${index}`, summary: originalText,
+      payload: { originalText, newText: newText === "" ? " \t\n　" : newText, region: boundingBox, mask: { objectKey: "ignore" }, attachedInputs: ["ignore"] },
+    } });
+  }
+  const input = { sourceCardId: "parent", sourceVersionId: "version-1", tool: "change_text" };
+  const submit = (id: string, operationIds: string[]) => api.request("POST", "/api/image-editor/sessions/text-session/submit", {
+    headers: { "idempotency-key": id },
+    body: { ...input, operationIds },
+  });
+  assert.equal((await submit("unchanged", ["line-0"])).status, 409);
+  assert.equal(calls.length, 0);
+  assert.equal((await submit("batch", ["line-0", "line-1", "line-2", "line-3"])).status, 202);
+  await settle();
+
+  const [call] = calls;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(call.images?.map(({ bytes, role }) => [bytes, role]), [[bytes, "source"]]);
+  assert.equal(call.mask, undefined);
+  assert.equal(call.maskMimeType, undefined);
+  assert.match(call.prompt, /^严格保持输入图片中的商品主体外观/);
+  assert.match(call.prompt, /newText 为空时移除原文字，用周围背景自然填补/);
+  assert.ok(call.prompt.includes(JSON.stringify(rows.slice(1), null, 2)));
+  assert.match(call.prompt, /1\. 顶部左侧区域（横向约 10%–40%，纵向约 10%–20%）/);
+  assert.match(call.prompt, /2\. 中部居中区域（横向约 30%–40%，纵向约 43%–53%）/);
+  assert.match(call.prompt, /3\. 底部右侧区域（横向约 70%–90%，纵向约 70%–80%）：移除原文字，用周围背景自然填补。/);
+  assert.doesNotMatch(call.prompt, /保持原样|原始生图提示词|替换为“\s*”/);
+  const [result] = await service.listAllTasks();
+  assert.deepEqual(result.snapshot?.operations.map(({ operationId, order }) => [operationId, order]), [
+    ["line-1", 1], ["line-2", 2], ["line-3", 3],
+  ]);
+  assert.deepEqual(result.snapshot?.attachedInputs, []);
+  assert.equal(result.snapshot?.maskApplied, false);
+  assert.equal(result.snapshot?.operations[2].payload.newText, "");
+});
+
+test("change_text accepts 50 changes and 500-character fields and reports which limit was exceeded", async () => {
+  const service = new ImageEditorService(new MemoryImageEditorRepository(), provider(), new MemoryStorage(), async () => source);
+  const api = createImageEditorApi(service);
+  const upsert = (operationId: string, originalText: string, newText: string) => service.upsertOperation({
+    sessionId: "limits",
+    operation: { ...operation("change_text"), operationId, payload: { originalText, newText, region: { x: 0.1, y: 0.1, width: 0.3, height: 0.1 } } },
+  });
+  const submit = (id: string, operationIds: string[]) => api.request("POST", "/api/image-editor/sessions/limits/submit", {
+    headers: { "idempotency-key": id },
+    body: { sourceCardId: "parent", sourceVersionId: "version-1", tool: "change_text", operationIds },
+  });
+  const expectError = async (id: string, operationIds: string[], code: string) => {
+    const result = await submit(id, operationIds);
+    assert.equal(result.status, 409);
+    assert.equal((result.body as { error: { code: string } }).error.code, code);
+  };
+  const original = "原".repeat(500);
+  const replacement = "新".repeat(500);
+  await upsert("oversized-original", original + "字", replacement);
+  await upsert("oversized-replacement", original, replacement + "字");
+  await expectError("original-limit", ["oversized-original"], "CHANGE_TEXT_ORIGINAL_TEXT_TOO_LONG");
+  await expectError("replacement-limit", ["oversized-replacement"], "CHANGE_TEXT_NEW_TEXT_TOO_LONG");
+
+  const changedIds = Array.from({ length: 50 }, (_, index) => `line-${index}`);
+  for (const id of changedIds) await upsert(id, original, replacement);
+  await upsert("one-too-many", "另一个原文", "另一个新文");
+  await upsert("unchanged", "同一行", "同一行");
+  await expectError("count-limit", [...changedIds, "one-too-many"], "CHANGE_TEXT_TOO_MANY_OPERATIONS");
+  assert.equal((await service.listAllTasks()).length, 0);
+  assert.equal((await submit("at-limits", [...changedIds, "unchanged"])).status, 202);
+  const [result] = await service.listAllTasks();
+  assert.equal(result.snapshot?.operations.length, 50);
 });
 
 test("redraw materializes a same-size grayscale mask with persisted metadata", async () => {
@@ -334,4 +443,188 @@ test("mask eraser strokes subtract from previously painted mask pixels", async (
   const pixels = await sharp(object.bytes).removeAlpha().grayscale().raw().toBuffer();
   assert.ok(pixels[50 * 100 + 30] > 200, "painted area remains selected");
   assert.ok(pixels[50 * 100 + 50] < 20, "eraser removes the selected center area");
+});
+
+test("editing attaches the version's product inputs in order only for the applicable tools", async () => {
+  const storage = new MemoryStorage();
+  const repository = new MemoryImageEditorRepository();
+  const bytes = await sharp({ create: { width: 20, height: 20, channels: 3, background: "white" } }).png().toBuffer();
+  const productInputs = imageEditProductInputs([
+    { objectKey: "first", role: "product_primary" },
+    { objectKey: "style", role: "replica_reference" },
+    { objectKey: "second", role: "product_detail" },
+    { objectKey: "second", role: "product" },
+  ]);
+  await storage.put({ key: "first", bytes: Buffer.from("first"), contentType: "image/png" });
+  await storage.put({ key: "second", bytes: Buffer.from("second"), contentType: "image/png" });
+  assert.deepEqual(productInputs, [{ objectKey: "first", role: "product" }, { objectKey: "second", role: "product" }]);
+  const editorSource = { ...source, bytes, productInputs };
+  const calls: ImageEditRequest[] = [];
+  const fakeImageProvider = {
+    async edit(request: ImageEditRequest) {
+      calls.push(request);
+      return { bytes, mimeType: "image/png" };
+    },
+  };
+  const service = new ImageEditorService(repository, provider({
+    edit: (command) => requestImageEditorEdit(fakeImageProvider, storage, "gpt-image-2", defaultImageOptions("gpt-image-2"), command, editorSource),
+  }), storage, async () => editorSource);
+  const region = { x: 0.1, y: 0.1, width: 0.5, height: 0.2 };
+  const operations: Array<{ op: EditOperation; attaches: boolean }> = [
+    { op: operation("re_edit"), attaches: true },
+    { op: operation("redraw"), attaches: true },
+    { op: { ...operation("outpaint"), payload: { direction: "all", targetRatio: "3:4" } }, attaches: true },
+    { op: { ...operation("add_text"), payload: { text: "标题", prompt: "使用黑体" } }, attaches: false },
+    { op: { ...operation("change_text"), payload: { originalText: "旧文字", newText: "新文字", region, prompt: "保留字体" } }, attaches: false },
+    { op: { ...operation("redraw"), type: "erase" }, attaches: false },
+  ];
+  for (const [i, { op, attaches }] of operations.entries()) {
+    await service.upsertOperation({ sessionId: "parent", operation: op });
+    const result = await service.submit({ sessionId: "parent", idempotencyKey: op.type, sourceCardId: "parent", sourceVersionId: "version-1", tool: op.type });
+    assert.deepEqual(result.snapshot.attachedInputs, attaches ? productInputs : []);
+    for (let check = 0; check < 30 && calls.length <= i; check += 1) await settle();
+    const call = calls[i];
+    assert.ok(call);
+    assert.deepEqual(call.images?.map((image) => [image.role, image.bytes]), attaches
+      ? [["source", bytes], ["product", Buffer.from("first")], ["product", Buffer.from("second")]]
+      : [["source", bytes]]);
+    if (attaches) assert.match(call.prompt, /^第 1 张为待编辑图，其余为商品外观依据，不得复制其背景与文字/);
+    else assert.doesNotMatch(call.prompt, /商品外观依据/);
+  }
+});
+
+test("product restoration defaults to all originals, accepts one candidate or a session upload, and freezes the choice", async () => {
+  const repository = new MemoryImageEditorRepository();
+  const storage = new MemoryStorage();
+  const png = await sharp({ create: { width: 200, height: 200, channels: 3, background: "red" } }).png().toBuffer();
+  const jpeg = await sharp(png).jpeg().toBuffer();
+  const webp = await sharp(png).webp().toBuffer();
+  const productInputs = ["batch/product-1", "batch/product-2"].map((objectKey) => ({ objectKey, role: "product" }));
+  await storage.put({ key: productInputs[0].objectKey, bytes: jpeg, contentType: "image/jpeg" });
+  await storage.put({ key: productInputs[1].objectKey, bytes: webp, contentType: "image/webp" });
+  const calls: ImageEditRequest[] = [];
+  const uploader = (sessionId: string, versionId: string) => `/api/image-editor/sessions/${sessionId}/versions/${versionId}/restore-inputs`;
+  const service = new ImageEditorService(repository, provider({
+    edit: (command, image) => requestImageEditorEdit({
+      async edit(request) {
+        calls.push(request);
+        return { bytes: png, mimeType: "image/png" };
+      },
+    }, storage, "gpt-image-2", defaultImageOptions("gpt-image-2"), command, image),
+  }), storage, async (id) => ({ ...source, bytes: png, productInputs: id === "version-1" ? productInputs : [] }), undefined,
+  async (session, version) => session === "parent" && ["version-1", "canvas-version"].includes(version));
+  const api = createImageEditorApi(service);
+  const app = createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage, imageEditorApi: api });
+  const session = "/api/image-editor/sessions/parent";
+  const draft = await api.request("GET", `${session}?sourceVersionId=version-1`);
+  assert.equal(draft.status, 200);
+  const candidates = (draft.body as { data: { productInputs: Array<{ objectKey: string; thumbnailUrl: string }> } }).data.productInputs;
+  assert.deepEqual(candidates.map((image) => image.objectKey), productInputs.map((input) => input.objectKey));
+  const thumbnail = await api.request("GET", candidates[0].thumbnailUrl);
+  assert.equal(thumbnail.status, 200);
+  assert.equal((await sharp(thumbnail.raw).metadata()).width, 160);
+  assert.equal((await api.request("GET", candidates[0].thumbnailUrl.replace("/parent/", "/another/"))).status, 404);
+
+  const uploadPath = uploader("parent", "canvas-version");
+  const form = new FormData();
+  form.append("file", new Blob([Uint8Array.from(png)], { type: "image/png" }), "依据图.png");
+  const request = new Request("http://local.test", { method: "POST", body: form });
+  const upload = await dispatchInputImageUpload(app, uploadPath, Buffer.from(await request.arrayBuffer()), {
+    "content-type": request.headers.get("content-type") ?? "",
+  });
+  assert.equal(upload?.status, 201);
+  const uploaded = (upload?.body as { data: { objectKey: string; thumbnailUrl: string } }).data;
+  assert.match(uploaded.objectKey, /^image-edits\/sessions\/parent\/versions\/canvas-version\/restore-inputs\//);
+  assert.equal((await api.request("GET", uploaded.thumbnailUrl)).status, 200);
+  for (const [bytes, mimeType, expected] of [
+    [jpeg, "image/jpeg", 201], [webp, "image/webp", 201], [png, "image/jpeg", 400],
+    [Buffer.alloc(10 * 1024 * 1024 + 1), "image/png", 413],
+    [Buffer.from("text"), "image/png", 400],
+  ] as const) {
+    assert.equal((await api.request("POST", uploadPath, { body: { bytes, mimeType } })).status, expected);
+  }
+  assert.equal((await api.request("POST", uploader("another", "canvas-version"), { body: { bytes: png, mimeType: "image/png" } })).status, 400);
+
+  const submit = async (key: string, sourceVersionId: string, referenceObjectKeys?: string[]) => {
+    const op = { ...operation("restore_product"), sourceVersionId, payload: referenceObjectKeys ? { referenceObjectKeys } : {} };
+    await api.request("POST", `${session}/operations`, { body: { operation: op } });
+    return api.request("POST", `${session}/submit`, {
+      headers: { "idempotency-key": key }, body: { sourceCardId: "parent", sourceVersionId, tool: op.type },
+    });
+  };
+  const cases = [
+    ["default", "version-1", undefined, productInputs.map((input) => input.objectKey), [jpeg, webp]],
+    ["single", "version-1", [productInputs[1].objectKey], [productInputs[1].objectKey], [webp]],
+    ["upload", "canvas-version", [uploaded.objectKey], [uploaded.objectKey], [png]],
+  ] as const;
+  for (const [i, [key, version, selection, keys, images]] of cases.entries()) {
+    const result = await submit(key, version, selection ? [...selection] : undefined);
+    assert.equal(result.status, 202);
+    const { snapshot, attempt } = (result.body as { data: Awaited<ReturnType<typeof service.submit>> }).data;
+    assert.equal(snapshot.tool, "restore_product");
+    assert.deepEqual(snapshot.attachedInputs, keys.map((objectKey) => ({ objectKey, role: "product" })));
+    assert.deepEqual(snapshot.operations[0].payload, { referenceObjectKeys: keys });
+    assert.equal(snapshot.maskApplied, false);
+    assert.match(attempt.command.prompt, /^第 1 张为待编辑图[\s\S]*保持原图的构图、背景、文字[\s\S]*形状、结构比例、颜色、材质/);
+    for (let check = 0; check < 30 && calls.length <= i; check += 1) await settle();
+    assert.deepEqual(calls[i].images?.map((image) => image.bytes), [png, ...images]);
+  }
+  for (const [key, version, selection, code] of [
+    ["required", "canvas-version", undefined, "RESTORE_PRODUCT_REFERENCE_REQUIRED"],
+    ["bad-keys", "version-1", ["unrelated"], "RESTORE_PRODUCT_REFERENCE_INVALID"],
+    ["other-version", "version-1", [uploaded.objectKey], "RESTORE_PRODUCT_REFERENCE_INVALID"],
+    ["multiple", "version-1", productInputs.map((input) => input.objectKey), "RESTORE_PRODUCT_REFERENCE_INVALID"],
+  ] as const) {
+    const result = await submit(key, version, selection ? [...selection] : undefined);
+    assert.equal(result.status, 409);
+    assert.equal((result.body as { error: { code: string } }).error.code, code);
+  }
+  assert.equal((await repository.listChildTasks()).length, 3);
+});
+
+test("regenerating from the editor uses the exact opened task version and frozen product inputs", async () => {
+  const storage = new MemoryStorage();
+  const taskRepository = new MemoryTaskRepository();
+  const calls: ImageEditRequest[] = [];
+  const image = (background: string) => sharp({ create: { width: 30, height: 30, channels: 3, background } }).png().toBuffer();
+  const [original, generated] = await Promise.all([image("red"), image("blue")]);
+  const app = createSuiteStudioApp({
+    repository: new MemorySuiteRepository(), taskRepository, storage,
+    provider: { async edit(request) { calls.push(request); return { bytes: generated, mimeType: "image/png" }; } },
+  });
+  const resultData = <T>(result: { body: unknown }) => (result.body as { data: T }).data;
+  const suiteId = resultData<{ id: string }>(await app.request("POST", "/api/suites", { body: { name: "画布", origin: "canvas" } })).id;
+  const uploaded = await app.upload(suiteId, { filename: "product.png", bytes: original, mimeType: "image/png" });
+  const { id: inputId, originalObjectKey } = resultData<{ id: string; originalObjectKey: string }>(uploaded);
+  const taskId = resultData<{ id: string }>(await app.request("POST", `/api/suites/${suiteId}/tasks/custom`, {
+    body: { imageType: "main", title: "商品", promptDraft: "原始生成提示词", sourceInputImageId: inputId },
+  })).id;
+  const generate = (key: string, body: Record<string, unknown> = {}) => app.request("POST", `/api/suite-tasks/${taskId}/generation`, {
+    body, headers: { "idempotency-key": key },
+  });
+  const waitForVersions = async (count: number) => {
+    for (let check = 0; check < 30; check += 1) {
+      const history = await taskRepository.listTaskVersions(taskId);
+      if (history.versions.length === count) return history.versions;
+      await settle();
+    }
+    throw new Error("Generation did not complete");
+  };
+  assert.equal((await generate("first")).status, 202);
+  const [first] = await waitForVersions(1);
+  assert.equal((await generate("legacy", { promptDraft: "新的草稿" })).status, 202);
+  const [legacy] = await waitForVersions(2);
+  assert.equal((await generate("edit", { editSourceVersionId: first.id })).status, 202);
+  const [regenerated] = await waitForVersions(3);
+  assert.equal((await taskRepository.getTask(taskId))?.promptDraft, "新的草稿");
+  assert.equal(regenerated.contextSnapshot.sourceVersionId, first.id);
+  assert.deepEqual(regenerated.contextSnapshot.attachedInputs, [{ objectKey: originalObjectKey, role: "product" }]);
+  assert.deepEqual(calls[2].images?.map(({ role, bytes }) => [role, bytes]), [
+    ["source", (await storage.get(first.objectKey))?.bytes], ["product", original],
+  ]);
+  assert.match(calls[2].prompt, /^第 1 张为待编辑图[\s\S]*原始生成提示词$/);
+  assert.equal((await generate("legacy-edit", { editSourceVersionId: legacy.id })).status, 202);
+  const [fromLegacy] = await waitForVersions(4);
+  assert.deepEqual(fromLegacy.contextSnapshot.attachedInputs, regenerated.contextSnapshot.attachedInputs);
+  assert.match(calls[3].prompt, /新的草稿$/);
 });
