@@ -1,6 +1,6 @@
 import type { AplusImageVersionMetadata, AplusTaskMetadata, DetailSizePresets } from "../shared/aplus.js";
 import type { ListingConfigInput } from "../shared/listing-config.js";
-import type { ModelChannelSnapshot } from "../shared/model-settings.js";
+import type { ImageQuality, ModelChannelSnapshot } from "../shared/model-settings.js";
 import type {
   ProductCard,
   ProductCardFields,
@@ -173,7 +173,7 @@ export interface ImageEditRequest {
   model: string;
   prompt: string;
   size: string;
-  quality: "medium";
+  quality: ImageQuality;
   n: 1;
   responseFormat: "b64_json";
   images?: Array<{ bytes: Buffer; mimeType: string; filename: string; role?: string }>;

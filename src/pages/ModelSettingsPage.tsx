@@ -35,6 +35,12 @@ function ImageOptionsFields({ options, onChange }: { options: ImageOptions; onCh
         <option value="tier">档位（tier）</option><option value="pixels">像素（pixels）</option>
       </select>
     </div>
+    <label>编辑出图质量
+      <select value={options.quality ?? ""} onChange={(event) => onChange({ ...options, quality: event.target.value ? event.target.value as ImageOptions["quality"] : undefined })}>
+        <option value="">默认（高）</option>
+        <option value="low">低</option><option value="medium">中</option><option value="high">高</option>
+      </select>
+    </label>
   </div>;
 }
 

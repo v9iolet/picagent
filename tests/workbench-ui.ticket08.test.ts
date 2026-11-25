@@ -95,7 +95,7 @@ test("generated images open an editor with the seven V1 image-edit tools", async
   assert.match(source, /MaskStroke/);
   assert.match(source, /onMouseDown={startStroke}/);
   assert.match(source, /编辑提示词/);
-  assert.match(source, /image-edit-v1/);
+  assert.match(source, /\{\s*tool: activeOperationType,\s*sourceVersionId: version\.id,\s*operationIds:/);
   assert.match(css, /\.wb-editor-backdrop \{ position: fixed;/);
   assert.match(css, /\.wb-editor-canvas svg \{ position:absolute;/);
 });
@@ -131,7 +131,7 @@ test("text regions use a dashed Konva transformer and the overlay follows the re
   assert.match(source, /Transformer/);
   assert.match(source, /borderDash/);
   assert.match(source, /textOperations\.map/);
-  assert.match(source, /onClick=\{\(\) => selectOperation\(item\)\}/);
+  assert.match(source, /onClick=\{\(\) => \{[^\n]*switchTool\("add_text", item\)/);
   assert.match(source, /ResizeObserver/);
   assert.match(source, /Stage width=\{frame\.width\} height=\{frame\.height\}/);
   assert.match(source, /maskMode/);

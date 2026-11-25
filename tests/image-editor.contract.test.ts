@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 import sharp from "sharp";
 import { buildImageEditPrompt, ImageEditorService, MemoryImageEditorRepository, type EditOperation, type ImageEditProvider, type ImageSource } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import { DashScopeOcrProvider } from "../server/providers/dashscope-ocr-provider.js";
+import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
+import type { ImageEditRequest } from "../server/types.js";
+import { defaultImageOptions } from "../shared/model-settings.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 
 const source: ImageSource = { bytes: Buffer.from("source"), mimeType: "image/png", width: 100, height: 100 };
@@ -21,17 +25,58 @@ function provider(overrides: Partial<ImageEditProvider> = {}): ImageEditProvider
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 10)); }
 
-test("submission freezes ordered operations and is idempotent", async () => {
+test("mixed tools and multiple masks are rejected before submitting", async () => {
+  const repository = new MemoryImageEditorRepository();
+  const service = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source);
+  const api = createImageEditorApi(service);
+  await service.upsertOperation({ sessionId: "session", operation: operation() });
+  await service.upsertOperation({ sessionId: "session", operation: { ...operation("redraw"), operationId: "op-2" } });
+  await service.upsertOperation({ sessionId: "session", operation: { ...operation("redraw"), operationId: "op-3" } });
+  const submit = (tool: string, operationIds: string[]) => api.request("POST", "/api/image-editor/sessions/session/submit", {
+    headers: { "idempotency-key": tool },
+    body: { sourceCardId: "parent", sourceVersionId: "version-1", tool, operationIds },
+  });
+  const mixed = await submit("re_edit", ["op-1", "op-2"]);
+  assert.equal(mixed.status, 409);
+  assert.equal((mixed.body as { error: { code: string } }).error.code, "MIXED_IMAGE_EDIT_TOOLS");
+  const masks = await submit("redraw", ["op-2", "op-3"]);
+  assert.equal(masks.status, 409);
+  assert.equal((masks.body as { error: { code: string } }).error.code, "MULTIPLE_MASK_OPERATIONS_UNSUPPORTED");
+  assert.equal((await repository.listChildTasks()).length, 0);
+  assert.equal((await repository.getDraft("session"))?.operations.length, 3);
+});
+
+test("submission freezes only the selected tool and source version, clears submitted operations, and is idempotent", async () => {
   const repository = new MemoryImageEditorRepository();
   let selected: ImageEditProvider | null = provider();
   const service = new ImageEditorService(repository, async () => selected, new MemoryStorage(), async () => source);
-  await service.upsertOperation({ sessionId: "session", operation: operation() });
-  await service.upsertOperation({ sessionId: "session", operation: { ...operation("add_text"), operationId: "op-2", summary: "添加标题" } });
-  const first = await service.submit({ sessionId: "session", idempotencyKey: "same", sourceCardId: "parent", sourceVersionId: "version-1", summary: "组合编辑" });
+  const addText = { ...operation("add_text"), payload: { text: "标题", prompt: "使用黑体", strokes: [{ points: [] }] } };
+  await service.upsertOperation({ sessionId: "session", operation: addText });
+  await service.upsertOperation({ sessionId: "session", operation: { ...addText, operationId: "op-2", summary: "添加副标题" } });
+  await service.upsertOperation({ sessionId: "session", operation: { ...addText, sourceVersionId: "older-version" } });
+  await service.upsertOperation({ sessionId: "session", operation: { ...operation(), operationId: "re-edit-draft" } });
+  const input = { sessionId: "session", idempotencyKey: "same", sourceCardId: "parent", sourceVersionId: "version-1", tool: "add_text" };
+  const first = await service.submit(input);
   selected = null;
-  const duplicate = await service.submit({ sessionId: "session", idempotencyKey: "same", sourceCardId: "parent", sourceVersionId: "version-1", summary: "组合编辑" });
-  assert.equal(first.duplicate, false); assert.equal(duplicate.duplicate, true); assert.equal(duplicate.childTask.id, first.childTask.id); assert.deepEqual(first.snapshot.operations.map((item) => item.operationId), ["op-1", "op-2"]);
-  await settle(); const task = await repository.getChildTask(first.childTask.id); const versions = await repository.listVersions(first.childTask.id); assert.equal(task?.currentVersionId, versions[0].id); assert.equal(task?.finalVersionId, null);
+  const duplicate = await service.submit(input);
+  assert.equal(first.duplicate, false);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.childTask.id, first.childTask.id);
+  assert.equal(first.snapshot.tool, "add_text");
+  assert.equal(first.snapshot.maskApplied, false);
+  assert.deepEqual(first.snapshot.attachedInputs, []);
+  assert.deepEqual(first.attempt.command.operations.map((item) => [item.operationId, item.sourceVersionId, item.payload]), [
+    ["op-1", "version-1", { text: "标题", prompt: "使用黑体" }],
+    ["op-2", "version-1", { text: "标题", prompt: "使用黑体" }],
+  ]);
+  assert.deepEqual((await repository.getDraft("session"))?.operations.map((item) => [item.operationId, item.sourceVersionId]), [
+    ["op-1", "older-version"], ["re-edit-draft", "version-1"],
+  ]);
+  await settle();
+  const task = await repository.getChildTask(first.childTask.id);
+  const versions = await repository.listVersions(first.childTask.id);
+  assert.equal(task?.currentVersionId, versions[0].id);
+  assert.equal(task?.finalVersionId, null);
 });
 
 test("unsupported capability rejects before child task creation", async () => {
@@ -40,9 +85,36 @@ test("unsupported capability rejects before child task creation", async () => {
   await assert.rejects(service.submit({ sessionId: "session", idempotencyKey: "blocked", sourceCardId: "parent", sourceVersionId: "version-1" }), /IMAGE_EDIT_CAPABILITY_UNSUPPORTED:redraw/);
 });
 
+test("submission leaves a draft intact if it changed while the request was being prepared", async () => {
+  const repository = new MemoryImageEditorRepository();
+  let start!: () => void;
+  let resume!: () => void;
+  const sourceRequested = new Promise<void>((resolve) => { start = resolve; });
+  const sourceReady = new Promise<void>((resolve) => { resume = resolve; });
+  const service = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => {
+    start();
+    await sourceReady;
+    return source;
+  });
+  const initial = operation();
+  await service.upsertOperation({ sessionId: "session", operation: initial });
+  const input = { sessionId: "session", idempotencyKey: "submit", sourceCardId: "parent", sourceVersionId: "version-1", tool: "re_edit" };
+  const submitting = service.submit(input);
+  await sourceRequested;
+  await service.upsertOperation({ sessionId: "session", operation: { ...initial, payload: { prompt: "更新后的草稿" } } });
+  resume();
+  await assert.rejects(submitting, /EDIT_DRAFT_CHANGED/);
+  assert.equal((await repository.listChildTasks()).length, 0);
+  assert.equal((await repository.getDraft("session"))?.operations[0].payload.prompt, "更新后的草稿");
+  const retried = await service.submit(input);
+  assert.equal(retried.attempt.command.prompt, "更新后的草稿");
+  assert.deepEqual((await repository.getDraft("session"))?.operations, []);
+});
+
 test("failure retains child task, creates no version, and retry reuses snapshot", async () => {
   let calls = 0; const repository = new MemoryImageEditorRepository(); const service = new ImageEditorService(repository, provider({ edit: async () => { calls += 1; if (calls === 1) throw new Error("MODEL_FAILED"); return { bytes: Buffer.from("ok"), mimeType: "image/png", width: 100, height: 100 }; } }), new MemoryStorage(), async () => source);
   await service.upsertOperation({ sessionId: "session", operation: operation() }); const submitted = await service.submit({ sessionId: "session", idempotencyKey: "submit", sourceCardId: "parent", sourceVersionId: "version-1" }); await settle();
+  assert.deepEqual((await repository.getDraft("session"))?.operations, []);
   assert.equal((await repository.getChildTask(submitted.childTask.id))?.status, "failed"); assert.equal((await repository.listVersions(submitted.childTask.id)).length, 0);
   const retried = await service.retry(submitted.attempt.id, "retry"); assert.equal(retried.childTask.id, submitted.childTask.id); assert.equal(retried.snapshot.id, submitted.snapshot.id); await settle(); assert.equal((await repository.listVersions(submitted.childTask.id)).length, 1); assert.equal((await repository.listAttempts(submitted.childTask.id)).length, 2);
 });
@@ -95,14 +167,73 @@ test("outpaint freezes computed dimensions and anchor, and rejects conflicting d
   await assert.rejects(invalidService.submit({ sessionId: "session", idempotencyKey: "outpaint-invalid", sourceCardId: "parent", sourceVersionId: "version-1" }), /OUTPAINT_TARGET_DIMENSIONS_INVALID/);
 });
 
-test("regenerate endpoint appends an attempt and version to the same child task", async () => {
-  const repository = new MemoryImageEditorRepository(); const service = new ImageEditorService(repository, provider(), new MemoryStorage(), async () => source); const api = createImageEditorApi(service);
-  await service.upsertOperation({ sessionId: "session", operation: operation() });
-  const first = await api.request("POST", "/api/image-editor/sessions/session/submit", { headers: { "idempotency-key": "submit" }, body: { sourceCardId: "parent", sourceVersionId: "version-1" } });
-  assert.equal(first.status, 202); const firstData = (first.body as { data: { childTask: { id: string } } }).data; await settle();
-  const regenerated = await api.request("POST", `/api/image-editor/tasks/${firstData.childTask.id}/regenerate`, { headers: { "idempotency-key": "regenerate" }, body: { summary: "再生成" } });
-  assert.equal(regenerated.status, 202); const duplicate = await api.request("POST", `/api/image-editor/tasks/${firstData.childTask.id}/regenerate`, { headers: { "idempotency-key": "regenerate" }, body: { summary: "ignored" } }); assert.equal(duplicate.status, 200);
-  await settle(); const task = await repository.getChildTask(firstData.childTask.id); assert.equal(task?.id, firstData.childTask.id); assert.equal((await repository.listAttempts(firstData.childTask.id)).length, 2); assert.equal((await repository.listVersions(firstData.childTask.id)).length, 2);
+test("regenerate replays the frozen prompt, source, mask and attached inputs on the same child task", async () => {
+  const repository = new MemoryImageEditorRepository();
+  const storage = new MemoryStorage();
+  const calls: ImageEditRequest[] = [];
+  const bytes = await sharp({ create: { width: 1024, height: 1360, channels: 3, background: "white" } }).png().toBuffer();
+  const resultBytes = await sharp({ create: { width: 1024, height: 1024, channels: 3, background: "blue" } }).png().toBuffer();
+  const editorSource = { ...source, bytes, width: 1024, height: 1360 };
+  const imageProvider = { edit: async (request: ImageEditRequest) => { calls.push(request); return { bytes: resultBytes, mimeType: "image/png" }; } };
+  const options = defaultImageOptions("gpt-image-2");
+  const editProvider = provider();
+  const service = new ImageEditorService(repository, {
+    ...editProvider,
+    capabilities: async () => ({ ...await editProvider.capabilities(), imageToImage: false }),
+    edit: (command, input) => requestImageEditorEdit(imageProvider, storage, "gpt-image-2", options, command, input),
+  }, storage, async (versionId) => versionId === "version-1" ? editorSource : null);
+  const api = createImageEditorApi(service);
+  await service.upsertOperation({ sessionId: "session", operation: operation("redraw") });
+  const first = await service.submit({ sessionId: "session", idempotencyKey: "submit", sourceCardId: "parent", sourceVersionId: "version-1", tool: "redraw" });
+  assert.equal(first.snapshot.maskApplied, true);
+  await settle();
+
+  // Simulate a snapshot with attachments to verify the replay path before the attachment tools are added.
+  const attachment = { objectKey: "frozen-product", role: "product" };
+  await storage.put({ key: attachment.objectKey, bytes: resultBytes, contentType: "image/png" });
+  const snapshot = { ...first.snapshot, id: randomUUID(), attachedInputs: [attachment] };
+  const childTask = { ...first.childTask, id: randomUUID(), snapshotId: snapshot.id };
+  const attempt = { ...first.attempt, id: randomUUID(), snapshotId: snapshot.id, childTaskId: childTask.id };
+  await repository.submit({ idempotencyKey: "with-attached-inputs", snapshot, childTask, attempt });
+  await repository.completeAttempt({
+    attemptId: attempt.id, objectKey: "existing-version", sha256: "a".repeat(64), width: 1024, height: 1024,
+    mimeType: "image/png", completedAt: new Date().toISOString(),
+  });
+  const failedAttempt = await repository.appendAttempt({
+    idempotencyKey: "previous-regeneration", snapshot, childTask: (await repository.getChildTask(childTask.id))!,
+    attempt: { ...attempt, id: randomUUID() },
+  });
+  await repository.failAttempt(failedAttempt.attempt.id, "MODEL_FAILED", "上次生成失败", new Date().toISOString());
+
+  const path = `/api/image-editor/tasks/${childTask.id}/regenerate`;
+  const request = { headers: { "idempotency-key": "regenerate" }, body: { summary: "用于界面展示的摘要" } };
+  const submitted = await api.request("POST", path, request);
+  assert.equal(submitted.status, 202);
+  const { childTask: regenerating } = (submitted.body as { data: typeof first }).data;
+  assert.equal(regenerating.status, "generating");
+  assert.equal(regenerating.errorCode, null);
+  assert.equal(regenerating.errorMessage, null);
+  assert.equal((await api.request("POST", path, request)).status, 200);
+  for (let i = 0; i < 30 && (await repository.listVersions(childTask.id)).length < 2; i += 1) await settle();
+  assert.equal((await repository.listAttempts(childTask.id)).length, 3);
+  assert.equal((await repository.listVersions(childTask.id)).length, 2);
+  assert.equal(calls.length, 2);
+  const initial = calls[0];
+  const replay = calls[1];
+  assert.match(initial.prompt, /仅重绘蒙版白色选区：局部重绘/);
+  assert.equal(replay.prompt, initial.prompt);
+  assert.ok(initial.mask?.length);
+  assert.deepEqual(replay.mask, initial.mask);
+  assert.deepEqual(replay.images?.map(({ role, bytes }) => ({ role, bytes })), [
+    { role: "source", bytes }, { role: "product", bytes: resultBytes },
+  ]);
+  assert.equal(replay.size, "1024x1360");
+  assert.equal(replay.quality, "high");
+
+  await requestImageEditorEdit(imageProvider, storage, "gpt-image-2", { ...options, quality: "medium" },
+    first.attempt.command, { ...editorSource, width: 1027, height: 1824 });
+  assert.equal(calls[2].quality, "medium");
+  assert.equal(calls[2].size, "1024x1824");
 });
 
 test("submission freezes sourcePrompt while compiling pure product-fidelity prompts for local edits and preserving full prompt for re_edit", async () => {
@@ -119,20 +250,22 @@ test("submission freezes sourcePrompt while compiling pure product-fidelity prom
   await service.upsertOperation({ sessionId: "session", operation: { ...operation("add_text"), operationId: "op-add", payload: { text: "新品主视觉", region: { x: 0.2, y: 0.3, width: 0.4, height: 0.1 }, prompt: "使用醒目的无衬线标题，与画面光线融合" } } });
   await service.upsertOperation({ sessionId: "session", operation: { ...operation("change_text"), operationId: "op-change", payload: { originalText: "旧标语", newText: "新标语", region: { x: 0.1, y: 0.1, width: 0.5, height: 0.2 }, prompt: "保持字体一致" } } });
   await service.upsertOperation({ sessionId: "session", operation: { ...operation("redraw"), operationId: "op-redraw", payload: { prompt: "替换为柔和木纹桌面", strokes: [{ points: [{ x: 0.1, y: 0.2 }, { x: 0.3, y: 0.4 }], width: 0.1 }] } } });
-  const submitted = await service.submit({ sessionId: "session", idempotencyKey: "prompt-compose", sourceCardId: "parent", sourceVersionId: "version-1", summary: "组合局部修改" });
-  assert.equal(submitted.snapshot.sourcePrompt, "SOURCE VERSION PROMPT");
+  for (const tool of ["add_text", "change_text", "redraw"]) {
+    const submitted = await service.submit({ sessionId: "session", idempotencyKey: `prompt-${tool}`, sourceCardId: "parent", sourceVersionId: "version-1", tool });
+    assert.equal(submitted.snapshot.sourcePrompt, "SOURCE VERSION PROMPT");
+  }
   await settle();
-  const localPrompt = commands[0].prompt;
-  assert.match(localPrompt, /严格保持输入图片中的商品主体外观/);
-  assert.match(localPrompt, /横向约 20%–60%/);
-  assert.match(localPrompt, /新品主视觉/);
-  assert.match(localPrompt, /使用醒目的无衬线标题/);
-  assert.match(localPrompt, /顶部居中区域（横向约 10%–60%，纵向约 10%–30%）/);
-  assert.match(localPrompt, /旧标语.*新标语/);
-  assert.match(localPrompt, /仅重绘蒙版白色选区：替换为柔和木纹桌面/);
-  assert.doesNotMatch(localPrompt, /SOURCE VERSION PROMPT/);
-  assert.doesNotMatch(localPrompt, /strokes/);
-  assert.doesNotMatch(localPrompt, /ocrSnapshot/);
+  const [add, change, redraw] = commands.map((command) => command.prompt);
+  assert.match(add, /横向约 20%–60%/);
+  assert.match(add, /新品主视觉/);
+  assert.match(add, /使用醒目的无衬线标题/);
+  assert.match(change, /顶部居中区域（横向约 10%–60%，纵向约 10%–30%）/);
+  assert.match(change, /旧标语.*新标语/);
+  assert.match(redraw, /仅重绘蒙版白色选区：替换为柔和木纹桌面/);
+  for (const { prompt } of commands) {
+    assert.match(prompt, /严格保持输入图片中的商品主体外观/);
+    assert.doesNotMatch(prompt, /SOURCE VERSION PROMPT|strokes|ocrSnapshot/);
+  }
 
   const reEditPrompt = buildImageEditPrompt([{ ...operation("re_edit"), payload: { prompt: "完整重编辑提示词" } }], "SOURCE VERSION PROMPT");
   assert.equal(reEditPrompt, "完整重编辑提示词");

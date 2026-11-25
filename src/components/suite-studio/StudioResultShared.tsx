@@ -90,6 +90,7 @@ export function StudioImageEditorHost({
   const parentTaskId = card.parentTaskId;
   return (
     <ImageEditorModal
+      key={card.versionId}
       task={{ id: targetTaskId, title: card.title, promptDraft: card.promptText }}
       version={{
         id: card.versionId,
@@ -107,19 +108,11 @@ export function StudioImageEditorHost({
           summary,
         );
       }}
-      onSubmit={async (spec, instruction) => {
-        const ops = Array.isArray(spec.operations) ? spec.operations : [];
-        for (const op of ops) {
-          await suiteApi.upsertImageEditOperation(
-            targetTaskId,
-            op as Record<string, unknown>,
-            instruction,
-          );
-        }
+      onSubmit={async (selection, instruction) => {
         const res = await suiteApi.submitImageEdit(targetTaskId, {
+          ...selection,
           sourceCardId: targetTaskId,
-          sourceVersionId: String(spec.sourceVersionId ?? card.versionId),
-          parentVersionId: String(spec.sourceVersionId ?? card.versionId),
+          parentVersionId: selection.sourceVersionId,
           summary: instruction,
         });
         onClose();
@@ -128,7 +121,7 @@ export function StudioImageEditorHost({
       }}
       onRegenerate={async () => {
         if (card.editChildTaskId) {
-          await suiteApi.regenerateImageEditTask(card.editChildTaskId, card.promptText);
+          await suiteApi.regenerateImageEditTask(card.editChildTaskId);
           onClose();
           onEditJobStarted(card.editChildTaskId, parentTaskId);
           onNotify("已提交再次生成，正在更新图片…");

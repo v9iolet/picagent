@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { capabilityLabels, defaultImageOptions, type ImageOptions, type ChannelModel, type ModelCapability, type ModelChannelInput, type ModelChannelSnapshot, type ModelPreferences, type ModelSettingsView } from "../shared/model-settings.js";
+import { capabilityLabels, defaultImageOptions, IMAGE_QUALITIES, type ImageOptions, type ChannelModel, type ModelCapability, type ModelChannelInput, type ModelChannelSnapshot, type ModelPreferences, type ModelSettingsView } from "../shared/model-settings.js";
 import { parseProviderJson } from "./providers/provider-json.js";
 
 interface StoredChannel extends ModelChannelInput { id: string }
@@ -57,7 +57,11 @@ function validateImageOptions(value: unknown): ImageOptions {
   if (!validList(options.sizes, /^(1K|2K|4K)$/) || !validList(options.aspectRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/) || (options.sizeMode !== "tier" && options.sizeMode !== "pixels")) {
     throw new SettingsError("INVALID_IMAGE_OPTIONS", "请配置非空的分辨率档位（1K/2K/4K）、有效比例和尺寸模式");
   }
-  return { sizes: [...new Set(options.sizes)], aspectRatios: [...new Set(options.aspectRatios)], sizeMode: options.sizeMode };
+  const quality = IMAGE_QUALITIES.find((value) => value === options.quality);
+  if (options.quality !== undefined && !quality) {
+    throw new SettingsError("INVALID_IMAGE_OPTIONS", "请为图片编辑选择有效的出图质量");
+  }
+  return { sizes: [...new Set(options.sizes)], aspectRatios: [...new Set(options.aspectRatios)], sizeMode: options.sizeMode, ...(quality ? { quality } : {}) };
 }
 
 function validateChannel(value: unknown): ModelChannelInput {
