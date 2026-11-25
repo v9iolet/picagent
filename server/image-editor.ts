@@ -1,7 +1,8 @@
 import type { ModelChannelSnapshot } from "../shared/model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import sharp from "sharp";
-import type { StorageAdapter } from "./types.js";
+import type { PromptRepository, StorageAdapter } from "./types.js";
 
 export const IMAGE_EDIT_TOOLS = ["re_edit", "regenerate", "add_text", "change_text", "redraw", "erase", "outpaint"] as const;
 export type ImageEditTool = (typeof IMAGE_EDIT_TOOLS)[number];
@@ -36,6 +37,10 @@ export interface EditSnapshot {
   parentVersionId: string;
   summary: string;
   sourcePrompt: string;
+  tool?: ImageEditOperationType | null;
+  attachedInputs?: ReadonlyArray<ImageEditAttachedInput>;
+  maskApplied?: boolean | null;
+  promptTemplateVersionId?: string | null;
   operations: ReadonlyArray<EditOperation>;
   provider: EditProviderSnapshot;
   createdAt: string;
@@ -90,7 +95,11 @@ export interface ImageEditCommand {
   sourceVersionId: string;
   prompt: string;
   operations: ReadonlyArray<EditOperation>;
+  attachedInputs?: ReadonlyArray<ImageEditAttachedInput>;
+  maskApplied?: boolean | null;
 }
+
+export interface ImageEditAttachedInput { objectKey: string; role: string }
 
 export interface ImageEditProviderCapabilities {
   imageToImage: boolean;
@@ -152,11 +161,44 @@ async function renderMaskPng(source: Pick<ImageSource, "width" | "height">, stro
 }
 
 type EditSubmission = { snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt; duplicate: boolean };
+export type EditDraft = { sessionId: string; operations: EditOperation[]; summary: string };
+export type EditSubmissionInput = Omit<EditSubmission, "duplicate"> & {
+  idempotencyKey: string;
+  submittedDraft?: { sessionId: string; operations: EditOperation[] };
+};
+
+function matchesDraftOperation(left: EditOperation, right: EditOperation) {
+  return left.operationId === right.operationId && left.sourceVersionId === right.sourceVersionId;
+}
+
+function withDraftOperations(draft: EditDraft, operations: EditOperation[], summary = draft.summary): EditDraft {
+  return { ...draft, operations: operations.map((operation, index) => ({ ...operation, order: index + 1 })), summary };
+}
+
+export function upsertDraftOperation(draft: EditDraft, operation: EditOperation, summary?: string): EditDraft {
+  const operations = [...draft.operations];
+  const index = operations.findIndex((item) => matchesDraftOperation(item, operation));
+  if (index >= 0) operations[index] = operation;
+  else operations.push(operation);
+  return withDraftOperations(draft, operations, summary);
+}
+
+export function removeDraftOperations(draft: EditDraft, operationIds: readonly string[], submitted?: readonly EditOperation[]): EditDraft {
+  const operations = draft.operations.filter((item) => submitted
+    ? !submitted.some((operation) => matchesDraftOperation(item, operation)
+      && isDeepStrictEqual({ ...item, order: 0 }, { ...operation, order: 0 }))
+    : !operationIds.includes(item.operationId));
+  if (submitted && draft.operations.length - operations.length !== submitted.length) {
+    throw new Error("EDIT_DRAFT_CHANGED");
+  }
+  return withDraftOperations(draft, operations, operations.map((operation) => operation.summary).join("；"));
+}
 
 export interface ImageEditorRepository {
   getSubmission(idempotencyKey: string): Promise<EditSubmission | null>;
-  getDraft(sessionId: string): Promise<{ sessionId: string; operations: EditOperation[]; summary: string } | null>;
-  saveDraft(draft: { sessionId: string; operations: EditOperation[]; summary: string }): Promise<void>;
+  getDraft(sessionId: string): Promise<EditDraft | null>;
+  upsertDraftOperation(sessionId: string, operation: EditOperation, summary?: string): Promise<EditDraft>;
+  removeDraftOperations(sessionId: string, operationIds: readonly string[]): Promise<EditDraft | null>;
   getSnapshot(id: string): Promise<EditSnapshot | null>;
   getChildTask(id: string): Promise<ImageEditChildTask | null>;
   listChildTasks(): Promise<ImageEditChildTask[]>;
@@ -164,7 +206,7 @@ export interface ImageEditorRepository {
   getOcrSnapshot(sessionId: string, sourceVersionId: string): Promise<OcrSnapshot | null>;
   saveOcrSnapshot(sessionId: string, snapshot: OcrSnapshot): Promise<void>;
   getAttempt(id: string): Promise<ImageEditAttempt | null>;
-  submit(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }): Promise<EditSubmission>;
+  submit(input: EditSubmissionInput): Promise<EditSubmission>;
   appendAttempt?(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }): Promise<EditSubmission>;
   completeAttempt(input: { attemptId: string; objectKey: string; sha256: string; width: number; height: number; mimeType: string; completedAt: string }): Promise<{ attempt: ImageEditAttempt; version: ImageEditVersion; childTask: ImageEditChildTask }>;
   failAttempt(attemptId: string, code: string, message: string, completedAt: string): Promise<{ attempt: ImageEditAttempt; childTask: ImageEditChildTask }>;
@@ -175,7 +217,7 @@ export interface ImageEditorRepository {
 }
 
 export class MemoryImageEditorRepository implements ImageEditorRepository {
-  private drafts = new Map<string, { sessionId: string; operations: EditOperation[]; summary: string }>();
+  private drafts = new Map<string, EditDraft>();
   private snapshots = new Map<string, EditSnapshot>();
   private tasks = new Map<string, ImageEditChildTask>();
   private attempts = new Map<string, ImageEditAttempt>();
@@ -183,7 +225,18 @@ export class MemoryImageEditorRepository implements ImageEditorRepository {
   private idempotency = new Map<string, { snapshotId: string; childTaskId: string; attemptId: string }>();
   private ocr = new Map<string, OcrSnapshot>();
   async getDraft(id: string) { const draft = this.drafts.get(id); return draft ? structuredClone(draft) : null; }
-  async saveDraft(draft: { sessionId: string; operations: EditOperation[]; summary: string }) { this.drafts.set(draft.sessionId, structuredClone(draft)); }
+  async upsertDraftOperation(sessionId: string, operation: EditOperation, summary?: string) {
+    const draft = upsertDraftOperation(this.drafts.get(sessionId) ?? { sessionId, operations: [], summary: "" }, operation, summary);
+    this.drafts.set(sessionId, structuredClone(draft));
+    return draft;
+  }
+  async removeDraftOperations(sessionId: string, operationIds: readonly string[]) {
+    const draft = this.drafts.get(sessionId);
+    if (!draft) return null;
+    const updated = removeDraftOperations(draft, operationIds);
+    this.drafts.set(sessionId, structuredClone(updated));
+    return updated;
+  }
   async getSnapshot(id: string) { const snapshot = this.snapshots.get(id); return snapshot ? structuredClone(snapshot) : null; }
   async getChildTask(id: string) { const task = this.tasks.get(id); return task ? structuredClone(task) : null; }
   async listChildTasks() { return [...this.tasks.values()].map((task) => structuredClone(task)).sort((a, b) => a.createdAt.localeCompare(b.createdAt)); }
@@ -196,9 +249,14 @@ export class MemoryImageEditorRepository implements ImageEditorRepository {
     if (!old) return null;
     return structuredClone({ snapshot: this.snapshots.get(old.snapshotId)!, childTask: this.tasks.get(old.childTaskId)!, attempt: this.attempts.get(old.attemptId)!, duplicate: true });
   }
-  async submit(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }) {
+  async submit({ submittedDraft, ...input }: EditSubmissionInput) {
     const old = this.idempotency.get(input.idempotencyKey);
     if (old) return { snapshot: this.snapshots.get(old.snapshotId)!, childTask: this.tasks.get(old.childTaskId)!, attempt: this.attempts.get(old.attemptId)!, duplicate: true };
+    if (submittedDraft) {
+      const draft = this.drafts.get(submittedDraft.sessionId);
+      if (!draft) throw new Error("EDIT_DRAFT_CHANGED");
+      this.drafts.set(draft.sessionId, removeDraftOperations(draft, [], submittedDraft.operations));
+    }
     this.snapshots.set(input.snapshot.id, structuredClone(input.snapshot));
     this.tasks.set(input.childTask.id, structuredClone(input.childTask));
     this.attempts.set(input.attempt.id, structuredClone(input.attempt));
@@ -328,30 +386,56 @@ const OUTPAINT_ANCHOR_LABELS: Record<string, string> = {
   right: "居右",
 };
 
-export function buildImageEditPrompt(operations: ReadonlyArray<EditOperation>, sourcePrompt: string): string {
+const EDIT_PAYLOAD_FIELDS: Record<ImageEditOperationType, readonly string[]> = {
+  re_edit: ["prompt"],
+  add_text: ["text", "region", "prompt"],
+  change_text: ["originalText", "newText", "region", "prompt"],
+  redraw: ["strokes", "feather", "prompt"],
+  erase: ["strokes", "feather", "prompt"],
+  outpaint: ["direction", "targetRatio", "targetWidth", "targetHeight", "prompt"],
+};
+
+const IMAGE_EDIT_PROMPT_HEADER = "严格保持输入图片中的商品主体外观、结构比例、材质细节、光影色调、背景构图及未指定修改的文字与元素不变，仅执行以下局部修改：";
+const IMAGE_EDIT_INSTRUCTIONS = {
+  change_text: "将{{region}}的原文字“{{originalText}}”替换为“{{newText}}”，保持原有排版、字体风格、颜色与光影一致{{requirement}}。",
+  add_text: "在{{region}}新增文字“{{text}}”{{requirement}}。",
+  redraw: "仅重绘蒙版白色选区{{requirement}}，蒙版以外的商品与背景画面严格保持不变。",
+  erase: "仅消除蒙版白色选区中的目标并自然补全周围背景{{requirement}}，蒙版以外画面严格保持不变。",
+  outpaint: "{{direction}}扩展画面至比例 {{ratio}}{{dimensions}}，原图主体锚点保持{{anchor}}并自然延续背景纹理与光影{{requirement}}。",
+};
+
+export function buildImageEditPrompt(
+  operations: ReadonlyArray<EditOperation>,
+  sourcePrompt: string,
+  template?: { body: string; userPromptTemplate: string } | null,
+): string {
   if (operations.length === 1 && operations[0].type === "re_edit") {
     return String(operations[0].payload.prompt ?? sourcePrompt);
   }
-  const header = "严格保持输入图片中的商品主体外观、结构比例、材质细节、光影色调、背景构图及未指定修改的文字与元素不变，仅执行以下局部修改：";
   const instructions = operations.map((operation, index) => {
     const prefix = operations.length > 1 ? `${index + 1}. ` : "";
     const req = typeof operation.payload.prompt === "string" ? operation.payload.prompt.trim() : "";
+    const requirement = req ? `（${req}）` : "";
+    const render = (instruction: string, values: Record<string, string>) => prefix
+      + (template?.userPromptTemplate || instruction).replace(/\{\{(\w+)\}\}/g, (_, key: string) => values[key] ?? "");
     switch (operation.type) {
-      case "change_text": {
-        const regionDesc = describeNormalizedRegion(operation.payload.region);
-        const orig = String(operation.payload.originalText ?? "").trim();
-        const next = String(operation.payload.newText ?? "").trim();
-        return `${prefix}将${regionDesc}的原文字“${orig}”替换为“${next}”，保持原有排版、字体风格、颜色与光影一致${req ? `（${req}）` : ""}。`;
-      }
-      case "add_text": {
-        const regionDesc = operation.payload.region ? describeNormalizedRegion(operation.payload.region) : "画面指定区域";
-        const text = String(operation.payload.text ?? "").trim();
-        return `${prefix}在${regionDesc}新增文字“${text}”${req ? `，排版与视觉要求：${req}` : ""}。`;
-      }
+      case "change_text":
+        return render(IMAGE_EDIT_INSTRUCTIONS.change_text, {
+          region: describeNormalizedRegion(operation.payload.region),
+          originalText: String(operation.payload.originalText ?? "").trim(),
+          newText: String(operation.payload.newText ?? "").trim(),
+          requirement,
+        });
+      case "add_text":
+        return render(IMAGE_EDIT_INSTRUCTIONS.add_text, {
+          region: operation.payload.region ? describeNormalizedRegion(operation.payload.region) : "画面指定区域",
+          text: String(operation.payload.text ?? "").trim(),
+          requirement: req ? `，排版与视觉要求：${req}` : "",
+        });
       case "redraw":
-        return `${prefix}仅重绘蒙版白色选区${req ? `：${req}` : ""}，蒙版以外的商品与背景画面严格保持不变。`;
+        return render(IMAGE_EDIT_INSTRUCTIONS.redraw, { requirement: req ? `：${req}` : "" });
       case "erase":
-        return `${prefix}仅消除蒙版白色选区中的目标并自然补全周围背景${req ? `（${req}）` : ""}，蒙版以外画面严格保持不变。`;
+        return render(IMAGE_EDIT_INSTRUCTIONS.erase, { requirement });
       case "outpaint": {
         const dir = OUTPAINT_DIRECTION_LABELS[String(operation.payload.direction ?? "all")] ?? "向四周";
         const targetRatio = String(operation.payload.targetRatio ?? "original");
@@ -359,13 +443,13 @@ export function buildImageEditPrompt(operations: ReadonlyArray<EditOperation>, s
         const th = Number(operation.payload.targetHeight);
         const dims = Number.isFinite(tw) && Number.isFinite(th) && tw > 0 && th > 0 ? `，目标尺寸 ${tw}×${th}` : "";
         const anchor = OUTPAINT_ANCHOR_LABELS[String(operation.payload.anchor ?? "center")] ?? "居中";
-        return `${prefix}${dir}扩展画面至比例 ${targetRatio}${dims}，原图主体锚点保持${anchor}并自然延续背景纹理与光影${req ? `（${req}）` : ""}。`;
+        return render(IMAGE_EDIT_INSTRUCTIONS.outpaint, { direction: dir, ratio: targetRatio, dimensions: dims, anchor, requirement });
       }
       case "re_edit":
         return `${prefix}${req || operation.summary}`;
     }
   });
-  return [header, ...instructions].filter(Boolean).join("\n");
+  return [template?.body ?? IMAGE_EDIT_PROMPT_HEADER, ...instructions].filter(Boolean).join("\n");
 }
 
 function editProviderSnapshot({ name, version, capabilitiesVersion, channel }: ImageEditProvider): EditProviderSnapshot {
@@ -380,6 +464,7 @@ export class ImageEditorService {
     private readonly resolveSource: (versionId: string) => Promise<ImageSource | null>,
     private readonly ocrProvider?: OcrProvider | (() => Promise<OcrProvider | null>),
     private readonly validateSource?: (sourceCardId: string, sourceVersionId: string) => Promise<boolean>,
+    private readonly prompts?: PromptRepository,
   ) {}
 
   private async requireProvider() {
@@ -414,19 +499,58 @@ export class ImageEditorService {
     return snapshot;
   }
   async getOcrSnapshot(sessionId: string, sourceVersionId: string) { return this.repository.getOcrSnapshot(sessionId, sourceVersionId); }
-  async upsertOperation(input: { sessionId: string; operation: EditOperation; summary?: string }) { const draft = await this.repository.getDraft(input.sessionId) ?? { sessionId: input.sessionId, operations: [], summary: "" }; const index = draft.operations.findIndex((item) => item.operationId === input.operation.operationId); const operations = [...draft.operations]; if (index >= 0) operations[index] = input.operation; else operations.push(input.operation); operations.forEach((item, i) => { item.order = i + 1; }); await this.repository.saveDraft({ ...draft, operations, summary: input.summary ?? draft.summary }); return { sessionId: input.sessionId, operations, summary: input.summary ?? draft.summary }; }
-  async removeOperation(sessionId: string, operationId: string) { const draft = await this.repository.getDraft(sessionId); if (!draft) return null; const operations = draft.operations.filter((item) => item.operationId !== operationId).map((item, i) => ({ ...item, order: i + 1 })); await this.repository.saveDraft({ ...draft, operations }); return { ...draft, operations }; }
-  async submit(input: { sessionId: string; idempotencyKey: string; sourceCardId: string; sourceVersionId: string; parentVersionId?: string; summary?: string }) {
+  async upsertOperation(input: { sessionId: string; operation: EditOperation; summary?: string }) {
+    return this.repository.upsertDraftOperation(input.sessionId, input.operation, input.summary);
+  }
+  async removeOperation(sessionId: string, operationId: string) {
+    return this.repository.removeDraftOperations(sessionId, [operationId]);
+  }
+  private async resolveEditPrompt(tool: ImageEditOperationType) {
+    if (!this.prompts || tool === "re_edit") return null;
+    const published = await this.prompts.listPublished("task_image");
+    const matching = published.find((item) => item.code === `image-editor.${tool}`);
+    if (!matching) throw new Error("IMAGE_EDIT_PROMPT_TEMPLATE_UNAVAILABLE");
+    const template = await this.prompts.getPublishedVersion(matching.templateVersionId, "task_image");
+    if (!template) throw new Error("IMAGE_EDIT_PROMPT_TEMPLATE_UNAVAILABLE");
+    return template;
+  }
+  async submit(input: {
+    sessionId: string; idempotencyKey: string; sourceCardId: string; sourceVersionId: string;
+    parentVersionId?: string; summary?: string; tool?: string; operationIds?: readonly string[];
+  }) {
     const existing = await this.repository.getSubmission(input.idempotencyKey);
     if (existing) return existing;
     if (!input.sourceCardId.trim() || !input.sourceVersionId.trim()) throw new Error("EDIT_SOURCE_VERSION_REQUIRED");
-    const draft = await this.repository.getDraft(input.sessionId); if (!draft || !draft.operations.length) throw new Error("EDIT_OPERATIONS_REQUIRED");
+    if (input.tool !== undefined && (!IMAGE_EDIT_TOOLS.some((tool) => tool === input.tool) || input.tool === "regenerate")) {
+      throw new Error("INVALID_IMAGE_EDIT_TOOL");
+    }
+    const draft = await this.repository.getDraft(input.sessionId);
+    const versionOperations = draft?.operations.filter((operation) => operation.sourceVersionId === input.sourceVersionId) ?? [];
+    const selected = new Set(input.operationIds);
+    const draftOperations = input.operationIds
+      ? versionOperations.filter((operation) => selected.has(operation.operationId))
+      : versionOperations.filter((operation) => !input.tool || operation.type === input.tool);
+    if (!draftOperations.length || (input.operationIds && draftOperations.length !== selected.size)) {
+      const duplicate = await this.repository.getSubmission(input.idempotencyKey);
+      if (duplicate) return duplicate;
+      throw new Error(draftOperations.length ? "EDIT_DRAFT_CHANGED" : "EDIT_OPERATIONS_REQUIRED");
+    }
+    const tool = input.tool ?? draftOperations[0].type;
+    if (draftOperations.some((operation) => operation.type !== tool)) throw new Error("MIXED_IMAGE_EDIT_TOOLS");
+    if (draftOperations.length > 1 && tool !== "add_text" && tool !== "change_text") {
+      throw new Error(tool === "redraw" || tool === "erase" ? "MULTIPLE_MASK_OPERATIONS_UNSUPPORTED" : "MULTIPLE_IMAGE_EDIT_OPERATIONS_UNSUPPORTED");
+    }
     if (this.validateSource && !(await this.validateSource(input.sourceCardId, input.sourceVersionId))) throw new Error("EDIT_SOURCE_NOT_FOUND");
     const source = await this.resolveSource(input.sourceVersionId); if (!source) throw new Error("SOURCE_VERSION_NOT_FOUND");
     const provider = await this.requireProvider();
     const sourcePrompt = source.generationPrompt ?? "";
-    const operations = await Promise.all(draft.operations.map(async (operation, i) => {
-      const payload = { ...operation.payload };
+    const operations = await Promise.all(draftOperations.map(async (operation, i) => {
+      if (!Object.hasOwn(EDIT_PAYLOAD_FIELDS, operation.type) || !operation.payload || typeof operation.payload !== "object" || Array.isArray(operation.payload)) {
+        throw new Error("INVALID_IMAGE_EDIT_OPERATION");
+      }
+      const payload = Object.fromEntries(EDIT_PAYLOAD_FIELDS[operation.type]
+        .filter((field) => Object.hasOwn(operation.payload, field))
+        .map((field) => [field, operation.payload[field]]));
       if (operation.type === "change_text") {
         const ocr = await this.repository.getOcrSnapshot(input.sessionId, input.sourceVersionId);
         if (ocr) {
@@ -435,7 +559,10 @@ export class ImageEditorService {
       }
       return { ...operation, order: i + 1, sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId, parentVersionId: input.parentVersionId ?? input.sourceVersionId, payload };
     }));
-    const caps = await provider.capabilities(); this.assertCapabilities(operations, caps); for (const operation of operations) this.validateOperation(operation);
+    const caps = await provider.capabilities();
+    this.assertCapabilities(operations, caps);
+    for (const operation of operations) this.validateOperation(operation);
+    const template = await this.resolveEditPrompt(operations[0].type);
     const materialized = await Promise.all(operations.map(async (operation) => {
       const payload = { ...operation.payload };
       if (operation.type === "outpaint") {
@@ -463,13 +590,27 @@ export class ImageEditorService {
       }
       return { ...operation, payload };
     }));
-    const summary = input.summary ?? draft.summary;
-    const orderedOperations = materialized.sort((a, b) => a.order - b.order);
-    const prompt = buildImageEditPrompt(orderedOperations, sourcePrompt);
-    const snapshot: EditSnapshot = { id: randomUUID(), sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId, parentVersionId: input.parentVersionId ?? input.sourceVersionId, summary, sourcePrompt, operations: structuredClone(materialized), provider: editProviderSnapshot(provider), createdAt: new Date().toISOString(), schemaVersion: "image-edit-snapshot-v1" };
+    const summary = input.summary ?? draftOperations.map((operation) => operation.summary).join("；");
+    const prompt = buildImageEditPrompt(materialized, sourcePrompt, template);
+    const snapshot: EditSnapshot = {
+      id: randomUUID(), sourceCardId: input.sourceCardId, sourceVersionId: input.sourceVersionId,
+      parentVersionId: input.parentVersionId ?? input.sourceVersionId, summary, sourcePrompt, tool: materialized[0].type,
+      attachedInputs: [], maskApplied: materialized.some((operation) => Boolean(operation.payload.mask)),
+      promptTemplateVersionId: template?.templateVersionId ?? null,
+      operations: structuredClone(materialized), provider: editProviderSnapshot(provider),
+      createdAt: new Date().toISOString(), schemaVersion: "image-edit-snapshot-v1",
+    };
     const taskId = randomUUID(); const now = new Date().toISOString(); const childTask: ImageEditChildTask = { id: taskId, sourceCardId: input.sourceCardId, sourceVersionId: snapshot.sourceVersionId, parentVersionId: snapshot.parentVersionId, snapshotId: snapshot.id, summary: snapshot.summary, status: "generating", currentVersionId: null, finalVersionId: null, errorCode: null, errorMessage: null, createdAt: now, updatedAt: now };
-    const attempt: ImageEditAttempt = { id: randomUUID(), childTaskId: taskId, snapshotId: snapshot.id, attemptNo: 1, status: "generating", command: { type: materialized[0].type, sourceVersionId: snapshot.sourceVersionId, prompt, operations: structuredClone(materialized) }, provider: snapshot.provider, errorCode: null, errorMessage: null, createdAt: now, completedAt: null };
-    const result = await this.repository.submit({ idempotencyKey: input.idempotencyKey, snapshot, childTask, attempt }); if (!result.duplicate) void this.execute(result.attempt, provider);
+    const command: ImageEditCommand = {
+      type: materialized[0].type, sourceVersionId: snapshot.sourceVersionId, prompt,
+      operations: snapshot.operations, attachedInputs: snapshot.attachedInputs, maskApplied: snapshot.maskApplied,
+    };
+    const attempt: ImageEditAttempt = { id: randomUUID(), childTaskId: taskId, snapshotId: snapshot.id, attemptNo: 1, status: "generating", command, provider: snapshot.provider, errorCode: null, errorMessage: null, createdAt: now, completedAt: null };
+    const result = await this.repository.submit({
+      idempotencyKey: input.idempotencyKey, snapshot, childTask, attempt,
+      submittedDraft: { sessionId: input.sessionId, operations: draftOperations },
+    });
+    if (!result.duplicate) void this.execute(result.attempt, provider);
     return result;
   }
   async retry(attemptId: string, idempotencyKey: string) {
@@ -495,7 +636,7 @@ export class ImageEditorService {
     return result;
   }
 
-  async regenerate(input: { childTaskId: string; idempotencyKey: string; summary?: string }) {
+  async regenerate(input: { childTaskId: string; idempotencyKey: string }) {
     const existing = await this.repository.getSubmission(input.idempotencyKey);
     if (existing) return existing;
     const task = await this.repository.getChildTask(input.childTaskId);
@@ -504,13 +645,21 @@ export class ImageEditorService {
     const snapshot = await this.repository.getSnapshot(task.snapshotId);
     if (!snapshot) throw new Error("INVALID_IMAGE_EDIT_SNAPSHOT");
     const provider = await this.requireProvider();
-    const source = await this.resolveSource(task.currentVersionId);
-    if (!source) throw new Error("CURRENT_VERSION_SOURCE_NOT_FOUND");
-    const operation: EditOperation = { ...snapshot.operations[0], type: "re_edit", sourceVersionId: task.currentVersionId, parentVersionId: task.currentVersionId, summary: input.summary ?? snapshot.summary };
-    const command: ImageEditCommand = { type: "re_edit", sourceVersionId: task.currentVersionId, prompt: input.summary ?? snapshot.summary, operations: [operation] };
+    if (!(await this.resolveSource(snapshot.sourceVersionId))) throw new Error("SOURCE_VERSION_NOT_FOUND");
+    const attempts = await this.repository.listAttempts(task.id);
+    const original = attempts[0];
+    if (!original || !snapshot.operations.length) throw new Error("INVALID_IMAGE_EDIT_SNAPSHOT");
+    const command: ImageEditCommand = {
+      ...original.command,
+      type: snapshot.tool ?? original.command.type,
+      sourceVersionId: snapshot.sourceVersionId,
+      operations: snapshot.operations,
+      attachedInputs: snapshot.attachedInputs ?? original.command.attachedInputs,
+      maskApplied: snapshot.maskApplied ?? original.command.maskApplied,
+    };
     const caps = await provider.capabilities();
     if (!caps.currentVersionInput || !caps.imageToImage) throw new Error("IMAGE_EDIT_CURRENT_VERSION_UNSUPPORTED");
-    const attempts = await this.repository.listAttempts(task.id);
+    this.assertCapabilities(command.operations, caps);
     const attempt: ImageEditAttempt = {
       id: randomUUID(), childTaskId: task.id, snapshotId: snapshot.id, attemptNo: attempts.length + 1,
       status: "generating", command, provider: editProviderSnapshot(provider), errorCode: null, errorMessage: null,

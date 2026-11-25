@@ -1076,6 +1076,9 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
     assert.equal(afterClear.versions.some((v) => v.isFinal), false);
 
     const editorRepo = new PostgresImageEditorRepository(pool);
+    assert.deepEqual(await editorRepo.getSourceVersion(version.id), {
+      objectKey: version.objectKey, mimeType: "image/png", generationPrompt: "PG 复刻提示词",
+    });
     const snapId = randomUUID();
     const childId = randomUUID();
     const editAttemptId = randomUUID();
@@ -1131,6 +1134,9 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
       mimeType: "image/png",
       completedAt: timestamp,
     });
+    assert.deepEqual(await editorRepo.getSourceVersion(completedEdit.version.id), {
+      objectKey: completedEdit.version.objectKey, mimeType: "image/png", generationPrompt: "测试编辑",
+    });
     await editorRepo.selectVersion(childId, completedEdit.version.id, "final");
     assert.equal((await editorRepo.getChildTask(childId))?.finalVersionId, completedEdit.version.id);
     await editorRepo.clearFinalVersions([childId]);
@@ -1143,16 +1149,64 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
   });
 });
 
+test("042 persists editor snapshot metadata and consumes only submitted drafts with the published edit prompt", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const editor = new PostgresImageEditorRepository(pool);
+    const prompts = new PostgresPromptRepository(pool);
+    const original = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.add_text");
+    assert.ok(original);
+    const draft = await prompts.copyVersion(original.templateVersionId);
+    assert.ok(draft);
+    await prompts.updateDraft(draft.templateVersionId, {
+      body: "保留图片中的商品和原有文字。",
+      userPromptTemplate: "只在{{region}}添加新文字「{{text}}」。",
+    });
+    await prompts.publishVersion(draft.templateVersionId);
+    await runMigrations(pool);
+    assert.equal((await prompts.getPublishedVersion(draft.templateVersionId, "task_image"))?.body, "保留图片中的商品和原有文字。");
+
+    const source = { bytes: Buffer.from("source"), width: 1024, height: 1024, mimeType: "image/png" };
+    const service = new ImageEditorService(editor, {
+      name: "fake", version: "1", capabilitiesVersion: "1",
+      capabilities: () => ({ addText: true, imageToImage: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
+      edit: async () => source,
+    }, new MemoryStorage(), async () => source, undefined, undefined, prompts);
+    const operation = {
+      operationId: "op1", type: "add_text" as const, order: 1, sourceCardId: "card",
+      sourceVersionId: "version-1", parentVersionId: "version-1", summary: "添加文字",
+      payload: { text: "样例", prompt: "保留原格式" },
+    };
+    await service.upsertOperation({ sessionId: "card", operation });
+    await service.upsertOperation({ sessionId: "card", operation: { ...operation, sourceVersionId: "version-2" } });
+    const result = await service.submit({
+      sessionId: "card", idempotencyKey: "042-editor-submit", sourceCardId: "card", sourceVersionId: "version-1",
+      tool: "add_text", operationIds: [operation.operationId],
+    });
+    assert.deepEqual((await editor.getDraft("card"))?.operations.map((item) => item.sourceVersionId), ["version-2"]);
+    const snapshot = await editor.getSnapshot(result.snapshot.id);
+    assert.equal(snapshot?.tool, "add_text");
+    assert.deepEqual(snapshot?.attachedInputs, []);
+    assert.equal(snapshot?.maskApplied, false);
+    assert.equal(snapshot?.promptTemplateVersionId, draft.templateVersionId);
+    assert.equal((await editor.getAttempt(result.attempt.id))?.command.prompt, "保留图片中的商品和原有文字。\n只在画面指定区域添加新文字「样例」。");
+    for (let i = 0; i < 30 && (await editor.getChildTask(result.childTask.id))?.status === "generating"; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal((await editor.getChildTask(result.childTask.id))?.status, "succeeded");
+  });
+});
+
 test("035 idempotently retires unused templates, preserves read-by-id & library filtering, and keeps active edit/publish working", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);
     const library = new PostgresLibraryRepository(pool);
 
-    // 1. After fresh migrations (001..039): reverse.* seeded in 018 are retired; replica.* upgraded by 036 and product.onboarding seeded by 039 stay published with usedBy
+    const editorCodes = ["image-editor.add_text", "image-editor.change_text", "image-editor.erase", "image-editor.outpaint", "image-editor.redraw"];
+    // Legacy reverse templates are retired; current replica, onboarding and editor templates remain published.
     const initialPublished = await prompts.listPublished();
     assert.deepEqual(
       initialPublished.map((item) => item.code).sort(),
-      ["product.onboarding", "replica.compose", "replica.high"],
+      [...editorCodes, "product.onboarding", "replica.compose", "replica.high"],
     );
     assert.equal(initialPublished.find((i) => i.code === "replica.compose")?.versionNo, 2);
     assert.equal(initialPublished.find((i) => i.code === "replica.high")?.versionNo, 2);
@@ -1200,6 +1254,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
         "general.category-prompt",
         "general.listing-copy",
         "general.structure-plan",
+        ...editorCodes,
         "product.onboarding",
         "replica.compose",
         "replica.high",
@@ -1208,12 +1263,12 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
 
     // Library repository filters published vs retired vs all accurately with usedBy
     const libPublished = await library.listResources({ resourceType: "prompt_template", status: "published", pageSize: 100 });
-    assert.equal(libPublished.items.length, 7);
+    assert.equal(libPublished.items.length, 7 + editorCodes.length);
     assert.ok(libPublished.items.every((item) => (item.usedBy?.length ?? 0) > 0));
     const libRetired = await library.listResources({ resourceType: "prompt_template", status: "retired", pageSize: 100 });
     assert.equal(libRetired.items.length, 13); // 10 reverse + 2 plan + 1 repair
     const libAll = await library.listResources({ resourceType: "prompt_template", pageSize: 100 });
-    assert.equal(libAll.items.length, 20);
+    assert.equal(libAll.items.length, 20 + editorCodes.length);
 
     // 3. Active template copy -> edit draft -> draft filtering -> publish flow works end-to-end in PG
     const baseRefine = activeAfterImport.find((i) => i.code === "general.base_refine")!;
@@ -1278,6 +1333,7 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
         "general.category-prompt",
         "general.listing-copy",
         "general.structure-plan",
+        ...editorCodes,
         "product.onboarding",
         "replica.compose",
         "replica.high",

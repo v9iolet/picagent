@@ -164,7 +164,7 @@ test("updates the two default preferences independently and protects their chann
 
 test("image options round-trip through channels and resolve with legacy model defaults", async () => {
   const { api, settings } = setup();
-  const imageOptions = { sizes: ["1K", "2K"], aspectRatios: ["1:1", "2:3"], sizeMode: "pixels" };
+  const imageOptions = { sizes: ["1K", "2K"], aspectRatios: ["1:1", "2:3"], sizeMode: "pixels", quality: "medium" };
   const created = await api.request("POST", path + "/channels", { body: {
     ...channel, models: [{ id: "gpt-image-2.5-flare-special", capabilities: ["image"], imageOptions }],
   } });
@@ -194,6 +194,7 @@ test("invalid image options are rejected without losing the saved capability con
     { sizes: ["8K"], aspectRatios: ["1:1"], sizeMode: "pixels" },
     { sizes: ["1K"], aspectRatios: ["0:3"], sizeMode: "pixels" },
     { sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "unknown" },
+    { sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "pixels", quality: "ultra" },
   ]) {
     assert.equal((await api.request("POST", path + "/channels", { body: { ...channel, models: [{ ...channel.models[0], imageOptions }] } })).status, 400);
   }

@@ -5,6 +5,7 @@
 UPDATE prompt_library.prompt_templates t
 SET published_version_id = NULL
 WHERE t.published_version_id IS NOT NULL
+  AND t.code NOT LIKE 'image-editor.%'
   AND (
     t.stage IN ('plan', 'task_image', 'reverse_prompt')
     OR EXISTS (
@@ -18,4 +19,8 @@ WHERE t.published_version_id IS NOT NULL
 UPDATE prompt_library.prompt_template_versions v
 SET status = 'retired'
 WHERE v.status = 'published'
-  AND v.stage IN ('plan', 'task_image', 'reverse_prompt');
+  AND v.stage IN ('plan', 'task_image', 'reverse_prompt')
+  AND NOT EXISTS (
+    SELECT 1 FROM prompt_library.prompt_templates t
+    WHERE t.id = v.template_id AND t.code LIKE 'image-editor.%'
+  );

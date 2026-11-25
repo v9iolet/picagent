@@ -446,7 +446,7 @@ test("默认生图模型：套图配置、新建任务与检查器可选七种�
   await card.getByText("9:16", { exact: true }).waitFor();
 });
 
-test("创作画布：移除卖点排版入口，未配 OCR 时可手工框选改文字并一键开始生成编辑子卡", async (t) => {
+test("创作画布：未配 OCR 时可手工改文字，切换工具保留草稿，提交只使用当前工具", async (t) => {
   const { api, url, page } = await offlineCanvas(t);
   const { suiteId } = await seedGeneratedCanvas(api, 2);
   await page.goto(url + `create/canvas/${suiteId}`);
@@ -458,17 +458,41 @@ test("创作画布：移除卖点排版入口，未配 OCR 时可手工框选改
   await page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit").first().click();
   const dialog = page.getByRole("dialog", { name: "图片编辑器" });
   await dialog.waitFor();
+  await dialog.getByLabel("版本详细提示词").fill("保留在重新编辑里的草稿");
+  await dialog.getByRole("button", { name: "添加到对话" }).click();
+  await dialog.getByRole("button", { name: "更新对话操作" }).waitFor();
 
   const changeTextTool = dialog.locator(".wb-editor-tools button", { hasText: "改文字" });
-  assert.equal(await changeTextTool.isDisabled(), false);
   await changeTextTool.click();
+  await dialog.getByRole("status").filter({ hasText: "切换前的草稿会保留" }).waitFor();
+  await dialog.getByText("已加入对话 0 项", { exact: true }).waitFor();
 
   await dialog.getByText(/当前未配置多模态识字模型/).waitFor();
   assert.doesNotMatch(await dialog.innerText(), /fetch failed/);
 
   await dialog.getByLabel("原文字").fill("旧卖点标题");
   await dialog.getByLabel("新文字").fill("65W 便携快充");
+  await dialog.getByRole("button", { name: "添加到对话" }).click();
+  await dialog.getByRole("button", { name: "更新对话操作" }).waitFor();
+  const reEditTool = dialog.locator(".wb-editor-tools button", { hasText: "重新编辑" });
+  await reEditTool.click();
+  assert.equal(await dialog.getByLabel("版本详细提示词").inputValue(), "保留在重新编辑里的草稿");
+  await changeTextTool.click();
+  assert.equal(await dialog.getByLabel("新文字").inputValue(), "65W 便携快充");
+  const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));
   await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
+  const response = await submitted;
+  assert.equal(response.status(), 202);
+  const selection = response.request().postDataJSON();
+  assert.equal(selection.tool, "change_text");
+  assert.equal(selection.operationIds.length, 1);
+  const draft = await api.request("GET", `/api/image-editor/sessions/${selection.sourceCardId}`);
+  assert.deepEqual(draft.body.data.operations.map((item) => item.type), ["re_edit"]);
+  assert.deepEqual((await response.json()).data.snapshot.operations[0].payload, {
+    originalText: "旧卖点标题", newText: "65W 便携快充",
+    region: { x: 0.36, y: 0.42, width: 0.28, height: 0.1, rotation: 0 },
+    prompt: "保持原有排版、字体感觉、颜色、透视和光影，只替换文字内容",
+  });
   await dialog.waitFor({ state: "hidden" });
 
   await page.locator(".wb-edit-child-card").first().waitFor();

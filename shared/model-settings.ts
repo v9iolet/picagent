@@ -1,9 +1,12 @@
 export type ModelCapability = "image" | "vision";
+export const IMAGE_QUALITIES = ["low", "medium", "high"] as const;
+export type ImageQuality = (typeof IMAGE_QUALITIES)[number];
 
 export interface ImageOptions {
   sizes: string[];
   aspectRatios: string[];
   sizeMode: "tier" | "pixels";
+  quality?: ImageQuality;
 }
 
 export function defaultImageOptions(modelId: string): ImageOptions {
@@ -24,6 +27,19 @@ export function resolveImageSize(size: string, ratio: string, sizeMode: ImageOpt
   if (!shortEdge || !width || !height || !Number.isFinite(width / height)) throw new Error("IMAGE_SIZE_UNSUPPORTED");
   const longEdge = 16 * Math.round(shortEdge * Math.max(width, height) / Math.min(width, height) / 16);
   return width >= height ? `${longEdge}x${shortEdge}` : `${shortEdge}x${longEdge}`;
+}
+
+export function resolveClosestImageSize(width: number, height: number, options: ImageOptions): string {
+  let closest: { size: string; ratio: string; distance: number } | undefined;
+  for (const size of options.sizes) {
+    for (const ratio of options.aspectRatios) {
+      const [candidateWidth, candidateHeight] = resolveImageSize(size, ratio, "pixels").split("x").map(Number);
+      const distance = Math.hypot(Math.log(candidateWidth / width), Math.log(candidateHeight / height));
+      if (!closest || distance < closest.distance) closest = { size, ratio, distance };
+    }
+  }
+  if (!closest || !Number.isFinite(closest.distance)) throw new Error("IMAGE_SIZE_UNSUPPORTED");
+  return resolveImageSize(closest.size, closest.ratio, options.sizeMode);
 }
 
 export interface ChannelModel {
