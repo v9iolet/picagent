@@ -663,6 +663,8 @@ body:has(.suite-mode-switch button:nth-child(2).active) .flow-version-row { padd
 .wb-mask-mode button.is-active:hover:not(:disabled),
 .ss-layout .wb-mask-mode button.is-active:hover:not(:disabled) { border-color:#27272A; background:#27272A; color:#FFFFFF; }
 .wb-editor-options textarea { min-height:88px; resize:vertical; border:1px solid var(--suite-line); border-radius:6px; background:#fff; padding:8px; color:var(--suite-ink); font:inherit; line-height:1.5; }
+.wb-editor-source-prompt summary { cursor:pointer; }
+.wb-editor-source-prompt p { margin-top:7px; white-space:pre-wrap; overflow-wrap:anywhere; }
 .wb-editor-option-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .wb-editor-option-head button, .wb-danger-link { min-height:30px; border:1px solid var(--suite-line); border-radius:6px; background:#fff; color:var(--suite-ink); padding:0 8px; font:inherit; font-size:10px; }
 .wb-danger-link { color:#9b3636; }
