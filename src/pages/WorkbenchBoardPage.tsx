@@ -764,7 +764,7 @@ export function ImageEditorModal({
   const [brush, setBrush] = useState(42);
   const [expand, setExpand] = useState("all");
   const [ratio, setRatio] = useState("original");
-  const [instruction, setInstruction] = useState(() => versionGenerationPrompt(version, task.promptDraft));
+  const [instruction, setInstruction] = useState("");
   const [addTextPrompt, setAddTextPrompt] = useState("");
   const [redrawPrompt, setRedrawPrompt] = useState("");
   const [erasePrompt, setErasePrompt] = useState("移除选区中的目标，并根据周围画面自然补全背景，保持原有光线、纹理和透视关系");
@@ -1063,7 +1063,7 @@ export function ImageEditorModal({
     };
     switch (type) {
       case "re_edit":
-        return operation("重新编辑提示词", { prompt: instruction });
+        return operation("AI 改图", { prompt: instruction });
       case "add_text":
         return operation(`添加文本：${text}`, { text, region: textRegion, prompt: addTextPrompt });
       case "redraw":
@@ -1080,7 +1080,6 @@ export function ImageEditorModal({
   };
 
   const validationError = () => {
-    if (tool === "re_edit" && !instruction.trim()) return "请填写编辑提示词";
     if (tool === "add_text" && (!text.trim() || !addTextPrompt.trim())) return "请填写精确文字和添加文字要求";
     if (tool === "inpaint" && (!strokes.length || !redrawPrompt.trim())) return "请绘制选区并填写重绘要求";
     if (tool === "erase" && !strokes.length) return "请先绘制要清除的选区";
@@ -1284,7 +1283,7 @@ export function ImageEditorModal({
   };
 
   const toolList: Array<[EditTool, string, string]> = [
-    ["re_edit", "重新编辑", "imageToImage"],
+    ["re_edit", "AI 改图", "imageToImage"],
     ["regenerate", "再次生成", "currentVersionInput"],
     ["add_text", "添加文本", "addText"],
     ["change_text", "编辑文字", "changeText"],
@@ -1484,7 +1483,23 @@ export function ImageEditorModal({
             </div>
           </div>
           <aside className="wb-editor-options">
-            {tool === "re_edit" && <label>版本详细提示词<textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} /></label>}
+            {tool === "re_edit" && (
+              <>
+                <label>
+                  调整要求
+                  <textarea
+                    value={instruction}
+                    disabled={loadingDraft || saving}
+                    onChange={(event) => setInstruction(event.target.value)}
+                    placeholder="输入调整要求（选填，空着将按原提示词重绘）。如：商品向左移动一点，换成浅灰色背景…"
+                  />
+                </label>
+                <details className="wb-editor-source-prompt">
+                  <summary>原提示词</summary>
+                  <p>{versionGenerationPrompt(version) || "暂无原提示词"}</p>
+                </details>
+              </>
+            )}
             {tool === "add_text" && (
               <>
                 <div className="wb-editor-option-head">
@@ -1652,7 +1667,7 @@ export function ImageEditorModal({
                   || (tool === "restore_product" && (uploadingRestoreInput || (!restoreInput && !productInputs.length)))}
                 onClick={() => void submit()}
               >
-                {saving ? "提交中…" : tool === "restore_product" ? "还原商品" : "开始生成（新建编辑子卡）"}
+                {saving ? "提交中…" : tool === "re_edit" ? "生成" : tool === "restore_product" ? "还原商品" : "开始生成（新建编辑子卡）"}
               </button>
             )}
           </footer>

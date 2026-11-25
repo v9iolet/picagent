@@ -424,6 +424,8 @@ const EDIT_PAYLOAD_FIELDS: Record<ImageEditOperationType, readonly string[]> = {
 };
 
 const IMAGE_EDIT_PROMPT_HEADER = "严格保持输入图片中的商品主体外观、结构比例、材质细节、光影色调、背景构图及未指定修改的文字与元素不变，仅执行以下局部修改：";
+const RE_EDIT_PROMPT_HEADER = "严格保持待编辑图中未指定修改的商品主体外观、结构比例、材质细节、光影色调、背景构图、文字与元素不变。";
+const RE_EDIT_INSTRUCTION = "只执行以下修改：{{instruction}}";
 const CHANGE_TEXT_INSTRUCTION = "仅编辑下列文字。按原文字和位置找到每一条，准确替换为 newText，保持原有排版、字体风格、颜色、透视与光影。newText 为空时移除原文字，用周围背景自然填补，延续纹理和光影。坐标相对整张图归一化，以左上角为原点。";
 const RESTORE_PRODUCT_HEADER = "仅修正待编辑图中的商品外观，保持原图的构图、背景、文字、版式和光影不变。";
 const IMAGE_EDIT_INSTRUCTIONS = {
@@ -477,7 +479,14 @@ export function buildImageEditPrompt(
   template?: { body: string; userPromptTemplate: string } | null,
 ): string {
   if (operations.length === 1 && operations[0].type === "re_edit") {
-    return String(operations[0].payload.prompt ?? sourcePrompt);
+    const prompt = operations[0].payload.prompt;
+    const instruction = typeof prompt === "string" ? prompt.trim() : "";
+    if (!instruction) return sourcePrompt;
+    const wrapper = template?.userPromptTemplate || RE_EDIT_INSTRUCTION;
+    const modification = wrapper.includes("{{instruction}}")
+      ? wrapper.replaceAll("{{instruction}}", () => instruction)
+      : `${wrapper}\n${instruction}`;
+    return [template?.body ?? RE_EDIT_PROMPT_HEADER, modification].join("\n");
   }
   if (operations[0]?.type === "change_text") return buildChangeTextPrompt(operations, template);
   const instructions = operations.map((operation, index) => {
@@ -665,8 +674,8 @@ export class ImageEditorService {
   async removeOperation(sessionId: string, operationId: string) {
     return this.repository.removeDraftOperations(sessionId, [operationId]);
   }
-  private async resolveEditPrompt(tool: ImageEditOperationType) {
-    if (!this.prompts || tool === "re_edit") return null;
+  private async resolveEditPrompt(tool: ImageEditOperationType, instruction: unknown) {
+    if (!this.prompts || (tool === "re_edit" && (typeof instruction !== "string" || !instruction.trim()))) return null;
     const published = await this.prompts.listPublished("task_image");
     const matching = published.find((item) => item.code === `image-editor.${tool}`);
     if (!matching) throw new Error("IMAGE_EDIT_PROMPT_TEMPLATE_UNAVAILABLE");
@@ -733,7 +742,7 @@ export class ImageEditorService {
     const attachedInputs = operationType === "restore_product"
       ? await this.resolveRestoreInputs(input.sessionId, source, operations[0])
       : ["re_edit", "redraw", "outpaint"].includes(operationType) ? source.productInputs ?? [] : [];
-    const template = await this.resolveEditPrompt(operationType);
+    const template = await this.resolveEditPrompt(operationType, operations[0].payload.prompt);
     const materialized = await Promise.all(operations.map(async (operation) => {
       const payload = { ...operation.payload };
       if (operation.type === "restore_product") {
@@ -856,8 +865,11 @@ export class ImageEditorService {
     if (!operation.sourceVersionId || !operation.parentVersionId) throw new Error("EDIT_SOURCE_VERSION_REQUIRED");
     const region = operation.payload.region;
     if (region && typeof region === "object") this.validateRect(region as Record<string, unknown>);
+    if (operation.type === "re_edit" && operation.payload.prompt !== undefined && typeof operation.payload.prompt !== "string") {
+      throw new Error("RE_EDIT_PROMPT_INVALID");
+    }
     const prompt = typeof operation.payload.prompt === "string" ? operation.payload.prompt.trim() : "";
-    if (["re_edit", "add_text", "redraw", "erase"].includes(operation.type) && !prompt) throw new Error(`${operation.type.toUpperCase()}_PROMPT_REQUIRED`);
+    if (["add_text", "redraw", "erase"].includes(operation.type) && !prompt) throw new Error(`${operation.type.toUpperCase()}_PROMPT_REQUIRED`);
     if (["redraw", "erase"].includes(operation.type)) {
       if (!Array.isArray(operation.payload.strokes) || !operation.payload.strokes.length) throw new Error("MASK_STROKES_REQUIRED");
       for (const stroke of operation.payload.strokes) {

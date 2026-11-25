@@ -85,16 +85,16 @@ test("layout saves are serialized and advance the server version between request
   assert.match(source, /layoutVersionRef\.current = saved\.layoutVersion/);
 });
 
-test("generated images open an editor with the seven V1 image-edit tools", async () => {
+test("generated images open an editor with the image-edit tools", async () => {
   const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
   const css = await readFile("public/assets/suite-workbench.css", "utf8");
-  for (const label of ["添加文本", "编辑文字", "局部重绘", "消除笔", "扩图", "重新编辑", "再次生成"]) assert.match(source, new RegExp(label));
+  for (const label of ["添加文本", "编辑文字", "局部重绘", "消除笔", "扩图", "AI 改图", "再次生成", "商品还原"]) assert.match(source, new RegExp(label));
   assert.doesNotMatch(source, /画面微调/);
   assert.doesNotMatch(source, /超清/);
   assert.match(source, /ImageEditorModal/);
   assert.match(source, /MaskStroke/);
   assert.match(source, /onMouseDown={startStroke}/);
-  assert.match(source, /编辑提示词/);
+  assert.match(source, /<summary>原提示词<\/summary>/);
   assert.match(source, /\{\s*tool: activeOperationType,\s*sourceVersionId: version\.id,\s*operationIds:/);
   assert.match(css, /\.wb-editor-backdrop \{ position: fixed;/);
   assert.match(css, /\.wb-editor-canvas svg \{ position:absolute;/);
