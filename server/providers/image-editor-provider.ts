@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { resolveClosestImageSize, type ImageOptions } from "../../shared/model-settings.js";
+import { selectAplusGenerationSize } from "../aplus/aplus-image.js";
 import type { ImageEditCommand, ImageSource, MaskSnapshot, OutpaintSpec } from "../image-editor.js";
 import type { ImageProvider, StorageAdapter } from "../types.js";
 
@@ -15,7 +16,9 @@ export async function requestImageEditorEdit(
   const outpaint = command.operations.find((operation) => operation.type === "outpaint")?.payload as OutpaintSpec | undefined;
   // Older snapshots omit the offset and replay with their original input.
   const canvas = outpaint?.sourceOffset ? outpaint : undefined;
-  const size = resolveClosestImageSize(source.width, source.height, options, canvas?.targetRatio);
+  const size = source.aplus && !outpaint
+    ? selectAplusGenerationSize(source.aplus.preset, source.aplus.resolution, options).size
+    : resolveClosestImageSize(source.width, source.height, options, canvas?.targetRatio);
   let input = source;
   if (canvas) {
     const { left, top } = canvas.sourceOffset;

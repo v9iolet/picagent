@@ -18,6 +18,7 @@ import { MemoryTaskRepository } from "../server/repositories/memory-task-reposit
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { waitUntil } from "../server/suite-pipeline.js";
 import type { ImageEditRequest, TaskImageVersion } from "../server/types.js";
+import { readZipEntries } from "../server/zip.js";
 
 const fakeSize = { width: 120, height: 80 };
 const modules = ["hero", "selling_points", "usage_scene"];
@@ -36,7 +37,7 @@ function checkError(response: AppResponse, status: number, code: string) {
   assert.equal(response.body.error.code, code);
 }
 
-async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?: (call: number) => Promise<void>) {
+async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?: (call: number) => Promise<Buffer | void>) {
   const repository = new MemorySuiteRepository();
   const pipelines = new MemoryPipelineRepository();
   const tasks = new MemoryTaskRepository();
@@ -67,8 +68,8 @@ async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?:
       supportsMultipleImages: true,
       async edit(request) {
         calls.push(request);
-        await beforeImage?.(calls.length);
-        return { bytes: generated, mimeType: "image/png" };
+        const bytes = await beforeImage?.(calls.length);
+        return { bytes: bytes ?? generated, mimeType: "image/png" };
       },
     },
     llmClient: {
@@ -222,6 +223,7 @@ test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿�
   assert.match(f.calls.at(-1)!.prompt, /单卡人工补充：保留磨砂纹理/);
   assert.equal((await f.tasks.getTask(task.id))?.promptDraft, task.promptDraft);
   await assertDelivery(current);
+  await f.tasks.selectVersion(task.id, first.id, "final");
 
   let sourceCardId = task.id;
   let sourceVersionId = current.id;
@@ -250,6 +252,92 @@ test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿�
   const state = data<{ cards: Array<{ versionId: string; deliveryObjectKey: string; deliverySize: unknown }> }>(await f.app.request("GET", `${f.path}/studio-state`));
   assert.equal(state.cards[0].versionId, sourceVersionId);
   assert.deepEqual(await dimensions(f.storage, state.cards[0].deliveryObjectKey), expected);
+});
+
+test("A+ 结果顺序持久化到两端，长图和 ZIP 按该顺序使用交付图", async () => {
+  const colors = ["red", "blue", "lime"];
+  const f = await fixture(premiumPresets, async (call) => sharp({
+    create: { ...fakeSize, channels: 3, background: colors[Math.floor((call - 1) / 2)] },
+  }).png().toBuffer());
+  data(await f.confirm(), 202);
+  assert.equal((await f.waitForRun())?.status, "completed");
+  const order = (next: string[]) => f.app.request("PATCH", `${f.path}/order`, { body: { modules: next } });
+  checkError(await order(["hero", "hero"]), 400, "APLUS_INVALID_MODULES");
+  checkError(await order(["hero", "usage_scene"]), 409, "APLUS_RESULT_ORDER_CHANGED");
+  const sortedModules = ["usage_scene", "hero", "selling_points"];
+  assert.deepEqual(data(await order(sortedModules)), { modules: sortedModules });
+  const tasks = await f.tasks.listTasks(f.suiteId);
+  for (const key of premiumPresets) {
+    assert.deepEqual(tasks.filter(({ sizePreset }) => sizePreset === key).map(({ sortOrder }) => sortOrder), [2, 3, 1]);
+  }
+  const studio = data<{ cards: Array<{ moduleCode: string; sizePreset: string; sortOrder: number }> }>(
+    await f.app.request("GET", `${f.path}/studio-state`),
+  );
+  for (const key of premiumPresets) {
+    assert.deepEqual(studio.cards.filter(({ sizePreset }) => sizePreset === key).map(({ moduleCode }) => moduleCode), sortedModules);
+  }
+
+  checkError(await f.app.request("GET", `${f.path}/long-image?preset=1%3A1`), 400, "APLUS_INVALID_SIZE_PRESETS");
+  const exportResult = await f.app.request("GET", `${f.path}/export`);
+  assert.equal(exportResult.status, 200);
+  assert.equal(exportResult.headers?.["content-type"], "application/zip");
+  const zip = readZipEntries(exportResult.raw!);
+  const manifest = JSON.parse(zip.get("manifest.json")!.toString());
+  assert.deepEqual(manifest.groups.map(({ sizePreset }: { sizePreset: string }) => sizePreset), premiumPresets);
+  assert.equal(zip.size, 9);
+  for (const [index, preset] of premiumPresets.entries()) {
+    const { width, height } = APLUS_SIZE_PRESETS[preset].deliverySize;
+    const response = await f.app.request("GET", `${f.path}/long-image?preset=${preset}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers?.["cache-control"], "no-store");
+    const { data: pixels, info } = await sharp(response.raw!).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    assert.deepEqual([info.width, info.height], [width, height * 3]);
+    const firstPixels = [0, 1, 2].map((slice) => {
+      const offset = slice * height * width * info.channels;
+      return [...pixels.subarray(offset, offset + 3)];
+    });
+    assert.deepEqual(firstPixels, [[0, 255, 0], [255, 0, 0], [0, 0, 255]]);
+    const group = manifest.groups[index];
+    assert.deepEqual(group.longImage, { path: `${preset}/long-image.png`, width, height: height * 3 });
+    assert.deepEqual(zip.get(group.longImage.path), response.raw);
+    assert.deepEqual(group.items.map(({ moduleCode, sortOrder, generatedSize, deliverySize, path }: typeof group.items[number]) =>
+      [moduleCode, sortOrder, generatedSize, deliverySize, path]), sortedModules.map((code, itemIndex) =>
+      [code, itemIndex + 1, fakeSize, { width, height }, `${preset}/0${itemIndex + 1}_${code}.png`]));
+    for (const item of group.items) {
+      const { versions: [version] } = await f.tasks.listTaskVersions(item.taskId);
+      assert.deepEqual(zip.get(item.path), (await f.storage.get(version.deliveryObjectKey!))?.bytes);
+    }
+  }
+
+  const [failed] = tasks;
+  await f.tasks.updateTask(failed.id, { status: "failed" });
+  const partialZip = readZipEntries((await f.app.request("GET", `${f.path}/export`)).raw!);
+  const partial = JSON.parse(partialZip.get("manifest.json")!.toString());
+  const failedItem = partial.groups[0].items.find(({ taskId }: { taskId: string }) => taskId === failed.id);
+  assert.equal(failedItem.skippedReason, "failed");
+  assert.equal(failedItem.path, null);
+  assert.equal(partial.groups[0].longImage.height, 1200);
+  assert.equal(partial.groups[1].longImage.height, 1350);
+});
+
+test("通用比例长图按最宽的交付图等比拼接，ZIP 单图保留各自尺寸", async () => {
+  const sizes = [{ width: 64, height: 64 }, { width: 96, height: 96 }, { width: 128, height: 128 }];
+  const f = await fixture(["1:1"], async (call) => sharp({
+    create: { ...sizes[call - 1], channels: 3, background: "navy" },
+  }).png().toBuffer());
+  data(await f.confirm(), 202);
+  assert.equal((await f.waitForRun())?.status, "completed");
+  const response = await f.app.request("GET", `${f.path}/long-image?preset=1%3A1`);
+  assert.equal(response.status, 200);
+  const { width, height } = await sharp(response.raw!).metadata();
+  assert.deepEqual({ width, height }, { width: 128, height: 384 });
+  const zip = readZipEntries((await f.app.request("GET", `${f.path}/export`)).raw!);
+  const manifest = JSON.parse(zip.get("manifest.json")!.toString());
+  for (const [index, item] of manifest.groups[0].items.entries()) {
+    assert.deepEqual(item.deliverySize, sizes[index]);
+    const { width, height } = await sharp(zip.get(item.path)!).metadata();
+    assert.deepEqual({ width, height }, sizes[index]);
+  }
 });
 
 test("A+ 单卡重绘拒绝非文本及超过 500 字的附加提示词", async () => {
@@ -286,6 +374,9 @@ test("通用比例沿用生成图，续跑跳过当前版本及原样保留请�
     const { versions: [completed] } = await f.tasks.listTaskVersions(first.id);
     assert.deepEqual(completed.deliverySize, fakeSize);
     assert.equal(completed.deliveryObjectKey, completed.objectKey);
+    const partial = readZipEntries((await f.app.request("GET", `${f.path}/export`)).raw!);
+    const manifest = JSON.parse(partial.get("manifest.json")!.toString());
+    assert.deepEqual(manifest.groups[0].items.map(({ skippedReason }: { skippedReason: string | null }) => skippedReason), [null, "no_version", "no_version"]);
     const [originalBatch] = await f.tasks.listBatches(f.suiteId);
     assert.equal(originalBatch.status, "running");
     await f.pipelines.updateRun(f.runId, { status: "failed", errorCode: "PIPELINE_INTERRUPTED" });

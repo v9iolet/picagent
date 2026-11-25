@@ -664,7 +664,7 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
     const pipelines = new PostgresPipelineRepository(pool);
     const platforms = new PostgresPlatformRepository(pool);
     const storage = new MemoryStorage();
-    const app = createSuiteStudioApp({ repository: suites, storage, platformRepository: platforms });
+    const app = createSuiteStudioApp({ repository: suites, storage, platformRepository: platforms, taskRepository: tasks });
     const response = await app.request("GET", "/api/platforms");
     assert.equal(response.status, 200);
     const profiles: Awaited<ReturnType<typeof platforms.listEnabled>> = response.body.data;
@@ -695,8 +695,8 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
     const taskRow = {
       id: taskId, suiteId: suite.id, planSnapshotId: null, planItemId: null, ordinal: 1,
       title: "首屏主视觉", purpose: "展示商品", promptDraft: "提示词", sourceInputImageId: null, promptRevision: 1,
-      generationParams: { size: "1K", requestSize: "1664x1024" }, archivedAt: null,
-      moduleCode: "hero", sizePreset: "aplus_standard", sortOrder: 1, imageType: "detail", originKind: "aplus",
+      generationParams: { size: "1K", requestSize: "2496x1024" }, archivedAt: null,
+      moduleCode: "hero", sizePreset: "aplus_premium_web", sortOrder: 1, imageType: "detail", originKind: "aplus",
       status: "pending", createdAt: timestamp, updatedAt: timestamp,
     } as const;
     await tasks.createAplusTasks([taskRow]);
@@ -705,8 +705,19 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
     const task = await tasks.getTask(taskId);
     assert.equal(task?.originKind, "aplus");
     assert.equal(task.moduleCode, "hero");
-    assert.equal(task.sizePreset, "aplus_standard");
+    assert.equal(task.sizePreset, "aplus_premium_web");
     assert.equal(task.sortOrder, 1);
+    await tasks.createAplusTasks([
+      { ...taskRow, id: randomUUID(), ordinal: 2, sortOrder: 2, sizePreset: "aplus_premium_mobile" },
+      { ...taskRow, id: randomUUID(), ordinal: 3, sortOrder: 3, moduleCode: "usage_scene" },
+      { ...taskRow, id: randomUUID(), ordinal: 4, sortOrder: 4, moduleCode: "usage_scene", sizePreset: "aplus_premium_mobile" },
+    ]);
+    const orderPath = `/api/aplus/${suite.id}/order`;
+    assert.equal((await app.request("PATCH", orderPath, { body: { modules: ["hero"] } })).status, 409);
+    assert.deepEqual((await tasks.listTasks(suite.id)).map(({ sortOrder }) => sortOrder), [1, 2, 3, 4]);
+    const reordered = await app.request("PATCH", orderPath, { body: { modules: ["usage_scene", "hero"] } });
+    assert.equal(reordered.status, 200, JSON.stringify(reordered.body));
+    assert.deepEqual((await tasks.listTasks(suite.id)).map(({ sortOrder }) => sortOrder), [2, 2, 1, 1]);
     const { run } = await pipelines.createRun({ ...runningPipeline(suite.id), currentPhase: "aplus_planning" });
     assert.equal(run.currentPhase, "aplus_planning");
     const awaiting = await pipelines.updateRun(run.id, {
@@ -744,8 +755,8 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
         errorCode: null, errorMessage: null, externalRequestId: null, startedAt: timestamp, finishedAt: null,
       }],
     });
-    const generatedSize = { width: 1024, height: 640 };
-    const deliverySize = { width: 970, height: 600 };
+    const generatedSize = { width: 2496, height: 1024 };
+    const deliverySize = { width: 1464, height: 600 };
     const { version } = await tasks.completeAttempt({
       attemptId, slotId, taskId, completedAt: timestamp, processObjectKeys: [], sha256: "b".repeat(64),
       objectKey: "generated.png", mimeType: "image/png", ...generatedSize,
@@ -808,6 +819,7 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
       [["source", original], ...productBytes.map((bytes) => ["product", bytes])],
     ]);
     assert.match(editorCalls[0].prompt, /^第 1 张为待编辑图，其余为商品外观依据/);
+    assert.equal(editorCalls[0].size, "2496x1024");
     assert.deepEqual((await editor.getSourceVersion(editedImage.id))?.productInputs, normalizedProducts);
     assert.deepEqual(editedImage.generatedSize, generatedSize);
     assert.deepEqual(editedImage.deliverySize, deliverySize);
@@ -816,6 +828,27 @@ test("A+ 商品还原从 PG 版本快照读取全部商品原图并精确裁切�
     assert.ok(delivery);
     const { width, height } = await sharp(delivery.bytes).metadata();
     assert.deepEqual({ width, height }, deliverySize);
+
+    for (const [type, payload] of [
+      ["change_text", { originalText: "旧文案", newText: "新文案", region: { x: 0.1, y: 0.1, width: 0.4, height: 0.2 } }],
+      ["re_edit", { prompt: "调整背景" }],
+    ] as const) {
+      await service.upsertOperation({ sessionId: `aplus-${type}`, operation: {
+        type, payload, operationId: type, order: 1, summary: type,
+        sourceCardId: childId, sourceVersionId: editedImage.id, parentVersionId: editedImage.id,
+      } });
+      const edited = await service.submit({
+        sessionId: `aplus-${type}`, idempotencyKey: `aplus-${type}`, sourceCardId: childId, sourceVersionId: editedImage.id, tool: type,
+      });
+      const result = await waitUntil(() => service.getTask(edited.childTask.id), (task) => task?.task.status !== "generating", 5_000);
+      assert.equal(result?.task.status, "succeeded", result?.task.errorCode ?? undefined);
+      const replay = await service.regenerate({ childTaskId: edited.childTask.id, idempotencyKey: `aplus-${type}-regenerate` });
+      const regenerated = await waitUntil(() => service.getTask(replay.childTask.id), (task) => task?.task.status !== "generating", 5_000);
+      assert.equal(regenerated?.task.status, "succeeded", regenerated?.task.errorCode ?? undefined);
+      assert.equal(regenerated?.versions.length, 2);
+      assert.deepEqual(regenerated?.versions[0].deliverySize, deliverySize);
+    }
+    assert.deepEqual(editorCalls.map(({ size }) => size), Array(5).fill("2496x1024"));
 
     const previewTasks = [
       { path: "/api/suite-tasks", taskId, versionId: version.id },

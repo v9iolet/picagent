@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ComponentProps } from "react";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { suiteApi } from "../../api/client";
 import { ImageEditorModal } from "../../pages/WorkbenchBoardPage";
@@ -74,12 +74,14 @@ export function useResultJob(
 
 export function StudioImageEditorHost({
   card,
+  initialTool,
   onClose,
   onEditJobStarted,
   onRetryJobStarted,
   onNotify,
 }: {
   card: ResolvedDeliverySlot | null;
+  initialTool?: ComponentProps<typeof ImageEditorModal>["initialTool"];
   onClose: () => void;
   onEditJobStarted: (childTaskId: string, parentTaskId: string) => void;
   onRetryJobStarted: (batchId: string, parentTaskId: string) => void;
@@ -91,6 +93,7 @@ export function StudioImageEditorHost({
   return (
     <ImageEditorModal
       key={card.versionId}
+      initialTool={initialTool}
       task={{ id: targetTaskId, title: card.title, promptDraft: card.promptText }}
       version={{
         id: card.versionId,

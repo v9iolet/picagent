@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { AplusModuleCode } from "../../shared/aplus.js";
 import type { CanvasLayout, CompleteTaskAttemptInput, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskPreviewVersion, TaskRepository, TaskResultSlot } from "../types.js";
 
 export class MemoryTaskRepository implements TaskRepository {
@@ -9,6 +10,15 @@ export class MemoryTaskRepository implements TaskRepository {
     for (const task of tasks) {
       if (!this.tasks.has(task.id)) this.tasks.set(task.id, structuredClone(task));
     }
+  }
+  async reorderAplusModules(suiteId: string, modules: AplusModuleCode[]) {
+    const active = [...this.tasks.values()].filter((task) => task.suiteId === suiteId && task.originKind === "aplus" && task.status !== "archived");
+    const actual = new Set(active.map((task) => task.moduleCode));
+    if (!active.length || actual.size !== modules.length || modules.some((code) => !actual.has(code))) return false;
+    const order = new Map(modules.map((code, index) => [code, index + 1]));
+    const updatedAt = new Date().toISOString();
+    for (const task of active) this.tasks.set(task.id, { ...task, sortOrder: order.get(task.moduleCode!)!, updatedAt });
+    return true;
   }
   async createCustomTask(input: { suiteId: string; planSnapshotId: string | null; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }) {
     if (input.idempotencyKey) {

@@ -111,6 +111,10 @@ export const aplusApi = {
   confirm: (id: string, body: AplusPayload, key: string) =>
     write<AplusRun>(`${path(id)}/confirm`, body, "POST", key),
   resume: (id: string, key: string) => write<AplusRun>(`${path(id)}/resume`, {}, "POST", key),
+  reorder: (id: string, modules: AplusModuleCode[]) => write(`${path(id)}/order`, { modules }, "PATCH"),
+  longImageUrl: (id: string, preset: AplusSizePresetKey, revision?: string) =>
+    `${path(id)}/long-image?${new URLSearchParams({ preset, ...(revision ? { revision } : {}) })}`,
+  zipUrl: (id: string) => `${path(id)}/export`,
   redraw: (taskId: string, additionalPrompt: string) =>
     write<{ batchId: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { additionalPrompt }),
 };

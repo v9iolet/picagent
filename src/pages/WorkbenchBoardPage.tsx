@@ -739,6 +739,7 @@ export type ImageEditorVersionInput = Pick<
 export function ImageEditorModal({
   task,
   version,
+  initialTool = "re_edit",
   onClose,
   onSubmit,
   onOperationAdded,
@@ -746,12 +747,13 @@ export function ImageEditorModal({
 }: {
   task: ImageEditorTaskInput;
   version: ImageEditorVersionInput;
+  initialTool?: EditTool;
   onClose: () => void;
   onSubmit: (selection: ApiImageEditSelection, instruction: string) => Promise<void>;
   onOperationAdded?: (operation: DraftOperation, instruction: string) => Promise<void>;
   onRegenerate?: () => Promise<void>;
 }) {
-  const [tool, setTool] = useState<EditTool>("re_edit");
+  const [tool, setTool] = useState<EditTool>(initialTool);
   const [strokes, setStrokes] = useState<MaskStroke[]>([]);
   const [activeStroke, setActiveStroke] = useState<MaskStroke | null>(null);
   const [maskMode, setMaskMode] = useState<"draw" | "erase">("draw");
