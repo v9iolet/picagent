@@ -59,7 +59,7 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
     name: "openai-compatible-image",
     version: selected.model,
     channel: selected.source,
-    capabilitiesVersion: "v1",
+    capabilitiesVersion: "v2",
     capabilities: () => ({
       imageToImage: process.env.IMAGE_EDITOR_IMAGE_TO_IMAGE !== "false",
       addText: process.env.IMAGE_EDITOR_ADD_TEXT !== "false",

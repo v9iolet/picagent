@@ -3,7 +3,8 @@ import { ok, type AppResponse } from "./api-response.js";
 import { formatOcrErrorMessage, type ImageEditorService, type ImageEditVersionCompletedListener } from "./image-editor.js";
 
 export type ImageEditorApiResponse = AppResponse;
-const restoreInputErrors: Record<string, string> = {
+const editErrors: Record<string, string> = {
+  MASK_SELECTION_REQUIRED: "请先在图片上绘制要编辑的区域",
   RESTORE_PRODUCT_REFERENCE_REQUIRED: "请上传一张商品外观依据图",
   RESTORE_PRODUCT_REFERENCE_INVALID: "这张依据图不适用于当前图片，请重新选择或上传",
   RESTORE_PRODUCT_IMAGE_INVALID: "请选择有效的 PNG、JPG 或 WebP 图片",
@@ -14,7 +15,7 @@ const fail = (code: string, status = 400): ImageEditorApiResponse => {
     const purpose = code === "OCR_PROVIDER_UNAVAILABLE" ? "多模态" : "生图";
     return { status: 503, body: { error: { code, message: `请前往配置 → 偏好设置，选择默认${purpose}模型` }, requestId: randomUUID() } };
   }
-  return { status, body: { error: { code, message: restoreInputErrors[code] ?? code }, requestId: randomUUID() } };
+  return { status, body: { error: { code, message: editErrors[code] ?? code }, requestId: randomUUID() } };
 };
 
 export function createImageEditorApi(service: ImageEditorService) {

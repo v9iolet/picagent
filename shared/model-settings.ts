@@ -29,7 +29,7 @@ export function resolveImageSize(size: string, ratio: string, sizeMode: ImageOpt
   return width >= height ? `${longEdge}x${shortEdge}` : `${shortEdge}x${longEdge}`;
 }
 
-export function resolveClosestImageSize(width: number, height: number, options: ImageOptions): string {
+export function resolveClosestImageSize(width: number, height: number, options: ImageOptions, targetRatio?: string): string {
   let closest: { size: string; ratio: string; distance: number } | undefined;
   for (const size of options.sizes) {
     for (const ratio of options.aspectRatios) {
@@ -39,7 +39,8 @@ export function resolveClosestImageSize(width: number, height: number, options: 
     }
   }
   if (!closest || !Number.isFinite(closest.distance)) throw new Error("IMAGE_SIZE_UNSUPPORTED");
-  return resolveImageSize(closest.size, closest.ratio, options.sizeMode);
+  if (targetRatio && !options.aspectRatios.includes(targetRatio)) throw new Error("IMAGE_SIZE_UNSUPPORTED");
+  return resolveImageSize(closest.size, targetRatio ?? closest.ratio, options.sizeMode);
 }
 
 export interface ChannelModel {

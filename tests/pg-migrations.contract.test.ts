@@ -1548,6 +1548,61 @@ test("045 publishes the batch text-edit prompt and respects subsequent published
   });
 });
 
+test("048 publishes the three fallback prompts and preserves user-published versions on migration replay", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const published = await prompts.listPublished("task_image");
+    const expectations = [
+      ["redraw", /仅重绘\{\{region\}\}/],
+      ["erase", /仅消除\{\{region\}\}/],
+      ["outpaint", /仅补全灰色扩展区/],
+    ] as const;
+    for (const [tool, instruction] of expectations) {
+      const current = published.find(({ code }) => code === `image-editor.${tool}`);
+      assert.ok(current);
+      const history = await prompts.listVersions(current.templateId);
+      assert.deepEqual(history.map(({ versionNo, status }) => [versionNo, status]), [[1, "retired"], [2, "published"]]);
+      assert.match(history[1].userPromptTemplate, instruction);
+      const custom = await prompts.copyVersion(current.templateVersionId);
+      assert.ok(custom);
+      await prompts.updateDraft(custom.templateVersionId, { userPromptTemplate: "保留原图的光影与透视。" });
+      await prompts.publishVersion(custom.templateVersionId);
+    }
+
+    await runMigrations(pool);
+    for (const [tool] of expectations) {
+      const current = (await prompts.listPublished("task_image")).find(({ code }) => code === `image-editor.${tool}`);
+      assert.equal(current?.versionNo, 3);
+      assert.equal((await prompts.getPublishedVersion(current.templateVersionId, "task_image"))?.userPromptTemplate, "保留原图的光影与透视。");
+    }
+  });
+});
+
+test("048 replays after the original fallback templates are republished through the API", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const app = createSuiteStudioApp({ repository: new PostgresSuiteRepository(pool), storage: new MemoryStorage(), promptRepository: prompts });
+    const fallbackCodes = ["image-editor.redraw", "image-editor.erase", "image-editor.outpaint"];
+    const active = (await prompts.listPublished("task_image")).filter(({ code }) => fallbackCodes.includes(code));
+    assert.equal(active.length, fallbackCodes.length);
+    const originals = [];
+    for (const current of active) {
+      const [original] = await prompts.listVersions(current.templateId);
+      assert.equal(original.status, "retired");
+      const response = await app.request("POST", `/api/prompt-templates/${original.templateVersionId}/publish`);
+      assert.equal(response.status, 200);
+      originals.push(original);
+    }
+
+    await runMigrations(pool);
+    for (const original of originals) {
+      assert.ok(await prompts.getPublishedVersion(original.templateVersionId, "task_image"));
+      const history = await prompts.listVersions(original.templateId);
+      assert.deepEqual(history.map(({ versionNo, status }) => [versionNo, status]), [[1, "published"], [2, "retired"]]);
+    }
+  });
+});
+
 test("044 preserves the published product restoration template v2 on migration replay", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);
