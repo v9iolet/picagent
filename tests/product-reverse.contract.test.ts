@@ -168,7 +168,7 @@ test("legacy reverse plans remain readable with previews and asset archiving", a
   assert.equal((archived.body as any).data.promptSnapshot.promptVersionId, seeded.promptVersionId);
 });
 
-test("legacy reverse plan canvas-imports stays idempotent and rejects replica target suites", async () => {
+test("legacy reverse plan canvas-imports stays idempotent and rejects replica and A+ target suites", async () => {
   const storage = new MemoryStorage();
   const suites = new MemorySuiteRepository();
   const tasks = new MemoryTaskRepository();
@@ -206,14 +206,16 @@ test("legacy reverse plan canvas-imports stays idempotent and rejects replica ta
   assert.equal(task.reversePlanId, seeded.planId);
   assert.equal(task.reverseReferenceId, seeded.refId);
 
-  const replicaSuite = await suites.createSuite("爆品复刻批次", undefined, "replica");
-  const rejectedReplica = await api.request("POST", `/api/reverse-plans/${seeded.planId}/canvas-imports`, {
-    headers: { "idempotency-key": "canvas-import-to-replica" },
-    body: { targetSuiteId: replicaSuite.id },
-  });
-  assert.equal(rejectedReplica.status, 400);
-  assert.equal((rejectedReplica.body as any).error.code, "INVALID_SUITE_ORIGIN");
-  assert.equal((await tasks.listTasks(replicaSuite.id)).length, 0);
+  for (const origin of ["replica", "aplus"] as const) {
+    const target = await suites.createSuite("已有批次", undefined, origin);
+    const rejected = await api.request("POST", `/api/reverse-plans/${seeded.planId}/canvas-imports`, {
+      headers: { "idempotency-key": `canvas-import-to-${origin}` },
+      body: { targetSuiteId: target.id },
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal((rejected.body as any).error.code, "INVALID_SUITE_ORIGIN");
+    assert.equal((await tasks.listTasks(target.id)).length, 0);
+  }
 
   const existingCanvas = await suites.createSuite("已有画布", undefined, "canvas");
   const importedToCanvas = await api.request("POST", `/api/reverse-plans/${seeded.planId}/canvas-imports`, {
@@ -224,7 +226,7 @@ test("legacy reverse plan canvas-imports stays idempotent and rejects replica ta
   assert.equal((importedToCanvas.body as any).data.suiteId, existingCanvas.id);
 });
 
-test("ReversePage is read-only with upgrade banner and WorkbenchBoardPage skips polling for replica suites", async () => {
+test("ReversePage is read-only with upgrade banner and WorkbenchBoardPage skips polling for replica and A+ suites", async () => {
   const reversePage = await readFile("src/pages/ReversePage.tsx", "utf8");
   assert.match(reversePage, /爆品图反推已升级为爆品图复刻/);
   assert.match(reversePage, /\/create\/replica/);
@@ -242,6 +244,6 @@ test("ReversePage is read-only with upgrade banner and WorkbenchBoardPage skips 
   const workbenchPage = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
   assert.match(
     workbenchPage,
-    /useEffect\(\(\) => \{\s*if \(workbench\?\.suite\.origin === "replica"\) return;\s*const ordinaryTaskRunning/,
+    /useEffect\(\(\) => \{\s*if \(workbench\?\.suite\.origin === "replica" \|\| workbench\?\.suite\.origin === "aplus"\) return;\s*const ordinaryTaskRunning/,
   );
 });

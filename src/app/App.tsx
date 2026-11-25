@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AplusStudioPage } from "../pages/AplusStudioPage";
 import { HomePage } from "../pages/HomePage";
 import { ModelSettingsPage } from "../pages/ModelSettingsPage";
 import { SuiteStudioPage } from "../pages/SuiteStudioPage";
@@ -68,6 +69,16 @@ export function App() {
       <ReplicaStudioPage
         suiteId={replicaSuiteId}
         initialProductCardId={replicaProductCardId}
+        navigate={navigate}
+      />
+    );
+  }
+  if (/^\/create\/aplus\/?$/.test(canonical)) {
+    const params = new URLSearchParams(search);
+    return (
+      <AplusStudioPage
+        suiteId={params.get("suite")?.trim() || undefined}
+        initialProductCardId={params.get("productCardId")?.trim() || undefined}
         navigate={navigate}
       />
     );

@@ -252,5 +252,17 @@ test("PromptTemplatesPage shows only active templates with usedBy tags by defaul
   assert.ok(inspectorScroll.scrollHeight > inspectorScroll.clientHeight, "Inspector body should overflow with template details");
   assert.ok(inspectorScroll.scrollTop > 0, "Inspector body must be scrollable");
 
+  for (const [stage, count] of [
+    ["A+ 方案规划", 1], ["A+ 模块规则", APLUS_MODULES.length],
+    ["A+ 图像包装", 1], ["A+ AI 帮写", 1],
+  ]) {
+    await page.locator(".style-filter-panel").getByText(stage, { exact: true }).click();
+    await page.waitForFunction(({ stage, count }) => {
+      const cards = Array.from(document.querySelectorAll(".template-card"));
+      return cards.length === count && cards.every((card) =>
+        [...card.querySelectorAll(".badge")].some((badge) => badge.textContent === stage));
+    }, { stage, count });
+  }
+
   assert.deepEqual(errors, [], `Expected no uncaught page errors, got: ${errors.join("; ")}`);
 });

@@ -125,7 +125,7 @@ export class ApiHttpError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, cache: "no-store" });
   const payload = await response.json().catch(() => null) as { data?: T; error?: { code?: string; message?: string } } | null;
   if (!response.ok) throw new ApiHttpError(payload?.error?.message ?? "请求失败", response.status, payload?.error?.code);
