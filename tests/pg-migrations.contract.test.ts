@@ -675,8 +675,13 @@ test("041 seeds editable A+ sizes and preserves A+ rows and template stages on m
     const configured = { options: ["aplus_standard", "16:9"], default: "16:9" };
     await pool.query("UPDATE suite_workbench.platform_profiles SET detail_size_presets=$1 WHERE code='amazon'", [configured]);
 
-    const suite = await suites.createSuite("PG A+ 批次", undefined, "aplus");
+    const creationKey = "aplus-planning-contract";
+    const uploadDraft = await suites.createSuite("PG 上传草稿", creationKey);
+    const suite = await suites.createSuite("PG A+ 批次", creationKey, "aplus");
     assert.equal(suite.origin, "aplus");
+    assert.notEqual(suite.id, uploadDraft.id);
+    assert.equal((await suites.findAplusSuiteByIdempotencyKey(creationKey))?.id, suite.id);
+    assert.equal((await suites.createSuite("重复提交", creationKey, "aplus")).id, suite.id);
     const taskId = randomUUID();
     await pool.query(
       `INSERT INTO suite_workbench.suite_tasks
@@ -691,9 +696,17 @@ test("041 seeds editable A+ sizes and preserves A+ rows and template stages on m
     assert.equal(task.sortOrder, 1);
     const { run } = await pipelines.createRun({ ...runningPipeline(suite.id), currentPhase: "aplus_planning" });
     assert.equal(run.currentPhase, "aplus_planning");
-    assert.equal((await pipelines.updateRun(run.id, {
+    const awaiting = await pipelines.updateRun(run.id, {
       currentPhase: "awaiting_confirmation", status: "waiting_human_input",
-    }))?.currentPhase, "awaiting_confirmation");
+      config: { planSnapshot: { modules: ["hero"] } },
+    }, run);
+    assert.equal(awaiting?.currentPhase, "awaiting_confirmation");
+    const edited = await pipelines.updateRun(run.id, {
+      config: { planSnapshot: { modules: [{ moduleCode: "hero", copyRequirements: "新文案" }] } },
+    }, awaiting);
+    assert.ok(edited);
+    assert.equal(await pipelines.updateRun(run.id, { config: {} }, awaiting), null);
+    assert.equal(await pipelines.resumeRun(awaiting, "stale-confirm", "image_generating", awaiting.config), null);
 
     const batchId = randomUUID();
     const slotId = randomUUID();
@@ -743,6 +756,7 @@ test("041 seeds editable A+ sizes and preserves A+ rows and template stages on m
     assert.equal((await suites.getSuite(suite.id))?.origin, "aplus");
     assert.equal((await tasks.getTask(taskId))?.originKind, "aplus");
     assert.equal((await pipelines.getRun(run.id))?.currentPhase, "awaiting_confirmation");
+    assert.equal((await pipelines.resumeRun(edited, "current-confirm", "image_generating", edited.config))?.currentPhase, "image_generating");
     assert.deepEqual((await tasks.listTaskVersions(taskId)).versions[0], version);
     for (const stage of stages) {
       const { rows: [template] } = await pool.query<{ stage: string }>(
