@@ -764,7 +764,9 @@ export function ImageEditorModal({
   const [textOperationId, setTextOperationId] = useState(() => freshOperationId("add_text"));
   const [brush, setBrush] = useState(42);
   const [expand, setExpand] = useState("all");
-  const [ratio, setRatio] = useState<OutpaintRatio>("1:1");
+  const [selectedRatio, setRatio] = useState<OutpaintRatio | null>(null);
+  const [outpaintRatios, setOutpaintRatios] = useState<readonly OutpaintRatio[]>(OUTPAINT_RATIOS);
+  const ratio = selectedRatio ?? outpaintRatios[0] ?? "1:1";
   const [instruction, setInstruction] = useState("");
   const [addTextPrompt, setAddTextPrompt] = useState("");
   const [redrawPrompt, setRedrawPrompt] = useState("");
@@ -815,6 +817,8 @@ export function ImageEditorModal({
       ? `原文字和新文字每条最多 ${CHANGE_TEXT_MAX_LENGTH} 个字符`
       : "";
   const checkingCapabilities = !capabilities && !capabilityError;
+  const outpaintReady = Boolean(capabilities && capabilities.outpaint !== false && outpaintRatios.length);
+  const outpaintSelectionReady = outpaintReady && outpaintRatios.includes(ratio);
 
   const writeDraft = (write: () => Promise<unknown> | undefined) => {
     const pending = pendingDraftWrite.current.then(write).then(() => undefined);
@@ -885,7 +889,10 @@ export function ImageEditorModal({
 
   useEffect(() => {
     editorMounted.current = true;
-    suiteApi.imageEditorCapabilities().then((result) => setCapabilities(result.capabilities)).catch(() => setCapabilityError("能力状态暂时不可用"));
+    suiteApi.imageEditorCapabilities().then((result) => {
+      setOutpaintRatios(result.outpaintRatios ?? OUTPAINT_RATIOS);
+      setCapabilities(result.capabilities);
+    }).catch(() => setCapabilityError("能力状态暂时不可用"));
     return () => { editorMounted.current = false; };
   }, []);
   useEffect(() => {
@@ -1120,6 +1127,7 @@ export function ImageEditorModal({
 
   useEffect(() => {
     if (!activeOperationType || activeOperationType === "change_text" || saving || loadingDraft) return;
+    if (activeOperationType === "outpaint" && !outpaintSelectionReady) return;
     const next = operationFor(activeOperationType);
     const current = operations.find((item) => item.operationId === next.operationId);
     if (!current || (current.summary === next.summary && JSON.stringify(current.payload) === JSON.stringify(next.payload))) return;
@@ -1128,7 +1136,7 @@ export function ImageEditorModal({
       void writeDraft(() => onOperationAdded?.(next, next.summary)).catch(() => setEditorError("对话操作同步失败，请重试"));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [activeOperationType, saving, loadingDraft, text, textRegion, strokes, feather, expand, ratio, instruction, addTextPrompt, redrawPrompt, erasePrompt, textOperationId, restoreInput, operations]);
+  }, [activeOperationType, saving, loadingDraft, text, textRegion, strokes, feather, expand, ratio, outpaintSelectionReady, instruction, addTextPrompt, redrawPrompt, erasePrompt, textOperationId, restoreInput, operations]);
 
   const submit = async () => {
     if (!activeOperationType) return;
@@ -1202,7 +1210,7 @@ export function ImageEditorModal({
         break;
       case "outpaint":
         setExpand(String(payload.direction ?? "all"));
-        setRatio(isOutpaintRatio(payload.targetRatio) ? payload.targetRatio : "1:1");
+        setRatio(isOutpaintRatio(payload.targetRatio) ? payload.targetRatio : null);
         break;
       case "re_edit":
         setInstruction(String(payload.prompt ?? ""));
@@ -1294,8 +1302,8 @@ export function ImageEditorModal({
     ["restore_product", "商品还原", "imageToImage"],
   ];
   const activeCapability = toolList.find(([value]) => value === tool)?.[2];
-  const capabilityAvailable = (_value: EditTool, capability: string) => capabilities?.[capability] !== false;
-  const capabilityReady = tool === "regenerate" ? capabilities?.currentVersionInput !== false : !capabilities || capabilityAvailable(tool, activeCapability ?? "");
+  const capabilityAvailable = (value: EditTool, capability: string) => value === "expand" ? outpaintReady : capabilities?.[capability] !== false;
+  const capabilityReady = tool === "expand" ? outpaintSelectionReady : capabilityAvailable(tool, activeCapability ?? "");
   const outpaintBox = useMemo(
     () => computeOutpaintCanvas(version.width || 1024, version.height || 1024, ratio),
     [version.width, version.height, ratio],
@@ -1339,12 +1347,13 @@ export function ImageEditorModal({
             {toolList.map(([value, label, capability]) => (
               <button key={value} type="button" className={tool === value ? "is-active" : ""} disabled={saving || loadingDraft || !capabilityAvailable(value, capability)} onClick={() => switchTool(value)}>
                 {label}
-                <small>{!capabilityAvailable(value, capability) ? "不可用" : capabilities ? "可用" : "检查中"}</small>
+                <small>{value === "expand" && checkingCapabilities ? "检查中" : !capabilityAvailable(value, capability) ? "不可用" : capabilities ? "可用" : "检查中"}</small>
               </button>
             ))}
             {tool !== "change_text" && <p>{["inpaint", "erase"].includes(tool) ? "快捷键：Ctrl+Z 撤销 · [ / ] 调整笔刷大小" : "调整操作后添加到对话，生成时才冻结"}</p>}
             {toolNotice && <p role="status">{toolNotice}</p>}
             {capabilityError && <p className="wb-editor-error">{capabilityError}</p>}
+            {capabilities && !outpaintRatios.length && <p role="status">当前生图渠道没有可用的扩图比例。</p>}
           </aside>
           <div className="wb-editor-stage">
             <div className={`wb-editor-canvas-scroll${tool === "change_text" ? " wb-text-edit-canvas-scroll" : ""}`} ref={canvasScrollRef}>
@@ -1423,7 +1432,7 @@ export function ImageEditorModal({
                     {["inpaint", "erase"].includes(tool) && pointer && <KonvaCircle x={pointer.x} y={pointer.y} radius={brush / 2} stroke={maskMode === "erase" ? "#475569" : "#dc3f3f"} dash={maskMode === "erase" ? [4, 3] : undefined} strokeWidth={1.5} listening={false} />}
                   </Layer>
                 </Stage>
-                {tool === "expand" && (
+                {tool === "expand" && outpaintSelectionReady && (
                   <div className="wb-outpaint-overlay">
                     <div className="wb-outpaint-frame" style={{ aspectRatio: `${outpaintBox.targetWidth} / ${outpaintBox.targetHeight}` }}>
                       <div
@@ -1595,11 +1604,16 @@ export function ImageEditorModal({
                 </div>
               </div>
             )}
-            {tool === "expand" && (
+            {tool === "expand" && outpaintReady && (
               <>
                 <label>扩图重点<select value={expand} onChange={(event) => setExpand(event.target.value)}><option value="all">四周</option><option value="horizontal">左右</option><option value="vertical">上下</option><option value="left">左侧</option><option value="right">右侧</option></select></label>
-                <label>目标比例<select value={ratio} onChange={(event) => { if (isOutpaintRatio(event.target.value)) setRatio(event.target.value); }}>{OUTPAINT_RATIOS.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-                <output>扩边画布 {targetSize.width} × {targetSize.height}</output>
+                <label>目标比例
+                  <select value={outpaintSelectionReady ? ratio : ""} onChange={(event) => { if (isOutpaintRatio(event.target.value)) setRatio(event.target.value); }}>
+                    {!outpaintSelectionReady && <option value="" disabled>请选择可用比例</option>}
+                    {outpaintRatios.map((value) => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                </label>
+                {outpaintSelectionReady && <output>扩边画布 {targetSize.width} × {targetSize.height}</output>}
               </>
             )}
             {tool === "regenerate" && <p>再次生成只在当前卡片下新增版本，不创建子卡片。</p>}

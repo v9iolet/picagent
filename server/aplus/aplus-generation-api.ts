@@ -126,7 +126,7 @@ export function createAplusGenerationApi(deps: AplusGenerationDependencies) {
           id: randomUUID(), suiteId, planSnapshotId: null, planItemId: null, ordinal, imageType: "detail",
           title: definition.name, purpose: definition.description, promptDraft, promptRevision: 1,
           sourceInputImageId: referenceImageIds[0], referenceImageIds, status: "pending", archivedAt: null,
-          createdAt, updatedAt: createdAt, originKind: "aplus", moduleCode, sizePreset, sortOrder: ordinal,
+          createdAt, updatedAt: createdAt, originKind: "aplus", moduleCode, sizePreset, sortOrder: moduleIndex + 1,
           promptSha256: createHash("sha256").update(promptDraft).digest("hex"),
           generationParams: {
             size: tier, ratio, quality: "medium", requestSize: size, generatedSize,

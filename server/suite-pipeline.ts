@@ -916,7 +916,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       pipeline,
       activeTasks,
       totalTasks,
-      ordered: [...activeTasks].sort((a, b) => a.ordinal - b.ordinal),
+      ordered: [...activeTasks].sort((a, b) => (a.sortOrder ?? a.ordinal) - (b.sortOrder ?? b.ordinal)),
     }));
     const candidateTaskIds: string[] = [];
     for (const entry of page) {

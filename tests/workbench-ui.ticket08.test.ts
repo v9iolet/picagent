@@ -129,7 +129,7 @@ test("image editor uses the selected version prompt and operation-specific promp
 test("mask-based tools show the limited-selection notice and outpaint uses supported target ratios", async () => {
   const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
   assert.match(source, /\["inpaint", "erase", "expand"\]\.includes\(tool\) && <p role="status">当前模型对选区控制有限<\/p>/);
-  assert.match(source, /目标比例<select[^\n]+OUTPAINT_RATIOS\.map/);
+  assert.match(source, /目标比例\s*<select[\s\S]*?outpaintRatios\.map/);
   assert.doesNotMatch(source, /<option value="original">原比例<\/option>/);
   assert.match(source, /<small>原图居中<\/small>/);
 });

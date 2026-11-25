@@ -380,6 +380,25 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
 
   await page.goto(url(`/create/canvas/${batchId}`));
   await page.getByText("A+详情批次暂不支持在生图画布中打开。").waitFor();
+
+  await page.goto(firstUrl);
+  await page.getByRole("heading", { name: "通勤随行杯 A+" }).waitFor();
+  const confirmation = page.waitForEvent("dialog");
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await button("删除批次").click();
+  assert.match((await confirmation).message(), /通勤随行杯 A\+.*从生成记录中移除/);
+  assert.equal(page.url(), firstUrl);
+  page.once("dialog", (dialog) => dialog.accept());
+  const deleted = page.waitForResponse((response) => response.request().method() === "DELETE" && response.url() === url(`/api/suites/${batchId}`));
+  await button("删除批次").click();
+  assert.equal((await deleted).status(), 200);
+  await page.waitForURL(url("/create/aplus"));
+  assert.equal(await config.locator(".ss-thumb").count(), 0);
+  const refreshedFeed = page.waitForResponse((response) => response.url().includes("/api/suites/feed?origin=aplus"));
+  await button("生成记录").click();
+  const { items } = (await (await refreshedFeed).json()).data;
+  assert.equal(items.some(({ suite }) => suite.id === batchId), false);
+  assert.equal(await page.getByRole("dialog", { name: "生成记录" }).getByText("通勤随行杯 A+", { exact: true }).count(), 0);
   assert.deepEqual(errors, []);
 });
 

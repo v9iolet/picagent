@@ -11,6 +11,7 @@ import { createImageEditorApi } from "../server/image-editor-api.js";
 import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
+import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
 import { MemoryPlatformRepository } from "../server/repositories/memory-platform-repository.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
@@ -18,7 +19,7 @@ import { MemorySuiteRepository } from "../server/repositories/memory-suite-repos
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { waitUntil } from "../server/suite-pipeline.js";
-import type { ImageEditRequest, TaskImageVersion } from "../server/types.js";
+import type { ImageEditRequest, LibraryResource, TaskImageVersion } from "../server/types.js";
 import { readZipEntries } from "../server/zip.js";
 import { makeAplusEditorSourceResolver } from "./aplus-editor-fixture.js";
 
@@ -66,6 +67,7 @@ async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?:
   }, storage, makeAplusEditorSourceResolver(repository, tasks, editorTasks, storage));
   const app = createSuiteStudioApp({
     repository, storage, taskRepository: tasks, pipelineRepository: pipelines, promptRepository: prompts, platformRepository: platforms,
+    libraryRepository: new MemoryLibraryRepository(),
     imageEditorApi: createImageEditorApi(editor), imageGenerationConcurrency: 1, imageRetryDelayMs: 0,
     provider: {
       supportsMultipleImages: true,
@@ -152,8 +154,8 @@ test("确认按编辑后的模块与高级 A+ 预设建卡，冻结提示词、�
   const tasks = await f.tasks.listTasks(f.suiteId);
   assert.equal(tasks.length, 2 * premiumPresets.length);
   assert.deepEqual(tasks.map((task) => [task.originKind, task.moduleCode, task.sizePreset, task.sortOrder]), [
-    ["aplus", "usage_scene", "aplus_premium_web", 1], ["aplus", "usage_scene", "aplus_premium_mobile", 2],
-    ["aplus", "hero", "aplus_premium_web", 3], ["aplus", "hero", "aplus_premium_mobile", 4],
+    ["aplus", "usage_scene", "aplus_premium_web", 1], ["aplus", "usage_scene", "aplus_premium_mobile", 1],
+    ["aplus", "hero", "aplus_premium_web", 2], ["aplus", "hero", "aplus_premium_mobile", 2],
   ]);
   assert.equal((await f.tasks.listBatches(f.suiteId)).length, 1);
   assert.deepEqual(f.calls.map((call) => call.size), ["2496x1024", "2736x2048", "2496x1024", "2736x2048"]);
@@ -215,6 +217,33 @@ test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿�
   const deliveryResponse = await f.app.request("GET", `${preview}/delivery`);
   assert.deepEqual(generatedResponse.raw, (await f.storage.get(first.objectKey))?.bytes);
   assert.deepEqual(deliveryResponse.raw, (await f.storage.get(first.deliveryObjectKey!))?.bytes);
+  const libraryPath = "/api/library/resources";
+  const assertLibraryImage = async (id: string, objectKey: string, previewUrl: string | null) => {
+    const path = `${libraryPath}/${encodeURIComponent(id)}`;
+    const resource = data<LibraryResource>(await f.app.request("GET", path));
+    assert.equal(resource.stage, "aplus_image");
+    assert.equal(resource.source.origin, "aplus");
+    assert.equal(resource.source.originKind, "aplus");
+    assert.equal(resource.source.objectKey, objectKey);
+    assert.equal(resource.previewUrl, previewUrl);
+    const listed = data<{ items: LibraryResource[] }>(await f.app.request("GET", `${libraryPath}?scope=image&stage=aplus_image&query=${encodeURIComponent("A+详情")}`));
+    assert.deepEqual(listed.items.find((item) => item.id === id), resource);
+    const image = await f.storage.get(objectKey);
+    assert.ok(image);
+    if (previewUrl) {
+      const { width, height } = await sharp(image.bytes).metadata();
+      assert.ok(resource.summary.endsWith(` · ${width} × ${height}`));
+    }
+    assert.deepEqual((await f.app.request("GET", `${path}/preview`)).raw, image.bytes);
+    if (previewUrl) assert.deepEqual((await f.app.request("GET", previewUrl)).raw, image.bytes);
+  };
+  await assertLibraryImage(`task-version:${first.id}`, first.deliveryObjectKey!, `${preview}/delivery`);
+  const [legacyTask] = (await f.tasks.listTasks(f.suiteId)).slice(1);
+  const { versions: [legacy] } = await f.tasks.listTaskVersions(legacyTask.id);
+  legacy.deliveryObjectKey = null;
+  await assertLibraryImage(`task-version:${legacy.id}`, legacy.objectKey, legacy.previewUrl);
+  first.processObjectKeys.push(first.objectKey);
+  await assertLibraryImage(`process:${first.id}:0`, first.objectKey, null);
   checkError(await f.app.request("GET", `/api/suite-tasks/unknown/versions/${first.id}/preview/delivery`), 404, "INVALID_TASK_VERSION");
   const redrawn = await f.app.request("POST", `/api/suite-tasks/${task.id}/generation`, {
     headers: { "idempotency-key": "redraw" }, body: { additionalPrompt: "保留磨砂纹理" },
@@ -249,6 +278,7 @@ test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿�
     const preview = `/api/image-editor/tasks/${childTask.id}/versions/${version.id}/preview`;
     assert.deepEqual((await f.app.request("GET", preview)).raw, (await f.storage.get(version.objectKey))?.bytes);
     assert.deepEqual((await f.app.request("GET", `${preview}/delivery`)).raw, (await f.storage.get(version.deliveryObjectKey!))?.bytes);
+    await assertLibraryImage(`edit-version:${version.id}`, version.deliveryObjectKey!, `${preview}/delivery`);
     sourceCardId = childTask.id;
     sourceVersionId = version.id;
   }
@@ -280,11 +310,29 @@ test("A+ 结果顺序持久化到两端，长图和 ZIP 按该顺序使用交付
   }).png().toBuffer());
   data(await f.confirm(), 202);
   assert.equal((await f.waitForRun())?.status, "completed");
+  const initialTasks = await f.tasks.listTasks(f.suiteId);
+  const thumbnail = async (ordinal: number) => {
+    const task = initialTasks.find((item) => item.ordinal === ordinal)!;
+    return (await f.tasks.listTaskVersions(task.id)).versions[0].previewUrl;
+  };
+  const thumbnails = async () => data<{ items: Array<{ thumbnails: string[] }> }>(
+    await f.app.request("GET", "/api/suites/feed?origin=aplus"),
+  ).items[0].thumbnails;
+  assert.deepEqual(await thumbnails(), await Promise.all([1, 2, 3, 4].map(thumbnail)));
+  const zipPaths = async () => [...readZipEntries((await f.app.request("GET", `${f.path}/export`)).raw!).keys()];
+  const initialPaths = [...premiumPresets.flatMap((preset) => [
+    ...modules.map((code, index) => `${preset}/0${index + 1}_${code}.png`),
+    `${preset}/long-image.png`,
+  ]), "manifest.json"];
+  assert.deepEqual(await zipPaths(), initialPaths);
+  for (const task of initialTasks) task.sortOrder = task.ordinal;
+  assert.deepEqual(await zipPaths(), initialPaths, "历史批次的全局排序号也应导出连续编号");
   const order = (next: string[]) => f.app.request("PATCH", `${f.path}/order`, { body: { modules: next } });
   checkError(await order(["hero", "hero"]), 400, "APLUS_INVALID_MODULES");
   checkError(await order(["hero", "usage_scene"]), 409, "APLUS_RESULT_ORDER_CHANGED");
   const sortedModules = ["usage_scene", "hero", "selling_points"];
   assert.deepEqual(data(await order(sortedModules)), { modules: sortedModules });
+  assert.deepEqual(await thumbnails(), await Promise.all([5, 6, 1, 2].map(thumbnail)));
   const tasks = await f.tasks.listTasks(f.suiteId);
   for (const key of premiumPresets) {
     assert.deepEqual(tasks.filter(({ sizePreset }) => sizePreset === key).map(({ sortOrder }) => sortOrder), [2, 3, 1]);
@@ -335,6 +383,9 @@ test("A+ 结果顺序持久化到两端，长图和 ZIP 按该顺序使用交付
   const failedItem = partial.groups[0].items.find(({ taskId }: { taskId: string }) => taskId === failed.id);
   assert.equal(failedItem.skippedReason, "failed");
   assert.equal(failedItem.path, null);
+  assert.deepEqual(partial.groups[0].items.flatMap(({ path }: { path: string | null }) => path ? [path] : []), [
+    "aplus_premium_web/01_usage_scene.png", "aplus_premium_web/02_selling_points.png",
+  ]);
   assert.equal(partial.groups[0].longImage.height, 1200);
   assert.equal(partial.groups[1].longImage.height, 1350);
 });

@@ -399,6 +399,15 @@ function AplusWorkspace({
     });
   }
 
+  function deleteBatch() {
+    if (!suiteId || !state || busy || !window.confirm(`确定删除批次「${state.suite.name}」吗？删除后将从生成记录中移除。`)) return;
+    void act("delete", async () => {
+      await suiteApi.delete(suiteId);
+      if (mounted.current) onNew();
+      else if (readAplusWorkspace()?.suiteId === suiteId) clearAplusWorkspace();
+    });
+  }
+
   const batchSizes = state?.inputSnapshot?.sizePresets ?? [];
   const batchPlatform = state?.inputSnapshot?.platform;
   const platformName = profiles.find(({ code }) => code === batchPlatform)?.name ?? batchPlatform;
@@ -460,6 +469,7 @@ function AplusWorkspace({
             </div>
             <div className="ss-results-actions">
               <button type="button" disabled={Boolean(action)} onClick={() => setHistoryOpen(true)}>生成记录</button>
+              {state && <button type="button" disabled={busy} onClick={deleteBatch}>删除批次</button>}
               <button type="button" disabled={Boolean(action)} onClick={onNew}>＋ 新建</button>
             </div>
           </header>

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { fail as failApi } from "./api-errors.js";
 import { ok, type AppResponse } from "./api-response.js";
 import { formatOcrErrorMessage, type ImageEditorService, type ImageEditVersionCompletedListener } from "./image-editor.js";
 
@@ -99,7 +100,10 @@ export function createImageEditorApi(service: ImageEditorService) {
             tool: typeof body.tool === "string" ? body.tool : undefined, operationIds,
           });
           return ok(result, result.duplicate ? 200 : 202);
-        } catch (error) { return fail(error instanceof Error ? error.message : "IMAGE_EDIT_SUBMIT_FAILED", 409); }
+        } catch (error) {
+          const code = error instanceof Error ? error.message : "IMAGE_EDIT_SUBMIT_FAILED";
+          return code === "OUTPAINT_RATIO_UNSUPPORTED" ? failApi(code, 400) : fail(code, 409);
+        }
       }
       const retryMatch = path.match(/^\/api\/image-editor\/attempts\/([^/]+)\/retry$/);
       if (method === "POST" && retryMatch) { if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY"); try { const result = await service.retry(retryMatch[1], idempotencyKey); return ok(result, result.duplicate ? 200 : 202); } catch (error) { return fail(error instanceof Error ? error.message : "IMAGE_EDIT_RETRY_FAILED", 409); } }

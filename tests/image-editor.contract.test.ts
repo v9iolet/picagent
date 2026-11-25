@@ -11,7 +11,7 @@ import { dispatchInputImageUpload } from "../server/multipart.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { DashScopeOcrProvider } from "../server/providers/dashscope-ocr-provider.js";
-import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
+import { requestImageEditorEdit, supportedImageEditorOutpaintRatios } from "../server/providers/image-editor-provider.js";
 import type { ImageEditRequest } from "../server/types.js";
 import { defaultImageOptions } from "../shared/model-settings.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
@@ -328,6 +328,50 @@ test("outpaint adds margins when the source matches the target ratio, including 
   assert.deepEqual(computeOutpaintCanvas(1024, 1360, "3:4"), {
     targetWidth: 1281, targetHeight: 1708, sourceOffset: { left: 128, top: 174 },
   });
+});
+
+test("扩图提交按渠道比例返回 400 并保留草稿，档位和像素渠道均不创建失败子卡", async () => {
+  for (const sizeMode of ["tier", "pixels"] as const) {
+    const repository = new MemoryImageEditorRepository();
+    const storage = new MemoryStorage();
+    const options = { sizes: ["1K"], aspectRatios: ["3:4", "3:2"], sizeMode };
+    const bytes = await sharp({ create: { width: 100, height: 100, channels: 3, background: "navy" } }).png().toBuffer();
+    const sizes: string[] = [];
+    const imageProvider = { async edit(request: ImageEditRequest) { sizes.push(request.size); return { bytes, mimeType: "image/png" }; } };
+    const base = provider();
+    const service = new ImageEditorService(repository, provider({
+      capabilities: async () => ({ ...await base.capabilities(), outpaintRatios: supportedImageEditorOutpaintRatios(options) }),
+      edit: (command, input) => requestImageEditorEdit(imageProvider, storage, "fake", options, command, input),
+    }), storage, async () => ({ ...source, bytes }));
+    const api = createImageEditorApi(service);
+    const path = "/api/image-editor/sessions/session";
+    const submit = async (targetRatio: string) => {
+      const saved = await api.request("POST", `${path}/operations`, {
+        body: { operation: { ...operation("outpaint"), payload: { direction: "all", targetRatio } } },
+      });
+      assert.equal(saved.status, 200);
+      return api.request("POST", `${path}/submit`, {
+        headers: { "idempotency-key": "outpaint" },
+        body: { sourceCardId: "parent", sourceVersionId: "version-1", tool: "outpaint", operationIds: ["op-1"] },
+      });
+    };
+
+    assert.deepEqual((await service.capabilities()).outpaintRatios, ["3:4"]);
+    const rejected = await submit("16:9");
+    assert.equal(rejected.status, 400);
+    assert.ok("error" in rejected.body);
+    assert.deepEqual(rejected.body.error, { code: "OUTPAINT_RATIO_UNSUPPORTED", message: "当前生图渠道不支持该扩图比例，请选择可用比例。" });
+    assert.deepEqual(await repository.listChildTasks(), []);
+    assert.deepEqual(sizes, []);
+    assert.equal((await repository.getDraft("session"))?.operations[0].payload.targetRatio, "16:9");
+
+    const accepted = await submit("3:4");
+    assert.equal(accepted.status, 202);
+    const [child] = await repository.listChildTasks();
+    for (let i = 0; i < 30 && !(await repository.getChildTask(child.id))?.currentVersionId; i += 1) await settle();
+    assert.equal((await repository.getChildTask(child.id))?.status, "succeeded");
+    assert.deepEqual(sizes, [sizeMode === "tier" ? "1K" : "1024x1360"]);
+  }
 });
 
 test("regenerate replays legacy original-ratio outpaint with its frozen prompt and unpadded source", { timeout: 5000 }, async () => {

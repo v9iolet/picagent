@@ -9,25 +9,27 @@ import { createSuiteStudioApp } from "../server/app.js";
 import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import { dispatchInputImageUpload } from "../server/multipart.js";
+import { supportedImageEditorOutpaintRatios } from "../server/providers/image-editor-provider.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 
-async function offlineCanvas(t, sizes = ["1K", "2K"]) {
+async function offlineCanvas(t, sizes = ["1K", "2K"], aspectRatios = ["1:1", "3:2"]) {
   const sample = await readFile("public/assets/gan65-product.jpg");
   const libraryRepository = new MemoryLibraryRepository();
   const storage = new MemoryStorage();
   const taskRepository = new MemoryTaskRepository();
   const editorRepository = new MemoryImageEditorRepository();
   const calls = [];
+  const imageOptions = { sizes, aspectRatios, sizeMode: "pixels" };
   const editorService = new ImageEditorService(
     editorRepository,
     {
       name: "offline-editor",
       version: "gpt-image-2",
       capabilitiesVersion: "1",
-      capabilities: () => ({ imageToImage: true, addText: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
+      capabilities: () => ({ imageToImage: true, addText: true, changeText: true, redraw: true, erase: true, outpaint: true, outpaintRatios: supportedImageEditorOutpaintRatios(imageOptions), currentVersionInput: true }),
       edit: async () => ({ bytes: sample, mimeType: "image/jpeg", width: 64, height: 64 }),
     },
     storage,
@@ -56,7 +58,7 @@ async function offlineCanvas(t, sizes = ["1K", "2K"]) {
     channels: [{
       id: "offline", name: "离线测试", models: [{
         id: "gpt-image-2", capabilities: ["image"],
-        imageOptions: { sizes, aspectRatios: ["1:1", "3:2"], sizeMode: "pixels" },
+        imageOptions,
       }],
     }],
     preferences: { image: { channelId: "offline", modelId: "gpt-image-2" }, vision: null },
@@ -508,6 +510,34 @@ test("创作画布：AI 改图支持空输入重绘和按指令修改", async (t
     await dialog.waitFor({ state: "hidden" });
     await page.locator(".wb-edit-child-card .wb-card-state").filter({ hasText: /^已生成$/ }).nth(index).waitFor();
   }
+});
+
+test("创作画布：扩图仅可选择渠道支持的比例，无可用比例时禁用并提示", async (t) => {
+  const aspectRatios = ["16:9", "3:2", "3:4"];
+  const { api, url, page } = await offlineCanvas(t, ["1K"], aspectRatios);
+  const { suiteId } = await seedGeneratedCanvas(api, 1);
+  await page.goto(url + `create/canvas/${suiteId}`);
+  const edit = page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit");
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  const expand = dialog.getByRole("button", { name: /^扩图/ });
+  await edit.click();
+  await expand.click();
+  const ratio = dialog.getByLabel("目标比例");
+  assert.deepEqual(await ratio.locator("option").allTextContents(), ["3:4", "16:9"]);
+  assert.equal(await ratio.inputValue(), "3:4");
+  await ratio.selectOption("16:9");
+  const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
+  const response = await submitted;
+  assert.equal(response.status(), 202);
+  assert.equal((await response.json()).data.snapshot.operations[0].payload.targetRatio, "16:9");
+  await dialog.waitFor({ state: "hidden" });
+
+  aspectRatios.splice(0, aspectRatios.length, "3:2");
+  await edit.click();
+  await dialog.getByText("当前生图渠道没有可用的扩图比例。", { exact: true }).waitFor();
+  assert.equal(await expand.isDisabled(), true);
+  assert.equal(await ratio.count(), 0);
 });
 
 test("创作画布：未配 OCR 时可手工编辑文字，切换工具保留草稿，提交只使用当前工具", async (t) => {

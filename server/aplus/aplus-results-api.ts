@@ -69,7 +69,7 @@ export function createAplusResultsApi(deps: {
 
       const deliverySize = card.deliverySize ?? presetSize ?? await sharp(object.bytes).metadata();
       const ext = object.contentType === "image/jpeg" ? "jpg" : object.contentType === "image/webp" ? "webp" : "png";
-      const name = `${directory}/${String(sortOrder).padStart(2, "0")}_${moduleCode}.${ext}`;
+      const name = `${directory}/${String(entries.length + 1).padStart(2, "0")}_${moduleCode}.${ext}`;
       entries.push({ name, data: object.bytes });
       if (!presetSize) width = Math.max(width, deliverySize.width);
       items.push({ ...item, deliverySize: { width: deliverySize.width, height: deliverySize.height }, path: name, skippedReason: null });

@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
+import { OUTPAINT_RATIOS } from "../../shared/image-editor.js";
 import { resolveClosestImageSize, type ImageOptions } from "../../shared/model-settings.js";
 import { selectAplusGenerationSize } from "../aplus/aplus-image.js";
 import type { ImageEditCommand, ImageSource, MaskSnapshot, OutpaintSpec } from "../image-editor.js";
 import type { ImageProvider, StorageAdapter } from "../types.js";
+
+export function supportedImageEditorOutpaintRatios(options: ImageOptions) {
+  return OUTPAINT_RATIOS.filter((ratio) => options.aspectRatios.includes(ratio));
+}
 
 export async function requestImageEditorEdit(
   provider: ImageProvider,

@@ -45,6 +45,7 @@ export const errorMessages: Record<string, string> = {
   PAYLOAD_TOO_LARGE: "请求体超过大小限制",
   LEGACY_ENDPOINT_GONE: "该遗留接口已下线，请使用两阶段套图规划接口",
   IMAGE_SIZE_UNSUPPORTED: "当前账号分组不支持该分辨率",
+  OUTPAINT_RATIO_UNSUPPORTED: "当前生图渠道不支持该扩图比例，请选择可用比例。",
   IMAGE_DIMENSIONS_TOO_LARGE: "图片尺寸超过限制",
   MISSING_IDEMPOTENCY_KEY: "生成请求缺少幂等键",
   INVALID_PROMPT_STAGE: "提示词阶段无效",
