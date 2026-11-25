@@ -595,6 +595,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (latestPlanSnapshot) taskPlans.set(latestPlanSnapshot.id, latestPlanSnapshot);
     for (const [index, task] of tasks.entries()) {
       const providerName = channel ? "openai-compatible-image" : provider ? "image-provider" : "unconfigured";
+      const generationParams = task.generationParams ?? {};
+      const isAplusTask = task.originKind === "aplus";
+      const aplusRequestSize = isAplusTask && typeof generationParams.requestSize === "string" ? generationParams.requestSize : null;
+      const aplusSizeFields = isAplusTask ? {
+        ratio: generationParams.ratio,
+        generatedSize: generationParams.generatedSize,
+      } : {};
       if (failedAttempt) {
         attempts.push({
           ...failedAttempt, id: randomUUID(), slotId: slots[index].id, attemptNo: 1,
@@ -620,7 +627,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits",
           requestSummary: {
             n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((image) => image.role),
-            size: resolveClosestImageSize(width, height, imageOptions), quality: imageOptions.quality ?? "high",
+            size: aplusRequestSize ?? resolveClosestImageSize(width, height, imageOptions), quality: imageOptions.quality ?? "high",
+            ...aplusSizeFields,
           },
           promptSnapshot: { ...version.promptSnapshot, finalPrompt, providerPrompt, inputImages },
           promptSha256: createHash("sha256").update(finalPrompt).digest("hex"),
@@ -639,12 +647,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const taskPlan = task.planSnapshotId ? taskPlans.get(task.planSnapshotId) : null;
       const useOriginalImages = taskPlan?.requestSummary.useOriginalImages === true;
       let sourceKind: "base" | "original" | "library" = "original"; let sourceObjectKey = ""; let sourceBaseVersionId: string | null = null; let sourceInputImageId: string | null = null; let sourceLibraryReferenceId: string | null = null; let sourceResourceVersionId: string | null = null;
-      const generationParams = task.generationParams ?? {};
       const materialRefs = Array.isArray(generationParams.productMaterialRefs) ? generationParams.productMaterialRefs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 3) : [];
       const inputImages: Array<{ bytes: Buffer; mimeType: string; filename: string; role: string; objectKey: string; resourceId?: string; resourceVersionId?: string; libraryReferenceId?: string }> = [];
       const currentTaskVersionId = sourceVersionIds[task.id];
       const isReplicaTask = task.originKind === "replica";
-      const isAplusTask = task.originKind === "aplus";
       const aplusPromptMeta = isAplusTask ? asRecord(generationParams.aplusPromptSnapshot) : null;
       const replicaPromptMeta = isReplicaTask ? asRecord(generationParams.replicaPromptSnapshot) : null;
       const replicaCloneLevel = isReplicaTask ? resolveReplicaCloneLevel(generationParams) : "high";
@@ -828,20 +834,14 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
             styleSketch: replicaProductCount === 0,
           }
         : {};
-      const aplusSizeFields = isAplusTask ? {
-        ratio: generationParams.ratio,
-        generatedSize: generationParams.generatedSize,
-      } : {};
       const aplusFrozenFields = isAplusTask ? {
         ...aplusPromptMeta, moduleCode: task.moduleCode, sizePreset: task.sizePreset, sortOrder: task.sortOrder,
       } : {};
-      const size = isAplusTask && typeof generationParams.requestSize === "string"
-        ? generationParams.requestSize
-        : resolveImageSize(
-            typeof generationParams.size === "string" ? generationParams.size : "1K",
-            typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4",
-            imageOptions.sizeMode,
-          );
+      const size = aplusRequestSize ?? resolveImageSize(
+        typeof generationParams.size === "string" ? generationParams.size : "1K",
+        typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4",
+        imageOptions.sizeMode,
+      );
       const styleOverride = shouldApplyStyleOverride ? activeStyleOverride : null;
       attempts.push({
         id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits",

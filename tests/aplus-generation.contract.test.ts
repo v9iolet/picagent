@@ -179,6 +179,17 @@ test("确认按编辑后的模块与高级 A+ 预设建卡，冻结提示词、�
   assert.deepEqual(state.progress, { total: 4, completed: 4, percent: 100 });
   assert.equal(state.cards[0].sizePreset, "aplus_premium_web");
   assert.deepEqual(state.cards[0].deliverySize, { width: 1464, height: 600 });
+
+  const { versions: [webSource] } = await f.tasks.listTaskVersions(tasks[0].id);
+  data(await f.app.request("POST", `/api/suite-tasks/${tasks[0].id}/generation`, {
+    headers: { "idempotency-key": "editor-regenerate-web" }, body: { editSourceVersionId: webSource.id },
+  }), 202);
+  const regenerated = await waitUntil(() => f.tasks.listTaskVersions(tasks[0].id), ({ versions }) => versions.length === 2, 5000);
+  assert.equal(regenerated.attempts.at(-1)?.requestSummary.size, "2496x1024");
+  assert.equal(f.calls.at(-1)?.size, "2496x1024");
+  assert.deepEqual(f.calls.at(-1)?.images?.map(({ role }) => role), ["source", "product", "product"]);
+  assert.deepEqual(f.calls.at(-1)?.images?.slice(1).map(({ bytes }) => bytes), f.originals);
+  assert.deepEqual(await dimensions(f.storage, regenerated.versions[0].deliveryObjectKey!), { width: 1464, height: 600 });
 });
 
 test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿用交付裁切", async () => {
@@ -207,12 +218,18 @@ test("普通 A+ 精确交付 970×600，重绘、子卡和多代编辑版本沿�
 
   let sourceCardId = task.id;
   let sourceVersionId = current.id;
-  for (const sessionId of ["edit-child", "edit-grandchild"]) {
+  const edits = [
+    { type: "re_edit", summary: "调整背景", payload: { prompt: "调整背景" } },
+    { type: "change_text", summary: "修改文字", payload: {
+      originalText: "旧文案", newText: "新文案", region: { x: 0.1, y: 0.1, width: 0.4, height: 0.2 },
+    } },
+  ] as const;
+  for (const edit of edits) {
+    const sessionId = `edit-${edit.type}`;
     await f.editor.upsertOperation({ sessionId, operation: {
-      operationId: "edit", type: "re_edit", order: 1, sourceCardId, sourceVersionId, parentVersionId: sourceVersionId,
-      summary: "调整背景", payload: { prompt: "调整背景" },
+      ...edit, operationId: "edit", order: 1, sourceCardId, sourceVersionId, parentVersionId: sourceVersionId,
     } });
-    const { childTask } = await f.editor.submit({ sessionId, idempotencyKey: sessionId, sourceCardId, sourceVersionId, tool: "re_edit" });
+    const { childTask } = await f.editor.submit({ sessionId, idempotencyKey: sessionId, sourceCardId, sourceVersionId, tool: edit.type });
     const result = await waitUntil(() => f.editor.getTask(childTask.id), (value) => Boolean(value && value.task.status !== "generating"), 5000);
     assert.equal(result?.task.status, "succeeded");
     const [version] = result!.versions;
