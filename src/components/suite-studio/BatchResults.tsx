@@ -3,7 +3,7 @@ import { createGenerationActions, suiteApi, type ApiPlatformProfile } from "../.
 import { readProductCardSnapshot } from "../../../shared/product-card";
 import { SUITE_CATEGORY_GROUPS, SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
 import { pipelineErrorMessages } from "../../../shared/suite-pipeline-errors";
-import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
+import { ResultCardActions, type ResultCardEditor } from "./ResultCardActions";
 import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
 import { SelectedProductCardBar } from "../product-card-picker/SelectedProductCardBar";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
@@ -221,10 +221,9 @@ export function BatchResults({
     [notice, setNotice] = useState(""),
     [supplement, setSupplement] = useState("");
   const [preview, setPreview] = useState<{ url: string; title: string } | null>(null);
-  const [editCard, setEditCard] = useState<ResolvedDeliverySlot | null>(null);
+  const [editor, setEditor] = useState<ResultCardEditor | null>(null);
   const [editJob, setEditJob] = useState("");
-  const [retryJob, setRetryJob] = useState(""),
-    [retrySize, setRetrySize] = useState<Record<string, string>>({});
+  const [retryJob, setRetryJob] = useState("");
   const [showListingCopy, setShowListingCopy] = useState(false);
   const act = async (fn: () => Promise<void>) => {
     if (busy) return;
@@ -264,18 +263,6 @@ export function BatchResults({
       await studioApi.resume(id, action, fields);
       onActivate(id);
       await refresh(id);
-    });
-  const retry = (card: ResolvedDeliverySlot) =>
-    void act(async () => {
-      const size = retrySize[card.parentTaskId];
-      if (size)
-        await suiteApi.batchUpdateTaskParams(id, {
-          taskIds: [card.parentTaskId],
-          generationParams: { size },
-        });
-      const result = await submitGeneration(card.parentTaskId, size, (key) => suiteApi.generateTask(card.parentTaskId, undefined, key));
-      setRetryJob(result.batchId);
-      setNotice("已提交单张生成。");
     });
   const selected = ready.map((card) => card.parentTaskId).filter((task) => picked.includes(task));
   const structure = s.planning.snapshot?.structure,
@@ -484,42 +471,16 @@ export function BatchResults({
                   {type}
                 </strong>
               </div>
-              <div className="ss-actions">
-                {card.previewUrl && (
-                  <>
-                    <button
-                      onClick={() =>
-                        void act(() => download(card.previewUrl!, card.exportFilename ?? `${card.title}.png`))
-                      }
-                    >
-                      下载
-                    </button>
-                    <button
-                      disabled={busy || !!editJob || !card.versionId}
-                      onClick={() => setEditCard(card)}
-                    >
-                      编辑图片
-                    </button>
-                  </>
-                )}
-                {!running && (
-                  <>
-                    <select
-                      aria-label={"重试分辨率 " + card.title}
-                      value={retrySize[task] ?? ""}
-                      onChange={(e) => setRetrySize({ ...retrySize, [task]: e.target.value })}
-                    >
-                      <option value="">原分辨率</option>
-                      {sizes.map((v) => (
-                        <option key={v}>{v}</option>
-                      ))}
-                    </select>
-                    <button disabled={busy || !!retryJob} onClick={() => retry(card)}>
-                      {card.previewUrl ? "重新生成" : "失败重试"}
-                    </button>
-                  </>
-                )}
-              </div>
+              <ResultCardActions
+                card={card}
+                disabled={busy || running || card.taskStatus === "generating" || Boolean(retryJob || editJob)}
+                onDownload={card.previewUrl ? () => void act(() => download(card.previewUrl!, card.exportFilename ?? `${card.title}.png`)) : undefined}
+                onEdit={setEditor}
+                resolution={{ suiteId: id, sizes }}
+                submitGeneration={submitGeneration}
+                onRedrawStarted={(batchId) => { setRetryJob(batchId); setNotice("已提交单张生成。"); }}
+                onArchived={() => refresh(id)}
+              />
             </article>
           );
         })}
@@ -544,8 +505,9 @@ export function BatchResults({
       )}
       {showListingCopy && <ListingCopyDrawer state={s} profiles={profiles} close={() => setShowListingCopy(false)} />}
       <StudioImageEditorHost
-        card={editCard}
-        onClose={() => setEditCard(null)}
+        card={editor?.card ?? null}
+        initialTool={editor?.initialTool}
+        onClose={() => setEditor(null)}
         onEditJobStarted={setEditJob}
         onRetryJobStarted={setRetryJob}
         onNotify={setNotice}

@@ -22,7 +22,6 @@ export const APLUS_MODULES = [
 
 export type AplusModuleCode = (typeof APLUS_MODULES)[number]["code"];
 export const APLUS_PRODUCT_INFO_MAX_LENGTH = 1000;
-export const APLUS_ADDITIONAL_PROMPT_MAX_LENGTH = 500;
 export const APLUS_MODULE_LIMITS = { min: 1, max: 10 } as const;
 export const DEFAULT_APLUS_MODULE_CODES = APLUS_MODULES.filter(({ defaultSelected }) => defaultSelected).map(({ code }) => code);
 const moduleCodes = new Set<string>(APLUS_MODULES.map(({ code }) => code));

@@ -801,7 +801,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
               errorMessage: latestAttempt?.status === "failed" ? latestAttempt.errorMessage : null,
             };
           }).sort((a, b) => (a.sortOrder ?? a.slotIndex) - (b.sortOrder ?? b.slotIndex))
-        : resolvedCards;
+        : resolvedCards.map((card) => ({ ...card, taskStatus: taskAggregateById.get(card.parentTaskId)!.status }));
     let pipeline = latestPipeline;
     if (
       pipeline &&

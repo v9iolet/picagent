@@ -876,8 +876,9 @@ test("regenerating from the editor uses the exact opened task version and frozen
     ["source", (await storage.get(first.objectKey))?.bytes], ["product", original],
   ]);
   assert.match(calls[2].prompt, /^第 1 张为待编辑图[\s\S]*原始生成提示词$/);
-  assert.equal((await generate("legacy-edit", { editSourceVersionId: legacy.id })).status, 202);
+  assert.equal((await generate("legacy-edit", { editSourceVersionId: legacy.id, additionalPrompt: "保留侧光" })).status, 202);
   const [fromLegacy] = await waitForVersions(4);
   assert.deepEqual(fromLegacy.contextSnapshot.attachedInputs, regenerated.contextSnapshot.attachedInputs);
-  assert.match(calls[3].prompt, /新的草稿$/);
+  assert.match(calls[3].prompt, /新的草稿\n\n单卡人工补充：保留侧光$/);
+  assert.equal((await taskRepository.getTask(taskId))?.promptDraft, "新的草稿");
 });

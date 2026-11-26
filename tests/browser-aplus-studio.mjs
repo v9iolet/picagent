@@ -310,6 +310,17 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
     return bytes;
   }
 
+  const photo = web.getByRole("button", { name: "放大 使用场景图", exact: true });
+  const photoUrl = await photo.locator("img").getAttribute("src");
+  await photo.click();
+  const singleDialog = page.getByRole("dialog", { name: "使用场景图", exact: true });
+  const singleImage = singleDialog.getByRole("img", { name: "使用场景图" });
+  await singleImage.evaluate((img) => img.decode());
+  assert.equal(await singleImage.getAttribute("src"), photoUrl);
+  await singleDialog.getByRole("button", { name: "关闭" }).click();
+  await singleDialog.waitFor({ state: "hidden" });
+  await photo.dragTo(web.locator("article").last());
+  assert.equal(await page.getByRole("dialog").count(), 0);
   await web.locator("article").last().getByRole("button", { name: "重绘" }).dragTo(web.locator("article").first());
   assert.deepEqual(await firstPixel(await readLongPreview()), [255, 0, 0]);
   await web.getByRole("img", { name: "拖动排序 首屏主视觉" }).dragTo(web.locator("article").first());
@@ -379,7 +390,7 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
   assert.deepEqual(await firstPixel(zip.get("aplus_premium_web/01_hero.png")), [0, 255, 0]);
   assert.deepEqual(await firstPixel(zip.get("aplus_premium_mobile/01_hero.png")), [0, 0, 128]);
 
-  await mobile.locator("article").last().dragTo(mobile.locator("article").first(), { sourcePosition: { x: 12, y: 12 } });
+  await mobile.locator("article").last().locator(".aplus-card-body").dragTo(mobile.locator("article").first(), { sourcePosition: { x: 5, y: 5 } });
   await mobile.locator("article").first().getByText("使用场景图", { exact: true }).waitFor();
   for (const group of [web, mobile]) {
     assert.deepEqual(await group.locator(".aplus-card-body strong").allTextContents(), ["使用场景图", "首屏主视觉"]);

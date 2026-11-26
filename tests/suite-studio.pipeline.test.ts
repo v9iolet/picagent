@@ -837,6 +837,29 @@ for (const [error, expected] of [
   });
 }
 
+test("套图单卡的附加提示词只进入本次重绘，非法输入不会启动生图", async () => {
+  const f = await pipelineFixture();
+  await start(f.app, f.suite.id, "start", oneCard);
+  await waitPipeline(f.app, f.suite.id, ["completed"]);
+  const [task] = await f.taskRepository.listTasks(f.suite.id);
+  const redraw = (additionalPrompt: unknown) => f.app.request("POST", `/api/suite-tasks/${task.id}/generation`, {
+    headers: { "idempotency-key": "manual-redraw" }, body: { additionalPrompt },
+  });
+  for (const invalid of ["长".repeat(501), null, 42]) {
+    assert.equal((await redraw(invalid)).status, 400);
+  }
+  assert.equal(f.providerCallCount(), 1);
+  const submitted = await redraw("  增强金属反光  ");
+  assert.equal(submitted.status, 202);
+  await eventually(async () => (await f.taskRepository.getBatch(submitted.body.data.batchId))?.status === "completed");
+  const { versions } = await f.taskRepository.listTaskVersions(task.id);
+  const current = versions.find((version) => version.isCurrent)!;
+  assert.equal(current.promptSnapshot.prompt, task.promptDraft + "\n\n单卡人工补充：增强金属反光");
+  assert.match(String(current.promptSnapshot.providerPrompt), /单卡人工补充：增强金属反光/);
+  assert.equal((await f.taskRepository.getTask(task.id))?.promptDraft, task.promptDraft);
+  assert.equal(f.providerCallCount(), 2);
+});
+
 test("partial_failed pipeline converges to completed once single-card retry fills all cards", async () => {
   const fixture = await pipelineFixture({
     imageRetryDelayMs: 0,

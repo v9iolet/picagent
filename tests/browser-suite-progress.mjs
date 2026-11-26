@@ -608,10 +608,13 @@ test("会话内切页缓存：未上传草稿、已上传未生成草稿、生�
 });
 
 test("partial_failed 批次单卡点击失败重试成功后，批次徽标立即收敛为已完成且清除失败告警", async (t) => {
+  const redrawGate = Promise.withResolvers();
+  t.after(() => redrawGate.resolve());
   const { app, page, url, sample } = await offlineProgressFixture(t, {
     imageRetryDelayMs: 0,
     providerEdit: async (call, defaultResult) => {
       if (call === 2) throw new Error("IMAGE_PROVIDER_FAILED");
+      if (call === 3) await redrawGate.promise;
       return defaultResult;
     },
   });
@@ -630,7 +633,15 @@ test("partial_failed 批次单卡点击失败重试成功后，批次徽标立�
   await batch.getByText("套图图片生成失败", { exact: true }).waitFor();
   assert.equal(await batch.locator("[data-result-card] img").count(), 1);
 
-  await batch.getByRole("button", { name: "失败重试", exact: true }).click();
+  const failedCard = batch.locator("[data-result-card]").filter({ hasText: "未生成" });
+  assert.equal(await failedCard.getByRole("button", { name: "下载", exact: true }).isDisabled(), true);
+  await failedCard.getByRole("button", { name: "重绘", exact: true }).click();
+  await page.getByRole("dialog", { name: "重绘图片" }).getByRole("button", { name: "确认重绘" }).click();
+  await page.getByRole("dialog", { name: "重绘图片" }).waitFor({ state: "hidden" });
+  await page.reload();
+  assert.equal(await failedCard.getByRole("button", { name: "删除", exact: true }).isDisabled(), true);
+  assert.equal(await failedCard.getByRole("button", { name: "重绘", exact: true }).isDisabled(), true);
+  redrawGate.resolve();
   await batch.locator('[data-status="completed"]').waitFor({ timeout: 12000 });
   assert.equal(await batch.locator('[data-status="completed"]').textContent(), "已完成");
   assert.equal(await batch.getByText("套图图片生成失败", { exact: true }).count(), 0);

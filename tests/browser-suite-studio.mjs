@@ -383,13 +383,14 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.waitForTimeout(3200);
   assert.equal(statePolls(), afterCompletion, "终态后不得继续轮询");
   const first = cards.first();
-  assert.equal(await first.getByRole("button", { name: "编辑文字" }).count(), 0);
-  await first.getByRole("button", { name: "编辑图片" }).click();
+  assert.deepEqual(await first.locator(".ss-actions button").allTextContents(), ["下载", "重绘", "图片编辑", "商品还原", "AI 改字", "删除"]);
+  await first.getByRole("button", { name: "图片编辑" }).click();
   const dialog = page.getByRole("dialog", { name: "图片编辑器" });
   await dialog.waitFor();
   assert.equal(new URL(page.url()).pathname, `/create/suite/${suiteId}`);
   assert.equal(await dialog.isVisible(), true);
-  await dialog.locator(".wb-editor-tools button", { hasText: "编辑文字" }).click();
+  await dialog.getByRole("button", { name: "关闭图片编辑器" }).click();
+  await first.getByRole("button", { name: "AI 改字", exact: true }).click();
   await dialog.getByRole("status").filter({ hasText: "文字识别请求超时" }).waitFor();
   await dialog.getByRole("button", { name: "重新识别" }).click();
   const firstText = dialog.getByRole("button", { name: "折叠插脚", exact: true });
@@ -432,12 +433,36 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   assert.equal(edits[2].summary, "删除文字：限时优惠");
   assert.deepEqual(submitted.request().postDataJSON().operationIds, edits.map((item) => item.operationId));
   await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
-  await first.getByRole("combobox").selectOption("4K");
+  await first.getByRole("button", { name: "重绘", exact: true }).click();
+  const redrawDialog = page.getByRole("dialog", { name: "重绘图片" });
+  const resolution = redrawDialog.getByLabel("输出分辨率");
+  assert.deepEqual(await resolution.locator("option").allTextContents(), ["原分辨率", "1K", "4K"]);
+  await resolution.selectOption("4K");
+  await redrawDialog.getByLabel("附加提示词（选填）").fill("增强磨砂纹理");
+  const generationRoute = "**/api/suite-tasks/*/generation";
+  const submittedKeys = [];
+  await page.route(generationRoute, async (route) => {
+    submittedKeys.push(route.request().headers()["idempotency-key"]);
+    const response = await route.fetch();
+    if (submittedKeys.length === 1) {
+      assert.equal(response.status(), 202);
+      await route.abort("failed");
+    } else {
+      await route.fulfill({ response });
+    }
+  });
+  await redrawDialog.getByRole("button", { name: "确认重绘" }).click();
+  await redrawDialog.getByRole("alert").waitFor();
   const regenReq = page.waitForResponse(
     (res) => res.request().method() === "POST" && res.url().includes("/api/suite-tasks/") && res.url().endsWith("/generation"),
   );
-  await first.getByRole("button", { name: "重新生成" }).click();
-  await regenReq;
+  await redrawDialog.getByRole("button", { name: "确认重绘" }).click();
+  const acknowledged = await regenReq;
+  assert.deepEqual(acknowledged.request().postDataJSON(), { additionalPrompt: "增强磨砂纹理" });
+  assert.equal(acknowledged.status(), 200);
+  assert.ok(submittedKeys[0]);
+  assert.deepEqual(submittedKeys, [submittedKeys[0], submittedKeys[0]]);
+  await page.unroute(generationRoute);
   await batch.getByText("图片已更新", { exact: true }).waitFor();
   assert.deepEqual(fixture.calls.find((x) => x.path.endsWith("/tasks/batch-params")).body.generationParams, {
     size: "4K",
@@ -449,8 +474,7 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
     /\/generation$/,
   );
   const second = cards.nth(1);
-  await second.getByRole("button", { name: "编辑图片", exact: true }).click();
-  await dialog.getByRole("button", { name: /^商品还原/ }).click();
+  await second.getByRole("button", { name: "商品还原", exact: true }).click();
   await dialog.getByRole("radio", { name: "使用全部商品原图", checked: true }).waitFor();
   await dialog.locator(".wb-restore-grid img").first().evaluate((image) => image.decode());
   const restoreRequest = page.waitForResponse((response) => response.url().endsWith("/submit"));
@@ -484,6 +508,14 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.getByRole("button", { name: "返回套图", exact: true }).click();
   await page.waitForURL(`**/create/suite/${suiteId}`);
   await batch.locator('[data-status="completed"]').waitFor();
+  await cards.last().getByRole("button", { name: "删除", exact: true }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "删除结果卡" });
+  assert.equal(await cards.count(), 7);
+  const archived = page.waitForResponse((res) => res.request().method() === "PATCH" && res.url().includes("/api/suite-tasks/"));
+  await deleteDialog.getByRole("button", { name: "确认删除" }).click();
+  assert.equal((await archived).request().postDataJSON().status, "archived");
+  await deleteDialog.waitFor({ state: "hidden" });
+  assert.equal(await cards.count(), 6);
   await page.goBack();
   await page.getByRole("tab", { name: "成品展示板", selected: true }).waitFor();
   await page.goto(fixture.url + "settings");
