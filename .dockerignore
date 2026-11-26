@@ -1,9 +1,9 @@
 .git
 .env
 .env.*
-!.env.example
 node_modules
 dist
+dist-server/
 build
 coverage
 var
@@ -14,3 +14,12 @@ artifacts
 playwright-report
 test-results
 *.tsbuildinfo
+tests/
+docs/
+prompt/
+scripts/
+.drone.yml
+**/.DS_Store
+README.md
+AGENTS.md
+CONTEXT.md

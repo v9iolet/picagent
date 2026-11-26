@@ -1,7 +1,6 @@
 import { PostgresListingRepository } from "./repositories/postgres-listing-copy-repository.js";
 import http from "node:http";
-import { readFile } from "node:fs/promises";
-import { extname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { Client as MinioClient } from "minio";
 import { Pool } from "pg";
 import { createSuiteStudioApp, hasValidTaskVersionIds } from "./app.js";
@@ -10,6 +9,7 @@ import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { dispatchInputImageUpload } from "./multipart.js";
 import { readBoundedRequestBody } from "./request-body-limit.js";
+import { createStaticAssetHandler } from "./http/static-assets.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
 import { defaultImageOptions } from "../shared/model-settings.js";
@@ -113,25 +113,7 @@ const app = createSuiteStudioApp({
   reverseRepository: new PostgresReverseRepository(pool),
   ragClient: new PostgresRagClient(pool),
 });
-const staticRoot = resolve(process.cwd(), "dist");
-const staticMime: Record<string, string> = {
-  ".css": "text/css; charset=utf-8",
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".svg": "image/svg+xml",
-  ".webp": "image/webp",
-};
-async function serveStatic(pathname: string): Promise<{ bytes: Buffer; contentType: string } | null> {
-  const relativePath = pathname === "/" || !extname(pathname) ? "index.html" : pathname.replace(/^\/+/, "");
-  const target = resolve(staticRoot, relativePath);
-  if (target !== staticRoot && !target.startsWith(`${staticRoot}\\`) && !target.startsWith(`${staticRoot}/`)) return null;
-  try {
-    return { bytes: await readFile(target), contentType: staticMime[extname(target).toLowerCase()] ?? "application/octet-stream" };
-  } catch { return null; }
-}
+const serveStatic = createStaticAssetHandler(resolve(process.cwd(), "dist"));
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
   const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -185,10 +167,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     if ((response.headers as Record<string, string> | undefined)?.location) { res.statusCode = response.status; res.setHeader("location", (response.headers as Record<string, string>).location); res.end(); return; }
     if (response.raw) { const rawHeaders = response.headers as Record<string, string> | undefined; res.statusCode = response.status; for (const [name, value] of Object.entries(rawHeaders ?? {})) res.setHeader(name, value); res.setHeader("content-type", rawHeaders?.["content-type"] ?? "application/octet-stream"); res.setHeader("cache-control", rawHeaders?.["cache-control"] ?? "private, max-age=60"); res.end(response.raw); return; }
   } else if (req.method === "GET" && !path.startsWith("/api/")) {
-    const asset = await serveStatic(requestUrl.pathname);
-    if (asset) { res.statusCode = 200; res.setHeader("content-type", asset.contentType); res.end(asset.bytes); return; }
-    const fallback = await serveStatic("/");
-    if (fallback) { res.statusCode = 200; res.setHeader("content-type", fallback.contentType); res.end(fallback.bytes); return; }
+    const asset = await serveStatic(req.url ?? "/");
+    if (asset) {
+      res.statusCode = 200;
+      res.setHeader("content-type", asset.contentType);
+      res.setHeader("cache-control", asset.cacheControl);
+      res.end(asset.bytes);
+      return;
+    }
     response = { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } };
   } else {
     let parsed: unknown; try { parsed = body.length ? JSON.parse(body.toString("utf8")) : undefined; } catch { parsed = undefined; }
