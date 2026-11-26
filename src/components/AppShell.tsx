@@ -1,5 +1,6 @@
 import type { MouseEvent, ReactNode } from "react";
 import { Icon } from "../pages/shared";
+import { BrandLogo } from "./BrandLogo";
 import "./AppShell.css";
 
 export type AppNavSection = "home" | "create" | "products" | "assets" | "templates" | "settings";
@@ -52,7 +53,7 @@ export function AppShell({
       <header className="pa-topbar">
         <div className="pa-topbar-left">
           <a className="pa-brand" href="/" onClick={linkTo("/")} title="PicAgent 首页">
-            <img src="/logo.png" alt="" width={24} height={24} />
+            <BrandLogo size={26} />
             <strong>PicAgent</strong>
           </a>
           <nav className="pa-breadcrumbs" aria-label="面包屑">

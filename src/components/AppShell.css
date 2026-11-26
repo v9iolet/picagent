@@ -92,7 +92,7 @@ body:has(.pa-shell-full) {
   padding: 0 14px;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   color: var(--pa-ink);
   text-decoration: none;
   border-right: 1px solid var(--pa-border);
@@ -101,10 +101,6 @@ body:has(.pa-shell-full) {
 
 .pa-brand img {
   display: block;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--pa-radius-sm);
-  object-fit: contain;
   flex-shrink: 0;
 }
 
