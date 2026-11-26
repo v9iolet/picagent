@@ -36,10 +36,15 @@ function checkUnauthorized(path: string, status: number, handler: typeof unautho
   if (status === 401 && handler === unauthorizedHandler && !path.startsWith("/api/auth/")) handler?.();
 }
 
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function fetchApiResponse(path: string, init?: RequestInit): Promise<Response> {
   const handler = unauthorizedHandler;
   const response = await fetch(path, { ...init, cache: "no-store", credentials: "same-origin" });
   checkUnauthorized(path, response.status, handler);
+  return response;
+}
+
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetchApiResponse(path, init);
   const payload = await response.json().catch(() => null) as { data?: T; error?: { code?: string; message?: string } } | null;
   if (!response.ok) throw new ApiHttpError(payload?.error?.message ?? "请求失败", response.status, payload?.error?.code);
   return payload?.data as T;

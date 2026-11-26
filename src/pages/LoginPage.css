@@ -148,6 +148,7 @@ body:has(.login-page) {
   color: #666673;
 }
 .login-password button:hover { background: #f4f4f5; }
+.login-password button[aria-pressed="true"] { background: #eae9f6; color: #49418a; }
 .login-captcha { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 9px; }
 .login-captcha button {
   overflow: hidden;

@@ -130,9 +130,9 @@ test("管理员登录、一次性验证码、刷新保持会话、撤销和退�
   }
   await username.fill("admin");
   await password.fill("woshisheng_666");
-  await page.getByRole("button", { name: "显示密码" }).click();
+  await page.getByRole("button", { name: "显示密码", pressed: false }).click();
   assert.equal(await password.getAttribute("type"), "text");
-  await page.getByRole("button", { name: "隐藏密码" }).click();
+  await page.getByRole("button", { name: "隐藏密码", pressed: true }).click();
   await failedLogin("XXXX", "验证码错误，请重新输入");
   advance(181000);
   await failedLogin(code(), "验证码已过期，请刷新后重试");
@@ -197,5 +197,34 @@ test("管理员登录、一次性验证码、刷新保持会话、撤销和退�
   assert.equal((await page.context().cookies()).some(c => c.name === "picagent_session"), false);
   const replay = await page.request.get(new URL("/api/suites", url).href, { headers: oldCookie });
   assert.equal(replay.status(), 401);
+  assert.deepEqual(errors, []);
+});
+
+test("会话撤销后打开套图生成记录，feed 的 401 会跳回登录页", async t => {
+  const { page, url, authService, code } = await fixture(t);
+  const captcha = await page.request.get(new URL("/api/auth/captcha", url).href);
+  const { data: { captchaId } } = await captcha.json();
+  const login = await page.request.post(new URL("/api/auth/login", url).href, {
+    data: { username: "admin", password: "woshisheng_666", captchaId, captchaCode: code() },
+  });
+  assert.equal(login.status(), 200);
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto(new URL("/create/suite", url).href);
+  const openHistory = page.getByRole("button", { name: "生成记录", exact: true });
+  await openHistory.click();
+  const drawer = page.getByRole("dialog", { name: "生成记录" });
+  await drawer.getByText("暂无生成记录", { exact: true }).waitFor();
+  await drawer.getByRole("button", { name: "关闭", exact: true }).click();
+
+  const cookie = (await page.context().cookies()).find(c => c.name === "picagent_session");
+  await authService.logout({ cookie: cookie.name + "=" + cookie.value });
+  const [feed] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === "/api/suites/feed"),
+    openHistory.click(),
+  ]);
+  assert.equal(feed.status(), 401);
+  await page.waitForURL(new URL("/login?next=%2Fcreate%2Fsuite", url).href);
+  await page.getByRole("status").filter({ hasText: "登录状态已失效，请重新登录" }).waitFor();
   assert.deepEqual(errors, []);
 });

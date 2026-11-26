@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { createIdempotencyKey } from "../api/client";
+import { createIdempotencyKey, request } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { Icon } from "./shared";
 import "../product-reverse.css";
@@ -20,17 +20,6 @@ type Ref = {
   effectivePromptVersionId?: string | null;
 };
 type Plan = { id: string; mode: Mode; baselineReferenceId?: string | null; references: Ref[] };
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { ...init, cache: "no-store" });
-  const payload = await response.json().catch(() => null) as { data?: T; error?: { message?: string } } | null;
-  if (!response.ok) {
-    const error = new Error(payload?.error?.message ?? "请求失败") as Error & { status?: number };
-    error.status = response.status;
-    throw error;
-  }
-  return payload?.data as T;
-}
 
 export function ReversePage({ planId, navigate }: { planId?: string; navigate: (to: string) => void }) {
   const [plan, setPlan] = useState<Plan | null>(null);
@@ -63,7 +52,7 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
     setPreviewId(null);
     setPreviewActual(false);
     try {
-      const next = await api<Plan>(`/api/reverse-plans/${encodeURIComponent(id)}`);
+      const next = await request<Plan>(`/api/reverse-plans/${encodeURIComponent(id)}`);
       if (isCancelled?.()) return;
       setPlan(next);
       setSelectedId((current) => current && next.references.some((item) => item.id === current) ? current : next.references[0]?.id ?? null);
@@ -80,7 +69,7 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
   }, []);
 
   useEffect(() => {
-    api<Template[]>("/api/prompt-templates?stage=reverse_prompt&status=all")
+    request<Template[]>("/api/prompt-templates?stage=reverse_prompt&status=all")
       .then(setTemplates)
       .catch(() => undefined);
   }, []);
@@ -129,7 +118,7 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
     if (!plan || importing) return;
     setImporting(true);
     try {
-      const result = await api<{ suiteId: string }>(`/api/reverse-plans/${encodeURIComponent(plan.id)}/canvas-imports`, {
+      const result = await request<{ suiteId: string }>(`/api/reverse-plans/${encodeURIComponent(plan.id)}/canvas-imports`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
         body: JSON.stringify({}),
@@ -146,7 +135,7 @@ export function ReversePage({ planId, navigate }: { planId?: string; navigate: (
     if (!plan || !selected || archiving) return;
     setArchiving(true);
     try {
-      await api(`/api/reverse-plans/${encodeURIComponent(plan.id)}/references/${encodeURIComponent(selected.id)}/asset`, {
+      await request(`/api/reverse-plans/${encodeURIComponent(plan.id)}/references/${encodeURIComponent(selected.id)}/asset`, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
       });

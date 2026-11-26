@@ -8,7 +8,7 @@ import {
   type DeliverySourceRole,
   type ResolvedDeliverySlot,
 } from "../../shared/workbench-delivery";
-import { suiteApi, type ApiWorkbench } from "../api/client";
+import { fetchApiResponse, suiteApi, type ApiWorkbench } from "../api/client";
 import { Icon, ImageWithState } from "../pages/shared";
 import "./DeliveryGalleryView.css";
 
@@ -80,7 +80,7 @@ export function DeliveryGalleryView({
   const handleDownloadSingle = async (slot: ResolvedDeliverySlot) => {
     if (!slot.previewUrl) return;
     try {
-      const response = await fetch(slot.previewUrl, { cache: "no-store" });
+      const response = await fetchApiResponse(slot.previewUrl);
       if (!response.ok) throw new Error("单张下载失败");
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -116,7 +116,7 @@ export function DeliveryGalleryView({
         quality: exportFormat === "jpeg" || exportFormat === "webp" ? exportQuality : undefined,
         stitchDetail: stitchDetail && deliverableDetails.length > 0,
       });
-      const response = await fetch(exportUrl, { cache: "no-store" });
+      const response = await fetchApiResponse(exportUrl);
       if (!response.ok) {
         const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
         throw new Error(payload?.error?.message ?? "导出 ZIP 失败");

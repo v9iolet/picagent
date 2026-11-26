@@ -88,7 +88,7 @@ export function LoginPage({ nextPath, navigate }: {
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      await auth.login({ username: username.trim(), password, captchaId: challenge.captchaId, captchaCode });
+      await auth.login({ username: username.trim(), password, captchaId: challenge.captchaId, captchaCode: captchaCode.trim() });
       navigate(nextPath, { replace: true });
     } catch (cause) {
       setError(cause instanceof ApiHttpError ? cause.message : "登录失败，请检查网络连接后重试。");
@@ -117,7 +117,7 @@ export function LoginPage({ nextPath, navigate }: {
           <div className="login-password">
             <input id="login-password" name="password" type={visible ? "text" : "password"} autoComplete="current-password"
               required placeholder="请输入密码" value={password} onChange={event => setPassword(event.target.value)} />
-            <button type="button" aria-label={visible ? "隐藏密码" : "显示密码"} onClick={() => setVisible(!visible)}>
+            <button type="button" aria-label={visible ? "隐藏密码" : "显示密码"} aria-pressed={visible} onClick={() => setVisible(!visible)}>
               <Icon name="eye" />
             </button>
           </div>
