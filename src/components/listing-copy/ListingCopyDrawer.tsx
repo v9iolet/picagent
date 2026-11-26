@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { usePolling } from "../../hooks/usePolling";
+import { useState } from "react";
 import { listingCopyApi, type ApiListingContent, type ApiListingJob, type ApiPlatformProfile } from "../../api/client";
 import { StudioDialog } from "../suite-studio/StudioDialog";
 import { studioApi, type StudioState } from "../suite-studio/studio";
@@ -46,32 +47,24 @@ export function ListingCopyDrawer({ state, profiles, close }: {
   const [checking, setChecking] = useState(true);
   const [readError, setReadError] = useState("");
   const [createError, setCreateError] = useState("");
-  const [retry, setRetry] = useState(0);
   const [busy, setBusy] = useState(false);
   const id = state.listingCopy?.id ?? discovered?.id;
   const autoListingPending = state.pipeline?.config.listingCopy === true && state.pipeline.status === "running";
-  useEffect(() => {
-    if (id) return;
-    let active = true;
-    let timer: ReturnType<typeof setTimeout>;
-    setChecking(true);
-    async function readBatch() {
-      try {
-        const next = await studioApi.state(suiteId);
-        if (!active) return;
-        if (next.listingCopy) setDiscovered({ id: next.listingCopy.id });
-        else if (next.pipeline?.config.listingCopy === true && next.pipeline.status === "running") {
-          timer = setTimeout(readBatch, 1000);
-          return;
-        }
-      } catch (error) {
-        if (active) setReadError(listingMessage(error));
-      }
-      if (active) setChecking(false);
-    }
-    void readBatch();
-    return () => { active = false; clearTimeout(timer); };
-  }, [id, suiteId, retry]);
+  usePolling(async signal => {
+    const next = await studioApi.state(suiteId, signal);
+    if (signal.aborted) return;
+    if (next.listingCopy) setDiscovered({ id: next.listingCopy.id });
+    else if (next.pipeline?.config.listingCopy && next.pipeline.status === "running") return;
+    setChecking(false);
+  }, {
+    enabled: !id && checking && !readError,
+    initialDelayMs: 0,
+    intervalMs: 1000,
+    onError: error => {
+      setReadError(listingMessage(error));
+      setChecking(false);
+    },
+  }, [suiteId]);
 
   async function generate() {
     setBusy(true);
@@ -90,7 +83,7 @@ export function ListingCopyDrawer({ state, profiles, close }: {
     <StudioDialog title="商品上架文案" className="lc-drawer" close={() => { if (!busy) close(); }}>
       <p className="lc-batch-name">{state.suite.name}</p>
       {id ? <DrawerJob key={id} id={id} initial={discovered?.id === id ? discovered.job : undefined} profiles={profiles} setBusy={setBusy} />
-        : readError ? <p role="alert" className="lc-error">{readError} <button onClick={() => { setReadError(""); setRetry((n) => n + 1); }}>重试读取</button></p>
+        : readError ? <p role="alert" className="lc-error">{readError} <button onClick={() => { setReadError(""); setChecking(true); }}>重试读取</button></p>
         : checking ? <p role="status">{autoListingPending ? "正在等待本批次的文案任务…" : "正在读取文案…"}</p>
         : <div className="lc-generate">
           <p>本批次暂无上架文案。可用该批次的商品实拍原图和卖点生成文案。</p>

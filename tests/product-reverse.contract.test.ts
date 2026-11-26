@@ -242,8 +242,6 @@ test("ReversePage is read-only with upgrade banner and WorkbenchBoardPage skips 
   assert.doesNotMatch(reversePage, /api<Plan>\("\/api\/reverse-plans"/);
 
   const workbenchPage = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
-  assert.match(
-    workbenchPage,
-    /useEffect\(\(\) => \{\s*if \(workbench\?\.suite\.origin === "replica" \|\| workbench\?\.suite\.origin === "aplus"\) return;\s*const ordinaryTaskRunning/,
-  );
+  assert.match(workbenchPage, /const studioManaged = workbench\?\.suite\.origin === "replica" \|\| workbench\?\.suite\.origin === "aplus"/);
+  assert.match(workbenchPage, /usePolling\(reload, \{\s*enabled: !studioManaged && Boolean\(ordinaryTaskRunning \|\| editChildRunning\)/);
 });

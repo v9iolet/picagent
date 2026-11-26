@@ -83,7 +83,7 @@ function readSnapshotCopy(snapshot: Record<string, unknown>): Array<{ role?: str
 
 export interface ReplicaBatchPreviewProps {
   state: ReplicaStudioState;
-  refresh: (id: string) => Promise<void>;
+  refresh: (id: string, signal?: AbortSignal) => Promise<void>;
   onDelete: (id: string) => void;
   navigate: (path: string) => void;
 }

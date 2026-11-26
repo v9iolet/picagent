@@ -1,3 +1,4 @@
+import { usePolling } from "../hooks/usePolling";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   modelSettingsApi,
@@ -186,9 +187,10 @@ export function SuiteStudioPage({
   }, []);
 
   const refresh = useCallback(
-    async (id: string) => {
+    async (id: string, signal?: AbortSignal) => {
       const seq = ++requestSeq.current;
-      const next = await studioApi.state(id);
+      const next = await studioApi.state(id, signal);
+      if (signal?.aborted) return;
       suiteWorkspaceStore.setMemoryCache({
         suiteId: next.suite.id,
         state: next,
@@ -610,36 +612,20 @@ export function SuiteStudioPage({
   const currentBatch = currentState && (currentState.cards.length || currentState.pipeline) ? currentState : null;
   const pollingSuiteId = currentBatch && isBatchPolling(currentBatch) ? currentBatch.suite.id : undefined;
 
-  useEffect(() => {
+  usePolling(async signal => {
     if (!pollingSuiteId) return;
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    async function poll() {
-      const seq = ++requestSeq.current;
-      try {
-        const next = await studioApi.state(pollingSuiteId!);
-        suiteWorkspaceStore.setMemoryCache({
-          suiteId: next.suite.id,
-          state: next,
-          images: next.inputImages,
-        });
-        if (!live || currentBatchIdRef.current !== pollingSuiteId) return;
-        applyState(next, seq);
-        if (isBatchPolling(next)) {
-          timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-        }
-      } catch (e) {
-        if (!live || currentBatchIdRef.current !== pollingSuiteId) return;
-        setNotice(message(e));
-        timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-      }
-    }
-    timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-    return () => {
-      live = false;
-      if (timer !== undefined) clearTimeout(timer);
-    };
-  }, [pollingSuiteId, applyState]);
+    const seq = ++requestSeq.current;
+    const next = await studioApi.state(pollingSuiteId, signal);
+    if (signal.aborted || currentBatchIdRef.current !== pollingSuiteId) return;
+    suiteWorkspaceStore.setMemoryCache({ suiteId: next.suite.id, state: next, images: next.inputImages });
+    applyState(next, seq);
+  }, {
+    enabled: Boolean(pollingSuiteId),
+    intervalMs: POLL_INTERVAL_MS,
+    onError: error => {
+      if (currentBatchIdRef.current === pollingSuiteId) setNotice(message(error));
+    },
+  }, [pollingSuiteId]);
 
   const route = (id: string) => {
     hydrated.current = id;

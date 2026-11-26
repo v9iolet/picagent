@@ -1,3 +1,4 @@
+import { useToast } from "../components/ui/ToastProvider";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { suiteApi, type ApiLibraryResource, type ApiPromptTemplate, type ApiPromptTemplateCopy } from "../api/client";
 import { AppShell } from "../components/AppShell";
@@ -26,7 +27,7 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
   const [savingTemplate, setSavingTemplate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [toast, setToast] = useState("");
+  const { showToast: notify } = useToast();
   const [promptModal, setPromptModal] = useState<ApiLibraryResource | null>(null);
   const loadSequence = useRef(0);
 
@@ -35,8 +36,6 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
     document.title = "模板库 · PicAgent";
     return () => { document.title = previous; };
   }, []);
-
-  const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2400); };
 
   const load = async () => {
     const sequence = ++loadSequence.current;
@@ -405,7 +404,6 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
         </div>
       )}
       {error && <div className="suite-toast show" role="alert">{error}</div>}
-      {toast && <div className="suite-toast show" role="status">{toast}</div>}
     </AppShell>
   );
 }

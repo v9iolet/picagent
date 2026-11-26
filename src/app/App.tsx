@@ -1,3 +1,4 @@
+import { ToastProvider } from "../components/ui/ToastProvider";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 const AplusStudioPage = lazy(() => import("../pages/AplusStudioPage").then(module => ({ default: module.AplusStudioPage })));
@@ -30,9 +31,11 @@ export function App() {
   }, []);
 
   return (
-    <Suspense fallback={<main role="status">正在加载页面…</main>}>
-      <RoutePage path={path} search={search} navigate={navigate} />
-    </Suspense>
+    <ToastProvider>
+      <Suspense fallback={<main role="status">正在加载页面…</main>}>
+        <RoutePage path={path} search={search} navigate={navigate} />
+      </Suspense>
+    </ToastProvider>
   );
 }
 

@@ -1,3 +1,5 @@
+import { useToast } from "../components/ui/ToastProvider";
+import { usePolling } from "../hooks/usePolling";
 import { ResolutionCostNote } from "../components/ResolutionCostNote";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { applyNodeChanges, Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, type Edge, type Node, type NodeProps, type Viewport, useNodesState, useReactFlow } from "@xyflow/react";
@@ -21,7 +23,7 @@ import { DeliveryGalleryView } from "../components/DeliveryGalleryView";
 import { ProductResourcePickerModal } from "../components/resource-picker";
 import { VersionCompareModal } from "../components/VersionCompareModal";
 import { stageLabel } from "../features/library/library-helpers";
-import { Icon, ImageWithState, ModelSettingsMessage } from "./shared";
+import { Icon, ImageWithState } from "./shared";
 import type { DraftOperation } from "../features/image-editor/ImageEditorModal";
 import { LazyImageEditorModal } from "../features/image-editor/LazyImageEditorModal";
 import { versionGenerationPrompt } from "../features/image-editor/versionGenerationPrompt";
@@ -717,7 +719,8 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
   const [styleDrawerOpen, setStyleDrawerOpen] = useState(false);
   const [styleDraft, setStyleDraft] = useState("");
   const [savingStyle, setSavingStyle] = useState(false);
-  const [toast, setToast] = useState("");
+  const { showToast: notify } = useToast();
+  const [loadError, setLoadError] = useState("");
   const [defaultImageModel, setDefaultImageModel] = useState<string | null | undefined>(undefined);
   const [imageOptions, setImageOptions] = useState(() => defaultImageOptions("gpt-image-2"));
   const [promptDraft, setPromptDraft] = useState("");
@@ -739,11 +742,6 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
   const selectedIsImageEditChild = Boolean(workbench?.imageEditChildren?.some((child) => String(child.task.id) === selectedTask?.id));
 
   useEffect(() => { setPromptDraft(selectedTask?.promptDraft ?? ""); }, [selectedTask?.id, selectedTask?.promptDraft]);
-
-  const notify = useCallback((message: string) => {
-    setToast(message);
-    if (!message.includes("配置 → 偏好设置")) window.setTimeout(() => setToast((current) => current === message ? "" : current), 2400);
-  }, []);
 
   useEffect(() => {
     const loadDefault = () => {
@@ -824,8 +822,9 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     return nextNodes;
   }, [setNodes, openStyleDrawer, notify, getInternalNode]);
 
-  const reload = useCallback(async () => {
-    const next = await suiteApi.getWorkbench(suiteId);
+  const reload = useCallback(async (signal?: AbortSignal) => {
+    const next = await suiteApi.getWorkbench(suiteId, signal);
+    if (signal?.aborted) return;
     latestWorkbench.current = next;
     setWorkbench(next);
     layoutVersionRef.current = next.layout?.layoutVersion ?? 0;
@@ -837,7 +836,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     setSelectedTaskId((current) => current && (next.tasks.some((task) => task.id === current) || next.imageEditChildren?.some((child) => String(child.task.id) === current)) ? current : next.tasks.find((task) => task.status !== "archived")?.id ?? null);
   }, [fitView, rebuildGraph, selectedNodeId, canvasFilter, suiteId]);
 
-  useEffect(() => { reload().catch(() => notify("工作台加载失败，请重试")); }, [suiteId]);
+  useEffect(() => { reload().catch(() => setLoadError("工作台加载失败，请重试")); }, [suiteId]);
 
   useEffect(() => {
     setMode(new URLSearchParams(search).get("view") === "gallery" ? "gallery" : "compose");
@@ -895,14 +894,13 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     rebuildGraph(latestWorkbench.current, selectedNodeId, canvasFilter, false);
   }, [selectedNodeId, canvasFilter, mode, rebuildGraph]);
 
-  useEffect(() => {
-    if (workbench?.suite.origin === "replica" || workbench?.suite.origin === "aplus") return;
-    const ordinaryTaskRunning = workbench?.tasks.some((task) => task.status === "generating");
-    const editChildRunning = workbench?.imageEditChildren?.some((child) => String(child.task.status) === "generating");
-    if (!ordinaryTaskRunning && !editChildRunning) return;
-    const timer = window.setInterval(() => { reload().catch(() => undefined); }, 1800);
-    return () => window.clearInterval(timer);
-  }, [reload, workbench]);
+  const studioManaged = workbench?.suite.origin === "replica" || workbench?.suite.origin === "aplus";
+  const ordinaryTaskRunning = workbench?.tasks.some(task => task.status === "generating");
+  const editChildRunning = workbench?.imageEditChildren?.some(child => String(child.task.status) === "generating");
+  usePolling(reload, {
+    enabled: !studioManaged && Boolean(ordinaryTaskRunning || editChildRunning),
+    intervalMs: 1800,
+  }, [reload]);
 
   const handleNodesChange = useCallback((changes: Parameters<typeof onNodesChange>[0]) => {
     const next = applyNodeChanges(changes, nodesRef.current);
@@ -1108,8 +1106,8 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
 
   if (!workbench) {
     return (
-      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "生图画布", to: "/create/canvas" }]} statusText={toast || "正在加载画布…"} statusTone={toast ? "error" : "running"}>
-        <div className="flow-loading">{toast || "正在加载画布…"}</div>
+      <AppShell activeNav="create" navigate={navigate} fullHeight crumbs={[{ label: "生图画布", to: "/create/canvas" }]} statusText={loadError || "正在加载画布…"} statusTone={loadError ? "error" : "running"}>
+        <div className="flow-loading">{loadError || "正在加载画布…"}</div>
       </AppShell>
     );
   }
@@ -1432,7 +1430,6 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
       )}
 
       {preview && <BeforeAfterLightbox preview={preview} onClose={() => setPreview(null)} />}
-      {toast && <div className="suite-toast show" role="status"><ModelSettingsMessage message={toast} /></div>}
     </AppShell>
   );
 }

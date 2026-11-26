@@ -1,3 +1,4 @@
+import { useToast } from "../components/ui/ToastProvider";
 import { useEffect, useRef, useState } from "react";
 import {
   emptyProductCardFields,
@@ -66,7 +67,7 @@ export function ProductLibraryPage({
   const [deleting, setDeleting] = useState(false);
 
   const [error, setError] = useState("");
-  const [toast, setToast] = useState("");
+  const { showToast } = useToast();
 
   const listSequence = useRef(0);
   const detailSequence = useRef(0);
@@ -74,7 +75,6 @@ export function ProductLibraryPage({
   const selectedIdRef = useRef<string | null>(selectedId);
   selectedIdRef.current = selectedId;
   const pinnedSelectionRef = useRef<string | null>(initialSelectedId ?? null);
-  const toastTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const previous = document.title;
@@ -90,14 +90,6 @@ export function ProductLibraryPage({
     setSelectedId(initialSelectedId);
   }, [initialSelectedId]);
 
-  useEffect(() => {
-    return () => {
-      if (toastTimerRef.current !== null) {
-        window.clearTimeout(toastTimerRef.current);
-      }
-    };
-  }, []);
-
   // Debounced live search when typing
   useEffect(() => {
     const trimmed = keywordInput.trim();
@@ -109,16 +101,7 @@ export function ProductLibraryPage({
     return () => window.clearTimeout(timer);
   }, [keywordInput, submittedKeyword]);
 
-  const notify = (message: string) => {
-    setToast(message);
-    if (toastTimerRef.current !== null) {
-      window.clearTimeout(toastTimerRef.current);
-    }
-    toastTimerRef.current = window.setTimeout(() => {
-      setToast("");
-      toastTimerRef.current = null;
-    }, 2600);
-  };
+  const notify = (message: string) => showToast(message, { durationMs: 2600 });
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -878,11 +861,6 @@ export function ProductLibraryPage({
       {error && (
         <div className="suite-toast show" role="alert">
           {error}
-        </div>
-      )}
-      {toast && (
-        <div className="suite-toast show" role="status">
-          {toast}
         </div>
       )}
     </AppShell>
