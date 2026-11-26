@@ -24,6 +24,8 @@ import {
   type ProductOnboardingStatus,
   type ProductOnboardingTxtAttachment,
 } from "../../shared/product-onboarding.js";
+import { isPlainObject, normalizeUuid, parsePagination } from "../http/validators.js";
+import { previewStorageObject } from "../http/binary-response.js";
 import { fail } from "../api-errors.js";
 import { now, ok, type AppResponse } from "../api-response.js";
 import { processImage, type ProcessedImage } from "../image.js";
@@ -48,7 +50,6 @@ import type {
 } from "./onboarding-repository.js";
 
 const ROOT = "/api/product-onboarding/sessions";
-const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const DATA_URL_RE = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,(.*)$/i;
 const BASE64_BODY_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 // Reject NUL, disallowed C0 control chars (keeping \t, \n, \r), DEL, and Unicode replacement char.
@@ -70,24 +71,6 @@ interface PreparedExistingDraftImage {
 }
 
 type PreparedDraftImageEntry = PreparedNewDraftImage | PreparedExistingDraftImage;
-
-function normalizeUuid(value: string): string | null {
-  const trimmed = value.trim();
-  return UUID_RE.test(trimmed) ? trimmed.toLowerCase() : null;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
-
-function parseNonNegativeInt(raw: string | null, fallback: number): number | null {
-  if (raw === null || raw.trim() === "") return fallback;
-  if (!/^\d+$/.test(raw.trim())) return null;
-  const parsed = Number(raw.trim());
-  return Number.isSafeInteger(parsed) ? parsed : null;
-}
 
 function parseImageUploadPayload(entry: Record<string, unknown>): {
   filename: string;
@@ -619,15 +602,11 @@ export function createProductOnboardingApi(deps: {
     ) {
       return fail("PRODUCT_ONBOARDING_INVALID_STATUS", 400);
     }
-    const limit = parseNonNegativeInt(url.searchParams.get("limit"), 20);
-    const offset = parseNonNegativeInt(url.searchParams.get("offset"), 0);
-    if (limit === null || limit < 1 || limit > 100 || offset === null || offset < 0) {
-      return fail("INVALID_PAGINATION", 400);
-    }
+    const pagination = parsePagination(url.searchParams, { mode: "offset", defaultLimit: 20 });
+    if (!pagination) return fail("INVALID_PAGINATION", 400);
     const result = await deps.sessions.list({
       status: rawStatus as ProductOnboardingStatus | "all",
-      limit,
-      offset,
+      ...pagination,
     });
     return ok(result);
   }
@@ -1112,24 +1091,9 @@ export function createProductOnboardingApi(deps: {
     if (!image) return fail("PRODUCT_ONBOARDING_IMAGE_NOT_FOUND", 404);
 
     const key = variant === "original" ? image.originalObjectKey : image.thumbnailObjectKey;
-    try {
-      const object = await deps.storage.get(key);
-      if (!object) return fail("INPUT_OBJECT_NOT_FOUND", 404);
-      return {
-        ...ok(null),
-        raw: object.bytes,
-        headers: {
-          "content-type": object.contentType,
-          "cache-control": "private, max-age=60",
-        },
-      };
-    } catch (error) {
-      const isNotFound = error instanceof Error && error.message === "OBJECT_NOT_FOUND";
-      return fail(
-        isNotFound ? "INPUT_OBJECT_NOT_FOUND" : "INPUT_OBJECT_READ_FAILED",
-        isNotFound ? 404 : 502,
-      );
-    }
+    return previewStorageObject(deps.storage, key, {
+      data: null, missingCode: "INPUT_OBJECT_NOT_FOUND", readFailureCode: "INPUT_OBJECT_READ_FAILED",
+    });
   }
 
   async function request(method: string, path: string, body?: unknown): Promise<AppResponse> {
