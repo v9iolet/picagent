@@ -12,7 +12,9 @@
     "test:ticket05": "tsx --test tests/ticket05.contract.test.ts tests/ticket05.input.test.ts",
     "test:ticket02": "tsx --test tests/suite-input-images.contract.test.ts tests/multipart-encoding.test.ts",
     "test:pg": "PG_CONTRACT_TEST=1 PLATFORM_MIGRATION_TEST=1 tsx --env-file-if-exists=.env --test tests/pg-migrations.contract.test.ts tests/suite-platform-background.contract.test.ts",
-    "build": "tsc -b && vite build",
+    "start": "node dist-server/server/index.js",
+    "build:server": "tsc -p tsconfig.server.build.json",
+    "build": "tsc -p tsconfig.app.json && vite build && npm run build:server",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
