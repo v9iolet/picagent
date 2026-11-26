@@ -1,7 +1,7 @@
 import type { ListingConfig } from "../../../shared/listing-config";
 import { readProductCardSnapshot, type ProductCardSnapshot } from "../../../shared/product-card";
 import {
-  postGeneration, createGenerationActions,
+  postGeneration, createGenerationActions, fetchApiResponse,
   type ApiImage,
   type ApiListingSummary,
   type ApiPlanSnapshot,
@@ -101,7 +101,7 @@ const path = (id: string) => `/api/suites/${encodeURIComponent(id)}`;
 const submitGeneration = createGenerationActions();
 async function json<T>(url: string, body?: object, signal?: AbortSignal): Promise<T> {
   if (body) return submitGeneration(url, body, (key) => postGeneration<T>(url, body, key));
-  const response = await fetch(url, { cache: "no-store", signal });
+  const response = await fetchApiResponse(url, { signal });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error?.message ?? `请求失败 (${response.status})`);
   return data.data;
@@ -174,7 +174,7 @@ export function fromRun(run: Pipeline | null): Config {
   };
 }
 export async function download(url: string, name: string) {
-  const res = await fetch(url);
+  const res = await fetchApiResponse(url);
   if (!res.ok) throw new Error(`下载失败 (${res.status})`);
   const blob = URL.createObjectURL(await res.blob());
   const a = document.createElement("a");

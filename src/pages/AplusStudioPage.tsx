@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   APLUS_SIZE_PRESETS, isAplusPlanStale, normalizeAplusLanguage, validateAplusSizePresets,
 } from "../../shared/aplus";
-import { ApiHttpError, createIdempotencyKey, productCardsApi, suiteApi, type ApiImage } from "../api/client";
+import { ApiHttpError, createIdempotencyKey, fetchApiResponse, productCardsApi, suiteApi, type ApiImage } from "../api/client";
 import { usePlatforms } from "../context/AppConfigContext";
 import { AppShell } from "../components/AppShell";
 import { GenerationHistoryDrawer } from "../components/generation-history/GenerationHistoryDrawer";
@@ -361,7 +361,7 @@ function AplusWorkspace({
         const copied: ApiImage[] = [];
         try {
           for (const image of images) {
-            const original = await fetch(image.originalPreviewUrl);
+            const original = await fetchApiResponse(image.originalPreviewUrl);
             if (!original.ok) throw new Error(`无法读取商品原图「${image.originalFilename}」。`);
             const file = new File([await original.blob()], image.originalFilename, { type: image.mimeType });
             copied.push(await suiteApi.upload(uploadSuiteId, file, copied.length + 1));

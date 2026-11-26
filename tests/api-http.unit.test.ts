@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ApiHttpError, deleteJson, getJson, patchJson, postJson, putJson, suiteApi } from "../src/api/client.js";
+import { ApiHttpError, deleteJson, getJson, patchJson, postJson, putJson, setUnauthorizedHandler, suiteApi } from "../src/api/client.js";
 
 test("JSON 方法保留请求体、JSON 头和调用方的幂等键", async t => {
   const requests: RequestInit[] = [];
@@ -16,6 +16,7 @@ test("JSON 方法保留请求体、JSON 头和调用方的幂等键", async t =>
   await deleteJson("/resource");
   await postJson("/resource", { value: 3 });
   assert.deepEqual(requests.map(req => req.method), ["GET", "POST", "PATCH", "PUT", "DELETE", "POST"]);
+  assert.ok(requests.every(req => req.credentials === "same-origin"));
   assert.deepEqual(requests.map(req => req.body), [undefined, '{"value":1}', '{"value":2}', '{}', undefined, '{"value":3}']);
   const headers = requests.map(req => new Headers(req.headers));
   for (const i of [1, 2, 3, 5]) assert.equal(headers[i].get("content-type"), "application/json");
@@ -24,6 +25,22 @@ test("JSON 方法保留请求体、JSON 头和调用方的幂等键", async t =>
   assert.notEqual(keys[1], keys[2]);
   assert.equal(keys[3], "retry");
   for (const i of [0, 4, 5]) assert.equal(keys[i], null);
+});
+
+test("只有当前会话的业务请求返回 401 时通知路由守卫", async t => {
+  const unauthorized = t.mock.fn();
+  setUnauthorizedHandler(unauthorized);
+  t.after(() => setUnauthorizedHandler(null));
+  t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 401 }));
+  await assert.rejects(postJson("/api/auth/login", {}), ApiHttpError);
+  assert.equal(unauthorized.mock.callCount(), 0);
+  await assert.rejects(getJson("/api/platforms"), ApiHttpError);
+  assert.equal(unauthorized.mock.callCount(), 1);
+  const previousRequest = getJson("/api/platforms");
+  const newSession = t.mock.fn();
+  setUnauthorizedHandler(newSession);
+  await assert.rejects(previousRequest, ApiHttpError);
+  assert.equal(newSession.mock.callCount(), 0);
 });
 
 test("结构规划保留选择的资料版本并附带幂等键", async t => {

@@ -1,6 +1,8 @@
-import type { MouseEvent, ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
+import { useOptionalAuth } from "../context/AuthContext";
 import { Icon } from "../pages/shared";
 import { BrandLogo } from "./BrandLogo";
+import { useToast } from "./ui/ToastProvider";
 import "./AppShell.css";
 
 export type AppNavSection = "home" | "create" | "products" | "assets" | "templates" | "settings";
@@ -8,6 +10,26 @@ export type AppNavSection = "home" | "create" | "products" | "assets" | "templat
 export interface AppCrumb {
   label: string;
   to?: string;
+}
+
+function AdminAccount({ username, logout }: { username: string; logout: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const { showToast } = useToast();
+  async function signOut() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await logout();
+    } catch {
+      showToast("退出登录失败，请检查网络连接后重试。", { tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return <div className="pa-topbar-account">
+    <span className="pa-admin-pill"><Icon name="shield" />{username}</span>
+    <button type="button" disabled={busy} onClick={signOut}>退出登录</button>
+  </div>;
 }
 
 export function AppShell({
@@ -33,6 +55,7 @@ export function AppShell({
   className?: string;
   children: ReactNode;
 }) {
+  const auth = useOptionalAuth();
   const linkTo = (to: string) => (event: MouseEvent<HTMLAnchorElement>) => {
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
@@ -76,6 +99,8 @@ export function AppShell({
             <i aria-hidden="true" />
             <span>{statusText}</span>
           </span>
+          {auth?.authEnabled && auth.authenticated && auth.user &&
+            <AdminAccount username={auth.user.username} logout={auth.logout} />}
         </div>
       </header>
       <aside className="pa-rail" aria-label="主导航">

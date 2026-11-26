@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { fetchApiResponse } from "../../api/http";
 import {
   buildFeedUrl,
   extractThumbnails,
@@ -38,7 +39,7 @@ async function fetchFeedPage(
   url: string,
   signal: AbortSignal,
 ): Promise<GenerationHistoryFeedPage> {
-  const response = await fetch(url, { cache: "no-store", signal });
+  const response = await fetchApiResponse(url, { signal });
   const payload = (await response.json().catch(() => null)) as {
     data?: GenerationHistoryFeedPage;
     error?: { message?: string };
