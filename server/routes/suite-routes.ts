@@ -353,6 +353,7 @@ export function registerSuiteRoutes(router: Router, { deps, pipeline, resolveIma
     return deleted ? ok(deleted) : fail("INVALID_SUITE_ID", 404);
   });
 
+  router.get("/api/suites/:suiteId/input-images/:imageId/original", ({ params }) => preview(params.suiteId, params.imageId, "original"));
   router.get(/^\/api\/suites\/(?<suiteId>[^/]+)\/input-images\/(?<imageId>[^/]+)\/preview\/(?<kind>original|thumbnail)$/, ({ params }) => preview(params.suiteId, params.imageId, params.kind === "original" ? "original" : "thumbnail"));
 
   router.get("/api/suites/:suiteId/input-images/:imageId/base-versions/:versionId/preview", ({ params }) => previewBaseVersion(params.suiteId, params.imageId, params.versionId));

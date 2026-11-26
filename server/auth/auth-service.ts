@@ -2,6 +2,8 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import type { authErrorMessages } from "../errors/auth.js";
 import { generateCaptchaCode, hashCaptchaCode, renderCaptchaSvg } from "./captcha.js";
 import { hashPassword, verifyPassword } from "./password.js";
+import { forwardedHttps as isSecureRequest, header } from "./request-meta.js";
+export { isSecureRequest };
 import type { AuthRepository, AuthSessionSnapshot, AuthUser, CaptchaChallenge } from "./types.js";
 
 const minute = 60_000;
@@ -41,14 +43,6 @@ export function loadAuthServiceOptionsFromEnv(env = process.env): AuthServiceOpt
     maxLoginFailures: 10,
     rateLimitWindowMs: 5 * minute,
   };
-}
-
-function header(headers: Headers, name: string) {
-  return headers[name] ?? Object.entries(headers).find(([key]) => key.toLowerCase() === name)?.[1];
-}
-
-export function isSecureRequest(headers: Headers): boolean {
-  return header(headers, "x-forwarded-proto")?.split(",")[0].trim().toLowerCase() === "https";
 }
 
 function hashToken(token: string) {
@@ -115,7 +109,8 @@ export class AuthService {
     if (!username || typeof input.password !== "string" || !input.password) {
       return { ok: false, code: "AUTH_FIELDS_REQUIRED", status: 400 };
     }
-    if (typeof input.captchaId !== "string" || !input.captchaId.trim() ||
+    const captchaId = typeof input.captchaId === "string" ? input.captchaId.trim() : "";
+    if (!captchaId ||
         typeof input.captchaCode !== "string" || !input.captchaCode.trim()) {
       return { ok: false, code: "CAPTCHA_REQUIRED", status: 400 };
     }
@@ -125,9 +120,9 @@ export class AuthService {
       return { ok: false, code: "TOO_MANY_LOGIN_ATTEMPTS", status: 429 };
     }
 
-    const challenge = await this.repository.consumeCaptcha(input.captchaId, now);
+    const challenge = await this.repository.consumeCaptcha(captchaId, now);
     if (challenge.status === "expired") return { ok: false, code: "CAPTCHA_EXPIRED", status: 400 };
-    const expected = Buffer.from(hashCaptchaCode(input.captchaId, input.captchaCode), "hex");
+    const expected = Buffer.from(hashCaptchaCode(captchaId, input.captchaCode), "hex");
     const stored = challenge.status === "ok" ? Buffer.from(challenge.codeHash, "hex") : null;
     if (!stored || stored.length !== expected.length || !timingSafeEqual(expected, stored)) {
       return { ok: false, code: "INVALID_CAPTCHA", status: 400 };

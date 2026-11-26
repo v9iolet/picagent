@@ -1,5 +1,6 @@
 import type { AppResponse } from "../api-response.js";
 import type { SuiteStudioApp } from "../app.js";
+import type { ConnectionMeta } from "../auth/request-meta.js";
 
 export async function dispatchJsonRequest(
   request: SuiteStudioApp["request"],
@@ -7,6 +8,7 @@ export async function dispatchJsonRequest(
   url: URL,
   headers: Record<string, string>,
   bytes: Buffer,
+  meta?: ConnectionMeta,
 ): Promise<AppResponse> {
   const settingsWrite = url.pathname.startsWith("/api/model-settings/") && ["POST", "PUT", "PATCH"].includes(method);
   if (settingsWrite && headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json") {
@@ -20,7 +22,7 @@ export async function dispatchJsonRequest(
   if (bytes.length) {
     try { body = JSON.parse(bytes.toString("utf8")); } catch { body = undefined; }
   }
-  const response = await request(method, url.pathname + url.search, { headers, body });
+  const response = await request(method, url.pathname + url.search, { headers, body, ...meta });
   if (!url.pathname.startsWith("/api/model-settings")) return response;
   return { ...response, headers: { ...response.headers, "cache-control": "no-store" } };
 }
