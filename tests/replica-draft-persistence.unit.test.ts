@@ -1,6 +1,7 @@
 // Run with: npx tsx --test tests/replica-draft-persistence.unit.test.ts
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeAsyncIndexedDb } from "./draft-storage-fixture";
 import {
   createIndexedDbBlobStorage,
   type KeepBlobKeysInput,
@@ -67,120 +68,6 @@ class MemoryBlobStorage implements ReplicaDraftBlobStorage {
   }
 }
 
-function createFakeAsyncIndexedDb(openGate: Promise<void>) {
-  const stores = new Map<string, Map<string, unknown>>();
-  let openCount = 0;
-
-  const factory = {
-    open(_name: string, _version?: number) {
-      openCount += 1;
-      const req: {
-        result?: unknown;
-        onupgradeneeded: (() => void) | null;
-        onsuccess: (() => void) | null;
-        onerror: (() => void) | null;
-        onblocked: (() => void) | null;
-      } = {
-        onupgradeneeded: null,
-        onsuccess: null,
-        onerror: null,
-        onblocked: null,
-      };
-
-      const db = {
-        objectStoreNames: {
-          contains: (name: string) => stores.has(name),
-        },
-        createObjectStore: (name: string) => {
-          if (!stores.has(name)) stores.set(name, new Map());
-          return {};
-        },
-        onversionchange: null as (() => void) | null,
-        onclose: null as (() => void) | null,
-        close: () => {},
-        transaction: (storeName: string, _mode: IDBTransactionMode) => {
-          const map = stores.get(storeName);
-          if (!map) throw new Error(`Missing object store ${storeName}`);
-          const tx: {
-            oncomplete: (() => void) | null;
-            onerror: (() => void) | null;
-            onabort: (() => void) | null;
-            objectStore: (name: string) => unknown;
-          } = {
-            oncomplete: null,
-            onerror: null,
-            onabort: null,
-            objectStore: () => ({
-              put: (value: unknown, key: string) => {
-                map.set(key, value);
-                const r: { onsuccess: (() => void) | null; onerror: (() => void) | null } = {
-                  onsuccess: null,
-                  onerror: null,
-                };
-                queueMicrotask(() => r.onsuccess?.());
-                return r;
-              },
-              get: (key: string) => {
-                const r: {
-                  result: unknown;
-                  onsuccess: (() => void) | null;
-                  onerror: (() => void) | null;
-                } = {
-                  result: map.get(key),
-                  onsuccess: null,
-                  onerror: null,
-                };
-                queueMicrotask(() => r.onsuccess?.());
-                return r;
-              },
-              getAllKeys: () => {
-                const r: {
-                  result: string[];
-                  onsuccess: (() => void) | null;
-                  onerror: (() => void) | null;
-                } = {
-                  result: Array.from(map.keys()),
-                  onsuccess: null,
-                  onerror: null,
-                };
-                queueMicrotask(() => r.onsuccess?.());
-                return r;
-              },
-              delete: (key: string) => {
-                map.delete(key);
-                return {};
-              },
-              clear: () => {
-                map.clear();
-                return {};
-              },
-            }),
-          };
-          // Complete transaction after request microtasks finish (matching IDB transaction semantics).
-          queueMicrotask(() => queueMicrotask(() => tx.oncomplete?.()));
-          return tx;
-        },
-      };
-
-      void openGate.then(() => {
-        req.result = db;
-        if (!stores.size) {
-          req.onupgradeneeded?.();
-        }
-        req.onsuccess?.();
-      });
-
-      return req as unknown as IDBOpenDBRequest;
-    },
-  } as unknown as IDBFactory;
-
-  return {
-    factory,
-    getStore: (name = "blobs") => stores.get(name),
-    getOpenCount: () => openCount,
-  };
-}
-
 function makeFakeUrlHooks() {
   let seq = 0;
   const active = new Set<string>();
@@ -200,6 +87,23 @@ function makeFakeUrlHooks() {
     },
   };
 }
+
+test("复刻沿用旧版本的字段读取规则，配额超限后仍可从旧会话配置恢复", () => {
+  const storage = new MemoryStorageLike();
+  const legacySessionStorage = new MemoryStorageLike();
+  const deps = { storage, legacySessionStorage, blobStorage: null };
+  for (const version of [undefined, 7]) {
+    storage.setItem(REPLICA_DRAFT_STORAGE_KEY, JSON.stringify({ version, config: { unifiedRequirement: "兼容配置" } }));
+    assert.equal(createReplicaDraftStore(deps).getSnapshot().config.unifiedRequirement, "兼容配置");
+  }
+  storage.removeItem(REPLICA_DRAFT_STORAGE_KEY);
+  legacySessionStorage.setItem(REPLICA_DRAFT_CONFIG_STORAGE_KEY, JSON.stringify({ unifiedRequirement: "旧配置" }));
+  storage.setItem = () => { throw new DOMException("full", "QuotaExceededError"); };
+  const store = createReplicaDraftStore(deps);
+  store.updateConfig({ unifiedRequirement: "本次编辑" });
+  assert.equal(store.getSnapshot().config.unifiedRequirement, "本次编辑");
+  assert.equal(createReplicaDraftStore(deps).getSnapshot().config.unifiedRequirement, "旧配置");
+});
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const start = Date.now();

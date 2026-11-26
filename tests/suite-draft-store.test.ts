@@ -211,3 +211,15 @@ test("graceful fallback on malformed JSON, external LAST_SUITE_STORAGE_KEY chang
   safeStore.clear();
   assert.equal(safeStore.getSnapshot().config.sellingPoints, "");
 });
+
+test("配额超限后套图仍保留本次切换的批次，其他入口写入新批次时可正常切换", () => {
+  const storage = createMemoryStorage({ [LAST_SUITE_STORAGE_KEY]: "first" });
+  const externalSet = storage.setItem.bind(storage);
+  const store = createSuiteWorkspaceStore(storage);
+  storage.setItem = () => { throw new DOMException("full", "QuotaExceededError"); };
+  store.setActiveSuite("second");
+  assert.equal(store.getSnapshot().activeSuiteId, "second");
+  assert.equal(storage.getItem(LAST_SUITE_STORAGE_KEY), "first");
+  externalSet(LAST_SUITE_STORAGE_KEY, "third");
+  assert.equal(store.getSnapshot().activeSuiteId, "third");
+});

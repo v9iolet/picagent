@@ -1,3 +1,4 @@
+import { createTextStorageStore, createWebStorageStore, type StorageLike } from "../../lib/draft-storage";
 import { readProductCardSnapshot } from "../../../shared/product-card";
 import { resolveSellingPointLayouts, resolveVisualStyle } from "../../../shared/selling-point-layouts";
 import { SUITE_CATEGORY_GROUPS, type SuiteCategoryGroupCode } from "../../../shared/suite-categories";
@@ -8,11 +9,7 @@ import { initialConfig, type Config, type Counts, type StudioState } from "./stu
 export const LAST_SUITE_STORAGE_KEY = "picagent:suite-studio:last-suite-id";
 export const SUITE_WORKSPACE_STORAGE_KEY = "picagent:suite-studio:workspace-v1";
 
-export interface StorageLike {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
-}
+export type { StorageLike } from "../../lib/draft-storage";
 
 export interface SuiteWorkspaceSnapshot {
   activeSuiteId: string | null;
@@ -157,95 +154,23 @@ function cloneSnapshot(snapshot: SuiteWorkspaceSnapshot): SuiteWorkspaceSnapshot
   };
 }
 
-function safeGetItem(storage: StorageLike | null, key: string): string | null {
-  if (!storage) return null;
-  try {
-    return storage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function safeSetItem(storage: StorageLike | null, key: string, value: string): void {
-  if (!storage) return;
-  try {
-    storage.setItem(key, value);
-  } catch {
-    // Ignore storage quota or privacy-mode errors.
-  }
-}
-
-function safeRemoveItem(storage: StorageLike | null, key: string): void {
-  if (!storage) return;
-  try {
-    storage.removeItem(key);
-  } catch {
-    // Ignore storage errors.
-  }
-}
-
 function readNormalizedId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
 }
 
-function loadPersistedSnapshot(storage: StorageLike | null): SuiteWorkspaceSnapshot {
-  const lastSuiteId = readNormalizedId(safeGetItem(storage, LAST_SUITE_STORAGE_KEY));
-  const rawWorkspace = safeGetItem(storage, SUITE_WORKSPACE_STORAGE_KEY);
-
-  if (!rawWorkspace) {
-    const base = emptySnapshot();
-    if (lastSuiteId) {
-      base.activeSuiteId = lastSuiteId;
-    }
-    return base;
-  }
-
-  try {
-    const parsed = JSON.parse(rawWorkspace) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || parsed.version !== 1) {
-      const base = emptySnapshot();
-      if (lastSuiteId) base.activeSuiteId = lastSuiteId;
-      return base;
-    }
-
-    const storedActiveId = readNormalizedId(parsed.activeSuiteId);
-    const storedConfigSuiteId = readNormalizedId(parsed.configSuiteId);
-    const config = sanitizeSuiteConfig(parsed.config);
-    const hasLocalConfigEdits = Boolean(parsed.hasLocalConfigEdits);
-    const clone = Boolean(parsed.clone);
-
-    // Keep workspace activeSuiteId strictly synchronized with LAST_SUITE_STORAGE_KEY.
-    // If LAST_SUITE_STORAGE_KEY was externally cleared while a suite was active, drop the stale active suite.
-    if (storedActiveId && !lastSuiteId) {
-      return emptySnapshot();
-    }
-
-    // If LAST_SUITE_STORAGE_KEY was externally overridden to a different suiteId, honor it cleanly.
-    if (lastSuiteId && lastSuiteId !== storedActiveId) {
-      return {
-        activeSuiteId: lastSuiteId,
-        config: cloneConfig(initialConfig),
-        configSuiteId: null,
-        hasLocalConfigEdits: false,
-        clone: false,
-      };
-    }
-
-    const activeSuiteId = storedActiveId ?? lastSuiteId;
-    return {
-      activeSuiteId,
-      config,
-      configSuiteId: activeSuiteId ? storedConfigSuiteId : null,
-      hasLocalConfigEdits,
-      clone: activeSuiteId ? clone : false,
-    };
-  } catch {
-    const base = emptySnapshot();
-    if (lastSuiteId) base.activeSuiteId = lastSuiteId;
-    return base;
-  }
+function decodeWorkspace(raw: unknown): PersistedWorkspacePayload | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const data = raw as Record<string, unknown>;
+  return {
+    version: 1,
+    activeSuiteId: readNormalizedId(data.activeSuiteId),
+    configSuiteId: readNormalizedId(data.configSuiteId),
+    config: sanitizeSuiteConfig(data.config),
+    hasLocalConfigEdits: Boolean(data.hasLocalConfigEdits),
+    clone: Boolean(data.clone),
+  };
 }
 
 export interface SuiteWorkspaceStore {
@@ -266,16 +191,36 @@ export interface SuiteWorkspaceStore {
 }
 
 export function createSuiteWorkspaceStore(storage: StorageLike | null): SuiteWorkspaceStore {
-  let snapshot = loadPersistedSnapshot(storage);
+  return createWorkspaceStore(storage);
+}
+
+function createWorkspaceStore(storage: StorageLike | "sessionStorage" | null): SuiteWorkspaceStore {
+  const lastSuite = createTextStorageStore({ storage, key: LAST_SUITE_STORAGE_KEY });
+  const workspace = createWebStorageStore({ storage, key: SUITE_WORKSPACE_STORAGE_KEY, version: 1, decode: decodeWorkspace });
+
+  function loadSnapshot(lastSuiteId: string | null): SuiteWorkspaceSnapshot {
+    const saved = workspace.read();
+    // An externally cleared or changed last-suite ID takes precedence over the workspace.
+    if (!saved || saved.activeSuiteId !== lastSuiteId) {
+      return { ...emptySnapshot(), activeSuiteId: lastSuiteId };
+    }
+    return {
+      activeSuiteId: lastSuiteId,
+      config: saved.config,
+      configSuiteId: lastSuiteId ? saved.configSuiteId : null,
+      hasLocalConfigEdits: saved.hasLocalConfigEdits,
+      clone: Boolean(lastSuiteId && saved.clone),
+    };
+  }
+
+  let lastPersistedId = readNormalizedId(lastSuite.read());
+  let snapshot = loadSnapshot(lastPersistedId);
   let memoryCache: SuiteWorkspaceMemoryCache | null = null;
 
   function persist(next: SuiteWorkspaceSnapshot) {
     snapshot = cloneSnapshot(next);
-    if (snapshot.activeSuiteId) {
-      safeSetItem(storage, LAST_SUITE_STORAGE_KEY, snapshot.activeSuiteId);
-    } else {
-      safeRemoveItem(storage, LAST_SUITE_STORAGE_KEY);
-    }
+    const savedId = snapshot.activeSuiteId ? lastSuite.write(snapshot.activeSuiteId) : lastSuite.remove();
+    if (savedId) lastPersistedId = snapshot.activeSuiteId;
 
     const hasAnythingToPersist =
       snapshot.activeSuiteId !== null ||
@@ -284,7 +229,7 @@ export function createSuiteWorkspaceStore(storage: StorageLike | null): SuiteWor
       isConfigDirty(snapshot.config);
 
     if (!hasAnythingToPersist) {
-      safeRemoveItem(storage, SUITE_WORKSPACE_STORAGE_KEY);
+      workspace.remove();
       return;
     }
 
@@ -296,15 +241,17 @@ export function createSuiteWorkspaceStore(storage: StorageLike | null): SuiteWor
       hasLocalConfigEdits: snapshot.hasLocalConfigEdits,
       clone: snapshot.clone,
     };
-    safeSetItem(storage, SUITE_WORKSPACE_STORAGE_KEY, JSON.stringify(payload));
+    workspace.write(payload);
   }
 
   return {
     getSnapshot() {
       // Reconcile if LAST_SUITE_STORAGE_KEY was externally mutated or cleared in the same tab.
-      const externalLastId = readNormalizedId(safeGetItem(storage, LAST_SUITE_STORAGE_KEY));
-      if (externalLastId !== snapshot.activeSuiteId) {
-        snapshot = loadPersistedSnapshot(storage);
+      const stored = lastSuite.readResult();
+      const externalLastId = readNormalizedId(stored.value);
+      if (stored.status !== "unreadable" && externalLastId !== lastPersistedId) {
+        lastPersistedId = externalLastId;
+        snapshot = loadSnapshot(externalLastId);
         if (memoryCache && memoryCache.suiteId !== snapshot.activeSuiteId) {
           memoryCache = null;
         }
@@ -420,34 +367,27 @@ export function createSuiteWorkspaceStore(storage: StorageLike | null): SuiteWor
     clear() {
       memoryCache = null;
       snapshot = emptySnapshot();
-      safeRemoveItem(storage, LAST_SUITE_STORAGE_KEY);
-      safeRemoveItem(storage, SUITE_WORKSPACE_STORAGE_KEY);
+      if (lastSuite.remove()) lastPersistedId = null;
+      workspace.remove();
       return cloneSnapshot(snapshot);
     },
   };
 }
 
-function browserSessionStorage(): StorageLike | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.sessionStorage;
-  } catch {
-    return null;
-  }
-}
+const lastSuite = createTextStorageStore({ storage: "sessionStorage", key: LAST_SUITE_STORAGE_KEY });
 
 export function readLastSuiteId(): string | null {
-  return readNormalizedId(safeGetItem(browserSessionStorage(), LAST_SUITE_STORAGE_KEY));
+  return readNormalizedId(lastSuite.read());
 }
 
 export function saveLastSuiteId(id: string): void {
   const normalized = readNormalizedId(id);
   if (!normalized) return;
-  safeSetItem(browserSessionStorage(), LAST_SUITE_STORAGE_KEY, normalized);
+  lastSuite.write(normalized);
 }
 
 export function clearLastSuiteId(): void {
-  safeRemoveItem(browserSessionStorage(), LAST_SUITE_STORAGE_KEY);
+  lastSuite.remove();
 }
 
-export const suiteWorkspaceStore = createSuiteWorkspaceStore(browserSessionStorage());
+export const suiteWorkspaceStore = createWorkspaceStore("sessionStorage");
