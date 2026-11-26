@@ -761,7 +761,8 @@
   width: 100%;
 }
 .ss-placeholder.is-loading,
-.ss-photo.is-pending {
+.ss-photo.is-pending,
+.aplus-card-image.is-pending {
   background: linear-gradient(
     110deg,
     var(--pa-bg) 25%,
@@ -822,7 +823,8 @@
   .ss-step[data-step-state="active"] .ss-step-badge,
   .ss-progress-fill::after,
   .ss-placeholder.is-loading,
-  .ss-photo.is-pending {
+  .ss-photo.is-pending,
+  .aplus-card-image.is-pending {
     animation: none;
   }
   .ss-progress-fill {

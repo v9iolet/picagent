@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { downloadImageUrl } from "./download-image-url.js";
 import type { ImageEditRequest, ImageProvider } from "../types.js";
 import { failModelArchive, finishModelArchive, startModelArchive } from "../prompt-archive.js";
@@ -40,6 +41,9 @@ async function readErrorBody(response: Response, apiKey: string): Promise<string
   }
   return result;
 }
+
+// The paid edit already succeeded. Repeating it cannot recover the original download.
+export class ImageUrlDownloadError extends Error {}
 
 export class GptImageProvider implements ImageProvider {
   readonly supportsMultipleImages = true;
@@ -115,7 +119,13 @@ export class GptImageProvider implements ImageProvider {
       } else if (typeof item?.url === "string" && item.url.trim()) {
         responseFormatUsed = "url";
         responseSummary = { httpStatus: response.status, responseFormatUsed };
-        image = await downloadImageUrl(item.url, controller.signal);
+        try {
+          image = await downloadImageUrl(item.url, controller.signal);
+        } catch (error) {
+          if (controller.signal.aborted || (error instanceof Error && error.message === "INVALID_PROVIDER_RESPONSE")) throw error;
+          await delay(300, undefined, { signal: controller.signal });
+          image = await downloadImageUrl(item.url, controller.signal);
+        }
       } else {
         throw new Error("INVALID_PROVIDER_RESPONSE");
       }
@@ -137,7 +147,7 @@ export class GptImageProvider implements ImageProvider {
       failObservation(observation, normalized, responseFormatUsed ? { responseFormatUsed } : undefined);
       recordImageFailure(request.flow ?? "image-edit", "openai-compatible-image", request.model, Date.now() - startedAt, normalized.message);
       logObservation("image.failed", { request_id: requestId, flow: request.flow ?? "image-edit", provider: "openai-compatible-image", model: request.model, duration_ms: Date.now() - startedAt, status: "error", error_code: normalized.message, ...(responseFormatUsed && { responseFormatUsed }) });
-      throw normalized;
+      throw responseFormatUsed === "url" ? new ImageUrlDownloadError(normalized.message) : normalized;
     } finally {
       clearTimeout(timeout);
     }

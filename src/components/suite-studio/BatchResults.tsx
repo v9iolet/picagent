@@ -8,6 +8,7 @@ import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
 import { SelectedProductCardBar } from "../product-card-picker/SelectedProductCardBar";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
 import { StudioDialog } from "./StudioDialog";
+import { StudioProgressBar, type StudioProgressStep } from "./StudioProgressBar";
 import {
   JOB_SUCCESS_STATUSES,
   readImageEditJobStatus,
@@ -43,7 +44,6 @@ const phaseErrors: Record<string, string> = {
   image_generating: "IMAGE_GENERATION_FAILED",
   done: "IMAGE_GENERATION_FAILED",
 };
-type StepState = "done" | "active" | "pending" | "failed";
 
 function runningBadgeText(phase: string, completed: number, total: number): string {
   switch (phase) {
@@ -100,8 +100,8 @@ function buildProgressModel(
     },
   ];
 
-  const steps: Array<{ key: string; index: string; label: string; state: StepState }> = baseSteps.map((step) => {
-    let state: StepState = "pending";
+  const steps: StudioProgressStep[] = baseSteps.map((step) => {
+    let state: StudioProgressStep["state"] = "pending";
     if (running) {
       if (step.order < currentOrder) state = "done";
       else if (step.order === currentOrder) state = "active";
@@ -115,12 +115,13 @@ function buildProgressModel(
     return { key: step.key, index: step.index, label: step.label, state };
   });
 
-  let copyStep: { label: string; state: StepState } | null = null;
+  let copyStep: Pick<StudioProgressStep, "label" | "state">;
   if (listingCopyEnabled || listingCopy) {
     if (listingCopy?.status === "running") copyStep = { label: "生成文案中…", state: "active" };
     else if (listingCopy?.status === "succeeded") copyStep = { label: "文案已生成", state: "done" };
     else if (listingCopy?.status === "failed") copyStep = { label: "文案生成失败", state: "failed" };
     else copyStep = { label: "等待规划", state: "pending" };
+    steps.push({ key: "listing_copy", index: "文", label: "上架文案 · " + copyStep.label, state: copyStep.state, alignEnd: true });
   }
 
   let percent = 15;
@@ -159,7 +160,7 @@ function buildProgressModel(
     headline = "套图已生成，正在并行生成商品上架文案…";
   }
 
-  return { steps, copyStep, percent, headline };
+  return { steps, percent, headline };
 }
 type Props = {
   state: StudioState;
@@ -376,41 +377,7 @@ export function BatchResults({
         <SelectedProductCardBar card={productCardSnapshot} readOnly compact />
       )}
       {progressModel && (
-        <div className="ss-progress">
-          <div className="ss-progress-head">
-            <strong>{progressModel.headline}</strong>
-            <span className="ss-progress-pct">{progressModel.percent}%</span>
-          </div>
-          <div
-            className="ss-progress-track"
-            role="progressbar"
-            aria-label="套图生成进度"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={progressModel.percent}
-            aria-valuetext={`${progressModel.percent}% · ${progressModel.headline}`}
-          >
-            <div className="ss-progress-fill" style={{ width: `${progressModel.percent}%` }} />
-          </div>
-          <ol className="ss-progress-steps" aria-label="生成阶段进度">
-            {progressModel.steps.map((step) => (
-              <li key={step.key} className="ss-step" data-step-state={step.state}>
-                <span className="ss-step-badge" aria-hidden="true">
-                  {step.state === "done" ? "✓" : step.index}
-                </span>
-                <span>{step.label}</span>
-              </li>
-            ))}
-            {progressModel.copyStep && (
-              <li className="ss-step ss-step-copy" data-step-state={progressModel.copyStep.state}>
-                <span className="ss-step-badge" aria-hidden="true">
-                  {progressModel.copyStep.state === "done" ? "✓" : "文"}
-                </span>
-                <span>上架文案 · {progressModel.copyStep.label}</span>
-              </li>
-            )}
-          </ol>
-        </div>
+        <StudioProgressBar {...progressModel} progressLabel="套图生成进度" stepsLabel="生成阶段进度" />
       )}
       {errorMessage && !running && <p className="ss-note">{errorMessage}</p>}
       {run?.status === "waiting_base_refine_decision" && (

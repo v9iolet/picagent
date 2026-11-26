@@ -8,6 +8,7 @@ import { GenerationHistoryDrawer } from "../components/generation-history/Genera
 import { formatHistoryTime } from "../components/generation-history/history-model";
 import { toSelectedProductCardSummary } from "../components/product-card-picker/types";
 import { message } from "../components/suite-studio/studio";
+import { StudioProgressBar } from "../components/suite-studio/StudioProgressBar";
 import { AplusConfigPanel } from "../features/aplus/AplusConfigPanel";
 import { AplusEmptyState } from "../features/aplus/AplusEmptyState";
 import { AplusPlanReview } from "../features/aplus/AplusPlanReview";
@@ -26,6 +27,13 @@ interface Props {
   initialProductCardId?: string;
   navigate: (path: string) => void;
 }
+
+const batchStatusLabels: Record<string, string> = {
+  waiting_human_input: "等待确认",
+  completed: "已完成",
+  partial_failed: "部分失败",
+  failed: "生成失败",
+};
 
 export function AplusStudioPage({ suiteId, initialProductCardId, navigate }: Props) {
   const [newCount, setNewCount] = useState(0);
@@ -426,7 +434,12 @@ function AplusWorkspace({
   const batchMeta = [platformName, batchSizes.map((key) => APLUS_SIZE_PRESETS[key].name).join(" / "), formatHistoryTime(state?.suite.createdAt)]
     .filter(Boolean).join(" · ");
   const planning = state?.pipeline?.currentPhase === "aplus_planning";
-  const total = state?.progress.total || planModules.length * batchSizes.length;
+  const moduleCount = planning ? state.inputSnapshot?.modules.length ?? 0 : planModules.length;
+  const total = state?.progress.total || moduleCount * batchSizes.length;
+  const completed = state?.progress.completed ?? 0;
+  const badgeText = running
+    ? (planning ? "策划中…" : total > 0 ? `生成中 ${completed}/${total}` : "生成中…")
+    : batchStatusLabels[state?.pipeline?.status ?? ""];
   const processing = action === "plan" || action === "confirm" || action === "resume" || running;
   const status = loading ? "正在读取 A+ 批次" : processing ? "A+详情处理中"
     : awaiting ? "等待方案确认" : "工作台就绪";
@@ -474,6 +487,12 @@ function AplusWorkspace({
               ) : (
                 <div className="aplus-batch-title">
                   <h2>{state?.suite.name ?? "A+详情结果"}</h2>
+                  {badgeText && (
+                    <span className="ss-status" data-status={state?.pipeline?.status}>
+                      {running && <span className="ss-status-dot" aria-hidden="true" />}
+                      {badgeText}
+                    </span>
+                  )}
                   {state && <button type="button" disabled={busy} onClick={() => { setName(state.suite.name); setEditingName(true); }}>改名</button>}
                 </div>
               )}
@@ -500,10 +519,18 @@ function AplusWorkspace({
           {loading && <p role="status">正在读取 A+ 批次…</p>}
           {!suiteId && !loading && <AplusEmptyState />}
           {running && (
-            <div className="ss-progress" role="status">
-              <strong>{planning ? "正在规划策划方案…" : `正在生成图片（${state.progress.completed} / ${total}）`}</strong>
-              {!planning && <progress aria-label="出图进度" max={total || 1} value={state.progress.completed} />}
-            </div>
+            <StudioProgressBar
+              headline={planning ? "正在分析商品原图与卖点，规划 A+ 详情策划方案…"
+                : total > 0 ? `正在生成 A+ 详情图片（已完成 ${completed}/${total} 张）…` : "正在生成 A+ 详情图片…"}
+              percent={planning ? 25 : Math.round(38 + (total > 0 ? Math.min(1, completed / total) : 0) * 60)}
+              progressLabel="A+详情生成进度"
+              stepsLabel="A+详情阶段进度"
+              steps={[
+                { key: "aplus_planning", index: "1", label: "策划方案", state: planning ? "active" : "done" },
+                { key: "awaiting_confirmation", index: "2", label: "确认方案", state: planning ? "pending" : "done" },
+                { key: "image_generating", index: "3", label: `生成图片 (${completed}/${total})`, state: planning ? "pending" : "active" },
+              ]}
+            />
           )}
           {failed && (
             <div className="ss-batch-error" role="alert">

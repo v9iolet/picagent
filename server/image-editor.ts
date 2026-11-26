@@ -4,6 +4,7 @@ import { CHANGE_TEXT_MAX_LENGTH, CHANGE_TEXT_MAX_OPERATIONS, computeOutpaintCanv
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import sharp from "sharp";
+import { errorMessages } from "./api-errors.js";
 import type { PromptRepository, StorageAdapter } from "./types.js";
 
 export const IMAGE_EDIT_TOOLS = ["re_edit", "regenerate", "add_text", "change_text", "redraw", "erase", "outpaint", "restore_product"] as const;
@@ -953,7 +954,7 @@ export class ImageEditorService {
       });
     } catch (error) {
       const code = error instanceof Error ? error.message : "IMAGE_EDIT_FAILED";
-      await this.repository.failAttempt(attempt.id, code, code, new Date().toISOString()).catch(() => undefined);
+      await this.repository.failAttempt(attempt.id, code, errorMessages[code] ?? code, new Date().toISOString()).catch(() => undefined);
     }
   }
 }

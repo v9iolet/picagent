@@ -1,10 +1,12 @@
 import dns from "node:dns";
 import { isIP } from "node:net";
+import { networkInterfaces } from "node:os";
 import ipaddr from "ipaddr.js";
 import { Agent } from "undici";
 
 const maxBytes = 32 * 1024 * 1024;
 const globalUnicastV6 = ipaddr.IPv6.parseCIDR("2000::/3");
+const fakeIpRange = ipaddr.IPv4.parseCIDR("198.18.0.0/15");
 const invalidResponse = () => new Error("INVALID_PROVIDER_RESPONSE");
 
 function isPublicAddress(address: string) {
@@ -12,20 +14,65 @@ function isPublicAddress(address: string) {
   return ip.range() === "unicast" && (ip.kind() === "ipv4" || ip.match(globalUnicastV6));
 }
 
-// Validate the answers used by the socket itself, so a second DNS lookup cannot change the destination.
-const dispatcher = new Agent({
-  connect: {
-    lookup(hostname, options, callback) {
-      dns.lookup(hostname, { all: true }, (error, addresses) => {
-        if (error) return callback(error, []);
-        if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address))) return callback(invalidResponse(), []);
-        const [first] = addresses;
-        if (options.all) callback(null, addresses);
-        else callback(null, first.address, first.family);
-      });
+function isFakeIp(address: string) {
+  return isIP(address) === 4 && ipaddr.IPv4.parse(address).match(fakeIpRange);
+}
+
+function dnsServerAddress(server: string) {
+  // Node accepts IPv4:port and [IPv6]:port, as well as bare addresses.
+  return server.match(/^\[([^\]]+)\](?::\d+)?$/)?.[1] ?? server.replace(/^(\d+(?:\.\d+){3}):\d+$/, "$1");
+}
+
+interface ImageUrlNetwork {
+  dnsLookup: (hostname: string, callback: (error: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void) => void;
+  getDnsServers: typeof dns.getServers;
+  getNetworkInterfaces: typeof networkInterfaces;
+}
+
+function canConnect(hostname: string, addresses: dns.LookupAddress[], network: Pick<ImageUrlNetwork, "getDnsServers" | "getNetworkInterfaces">) {
+  if (!addresses.length) return false;
+  const restricted = addresses.filter(({ address }) => !isPublicAddress(address));
+  if (!restricted.length) return true;
+  if (isIP(hostname) || restricted.some(({ address }) =>
+    !isFakeIp(address) || address === "198.18.0.0" || address === "198.19.255.255"
+  )) return false;
+
+  // The exception requires a local TUN/DNS address in the benchmark range.
+  const localAddresses = [
+    ...network.getDnsServers().map(dnsServerAddress),
+    ...Object.values(network.getNetworkInterfaces()).flatMap((entries) => entries?.map(({ address }) => address) ?? []),
+  ].map((address) => ipaddr.process(address).toString());
+  return localAddresses.some(isFakeIp) && addresses.every(({ address }) => !localAddresses.includes(ipaddr.process(address).toString()));
+}
+
+export function createImageUrlDispatcher({
+  dnsLookup = (hostname, callback) => dns.lookup(hostname, { all: true }, callback),
+  getDnsServers = dns.getServers,
+  getNetworkInterfaces = networkInterfaces,
+}: Partial<ImageUrlNetwork> = {}) {
+  // Validate the answers used by the socket itself, so no second lookup can change the destination.
+  return new Agent({
+    connect: {
+      lookup(hostname, options, callback) {
+        dnsLookup(hostname, (error, addresses) => {
+          if (error) return callback(error, []);
+          let allowed: boolean;
+          try {
+            allowed = canConnect(hostname, addresses, { getDnsServers, getNetworkInterfaces });
+          } catch {
+            return callback(invalidResponse(), []);
+          }
+          if (!allowed) return callback(invalidResponse(), []);
+          const [first] = addresses;
+          if (options.all) callback(null, addresses);
+          else callback(null, first.address, first.family);
+        });
+      },
     },
-  },
-});
+  });
+}
+
+const imageUrlDispatcher = createImageUrlDispatcher();
 
 function imageMimeType(bytes: Buffer) {
   if (bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) return "image/png";
@@ -34,7 +81,7 @@ function imageMimeType(bytes: Buffer) {
   throw invalidResponse();
 }
 
-export async function downloadImageUrl(raw: string, signal: AbortSignal) {
+export async function downloadImageUrl(raw: string, signal: AbortSignal, dispatcher = imageUrlDispatcher) {
   const url = URL.parse(raw);
   if (!url || !["http:", "https:"].includes(url.protocol) || url.username || url.password) throw invalidResponse();
   const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "");

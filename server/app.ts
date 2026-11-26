@@ -15,7 +15,7 @@ import { defaultImageOptions, IMAGE_QUALITIES, resolveClosestImageSize, resolveI
 import { PURE_WHITE_MAIN_IMAGE_REQUIREMENTS } from "../shared/platform-main-background.js";
 import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
 import { allocateSellingPointLayouts, resolveSellingPointLayouts } from "../shared/selling-point-layouts.js";
-import { GptImageProvider } from "./providers/gpt-image-provider.js";
+import { GptImageProvider, ImageUrlDownloadError } from "./providers/gpt-image-provider.js";
 import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
 import type { ModelSettings } from "./model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -902,6 +902,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   };
 
   const classifyTaskImageError = (error: unknown) => {
+    if (error instanceof Error && (error.message === "INVALID_PROVIDER_RESPONSE" || error.message === "INVALID_GENERATED_IMAGE")) return "INVALID_GENERATED_IMAGE";
     if (error instanceof Error && error.message === "IMAGE_SIZE_UNSUPPORTED") return "IMAGE_SIZE_UNSUPPORTED";
     if (error instanceof Error && error.message.includes("TIMEOUT")) return "TASK_IMAGE_PROVIDER_TIMEOUT";
     return "TASK_IMAGE_PROVIDER_FAILED";
@@ -929,6 +930,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       try {
         generated = await provider.edit(editRequest);
       } catch (firstError) {
+        if (firstError instanceof ImageUrlDownloadError) throw firstError;
         const firstCode = classifyTaskImageError(firstError);
         if (firstCode !== "TASK_IMAGE_PROVIDER_FAILED" && firstCode !== "TASK_IMAGE_PROVIDER_TIMEOUT") {
           throw firstError;
@@ -970,8 +972,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }
     } catch (error) {
       const code = classifyTaskImageError(error);
-      const errorMessage = errorMessages[code] ?? (code === "TASK_IMAGE_PROVIDER_TIMEOUT" ? errorMessages.IMAGE_PROVIDER_TIMEOUT : errorMessages.TASK_IMAGE_PROVIDER_FAILED);
-      await deps.taskRepository.failAttempt(attempt.id, code, errorMessage, new Date().toISOString()).catch(() => undefined);
+      await deps.taskRepository.failAttempt(attempt.id, code, errorMessages[code], new Date().toISOString()).catch(() => undefined);
     }
   };
 

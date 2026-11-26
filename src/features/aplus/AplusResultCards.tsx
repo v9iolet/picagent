@@ -130,7 +130,7 @@ export function AplusResultCards({
                       setDragged(null);
                     }}
                   >
-                    <div className="aplus-card-image" style={{ aspectRatio: size.ratio.replace(":", " / ") }}>
+                    <div className={`aplus-card-image${pending && !url && !card.previewUrl ? " is-pending" : ""}`} style={{ aspectRatio: size.ratio.replace(":", " / ") }}>
                       {url || card.previewUrl
                         ? <img src={url ?? card.previewUrl!} alt={title} loading="lazy" />
                         : <span>{pending ? "生成中…" : card.taskStatus === "failed" ? "生成失败" : "等待生成"}</span>}
