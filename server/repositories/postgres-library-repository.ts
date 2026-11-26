@@ -1,3 +1,4 @@
+import { UUID_RE } from "../http/validators.js";
 import { assertReferenceAllowed } from "../library-reference-policy.js";
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
@@ -12,7 +13,6 @@ import type {
   LibraryResourceQuery,
 } from "../types.js";
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function toIsoString(value: unknown): string {
   return value instanceof Date ? value.toISOString() : String(value);
@@ -326,7 +326,7 @@ export class PostgresLibraryRepository implements LibraryRepository {
           SELECT
             c.id AS current_child_task_id,
             CASE
-              WHEN c.source_card_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+              WHEN c.source_card_id ~* '${UUID_RE.source}'
               THEN c.source_card_id::uuid
               ELSE NULL
             END AS source_card_uuid,
@@ -339,7 +339,7 @@ export class PostgresLibraryRepository implements LibraryRepository {
           SELECT
             parent.id AS current_child_task_id,
             CASE
-              WHEN parent.source_card_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+              WHEN parent.source_card_id ~* '${UUID_RE.source}'
               THEN parent.source_card_id::uuid
               ELSE NULL
             END AS source_card_uuid,

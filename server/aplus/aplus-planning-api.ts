@@ -1,3 +1,4 @@
+import { isUuid } from "../http/validators.js";
 import { randomUUID } from "node:crypto";
 import {
   APLUS_PRODUCT_INFO_MAX_LENGTH,
@@ -41,7 +42,6 @@ interface AplusPlanningDependencies {
 
 type Result<T> = { ok: true; value: T } | { ok: false; response: AppResponse };
 const allowedLanguages = new Set<string>(["none", ...SUPPORTED_OUTPUT_LANGUAGES.map(({ code }) => code)]);
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function rejected(code: string, status = 400): Result<never> {
   return { ok: false, response: fail(code, status) };
@@ -80,7 +80,7 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
     const fields = readVisionFields(body);
     if (!fields.ok) return fields;
     const { platform, targetMarket, language, visualStyle, productInfo } = fields.value;
-    if (typeof sourceId !== "string" || !uuid.test(sourceId)) return rejected("APLUS_INVALID_INPUT_IMAGES");
+    if (!isUuid(sourceId)) return rejected("APLUS_INVALID_INPUT_IMAGES");
 
     const [profile, card, source] = await Promise.all([
       platform ? deps.platforms?.find(platform) : null,
@@ -266,7 +266,7 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
     if (!card.snapshot) return fail("APLUS_PRODUCT_CARD_REQUIRED");
     const fields = readVisionFields(body);
     if (!fields.ok) return fields.response;
-    if (typeof suiteId !== "string" || !uuid.test(suiteId) || !Array.isArray(inputImageIds)) {
+    if (!isUuid(suiteId) || !Array.isArray(inputImageIds)) {
       return fail("APLUS_INVALID_INPUT_IMAGES");
     }
     const { platform } = fields.value;
@@ -373,7 +373,7 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
   }
 
   async function loadRun(suiteId: string): Promise<Result<{ run: SuitePipelineRun; config: AplusRunConfig }>> {
-    const suite = uuid.test(suiteId) ? await deps.repository.getSuite(suiteId) : null;
+    const suite = isUuid(suiteId) ? await deps.repository.getSuite(suiteId) : null;
     if (!suite) return rejected("INVALID_SUITE_ID", 404);
     if (suite.origin !== "aplus") return rejected("INVALID_SUITE_ORIGIN");
     const run = await deps.pipelines.getLatestRun(suite.id);
@@ -450,9 +450,9 @@ export function createAplusPlanningApi(deps: AplusPlanningDependencies) {
       return rejected("PRODUCT_CARD_NOT_AVAILABLE");
     }
     if (
-      (body.suiteId !== undefined && (typeof body.suiteId !== "string" || !uuid.test(body.suiteId))) ||
+      (body.suiteId !== undefined && !isUuid(body.suiteId)) ||
       !Array.isArray(body.inputImageIds) || body.inputImageIds.length < 1 || body.inputImageIds.length > 6 ||
-      !body.inputImageIds.every((id) => typeof id === "string" && uuid.test(id)) ||
+      !body.inputImageIds.every(isUuid) ||
       new Set(body.inputImageIds).size !== body.inputImageIds.length
     ) return rejected("APLUS_INVALID_INPUT_IMAGES");
     const parsed = await readInputs(body, suiteId);

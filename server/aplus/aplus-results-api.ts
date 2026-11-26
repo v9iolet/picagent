@@ -3,6 +3,7 @@ import {
   APLUS_SIZE_PRESETS, validateAplusModuleCodes, type AplusModuleCode, type AplusSizePresetKey,
 } from "../../shared/aplus.js";
 import { sanitizeDeliveryName, type ResolvedDeliverySlot } from "../../shared/workbench-delivery.js";
+import { attachmentDisposition, binaryResponse } from "../http/binary-response.js";
 import { fail } from "../api-errors.js";
 import { asRecord, dataOf, ok, type AppResponse } from "../api-response.js";
 import { composeVerticalImages } from "../delivery-image.js";
@@ -98,7 +99,7 @@ export function createAplusResultsApi(deps: {
         if (!selected) return fail("APLUS_INVALID_SIZE_PRESETS", 400);
         const { longImage, manifest } = await readGroup(cards, selected);
         if (!longImage) return fail("DELIVERY_EMPTY", 400);
-        return { ...ok(manifest), raw: longImage.data, headers: { "content-type": "image/png", "cache-control": "no-store" } };
+        return binaryResponse(longImage.data, "image/png", { "cache-control": "no-store" }, manifest);
       }
 
       const entries: ZipEntryInput[] = [];
@@ -112,14 +113,10 @@ export function createAplusResultsApi(deps: {
       const manifest = { suiteId, suiteName: suite.name, groups };
       entries.push({ name: "manifest.json", data: Buffer.from(JSON.stringify(manifest, null, 2)) });
       const filename = `${sanitizeDeliveryName(suite.name, "Aplus")}.zip`;
-      return {
-        ...ok(manifest), raw: createZipBuffer(entries),
-        headers: {
-          "content-type": "application/zip",
-          "content-disposition": `attachment; filename="Aplus.zip"; filename*=UTF-8''${encodeURIComponent(filename)}`,
-          "cache-control": "no-store",
-        },
-      };
+      return binaryResponse(createZipBuffer(entries), "application/zip", {
+        "content-disposition": attachmentDisposition(filename, "Aplus.zip"),
+        "cache-control": "no-store",
+      }, manifest);
     } catch {
       return fail("APLUS_EXPORT_FAILED", 502);
     }

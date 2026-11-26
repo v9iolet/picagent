@@ -1,8 +1,8 @@
+import { UUID_RE } from "../http/validators.js";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { samePromptTemplateContent, validatePromptTemplateContract, withPromptTemplateUsage, type PromptStage, type PromptTemplatePublic, type PromptTemplateRecord, type PromptTemplateRuntime, type PromptVersionStatus } from "../prompt-library.js";
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const runtimeColumns = `t.id AS "templateId", v.id AS "templateVersionId", v.version_no AS "versionNo",
   t.code, v.name, v.kind, v.stage, v.execution_target AS "executionTarget", v.input_schema AS "inputSchema",
