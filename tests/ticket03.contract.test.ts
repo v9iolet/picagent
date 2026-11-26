@@ -95,6 +95,9 @@ test("successive generations append versions and old versions remain previewable
   assert.equal(preview.status, 200);
   assert.equal(preview.headers?.["content-type"], "image/png");
   assert.equal(preview.raw?.subarray(1, 4).toString("ascii"), "PNG");
+  const routed = await api.request("GET", oldVersion.previewUrl);
+  assert.deepEqual(routed.raw, preview.raw);
+  assert.deepEqual(routed.headers, preview.headers);
 
   const selected = await api.request("POST", `/api/suites/${suiteId}/input-images/${inputImageId}/base-versions/${oldVersion.id}/select`);
   assert.equal(selected.status, 200);

@@ -13,12 +13,12 @@ export function binaryResponse(bytes: Buffer, contentType: string, headers: Reco
 export async function previewStorageObject(
   storage: Pick<StorageAdapter, "get">,
   key: string,
-  options: { headers?: Record<string, string>; data?: unknown; missingCode?: string; readFailureCode?: string } = {},
+  options: { headers?: Record<string, string>; data?: unknown; contentType?: string; missingCode?: string; readFailureCode?: string } = {},
 ): Promise<AppResponse> {
   try {
     const object = await storage.get(key);
     if (!object) return fail(options.missingCode ?? "OBJECT_NOT_FOUND", 404);
-    return binaryResponse(object.bytes, object.contentType, options.headers, options.data);
+    return binaryResponse(object.bytes, options.contentType ?? object.contentType, options.headers, options.data);
   } catch (error) {
     if (error instanceof Error && error.message === "OBJECT_NOT_FOUND") return fail(options.missingCode ?? "OBJECT_NOT_FOUND", 404);
     return fail(options.readFailureCode ?? "OBJECT_READ_FAILED", 502);

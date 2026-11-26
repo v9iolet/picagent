@@ -854,6 +854,14 @@ test("PG 保存 A+ 商品还原交付图与图片库来源，044–046 启动重
     assert.notEqual(editedImage.deliveryObjectKey, editedImage.objectKey);
     const delivery = await storage.get(editedImage.deliveryObjectKey!);
     assert.ok(delivery);
+    const editPreview = `/api/image-editor/tasks/${childId}/versions/${editedImage.id}/preview`;
+    const preview = await editorApp.request("GET", editPreview);
+    assert.deepEqual(preview.raw, (await storage.get(editedImage.objectKey))?.bytes);
+    assert.equal(preview.headers?.["content-type"], editedImage.mimeType);
+    assert.deepEqual((await editorApp.request("GET", editPreview + "/delivery")).raw, delivery.bytes);
+    const wrongTask = await editorApp.request("GET", `/api/image-editor/tasks/${taskId}/versions/${editedImage.id}/preview`);
+    assert.equal(wrongTask.status, 404);
+    assert.equal(wrongTask.body.error.code, "NOT_FOUND");
     const { width, height } = await sharp(delivery.bytes).metadata();
     assert.deepEqual({ width, height }, deliverySize);
     await assertLibraryImage(`edit-version:${editedImage.id}`, editedImage.deliveryObjectKey!, `/api/image-editor/tasks/${childId}/versions/${editedImage.id}/preview/delivery`);

@@ -53,3 +53,16 @@ export function taskSlotView(slot: TaskResultSlot) {
 export function taskVersionView(version: TaskImageVersion) {
   return version;
 }
+
+export const resolvePlanStyleGuide = (snapshot: PlanSnapshot | null): string => {
+  if (!snapshot) return "未设置";
+  const card = snapshot?.structure?.globalStyleCard;
+  if (card && typeof card === "object" && typeof (card as Record<string, unknown>).promptPrefix === "string" && String((card as Record<string, unknown>).promptPrefix).trim()) {
+    return String((card as Record<string, unknown>).promptPrefix).trim();
+  }
+  const values = { ...(snapshot?.dynamicInput ?? {}), ...(snapshot?.humanInput ?? {}) } as Record<string, unknown>;
+  for (const key of ["design_style", "style_guide", "styleGuide", "visual_style"]) {
+    if (typeof values[key] === "string" && values[key].trim()) return values[key].trim();
+  }
+  return "沿用计划模板默认风格，保持商品真实外观、光影和品牌一致性。";
+};

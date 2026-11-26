@@ -166,6 +166,9 @@ test("DELETE /api/library/resources/:id supports single delete, URL-encoded IDs,
   const badEncoding = await app.request("DELETE", "/api/library/resources/%E0%A4%A");
   assert.equal(badEncoding.status, 404);
   assert.equal((badEncoding.body as any).error.code, "LIBRARY_RESOURCE_NOT_FOUND");
+  const badPreview = await app.request("GET", "/api/library/resources/%E0%A4%A/preview");
+  assert.equal(badPreview.status, 404);
+  assert.equal((badPreview.body as any).error.code, "LIBRARY_RESOURCE_NOT_FOUND");
 
   const unknown = await app.request("DELETE", "/api/library/resources/input%3Anonexistent");
   assert.equal(unknown.status, 404);
