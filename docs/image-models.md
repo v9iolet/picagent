@@ -1,6 +1,6 @@
 # 生图模型渠道与能力实测记录
 
-本文汇总云飞渠道的接口资料，以及项目在默认生图渠道 omyai（`omyai-生图`）上的实测记录。实测时使用的默认模型是 `gpt-image-2.5-flare-special`，能力以各节注明的渠道、模型和账号分组为准。
+本文汇总云飞渠道的接口资料，以及项目在生图渠道 omyai（`omyai-生图`）上对 `gpt-image-2.5-flare-special` 和 `gpt-image-2.6-flare-special` 的实测记录。能力以各节注明的渠道、模型和账号分组为准。
 
 ## 云飞渠道接口资料
 
@@ -459,3 +459,20 @@ npx tsx scripts/probe-gpt-image-size.ts --case-set high-res --dry-run
 脚本通过 `ImageEditorService`、`requestImageEditorEdit` 和正式 provider 构造与发送请求。`--dry-run --reference <三红圆输入图>` 会核对默认渠道并用本地假 provider 预览请求。付费抽样使用 `--live --reference <三红圆输入图> --output <新目录>`，需先获授权。[复现脚本](../scripts/probe-mask-fallback.ts)
 
 本次产物在主检出目录的 `.scratch/image-editor-upgrade/fallback-probe-2026-11-25/`，包含两张来源图、实际提交的 `outpaint-canvas.png`、三张结果图和 `results.jsonl`。
+
+## 实测结论：omyai / gpt-image-2.6-flare-special
+
+2026-11-25（北京时间），在已配置的 `omyai-生图` 渠道上通过 `/v1/images/edits` 单独选择 2.6。输入为白色无线鼠标实拍，`quality=medium`、`n=1`、`response_format=b64_json`。高级 A+ Web 交付比例为 1464:600，应用按 1K 档换算出 `size=2496x1024`。
+
+| 请求 | 请求 size | HTTP | 实出尺寸 | 耗时 | 上游错误 |
+| --- | --- | --- | --- | --- | --- |
+| 首次预检 | `2496x1024` | 502 | 无 | 134.2 秒 | `524` |
+| 同尺寸重试 | `2496x1024` | 200 | 2496×1024 | 35.0 秒 | 无 |
+
+2.6 在本次成功样本中接受了 2496×1024 像素请求并按指定尺寸返回。走 A+ 的居中裁切后交付为 1464×600，鼠标边缘、滚轮和侧键完整。2.5 曾实测多种像素尺寸，部分组合返回尺寸有偏差。2.5 的记录未覆盖 2496×1024，目前无法比较两者在这组像素上的差异或成功率。
+
+2026-11-26 的正式 A+ 批次用同一份 3C 商品卡规划默认 6 模块。Web 端的 6 张原图均实出 2496×1024。移动端请求 2736×2048，实出宽度均为 2736，高度为 2037–2052，交付图统一为 600×450。普通 A+ 首批成功样本请求 3312×2048，部分返回高度也有少量偏差，交付使用 970×600 的裁切图。同一账号把两个三并发批次同时提交时出现 HTTP 429 `concurrency_limit_exceeded`。
+
+淘宝 3:4 的四个服饰模块均请求 2048×2736，均实出 2052×2736，比例为 3:4。通用比例直接交付实出像素。
+
+原图、预检出图、裁切样图及逐次记录位于主检出目录的 `.scratch/a-plus-detail/tuning-assets/` 和 `.scratch/a-plus-detail/tuning-2026-11-25/`。
