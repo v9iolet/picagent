@@ -123,6 +123,9 @@ export function createImageEditorApi(service: ImageEditorService) {
     clearFinalVersions(childTaskIds: string[]) {
       return service.clearFinalVersions(childTaskIds);
     },
+    getVersion(childTaskId: string, versionId: string) {
+      return service.getVersion(childTaskId, versionId);
+    },
     setOnVersionCompleted(listener: ImageEditVersionCompletedListener) {
       service.setOnVersionCompleted(listener);
     },

@@ -266,6 +266,7 @@ export interface ImageEditorRepository {
   failAttempt(attemptId: string, code: string, message: string, completedAt: string): Promise<{ attempt: ImageEditAttempt; childTask: ImageEditChildTask }>;
   listAttempts(childTaskId: string): Promise<ImageEditAttempt[]>;
   listVersions(childTaskId: string): Promise<ImageEditVersion[]>;
+  getVersion?(childTaskId: string, versionId: string): Promise<ImageEditVersion | null>;
   selectVersion(childTaskId: string, versionId: string, selection: "current" | "final"): Promise<ImageEditVersion | null>;
   clearFinalVersions?(childTaskIds: string[]): Promise<void>;
 }
@@ -359,6 +360,10 @@ export class MemoryImageEditorRepository implements ImageEditorRepository {
   }
   async listAttempts(childTaskId: string) { return [...this.attempts.values()].filter((a) => a.childTaskId === childTaskId).sort((a, b) => a.attemptNo - b.attemptNo); }
   async listVersions(childTaskId: string) { return [...this.versions.values()].filter((v) => v.childTaskId === childTaskId).sort((a, b) => b.versionNumber - a.versionNumber); }
+  async getVersion(childTaskId: string, versionId: string) {
+    const version = this.versions.get(versionId);
+    return version?.childTaskId === childTaskId ? structuredClone(version) : null;
+  }
   async selectVersion(childTaskId: string, versionId: string, selection: "current" | "final") { const version = this.versions.get(versionId); if (!version || version.childTaskId !== childTaskId) return null; const task = this.tasks.get(childTaskId); if (!task) return null; if (selection === "final") { const attempt = this.attempts.get(version.attemptId); if (!attempt || attempt.status !== "succeeded") throw new Error("VERSION_NOT_ELIGIBLE_FOR_FINAL"); }
     if (selection === "current") this.tasks.set(childTaskId, { ...task, currentVersionId: version.id, updatedAt: new Date().toISOString() }); else this.tasks.set(childTaskId, { ...task, finalVersionId: version.id, updatedAt: new Date().toISOString() }); return version;
   }
@@ -907,6 +912,10 @@ export class ImageEditorService {
   async clearFinalVersions(childTaskIds: string[]) { if (childTaskIds.length) await this.repository.clearFinalVersions?.(childTaskIds); }
   async selectVersion(childTaskId: string, versionId: string, selection: "current" | "final") { return this.repository.selectVersion(childTaskId, versionId, selection); }
   async getTask(childTaskId: string) { const task = await this.repository.getChildTask(childTaskId); if (!task) return null; return { task, snapshot: await this.repository.getSnapshot(task.snapshotId), attempts: await this.repository.listAttempts(task.id), versions: await this.repository.listVersions(task.id) }; }
+  async getVersion(childTaskId: string, versionId: string) {
+    if (this.repository.getVersion) return this.repository.getVersion(childTaskId, versionId);
+    return (await this.repository.listVersions(childTaskId)).find((version) => version.id === versionId) ?? null;
+  }
   async listTasksBySourceCard(sourceCardId: string) { const tasks = await this.repository.listChildTasksBySourceCard(sourceCardId); return Promise.all(tasks.map(async (task) => ({ task, snapshot: await this.repository.getSnapshot(task.snapshotId), attempts: await this.repository.listAttempts(task.id), versions: await this.repository.listVersions(task.id) }))); }
   async listAllTasks() { const tasks = await this.repository.listChildTasks(); return Promise.all(tasks.map(async (task) => ({ task, snapshot: await this.repository.getSnapshot(task.snapshotId), attempts: await this.repository.listAttempts(task.id), versions: await this.repository.listVersions(task.id) }))); }
   private validateOperation(operation: EditOperation) {

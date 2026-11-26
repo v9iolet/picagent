@@ -3,13 +3,13 @@ import http from "node:http";
 import { resolve } from "node:path";
 import { Client as MinioClient } from "minio";
 import { Pool } from "pg";
-import { createSuiteStudioApp, hasValidTaskVersionIds } from "./app.js";
-import { fail } from "./api-errors.js";
+import { createSuiteStudioApp, type AppResponse } from "./app.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { dispatchInputImageUpload } from "./multipart.js";
 import { readBoundedRequestBody } from "./request-body-limit.js";
 import { createStaticAssetHandler } from "./http/static-assets.js";
+import { dispatchJsonRequest } from "./http/json-request.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
 import { defaultImageOptions } from "../shared/model-settings.js";
@@ -39,7 +39,6 @@ const config = loadServerConfig();
 initializeObservability();
 const pool = new Pool({ ...config.postgres, max: Math.max(6, Number(process.env.PG_POOL_MAX) || 16), connectionTimeoutMillis: 30_000, idleTimeoutMillis: 60_000 });
 const minio = new MinioClient(config.minio);
-await pool.query("SELECT 1");
 await runMigrations(pool, { recoverStaleAttempts: true });
 try {
   if (!(await minio.bucketExists(config.minio.bucket))) await minio.makeBucket(config.minio.bucket, config.minio.region);
@@ -119,54 +118,12 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
   const body = await readBoundedRequestBody(req, res, requestUrl.pathname);
   if (body === null) return;
-  const path = requestUrl.pathname + requestUrl.search;
-  const headers = req.headers as Record<string, string | undefined>;
-  let response;
+  const headers = req.headers as Record<string, string>;
+  let response: AppResponse;
   const upload = req.method === "POST" ? await dispatchInputImageUpload(app, requestUrl.pathname, body, headers) : null;
   if (upload) {
     response = upload;
-  } else if (
-    req.method === "GET" &&
-    (
-      /^\/api\/listing-copies\/[^/]+\/input-images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname) ||
-      /^\/api\/product-cards\/[^/]+\/images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname) ||
-      /^\/api\/product-onboarding\/sessions\/[^/]+\/images\/[^/]+\/preview\/(original|thumbnail)$/.test(requestUrl.pathname)
-    )
-  ) {
-    response = await app.request("GET", requestUrl.pathname);
-  } else if (req.method === "GET" && path.includes("/preview")) {
-    const inputMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/preview\/(original|thumbnail)$/);
-    const baseMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/base-versions\/([^/]+)\/preview$/);
-    const taskMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview(\/delivery)?$/);
-    const editTaskMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview(\/delivery)?$/);
-    const libraryMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
-    const reverseMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
-    const replicaMatch = requestUrl.pathname.match(/^\/api\/replicas\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
-    const safeDecode = (raw: string) => {
-      try { return decodeURIComponent(raw); } catch { return null; }
-    };
-    response = inputMatch
-      ? await app.preview(inputMatch[1], inputMatch[2], inputMatch[3] as "original" | "thumbnail")
-      : baseMatch
-        ? await app.previewBaseVersion(baseMatch[1], baseMatch[2], baseMatch[3])
-      : editTaskMatch && !hasValidTaskVersionIds(editTaskMatch[1], editTaskMatch[2])
-        ? fail("INVALID_TASK_VERSION", 404)
-      : editTaskMatch?.[3]
-        ? await app.request("GET", requestUrl.pathname)
-      : editTaskMatch
-        ? await (async () => { const found = await pool.query<{ objectKey: string; mimeType: string }>("SELECT v.object_key AS \"objectKey\", v.mime_type AS \"mimeType\" FROM suite_workbench.image_edit_versions v WHERE v.child_task_id=$1 AND v.id=$2", [editTaskMatch[1], editTaskMatch[2]]); if (!found.rows[0]) return { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } }; const object = await storage.get(found.rows[0].objectKey); return object ? { status: 200, raw: object.bytes, headers: { "content-type": found.rows[0].mimeType } } : { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } }; })()
-      : taskMatch
-        ? await app.previewTaskVersion(taskMatch[1], taskMatch[2], Boolean(taskMatch[3]))
-        : libraryMatch
-          ? await app.previewLibraryResource(safeDecode(libraryMatch[1]) ?? libraryMatch[1])
-        : reverseMatch
-          ? await app.previewReverseReference(reverseMatch[1], reverseMatch[2], (reverseMatch[3] as "original" | "thumbnail" | undefined) ?? "thumbnail")
-        : replicaMatch
-          ? await app.previewReplicaReference(replicaMatch[1], replicaMatch[2], ((replicaMatch[3] ?? requestUrl.searchParams.get("kind")) === "original" ? "original" : "thumbnail"))
-        : { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } };
-    if ((response.headers as Record<string, string> | undefined)?.location) { res.statusCode = response.status; res.setHeader("location", (response.headers as Record<string, string>).location); res.end(); return; }
-    if (response.raw) { const rawHeaders = response.headers as Record<string, string> | undefined; res.statusCode = response.status; for (const [name, value] of Object.entries(rawHeaders ?? {})) res.setHeader(name, value); res.setHeader("content-type", rawHeaders?.["content-type"] ?? "application/octet-stream"); res.setHeader("cache-control", rawHeaders?.["cache-control"] ?? "private, max-age=60"); res.end(response.raw); return; }
-  } else if (req.method === "GET" && !path.startsWith("/api/")) {
+  } else if (req.method === "GET" && !requestUrl.pathname.startsWith("/api/")) {
     const asset = await serveStatic(req.url ?? "/");
     if (asset) {
       res.statusCode = 200;
@@ -177,23 +134,20 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     }
     response = { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } };
   } else {
-    let parsed: unknown; try { parsed = body.length ? JSON.parse(body.toString("utf8")) : undefined; } catch { parsed = undefined; }
-    const isSettingsWrite = requestUrl.pathname.startsWith("/api/model-settings/") &&
-      (req.method === "POST" || req.method === "PUT" || req.method === "PATCH");
-    response = isSettingsWrite && headers["content-type"]?.split(";")[0].trim().toLowerCase() !== "application/json"
-      ? { status: 415, body: { error: { code: "UNSUPPORTED_MEDIA_TYPE", message: "配置请求必须使用 application/json" }, requestId: "" } }
-      : await app.request(req.method ?? "GET", path, { headers: headers as Record<string, string>, body: parsed });
+    response = await dispatchJsonRequest(app.request, req.method ?? "GET", requestUrl, headers, body);
   }
-  if (response.raw) {
-    const rawHeaders = response.headers as Record<string, string> | undefined;
-    res.statusCode = response.status;
-    for (const [name, value] of Object.entries(rawHeaders ?? {})) res.setHeader(name, value);
-    res.setHeader("content-type", rawHeaders?.["content-type"] ?? "application/octet-stream");
+  res.statusCode = response.status;
+  for (const [name, value] of Object.entries(response.headers ?? {})) res.setHeader(name, value);
+  if (response.headers?.location) {
+    res.end();
+  } else if (response.raw) {
+    res.setHeader("content-type", response.headers?.["content-type"] ?? "application/octet-stream");
+    res.setHeader("cache-control", response.headers?.["cache-control"] ?? "private, max-age=60");
     res.end(response.raw);
-    return;
+  } else {
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.end(JSON.stringify(response.body));
   }
-  if (requestUrl.pathname.startsWith("/api/model-settings")) res.setHeader("cache-control", "no-store");
-  res.statusCode = response.status; res.setHeader("content-type", "application/json; charset=utf-8"); res.end(JSON.stringify(response.body));
 }
 
 const server = http.createServer((req, res) => {

@@ -43,7 +43,7 @@ function compilePattern(pattern: Pattern): RegExp {
 }
 
 // Named captures use their names. Positional captures on a regex route use "1", "2", etc.
-function matchParams(pattern: RegExp, pathname: string): Record<string, string> | null {
+function matchParams(pattern: RegExp, pathname: string, decodeParams: boolean): Record<string, string> | null {
   pattern.lastIndex = 0;
   const match = pattern.exec(pathname);
   if (!match) return null;
@@ -51,27 +51,30 @@ function matchParams(pattern: RegExp, pathname: string): Record<string, string> 
   const params: Record<string, string> = Object.create(null);
   for (const [name, value] of Object.entries(captures)) {
     if (value === undefined) continue;
-    const decoded = decodeParam(value);
+    const decoded = decodeParams ? decodeParam(value) : value;
     if (decoded === null) return null;
     params[name] = decoded;
   }
   return params;
 }
 
-export function createRouter() {
+export type Router = ReturnType<typeof createRouter>;
+
+// Legacy routes decode selected identifiers themselves to report their domain-specific errors.
+export function createRouter({ decodeParams = true } = {}) {
   const routes: { method: string; pattern: RegExp; handler: Handler }[] = [];
   function route(method: string, pattern: Pattern, handler: Handler) {
     routes.push({ method: method.toUpperCase(), pattern: compilePattern(pattern), handler });
   }
   const register = (method: string) => (pattern: Pattern, handler: Handler) => route(method, pattern, handler);
 
-  async function dispatch(method: string, path: string, { headers = {}, body }: { headers?: Headers; body?: unknown } = {}): Promise<AppResponse | null> {
+  function handle(method: string, path: string, { headers = {}, body }: { headers?: Headers; body?: unknown } = {}) {
     const queryStart = path.indexOf("?");
     const pathname = queryStart === -1 ? path : path.slice(0, queryStart);
     const verb = method.toUpperCase();
     for (const entry of routes) {
       if (entry.method !== verb) continue;
-      const params = matchParams(entry.pattern, pathname);
+      const params = matchParams(entry.pattern, pathname, decodeParams);
       if (!params) continue;
       const query = new URLSearchParams(queryStart === -1 ? "" : path.slice(queryStart + 1));
       const idempotencyKey = Object.entries(headers).find(([name]) => name.toLowerCase() === "idempotency-key")?.[1];
@@ -80,5 +83,9 @@ export function createRouter() {
     return null;
   }
 
-  return { route, get: register("GET"), post: register("POST"), patch: register("PATCH"), put: register("PUT"), delete: register("DELETE"), dispatch };
+  async function dispatch(...args: Parameters<typeof handle>): Promise<AppResponse | null> {
+    return handle(...args);
+  }
+
+  return { route, get: register("GET"), post: register("POST"), patch: register("PATCH"), put: register("PUT"), delete: register("DELETE"), handle, dispatch };
 }
