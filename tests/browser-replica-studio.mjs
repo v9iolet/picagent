@@ -180,6 +180,7 @@ async function offlineReplicaStudio(t, gates = {}) {
     preferences: {
       image: { channelId: "offline", modelId: "gpt-image-2" },
       vision: { channelId: "offline", modelId: "gpt-image-2" },
+      video: null,
     },
   };
 

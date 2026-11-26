@@ -10,6 +10,7 @@ import { loadPostgresConfig } from "../server/config.js";
 import { ImageEditorService } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import type { ListingImage, ListingJob, ListingVersion } from "../server/listing-copy.js";
+import { ModelSettings, PostgresModelSettingsRepository } from "../server/model-settings.js";
 import { runMigrations } from "../server/migrations.js";
 import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
 import { PostgresImageEditorRepository } from "../server/repositories/postgres-image-editor-repository.js";
@@ -944,10 +945,11 @@ test("PG 保存 A+ 商品还原交付图与图片库来源，044–046 启动重
   });
 });
 
-test("043 and 050–052 publish all 19 A+ Markdown templates and preserve user publishes and retirements on replay", { skip }, async () => {
+test("043 and 050–053 publish all 19 A+ Markdown templates and preserve user publishes and retirements on replay", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);
-    const tunedIn050 = new Set([
+    const versionThreeCodes = new Set([
+      "aplus.ai-write",
       "aplus.plan", "aplus.image",
       "aplus.module.accessories", "aplus.module.brand_story", "aplus.module.comparison",
       "aplus.module.craftsmanship", "aplus.module.detail_closeup", "aplus.module.hero",
@@ -974,8 +976,7 @@ test("043 and 050–052 publish all 19 A+ Markdown templates and preserve user p
       assert.ok(template, file);
       const sourceFile = `prompt/normalized/${file}`;
       const record = parseNormalizedPromptMarkdown(await readFile(sourceFile, "utf8"), sourceFile);
-      // 051 advanced AI write only; 052 advances all other A+ defaults.
-      const versionNo = tunedIn050.has(record.code) ? 3 : 2;
+      const versionNo = versionThreeCodes.has(record.code) ? 3 : 2;
       assert.deepEqual(template, { ...record, status: "published", versionNo, usedBy: template.usedBy });
       assert.ok(template.usedBy?.length, file);
       return record;
@@ -988,7 +989,7 @@ test("043 and 050–052 publish all 19 A+ Markdown templates and preserve user p
     }
     for (const record of records) {
       const versions = await prompts.listVersions(record.templateId);
-      assert.deepEqual(versions.map(({ versionNo, status }) => [versionNo, status]), tunedIn050.has(record.code)
+      assert.deepEqual(versions.map(({ versionNo, status }) => [versionNo, status]), versionThreeCodes.has(record.code)
         ? [[1, "retired"], [2, "retired"], [3, "published"]]
         : [[1, "retired"], [2, "published"]]);
     }
@@ -1016,7 +1017,30 @@ test("043 and 050–052 publish all 19 A+ Markdown templates and preserve user p
     await prompts.retireVersion(custom.templateVersionId);
     await runMigrations(pool);
     assert.equal(await resolveAplusPromptTemplate(prompts, "aplus_ai_write"), null);
-    assert.deepEqual((await prompts.listVersions(aiWrite.templateId)).map(({ versionNo }) => versionNo), [1, 2, 3]);
+    assert.deepEqual((await prompts.listVersions(aiWrite.templateId)).map(({ versionNo }) => versionNo), [1, 2, 3, 4]);
+  });
+});
+
+test("053 fills the missing video preference and preserves configured defaults on replay", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const repository = new PostgresModelSettingsRepository(pool);
+    const settings = new ModelSettings(repository);
+    const path = "/api/model-settings";
+    const created = await settings.request("POST", path + "/channels", {
+      name: "商品视频", protocol: "openai-compatible", baseUrl: "https://channel.test", apiKey: "offline",
+      models: [{ id: "multimedia", capabilities: ["image", "video"] }],
+    });
+    assert.equal(created.status, 201);
+    const ref = { channelId: (await repository.read()).channels[0].id, modelId: "multimedia" };
+    await settings.request("PATCH", path + "/preferences", { image: ref });
+    await pool.query("UPDATE suite_workbench.model_settings SET state = state #- '{preferences,video}'");
+    const migration = await readFile("db/migrations/053_aplus_ai_write_tighten.sql", "utf8");
+    await pool.query(migration);
+    assert.deepEqual((await repository.read()).preferences, { image: ref, vision: null, video: null });
+    assert.equal((await settings.request("PATCH", path + "/preferences", { video: ref })).status, 200);
+    await pool.query(migration);
+    assert.deepEqual((await repository.read()).preferences, { image: ref, vision: null, video: ref });
+    assert.equal((await settings.resolve("video"))?.model, "multimedia");
   });
 });
 

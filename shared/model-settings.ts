@@ -1,4 +1,5 @@
-export type ModelCapability = "image" | "vision";
+export const MODEL_CAPABILITIES = ["image", "vision", "video"] as const;
+export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
 export const IMAGE_QUALITIES = ["low", "medium", "high"] as const;
 export type ImageQuality = (typeof IMAGE_QUALITIES)[number];
 
@@ -79,7 +80,7 @@ export interface ModelChannelSnapshot {
   baseUrl: string;
 }
 
-export const capabilityLabels = { image: "生图", vision: "多模态" } as const;
+export const capabilityLabels = { image: "生图", vision: "多模态", video: "视频" } as const;
 
 export function matchNearestAspectRatio(
   width: number,

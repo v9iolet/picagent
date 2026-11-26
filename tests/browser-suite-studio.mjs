@@ -177,13 +177,13 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
         models: [
           {
             id: "offline-image",
-            capabilities: ["image", "vision"],
+            capabilities: ["image", "vision", "video"],
             imageOptions: { sizes: ["1K", "4K"], aspectRatios: ["1:1", "3:2"], sizeMode: "tier" },
           },
         ],
       },
     ],
-    preferences: { image: { channelId: "demo", modelId: "offline-image" }, vision: null },
+    preferences: { image: { channelId: "demo", modelId: "offline-image" }, vision: null, video: null },
   };
   const calls = [];
   const vite = await createServer({
@@ -505,7 +505,9 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.keyboard.press("Escape");
   await sizeModeTip.waitFor({ state: "hidden" });
   assert.equal(await channelDialog.isVisible(), true, "First Escape inside native <dialog> must close only InfoTip, keeping <dialog> open");
+  assert.ok(await channelDialog.getByRole("checkbox", { name: "视频" }).isChecked());
   await page.getByLabel("生图", { exact: true }).uncheck();
+  assert.equal(await channelDialog.getByRole("group", { name: "生图尺寸能力" }).count(), 0);
   await page.getByRole("button", { name: "保存渠道", exact: true }).click();
   await page.waitForFunction(() => !document.querySelector("dialog[open]"));
   assert.equal(
@@ -515,6 +517,14 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
     ),
     false,
   );
+  await page.getByRole("link", { name: "偏好设置" }).click();
+  const video = page.getByRole("combobox", { name: "默认视频模型" });
+  await video.selectOption({ label: "离线测试 · offline-image" });
+  await page.getByRole("button", { name: "保存偏好" }).click();
+  await page.getByText("偏好设置已保存", { exact: true }).first().waitFor();
+  assert.deepEqual(fixture.calls.find((x) => x.method === "PATCH" && x.path.endsWith("/preferences")).body, {
+    video: { channelId: "demo", modelId: "offline-image" },
+  });
 });
 
 test("旧版结构计划模板失败时显示中文发布指引", async (t) => {

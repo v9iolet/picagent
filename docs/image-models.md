@@ -462,6 +462,8 @@ npx tsx scripts/probe-gpt-image-size.ts --case-set high-res --dry-run
 
 ## 实测结论：omyai / gpt-image-2.6-flare-special
 
+2026-11-26 的 A+ 详情实测中，该模型忽略了 `response_format=b64_json`，通过 `data[0].url` 返回图片。应用仍优先读取 base64，遇到 URL 时会从公网 HTTP(S) 地址下载，禁止重定向，校验图片格式和 32 MiB 体积上限，并按实际格式归档。
+
 2026-11-25（北京时间），在已配置的 `omyai-生图` 渠道上通过 `/v1/images/edits` 单独选择 2.6。输入为白色无线鼠标实拍，`quality=medium`、`n=1`、`response_format=b64_json`。高级 A+ Web 交付比例为 1464:600，应用按 1K 档换算出 `size=2496x1024`。
 
 | 请求 | 请求 size | HTTP | 实出尺寸 | 耗时 | 上游错误 |

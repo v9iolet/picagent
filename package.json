@@ -24,13 +24,15 @@
     "@opentelemetry/sdk-trace-node": "^2.0.1",
     "@xyflow/react": "^12.11.3",
     "dotenv": "^17.4.2",
+    "ipaddr.js": "^2.5.0",
     "konva": "^10.3.2",
     "minio": "^8.0.7",
     "pg": "^8.23.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-konva": "^19.2.5",
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.3",
+    "undici": "^6.29.0"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

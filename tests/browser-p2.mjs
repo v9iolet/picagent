@@ -44,7 +44,7 @@ async function startTestServer() {
   const [tpl] = await promptRepository.importRecords(parsePromptMarkdown("### 底图精修模板\n\n```plain\n保持商品实拍结构，纯白棚拍底图。\n```", "base.md"));
   await promptRepository.publishVersion(tpl.templateVersionId);
 
-  let settingsState = { channels: [], preferences: { image: null, vision: null } };
+  let settingsState = { channels: [], preferences: { image: null, vision: null, video: null } };
   const modelSettings = new ModelSettings({
     read: async () => structuredClone(settingsState),
     update: async (change) => { settingsState = change(structuredClone(settingsState)); return structuredClone(settingsState); },

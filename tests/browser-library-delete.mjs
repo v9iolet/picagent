@@ -216,7 +216,7 @@ async function offlineAssetsApp(t, { extraImages = 0 } = {}) {
         imageOptions: { sizes: ["1K", "2K"], aspectRatios: ["1:1", "3:4"], sizeMode: "pixels" },
       }],
     }],
-    preferences: { image: { channelId: "offline", modelId: "gpt-image-2" }, vision: null },
+    preferences: { image: { channelId: "offline", modelId: "gpt-image-2" }, vision: null, video: null },
   };
 
   const vite = await createServer({

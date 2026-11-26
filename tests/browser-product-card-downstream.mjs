@@ -280,6 +280,7 @@ async function startOfflineDownstreamApp(t) {
     preferences: {
       image: { channelId: "offline", modelId: "offline-image" },
       vision: { channelId: "offline", modelId: "offline-image" },
+      video: null,
     },
   };
 
