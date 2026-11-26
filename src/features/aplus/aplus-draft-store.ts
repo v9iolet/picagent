@@ -1,3 +1,4 @@
+import { createWebStorageStore } from "../../lib/draft-storage";
 import type { AplusDraft, AplusStudioState } from "./aplus-studio";
 
 const STORAGE_KEY = "picagent:aplus:workspace-v1";
@@ -11,29 +12,25 @@ interface AplusWorkspace {
 let workspace: AplusWorkspace | null = null;
 let batch: AplusStudioState | null = null;
 
+const workspaceStorage = createWebStorageStore<AplusWorkspace>({
+  storage: "sessionStorage",
+  key: STORAGE_KEY,
+  decode(raw) {
+    const saved = raw as Partial<AplusWorkspace> | null;
+    return typeof saved?.routeKey === "string" && saved.draft?.config && Array.isArray(saved.draft.images)
+      ? saved as AplusWorkspace
+      : null;
+  },
+});
+
 export function readAplusWorkspace(): AplusWorkspace | null {
-  if (workspace) return workspace;
-  try {
-    const saved = window.sessionStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved) as Partial<AplusWorkspace> | null;
-      if (typeof parsed?.routeKey === "string" && parsed.draft?.config && Array.isArray(parsed.draft.images)) {
-        workspace = parsed as AplusWorkspace;
-      }
-    }
-  } catch {
-    // The in-memory workspace still works when session storage is unavailable.
-  }
+  workspace ??= workspaceStorage.read();
   return workspace;
 }
 
 export function saveAplusWorkspace(value: AplusWorkspace) {
   workspace = value;
-  try {
-    window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(value));
-  } catch {
-    // The in-memory workspace still works when session storage is unavailable.
-  }
+  workspaceStorage.write(value);
 }
 
 export function readAplusBatch(suiteId: string | undefined) {
@@ -47,9 +44,5 @@ export function saveAplusBatch(state: AplusStudioState | null) {
 export function clearAplusWorkspace() {
   workspace = null;
   batch = null;
-  try {
-    window.sessionStorage.removeItem(STORAGE_KEY);
-  } catch {
-    // Session storage is optional.
-  }
+  workspaceStorage.remove();
 }
