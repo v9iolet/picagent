@@ -1,14 +1,15 @@
-import { useId, useRef, useState } from "react";
+import { useId, useState } from "react";
 import {
   APLUS_MODULES, APLUS_MODULE_LIMITS, APLUS_PRODUCT_INFO_MAX_LENGTH, APLUS_SIZE_PRESETS, validateAplusSizePresets,
 } from "../../../shared/aplus";
+import { VISUAL_STYLES, resolveVisualStyle } from "../../../shared/selling-point-layouts";
 import { SUPPORTED_OUTPUT_LANGUAGES } from "../../../shared/workbench-delivery";
 import type { ApiImage, ApiPlatformProfile } from "../../api/client";
 import { ProductCardPickerModal } from "../../components/product-card-picker/ProductCardPickerModal";
 import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
 import { toSelectedProductCardSummary } from "../../components/product-card-picker/types";
 import { StudioProductImageUpload } from "../../components/suite-studio/StudioProductImageUpload";
-import { StudioDialog } from "../../components/suite-studio/StudioDialog";
+import { InfoTip } from "../../components/ui/InfoTip";
 import { Icon } from "../../pages/shared";
 import { configForPlatform, toggleSizePreset, type AplusConfig, type AplusDraft } from "./aplus-studio";
 
@@ -40,9 +41,7 @@ export function AplusConfigPanel({
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [moduleNotice, setModuleNotice] = useState("");
-  const [showPlaceholderWarning, setShowPlaceholderWarning] = useState(false);
   const infoId = useId();
-  const infoRef = useRef<HTMLTextAreaElement>(null);
   const disabledReason = blocked || (
     !images.length ? "请上传至少 1 张商品原图。"
       : (!config.productCard && !config.productInfo.trim()) ? "请选择商品信息卡或填写商品卖点。"
@@ -53,7 +52,6 @@ export function AplusConfigPanel({
   const submitText = stale ? "方案已失效，重新规划" : "生成策划方案";
   const profile = profiles.find(({ code }) => code === config.platform);
   const aiWriteDisabledReason = !images.length ? "请先上传商品原图，再使用 AI 帮写。"
-    : !config.modules.length ? "请至少选择 1 个模块。"
     : !profile ? "请选择可用的平台。" : "";
   const sizeOptions = profile?.detailSizePresets.options.filter((option) =>
     validateAplusSizePresets([option], profile.detailSizePresets),
@@ -65,32 +63,6 @@ export function AplusConfigPanel({
         <div className="ss-eyebrow">A+ STUDIO</div>
         <h1>A+详情</h1>
         <StudioProductImageUpload images={images} busy={busy} canUpload upload={onUpload} remove={onRemove} />
-        <section>
-          <h2>商品信息卡 <small>选填</small></h2>
-          {config.productCard ? (
-            <SelectedProductCardBar
-              card={config.productCard}
-              onChangeCard={() => setPickerOpen(true)}
-              onRemove={() => onChange({ ...config, productCard: null })}
-            />
-          ) : (
-            <div className="pcp-trigger-wrap">
-              <button
-                type="button"
-                className="pcp-trigger-btn"
-                aria-haspopup="dialog"
-                disabled={busy}
-                onClick={() => setPickerOpen(true)}
-              >
-                <span className="pcp-trigger-left">
-                  <Icon name="box" />
-                  <span>选择商品信息卡（选填）</span>
-                </span>
-                <span className="pcp-trigger-arrow" aria-hidden="true">›</span>
-              </button>
-            </div>
-          )}
-        </section>
         <section>
           <h2>生成设置</h2>
           <div className="ss-fields">
@@ -115,6 +87,13 @@ export function AplusConfigPanel({
               <select aria-label="输出语言" value={config.language} onChange={(event) => onChange({ ...config, language: event.target.value })}>
                 {SUPPORTED_OUTPUT_LANGUAGES.map(({ code, label }) => <option key={code} value={code}>{label}</option>)}
                 <option value="none">不加文字</option>
+              </select>
+            </label>
+            <label>
+              视觉风格
+              <select aria-label="视觉风格" value={config.visualStyle ?? "auto"}
+                onChange={(event) => onChange({ ...config, visualStyle: resolveVisualStyle(event.target.value).id })}>
+                {VISUAL_STYLES.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
               </select>
             </label>
           </div>
@@ -152,33 +131,69 @@ export function AplusConfigPanel({
           </details>
         </section>
         <section>
-          <div className="aplus-section-heading">
-            <h2><label htmlFor={infoId}>商品卖点&生成要求</label></h2>
-            <button
-              type="button"
-              className="aplus-ai-write"
-              disabled={busy || Boolean(aiWriteDisabledReason)}
-              aria-busy={aiWriting}
-              aria-describedby={aiWriteDisabledReason ? `${infoId}-ai-write-reason` : undefined}
-              onClick={onAiWrite}
-            >
-              <Icon name="sparkles" />{aiWriting ? "AI 帮写中…" : "AI 帮写"}
-            </button>
+          <h2>商品信息卡 <small>选填</small></h2>
+          {config.productCard ? (
+            <SelectedProductCardBar
+              card={config.productCard}
+              onChangeCard={() => setPickerOpen(true)}
+              onRemove={() => onChange({ ...config, productCard: null })}
+            />
+          ) : (
+            <div className="pcp-trigger-wrap">
+              <button
+                type="button"
+                className="pcp-trigger-btn"
+                aria-haspopup="dialog"
+                disabled={busy}
+                onClick={() => setPickerOpen(true)}
+              >
+                <span className="pcp-trigger-left">
+                  <Icon name="box" />
+                  <span>选择商品信息卡（选填）</span>
+                </span>
+                <span className="pcp-trigger-arrow" aria-hidden="true">›</span>
+              </button>
+            </div>
+          )}
+          <div className="ss-selling-points-heading">
+            <h2><label htmlFor={infoId}>{config.productCard ? "补充卖点 & 本次生成要求（选填）" : "商品卖点 & 生成要求"}</label></h2>
+            <InfoTip
+              label="商品卖点填写说明"
+              align="start"
+              content={config.productCard
+                ? "客观商品事实已由所选商品信息卡自动注入，可在此补充本次画面侧重点、构图色调偏好或额外说明。"
+                : "请填写已确认的商品事实，例如产品名称、核心卖点、适用人群、期望场景和具体参数。不确定的信息可留空。"}
+            />
+            {config.productCard && (
+              <button
+                type="button"
+                className="aplus-ai-write"
+                disabled={busy || Boolean(aiWriteDisabledReason)}
+                aria-busy={aiWriting}
+                aria-describedby={aiWriteDisabledReason ? `${infoId}-ai-write-reason` : undefined}
+                onClick={onAiWrite}
+              >
+                <Icon name="sparkles" />{aiWriting ? "AI 帮写中…" : "AI 帮写"}
+              </button>
+            )}
           </div>
           <textarea
             id={infoId}
-            ref={infoRef}
+            aria-label="商品卖点与生成要求"
+            aria-required={!config.productCard}
             rows={5}
-            placeholder={productInfoPlaceholder}
+            placeholder={config.productCard
+              ? "客观商品事实将由所选商品信息卡自动注入；可在此补充本次画面侧重点、构图色调偏好或额外说明"
+              : productInfoPlaceholder}
             value={config.productInfo}
             onChange={(event) => onChange({ ...config, productInfo: Array.from(event.target.value).slice(0, infoLimit).join("") })}
           />
           <div className="aplus-product-info-footer">
-            {aiWrite && <button type="button" onClick={onUndoAiWrite}>撤销帮写</button>}
+            {config.productCard && aiWrite && <button type="button" onClick={onUndoAiWrite}>撤销帮写</button>}
             <small className="aplus-char-count">{Array.from(config.productInfo).length} / {infoLimit}</small>
           </div>
-          {aiWriteDisabledReason && <p className="ss-help" id={`${infoId}-ai-write-reason`}>{aiWriteDisabledReason}</p>}
-          {aiWrite?.truncated && <p className="ss-help" role="status">AI 帮写结果超过 {infoLimit} 字，已截断。</p>}
+          {config.productCard && aiWriteDisabledReason && <p className="ss-help" id={`${infoId}-ai-write-reason`}>{aiWriteDisabledReason}</p>}
+          {config.productCard && aiWrite?.truncated && <p className="ss-help" role="status">AI 帮写结果超过 {infoLimit} 字，已截断。</p>}
         </section>
         <section>
           <div className="aplus-section-heading">
@@ -218,31 +233,11 @@ export function AplusConfigPanel({
         {awaitingConfirmation ? (
           <button type="button" onClick={onViewPlan}>查看方案</button>
         ) : (
-          <button className="ss-primary" type="button" disabled={busy || Boolean(disabledReason)} onClick={() => {
-            if (config.productInfo.includes("【待补充")) setShowPlaceholderWarning(true);
-            else onSubmit();
-          }}>
+          <button className="ss-primary" type="button" disabled={busy || Boolean(disabledReason)} onClick={onSubmit}>
             {submitting ? "正在提交…" : submitText}
           </button>
         )}
       </footer>
-      {showPlaceholderWarning && (
-        <StudioDialog title="还有待补充的商品信息" close={() => setShowPlaceholderWarning(false)}>
-          <div className="aplus-action-form">
-            <p>卖点中还有「待补充」占位。你可以先补充，也可以继续生成策划方案。</p>
-            <div className="aplus-review-actions">
-              <button type="button" onClick={() => {
-                setShowPlaceholderWarning(false);
-                requestAnimationFrame(() => infoRef.current?.focus());
-              }}>去补充</button>
-              <button type="button" onClick={() => {
-                setShowPlaceholderWarning(false);
-                onSubmit();
-              }}>继续</button>
-            </div>
-          </div>
-        </StudioDialog>
-      )}
     </aside>
   );
 }

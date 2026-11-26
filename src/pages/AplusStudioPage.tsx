@@ -15,7 +15,7 @@ import { AplusResultCards } from "../features/aplus/AplusResultCards";
 import { clearAplusWorkspace, readAplusBatch, readAplusWorkspace, saveAplusBatch, saveAplusWorkspace } from "../features/aplus/aplus-draft-store";
 import {
   aplusApi, aplusPath, configForPlatform, currentPlanInput, makeAplusAiWritePayload, makeAplusPayload, newAplusDraft,
-  type AplusDraft, type AplusStudioState,
+  type AplusConfig, type AplusDraft, type AplusStudioState,
 } from "../features/aplus/aplus-studio";
 import { CreateToolsNav } from "../features/create/CreateToolsNav";
 import "../components/suite-studio/studio.css";
@@ -58,6 +58,7 @@ function draftFromBatch(state: AplusStudioState): AplusDraft {
       platform: input.platform,
       targetMarket: input.targetMarket,
       language: normalizeAplusLanguage(input.language),
+      visualStyle: input.visualStyle ?? "auto",
       sizePresets: input.sizePresets,
       modules: input.modules,
       productInfo: input.productInfo,
@@ -103,6 +104,17 @@ function AplusWorkspace({
     if (active) setDraft(next);
   }, [routeKey, suiteId]);
 
+  const updateConfig = useCallback((config: AplusConfig) => {
+    const current = draftRef.current;
+    let aiWrite = current.aiWrite;
+    if (!config.productCard || config.productCard.cardId !== current.config.productCard?.cardId) {
+      aiWrite = undefined;
+    } else if (aiWrite?.truncated && config.productInfo !== current.config.productInfo) {
+      aiWrite = { ...aiWrite, truncated: false };
+    }
+    commitDraft({ ...current, config, aiWrite });
+  }, [commitDraft]);
+
   useEffect(() => {
     mounted.current = true;
     const previous = document.title;
@@ -134,7 +146,7 @@ function AplusWorkspace({
     function clearPreselectedCard() {
       const current = draftRef.current;
       if (current.config.productCard?.cardId === initialProductCardId) {
-        commitDraft({ ...current, config: { ...current.config, productCard: null } });
+        updateConfig({ ...current.config, productCard: null });
       }
     }
 
@@ -142,7 +154,7 @@ function AplusWorkspace({
       if (!active) return;
       if (card.status === "published") {
         const current = draftRef.current;
-        commitDraft({ ...current, config: { ...current.config, productCard: toSelectedProductCardSummary(card) } });
+        updateConfig({ ...current.config, productCard: toSelectedProductCardSummary(card) });
       } else {
         clearPreselectedCard();
         setNotice("指定商品信息卡已归档，请重新选择。");
@@ -155,7 +167,7 @@ function AplusWorkspace({
       if (active) setLoadingCard(false);
     });
     return () => { active = false; };
-  }, [commitDraft, initialProductCardId]);
+  }, [updateConfig, initialProductCardId]);
 
   const refresh = useCallback(async () => {
     if (!suiteId) return;
@@ -218,13 +230,13 @@ function AplusWorkspace({
       if (!active || current.config.productCard?.cardId !== cardIdToCheck) return;
       if (card.status !== "published" || card.revision !== current.config.productCard.revision) {
         const productCard = card.status === "published" ? toSelectedProductCardSummary(card) : null;
-        commitDraft({ ...current, config: { ...current.config, productCard } });
+        updateConfig({ ...current.config, productCard });
       }
     }).catch(() => {
       // Confirmation also checks the current revision on the server.
     });
     return () => { active = false; };
-  }, [cardIdToCheck, commitDraft]);
+  }, [cardIdToCheck, updateConfig]);
   const confirmBlocked = loading || loadingCard || !validSize;
   const configBlocked = loading ? "正在读取批次…" : loadingCard ? "正在读取商品信息卡…"
     : action === "upload" ? "正在上传商品原图…" : running ? "当前批次正在处理。"
@@ -278,10 +290,11 @@ function AplusWorkspace({
   }
 
   function aiWrite() {
-    if (busy || !images.length || !profile || !config.modules.length) return;
+    if (busy || !images.length || !profile || !config.productCard) return;
     void act("ai-write", async () => {
       const { productInfo, truncated } = await aplusApi.aiWrite(makeAplusAiWritePayload(config, images));
       const current = draftRef.current;
+      if (current.config.productCard?.cardId !== config.productCard?.cardId) return;
       commitDraft({
         ...current,
         config: { ...current.config, productInfo },
@@ -325,9 +338,8 @@ function AplusWorkspace({
           const selected = draftRef.current.config.productCard;
           if (selected) {
             const card = await productCardsApi.get(selected.cardId).catch(() => null);
-            if (mounted.current) commitDraft({
-              ...draftRef.current,
-              config: { ...config, productCard: card?.status === "published" ? toSelectedProductCardSummary(card) : null },
+            if (mounted.current) updateConfig({
+              ...draftRef.current.config, productCard: card?.status === "published" ? toSelectedProductCardSummary(card) : null,
             });
           }
         }
@@ -442,7 +454,7 @@ function AplusWorkspace({
           aiWrite={draft.aiWrite}
           stale={stale}
           awaitingConfirmation={awaiting}
-          onChange={(next) => commitDraft({ ...draftRef.current, config: next })}
+          onChange={updateConfig}
           onUpload={upload}
           onRemove={remove}
           onAiWrite={aiWrite}

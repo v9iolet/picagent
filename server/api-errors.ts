@@ -10,6 +10,8 @@ export const errorMessages: Record<string, string> = {
   APLUS_INPUT_IMAGE_CONFLICT: "A+ 批次原图与规划输入不一致",
   APLUS_INVALID_MODULES: "请选择 1–10 个不同的 A+ 模块",
   APLUS_TARGET_MARKET_REQUIRED: "请选择目标市场",
+  APLUS_INVALID_VISUAL_STYLE: "视觉风格无效",
+  APLUS_PRODUCT_CARD_REQUIRED: "请先选择已发布的商品信息卡，再使用 AI 帮写",
   APLUS_INVALID_LANGUAGE: "输出语言无效",
   APLUS_INVALID_RESOLUTION: "请选择 1K 或 2K 分辨率",
   APLUS_INVALID_PRODUCT_INFO: "商品卖点与生成要求须为 1000 字以内的文本",

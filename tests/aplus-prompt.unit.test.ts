@@ -133,19 +133,15 @@ test("A+ 图像包装带上尺寸与安全区，不加文字时清空文案要�
   assert.doesNotMatch(noText, /Moving/);
 });
 
-test("A+ AI 帮写按是否选卡补写，只提供所选模块规则", () => {
-  const fields = { ...input, selectedModules: ["after_sales"] as const };
-  const withoutCard = renderAplusAiWritePrompt(aiWriteTemplate, fields);
-  assert.match(withoutCard.userPrompt, /未选商品卡，写五段基本信息并补充模块所需信息/);
-  assert.match(withoutCard.userPrompt, /商品卡事实：无/);
-  assert.match(withoutCard.systemPrompt, /1\. 产品名称、2\. 核心卖点、3\. 适用人群、4\. 期望场景、5\. 具体参数/);
-  assert.match(withoutCard.systemPrompt, /【待补充：质保期限】/);
-
-  const withCard = renderAplusAiWritePrompt(aiWriteTemplate, {
-    ...fields, productCardSnapshot: { ...emptyProductCardFields(), name: "随行水杯" },
+test("A+ 帮写对照有序原图与商品卡事实，保留草稿中的画面偏好", () => {
+  const { userPrompt, systemPrompt } = renderAplusAiWritePrompt(aiWriteTemplate, {
+    inputImageIds: ["front", "side"], productCardFacts: "商品名称：随行水杯",
+    productInfo: "低角度侧光", platform: "amazon", targetMarket: "美国", language: "none",
   });
-  assert.match(withCard.userPrompt, /已选商品卡，只写补充说明/);
-  assert.match(withCard.userPrompt, /商品卡事实：商品名称：随行水杯/);
-  assert.deepEqual([...withCard.systemPrompt.matchAll(/^模块代码：(.+)$/gm)].map((match) => match[1]), ["after_sales"]);
-  assert.match(withCard.systemPrompt, /政策只能取自商品卡或用户明确填写的售后承诺/);
+  assert.match(userPrompt, /商品原图对应顺序：\["front","side"\]/);
+  assert.match(userPrompt, /商品卡事实：商品名称：随行水杯/);
+  assert.match(userPrompt, /已有草稿与画面偏好：低角度侧光/);
+  assert.match(systemPrompt, /3–5 条补充卖点与视觉呈现方向/);
+  assert.match(systemPrompt, /严禁编造参数/);
+  assert.doesNotMatch(systemPrompt + userPrompt, /模块规则|模块代码|【待补充/);
 });

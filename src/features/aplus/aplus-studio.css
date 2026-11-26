@@ -54,6 +54,11 @@
   margin: 8px 0 4px;
 }
 
+.aplus-ai-write {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .aplus-ai-write,
 .aplus-plan-actions button {
   display: inline-flex;

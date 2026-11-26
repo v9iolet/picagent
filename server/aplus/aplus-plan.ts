@@ -39,7 +39,11 @@ export type AplusRunConfig = SuitePipelineRun["config"] & {
 };
 
 export function readAplusRunConfig(run: SuitePipelineRun): AplusRunConfig | null {
-  return run.config.inputSnapshot ? (run.config as AplusRunConfig) : null;
+  if (!run.config.inputSnapshot) return null;
+  const config = run.config as AplusRunConfig;
+  return config.inputSnapshot.visualStyle == null
+    ? { ...config, inputSnapshot: { ...config.inputSnapshot, visualStyle: "auto" } }
+    : config;
 }
 
 export function validateAplusPlanOutput(value: unknown, input: AplusPlanInputSummary): AplusPlan | null {

@@ -114,7 +114,7 @@ async function fixture(
     status: "published", sourceSessionId: null, revision: 1, images: [],
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   });
-  return { app, card, productCards, repository, pipelineRepository, planning, storage, draft, images, payload, calls, aiWriteCalls };
+  return { app, card, prompts, productCards, repository, pipelineRepository, planning, storage, draft, images, payload, calls, aiWriteCalls };
 }
 
 type Started = { suiteId: string; runId: string };
@@ -124,27 +124,34 @@ async function settled(f: Awaited<ReturnType<typeof fixture>>, runId: string) {
   return waitUntil(() => f.pipelineRepository.getRun(runId), (run) => Boolean(run && run.status !== "running"), 5_000);
 }
 
-test("A+ 无卡帮写带原图和所选模块补全五段，按 Unicode 字符截断", async () => {
-  const prefix = "磨砂杯身【待补充：质保期限】";
-  const output = prefix + "😀".repeat(1000);
-  const f = await fixture(undefined, () => output);
+test("A+ 无模块规则仍可根据已发布商品卡和有序原图帮写，按 Unicode 字符截断", async () => {
+  const prefix = "用侧光呈现磨砂杯身。";
+  const f = await fixture(undefined, () => prefix + "😀".repeat(1000));
+  for (const rule of await f.prompts.listPublished("aplus_module_rule")) {
+    await f.prompts.retireVersion(rule.templateVersionId);
+  }
+  await f.productCards.update(f.card.id, {
+    fields: { ...f.card, specifications: "容量 520 mL" }, images: [], updatedAt: new Date().toISOString(),
+  });
+  const published = await f.productCards.get(f.card.id);
+  assert.equal(published?.revision, 2);
   const { suiteId, inputImageIds, platform, targetMarket, language } = f.payload;
   const body = {
     suiteId, inputImageIds: [...inputImageIds].reverse(), platform, targetMarket, language,
-    modules: ["after_sales", "ingredients"], productInfo: "磨砂杯身",
+    productCardId: f.card.id, productInfo: "请用侧光【待补充：质保期限】",
   };
   const response = await f.app.request("POST", "/api/aplus/ai-write", { body });
   assert.equal(response.status, 200);
   assert.deepEqual(data(response), { productInfo: prefix + "😀".repeat(1000 - prefix.length), truncated: true });
   assert.equal(f.aiWriteCalls.length, 1);
   const [call] = f.aiWriteCalls;
-  assert.match(call.userPrompt, /未选商品卡，写五段基本信息并补充模块所需信息/);
-  assert.match(call.userPrompt, /当前商品卖点与生成要求：磨砂杯身/);
-  assert.match(call.userPrompt, /商品卡事实：无/);
+  assert.ok(call.userPrompt.includes(JSON.stringify(body.inputImageIds)));
+  assert.match(call.userPrompt, /商品卡随行杯/);
+  assert.match(call.userPrompt, /容量 520 mL/);
+  assert.match(call.userPrompt, /已有草稿与画面偏好：请用侧光/);
   assert.match(call.userPrompt, /目标平台：amazon\n目标市场：美国\n画面文字语言：en/);
-  assert.match(call.templateBody, /产品名称.*核心卖点.*适用人群.*期望场景.*具体参数/);
-  assert.match(call.templateBody, /【待补充：质保期限】/);
-  assert.deepEqual([...call.templateBody.matchAll(/^模块代码：(.+)$/gm)].map(([, code]) => code), body.modules);
+  assert.doesNotMatch(call.templateBody + call.userPrompt, /模块规则|模块代码|【待补充|450 mL/);
+  assert.deepEqual(await f.productCards.get(f.card.id), published);
   assert.deepEqual(call.visionImages.map(({ id }) => id), body.inputImageIds);
   for (const image of call.visionImages) {
     const input = await f.repository.getInputImage(suiteId, image.id);
@@ -156,44 +163,30 @@ test("A+ 无卡帮写带原图和所选模块补全五段，按 Unicode 字符�
   assert.equal(f.calls.length, 0);
 });
 
-test("A+ 有卡帮写读取当前已发布版本，仅要求补充缺失事实，允许返回空文本", async () => {
-  const f = await fixture();
-  await f.productCards.update(f.card.id, {
-    fields: { ...f.card, specifications: "容量 520 mL" }, images: [], updatedAt: new Date().toISOString(),
-  });
-  const published = await f.productCards.get(f.card.id);
-  assert.equal(published?.revision, 2);
-  const body = { ...f.payload, productCardId: f.card.id, productInfo: "", modules: ["size_spec"] };
-  const response = await f.app.request("POST", "/api/aplus/ai-write", { body });
-  assert.equal(response.status, 200);
-  assert.deepEqual(data(response), { productInfo: "", truncated: false });
-  assert.equal(f.aiWriteCalls.length, 1);
-  const [call] = f.aiWriteCalls;
-  assert.match(call.userPrompt, /已选商品卡，只写补充说明/);
-  assert.match(call.userPrompt, /商品卡随行杯/);
-  assert.match(call.userPrompt, /容量 520 mL/);
-  assert.doesNotMatch(call.userPrompt, /450 mL/);
-  assert.match(call.templateBody, /所选模块需要、商品卡未包含的信息/);
-  assert.match(call.templateBody, /不要重复商品卡事实/);
-  assert.deepEqual([...call.templateBody.matchAll(/^模块代码：(.+)$/gm)].map(([, code]) => code), body.modules);
-  assert.deepEqual(await f.productCards.get(f.card.id), published);
+test("A+ 有卡帮写遇到空模型回复时返回 502", async () => {
+  const f = await fixture(undefined, () => "  \n");
+  const body = { ...f.payload, productCardId: f.card.id };
+  error(await f.app.request("POST", "/api/aplus/ai-write", { body }), "APLUS_AI_WRITE_FAILED", 502);
 });
 
-test("A+ 帮写拒绝无原图、无所选模块、未发布商品卡等无效请求", async () => {
+test("A+ 帮写须有已发布商品卡和原图", async () => {
   const f = await fixture();
-  await f.productCards.setStatus(f.card.id, "archived", new Date().toISOString());
+  const body = { ...f.payload, productCardId: f.card.id };
   const cases: Array<[Record<string, unknown>, string]> = [
+    [{ productCardId: undefined }, "APLUS_PRODUCT_CARD_REQUIRED"],
+    [{ productCardId: null }, "APLUS_PRODUCT_CARD_REQUIRED"],
+    [{ productCardId: "  " }, "APLUS_PRODUCT_CARD_REQUIRED"],
     [{ inputImageIds: undefined }, "APLUS_INVALID_INPUT_IMAGES"],
     [{ inputImageIds: [] }, "APLUS_INVALID_INPUT_IMAGES"],
     [{ inputImageIds: [randomUUID()] }, "APLUS_INVALID_INPUT_IMAGES"],
     [{ inputImageIds: [f.images[0].id, f.images[0].id] }, "APLUS_INVALID_INPUT_IMAGES"],
-    [{ modules: [] }, "APLUS_INVALID_MODULES"],
     [{ productInfo: "😀".repeat(1001) }, "APLUS_INVALID_PRODUCT_INFO"],
-    [{ productCardId: f.card.id }, "PRODUCT_CARD_NOT_AVAILABLE"],
   ];
   for (const [change, code] of cases) {
-    error(await f.app.request("POST", "/api/aplus/ai-write", { body: { ...f.payload, ...change } }), code, 400);
+    error(await f.app.request("POST", "/api/aplus/ai-write", { body: { ...body, ...change } }), code, 400);
   }
+  await f.productCards.setStatus(f.card.id, "archived", new Date().toISOString());
+  error(await f.app.request("POST", "/api/aplus/ai-write", { body }), "PRODUCT_CARD_NOT_AVAILABLE", 400);
   assert.equal(f.aiWriteCalls.length, 0);
 });
 
@@ -223,6 +216,8 @@ test("A+ 规划提交校验原图、商品卡、卖点、平台、尺寸、模�
     [{ sizePresets: ["aplus_premium_web", "aplus_premium_web"] }, "APLUS_INVALID_SIZE_PRESETS"],
     [{ targetMarket: "" }, "APLUS_TARGET_MARKET_REQUIRED"],
     [{ language: "unsupported" }, "APLUS_INVALID_LANGUAGE"],
+    [{ visualStyle: "unknown" }, "APLUS_INVALID_VISUAL_STYLE"],
+    [{ visualStyle: 0 }, "APLUS_INVALID_VISUAL_STYLE"],
     [{ resolution: "4K" }, "APLUS_INVALID_RESOLUTION"],
   ];
   for (const [change, code, status = 400] of cases) {
@@ -361,14 +356,18 @@ test("A+ 方案可编辑文案、顺序及模块取舍，重新规划使用新�
 
   const replanPath = aplusPath(first.suiteId, "replan");
   const { suiteId: _draftId, inputImageIds: _imageIds, ...settings } = f.payload;
-  const input = { ...settings, platform: "taobao", targetMarket: "中国", modules: ["hero"], sizePresets: ["1:1"] };
+  const input = { ...settings, visualStyle: "natural_lifestyle", platform: "taobao", targetMarket: "中国", modules: ["hero"], sizePresets: ["1:1"] };
   const next = data<Started>(await f.app.request("POST", replanPath, { headers, body: input }));
   assert.notEqual(next.suiteId, first.suiteId);
   assert.notEqual(next.runId, first.runId);
   await settled(f, next.runId);
   assert.deepEqual(data(await f.app.request("POST", replanPath, { headers, body: {} })), next);
   assert.deepEqual((await f.repository.getInputImages(next.suiteId)).map((image) => image.sha256), f.images.map((image) => image.sha256));
-  assert.deepEqual(data<{ inputSnapshot: { modules: string[] } }>(await f.app.request("GET", aplusPath(next.suiteId, "studio-state"))).inputSnapshot.modules, ["hero"]);
+  const { inputSnapshot } = data<{ inputSnapshot: { modules: string[]; visualStyle: string } }>(
+    await f.app.request("GET", aplusPath(next.suiteId, "studio-state")),
+  );
+  assert.deepEqual(inputSnapshot.modules, ["hero"]);
+  assert.equal(inputSnapshot.visualStyle, "natural_lifestyle");
   assert.deepEqual(data<{ modules: unknown }>(await f.app.request("GET", aplusPath(first.suiteId, "studio-state"))).modules, data<{ modules: unknown }>(edited).modules);
 });
 
@@ -382,6 +381,11 @@ test("A+ 确认前重新读取原图和商品卡版本，比较所有失效字�
   assert.ok(prepared.ok);
   assert.equal(prepared.value.resolution, "1K");
   const summary = prepared.value.config.inputSnapshot;
+  assert.equal(summary.visualStyle, "auto");
+  assert.ok((await compare({ visualStyle: "  " })).ok);
+  const invalid = await compare({ visualStyle: "unknown" });
+  assert.ok(!invalid.ok);
+  error(invalid.response, "APLUS_INVALID_VISUAL_STYLE", 400);
   const current = { ...summary, resolution: "1K" };
   assert.equal(isAplusPlanStale(summary, current), false);
   const changes = [
@@ -390,6 +394,7 @@ test("A+ 确认前重新读取原图和商品卡版本，比较所有失效字�
     [{ productCardId: null }, { productCardId: null, productCardRevision: null }],
     [{ productCardRevision: 3 }, { productCardRevision: 3 }],
     [{ platform: "taobao", sizePresets: ["1:1"] }, { platform: "taobao" }],
+    [{ visualStyle: "dark_tech" }, { visualStyle: "dark_tech" }],
     [{ targetMarket: "日本" }, { targetMarket: "日本" }],
     [{ language: "none" }, { language: "none" }],
     [{ sizePresets: ["aplus_premium_web"] }, { sizePresets: ["aplus_premium_web"] }],

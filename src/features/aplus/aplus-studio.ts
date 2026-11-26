@@ -48,6 +48,7 @@ const initialConfig: AplusConfig = {
   platform: "",
   targetMarket: "美国",
   language: "en",
+  visualStyle: "auto",
   sizePresets: [],
   resolution: "2K",
   productInfo: "",
@@ -74,6 +75,7 @@ export function currentPlanInput(config: AplusConfig, images: ApiImage[]): Aplus
   const { platform, targetMarket, language, sizePresets, productInfo, productCard, modules } = config;
   return {
     platform, targetMarket, language, sizePresets, productInfo, modules,
+    visualStyle: config.visualStyle ?? "auto",
     productCardId: productCard?.cardId ?? null,
     productCardRevision: productCard?.revision ?? null,
     imageHashes: images.map((image) => image.sha256),
@@ -91,10 +93,10 @@ export function makeAplusPayload(config: AplusConfig, images: ApiImage[]) {
 }
 
 export function makeAplusAiWritePayload(config: AplusConfig, images: ApiImage[]) {
-  const { productInfo, productCard, modules, platform, targetMarket, language } = config;
+  const { productInfo, productCard, platform, targetMarket, language } = config;
   return {
     suiteId: images[0]?.suiteId, inputImageIds: images.map(({ id }) => id),
-    productInfo, productCardId: productCard?.cardId ?? null, modules, platform, targetMarket, language,
+    productInfo, productCardId: productCard?.cardId ?? null, platform, targetMarket, language,
   };
 }
 

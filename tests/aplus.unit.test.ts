@@ -5,6 +5,8 @@ import {
   APLUS_SIZE_PRESETS,
   DEFAULT_APLUS_MODULE_CODES,
   defaultDetailSizePresets,
+  isAplusPlanStale,
+  type AplusPlanInputSummary,
   validateAplusModuleCodes,
   validateAplusSizePresets,
 } from "../shared/aplus.js";
@@ -46,4 +48,14 @@ test("A+ 尺寸须属于平台，只有高级 A+ 两端可同时选择", () => {
   assert.deepEqual(APLUS_SIZE_PRESETS.aplus_premium_mobile.deliverySize, { width: 600, height: 450 });
   assert.deepEqual(APLUS_SIZE_PRESETS.aplus_standard.deliverySize, { width: 970, height: 600 });
   assert.equal(APLUS_SIZE_PRESETS["3:4"].deliverySize, null);
+});
+
+test("A+ 旧快照沿用 AI 智能匹配，更换视觉风格会使方案失效", () => {
+  const legacy: AplusPlanInputSummary = {
+    imageHashes: ["front"], productInfo: "磨砂杯身", productCardId: null, productCardRevision: null,
+    platform: "amazon", targetMarket: "美国", language: "en", sizePresets: ["aplus_standard"], modules: ["hero"],
+  };
+  assert.equal(isAplusPlanStale(legacy, { ...legacy, visualStyle: "auto" }), false);
+  assert.equal(isAplusPlanStale({ ...legacy, visualStyle: "auto" }, legacy), false);
+  assert.equal(isAplusPlanStale(legacy, { ...legacy, visualStyle: "dark_tech" }), true);
 });

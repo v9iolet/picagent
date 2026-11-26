@@ -944,11 +944,11 @@ test("PG 保存 A+ 商品还原交付图与图片库来源，044–046 启动重
   });
 });
 
-test("043 and 050 publish A+ templates matching Markdown imports and preserve later publishes on replay", { skip }, async () => {
+test("043, 050 and 051 publish A+ templates matching Markdown imports and preserve later publishes on replay", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);
     const tunedCodes = new Set([
-      "aplus.plan", "aplus.image",
+      "aplus.plan", "aplus.image", "aplus.ai-write",
       "aplus.module.accessories", "aplus.module.brand_story", "aplus.module.comparison",
       "aplus.module.craftsmanship", "aplus.module.detail_closeup", "aplus.module.hero",
       "aplus.module.ingredients", "aplus.module.multi_angle", "aplus.module.selling_points",
@@ -980,6 +980,7 @@ test("043 and 050 publish A+ templates matching Markdown imports and preserve la
       return record;
     }));
 
+    await runMigrations(pool);
     for (const publish of [false, true]) {
       const reimported = await importPromptRecordsWithPolicy(prompts, records, { publish });
       assert.deepEqual(reimported, published.map(({ template }) => template));
@@ -1000,9 +1001,21 @@ test("043 and 050 publish A+ templates matching Markdown imports and preserve la
     assert.ok(hero);
     await prompts.retireVersion(hero.templateVersionId);
 
+    const aiWrite = await resolveAplusPromptTemplate(prompts, "aplus_ai_write");
+    assert.ok(aiWrite);
+    const custom = await prompts.copyVersion(aiWrite.templateVersionId);
+    assert.ok(custom);
+    await prompts.publishVersion(custom.templateVersionId);
+
     await runMigrations(pool);
     assert.equal((await resolveAplusPromptTemplate(prompts, "aplus_plan"))?.templateVersionId, draft.templateVersionId);
     assert.equal(await resolveAplusPromptTemplate(prompts, "aplus_module_rule", "hero"), null);
+    assert.equal((await resolveAplusPromptTemplate(prompts, "aplus_ai_write"))?.templateVersionId, custom.templateVersionId);
+
+    await prompts.retireVersion(custom.templateVersionId);
+    await runMigrations(pool);
+    assert.equal(await resolveAplusPromptTemplate(prompts, "aplus_ai_write"), null);
+    assert.deepEqual((await prompts.listVersions(aiWrite.templateId)).map(({ versionNo }) => versionNo), [1, 2, 3]);
   });
 });
 
