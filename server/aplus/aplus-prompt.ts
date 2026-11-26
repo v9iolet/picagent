@@ -2,10 +2,12 @@ import {
   APLUS_SIZE_PRESETS,
   type AplusImageSize,
   type AplusModuleCode,
+  type AplusPlanInputSummary,
   type AplusSizePresetKey,
 } from "../../shared/aplus.js";
 import type { ListingRules } from "../../shared/listing-config.js";
 import { formatProductCardFacts, type ProductCardFields } from "../../shared/product-card.js";
+import { resolveVisualStyle } from "../../shared/selling-point-layouts.js";
 import type { PromptTemplateRuntime } from "../prompt-library.js";
 import type { PromptRepository } from "../types.js";
 
@@ -29,6 +31,7 @@ interface VisionInput {
 }
 
 interface AplusPlanPromptInput extends VisionInput {
+  visualStyle?: AplusPlanInputSummary["visualStyle"];
   productCardSnapshot?: ProductCardFields | null;
   selectedModules: readonly AplusModuleCode[];
   moduleRuleTemplates: readonly ModuleRuleTemplate[];
@@ -81,10 +84,12 @@ export function renderAplusPlanPrompt(template: PromptText, input: AplusPlanProm
 }) {
   const dualPremium = input.sizePresets.includes("aplus_premium_web") && input.sizePresets.includes("aplus_premium_mobile");
   const facts = input.productCardSnapshot && formatProductCardFacts(input.productCardSnapshot);
+  const style = resolveVisualStyle(input.visualStyle);
   return {
     systemPrompt: render(template.body, { moduleRules: renderSelectedModuleRules(input) }),
     userPrompt: render(template.userPromptTemplate, {
       ...visionFields(input, facts || "无"),
+      visualStyle: `${style.name}：${style.promptDirective}`,
       selectedModules: JSON.stringify(input.selectedModules),
       listingCopyRules: input.listingCopyRules ? JSON.stringify(input.listingCopyRules) : "无",
       sizePresets: JSON.stringify(input.sizePresets.map((key) => APLUS_SIZE_PRESETS[key])),
@@ -121,7 +126,7 @@ export function renderAplusImagePrompt(template: PromptText, input: {
     生成比例: input.generatedRatio ?? preset.ratio,
     生成尺寸: generatedSize,
     交付尺寸: deliverySize,
-    安全区: `商品主体、关键部位及文字放在宽度 ${safeWidth}% × 高度 ${safeHeight}% 的中心安全区内并留出边距，边缘只保留可裁切的背景或非关键装饰。`,
+    安全区: `背景、场景空间、承托台面与环境光效必须 100% 满幅出血铺满生成画布直达四边，严禁四周留白边或外框缩进。画面文字、信息面板边框及不可被裁断的商品关键主体须位于宽度 ${safeWidth}% × 高度 ${safeHeight}% 的中心安全区内。`,
   };
   const userPrompt = render(template.userPromptTemplate, {
     moduleCode: JSON.stringify(input.moduleCode),

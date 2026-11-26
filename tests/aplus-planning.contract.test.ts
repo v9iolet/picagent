@@ -10,6 +10,7 @@ import { readAplusRunConfig } from "../server/aplus/aplus-plan.js";
 import { createSuiteStudioApp } from "../server/app.js";
 import type { AppResponse } from "../server/api-response.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
+import { resolveVisualStyle } from "../shared/selling-point-layouts.js";
 import { buildPlanUserContent } from "../server/providers/dashscope-llm-client.js";
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
 import { MemoryPlatformRepository } from "../server/repositories/memory-platform-repository.js";
@@ -368,6 +369,8 @@ test("A+ 方案可编辑文案、顺序及模块取舍，重新规划使用新�
   );
   assert.deepEqual(inputSnapshot.modules, ["hero"]);
   assert.equal(inputSnapshot.visualStyle, "natural_lifestyle");
+  const style = resolveVisualStyle("natural_lifestyle");
+  assert.ok(f.calls.at(-1)?.userPrompt?.includes(`视觉风格要求：${style.name}：${style.promptDirective}`));
   assert.deepEqual(data<{ modules: unknown }>(await f.app.request("GET", aplusPath(first.suiteId, "studio-state"))).modules, data<{ modules: unknown }>(edited).modules);
 });
 

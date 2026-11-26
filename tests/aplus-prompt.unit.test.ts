@@ -12,6 +12,7 @@ import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { MemoryPromptRepository } from "../server/repositories/memory-prompt-repository.js";
 import { APLUS_MODULES } from "../shared/aplus.js";
 import { emptyProductCardFields } from "../shared/product-card.js";
+import { resolveVisualStyle } from "../shared/selling-point-layouts.js";
 
 async function readTemplate(name: string) {
   const source = `prompt/normalized/aplus-${name}.md`;
@@ -79,6 +80,13 @@ test("A+ 规划按所选顺序拼入对应模块规则，并保留原图与商�
   assert.doesNotMatch(systemPrompt, /### (使用场景图|品牌故事图|售后保障图)/);
   assert.match(systemPrompt, /占位都视为缺失/);
   assert.match(systemPrompt, /以商品卡快照优先/);
+  assert.match(systemPrompt, /AI 智能匹配.*按品类定调/);
+  assert.match(systemPrompt, /浅色商品的首屏和核心信息模块优先用深色/);
+  assert.match(systemPrompt, /相邻模块.*背景明度、色温或空间景别/);
+  assert.match(systemPrompt, /相邻模块的版式结构必须互斥/);
+  assert.match(systemPrompt, /整套最多一个模块使用等分卡片网格/);
+  const auto = resolveVisualStyle("auto");
+  assert.ok(userPrompt.includes(`视觉风格要求：${auto.name}：${auto.promptDirective}`));
   assert.match(userPrompt, /\["thumbnail-front","thumbnail-side"\]/);
   assert.match(userPrompt, /商品卖点与生成要求：水杯，容量【待补充：容量】/);
   assert.match(userPrompt, /商品卡快照事实：商品名称：随行水杯\n规格参数与尺寸重量：500 mL/);
@@ -124,7 +132,8 @@ test("A+ 图像包装带上尺寸与安全区，不加文字时清空文案要�
   assert.equal(parsed.文案要求, options.copyRequirements);
   assert.deepEqual(parsed.尺寸与安全区.生成尺寸, options.generatedSize);
   assert.deepEqual(parsed.尺寸与安全区.交付尺寸, { width: 1464, height: 600 });
-  assert.match(parsed.尺寸与安全区.安全区, /中心安全区/);
+  assert.match(parsed.尺寸与安全区.安全区, /背景、场景空间、承托台面与环境光效必须 100% 满幅出血.*直达四边/);
+  assert.match(parsed.尺寸与安全区.安全区, /画面文字、信息面板边框及不可被裁断的商品关键主体.*宽度 100% × 高度 98% 的中心安全区/);
   assert.match(withText, /品牌故事图（brand_story）中不得出现 Logo/);
 
   const noText = renderAplusImagePrompt(imageTemplate, { ...options, language: "none" });

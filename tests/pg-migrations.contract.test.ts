@@ -944,11 +944,11 @@ test("PG 保存 A+ 商品还原交付图与图片库来源，044–046 启动重
   });
 });
 
-test("043, 050 and 051 publish A+ templates matching Markdown imports and preserve later publishes on replay", { skip }, async () => {
+test("043 and 050–052 publish all 19 A+ Markdown templates and preserve user publishes and retirements on replay", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);
-    const tunedCodes = new Set([
-      "aplus.plan", "aplus.image", "aplus.ai-write",
+    const tunedIn050 = new Set([
+      "aplus.plan", "aplus.image",
       "aplus.module.accessories", "aplus.module.brand_story", "aplus.module.comparison",
       "aplus.module.craftsmanship", "aplus.module.detail_closeup", "aplus.module.hero",
       "aplus.module.ingredients", "aplus.module.multi_angle", "aplus.module.selling_points",
@@ -974,7 +974,8 @@ test("043, 050 and 051 publish A+ templates matching Markdown imports and preser
       assert.ok(template, file);
       const sourceFile = `prompt/normalized/${file}`;
       const record = parseNormalizedPromptMarkdown(await readFile(sourceFile, "utf8"), sourceFile);
-      const versionNo = tunedCodes.has(record.code) ? 2 : 1;
+      // 051 advanced AI write only; 052 advances all other A+ defaults.
+      const versionNo = tunedIn050.has(record.code) ? 3 : 2;
       assert.deepEqual(template, { ...record, status: "published", versionNo, usedBy: template.usedBy });
       assert.ok(template.usedBy?.length, file);
       return record;
@@ -987,9 +988,9 @@ test("043, 050 and 051 publish A+ templates matching Markdown imports and preser
     }
     for (const record of records) {
       const versions = await prompts.listVersions(record.templateId);
-      assert.deepEqual(versions.map(({ versionNo, status }) => [versionNo, status]), tunedCodes.has(record.code)
-        ? [[1, "retired"], [2, "published"]]
-        : [[1, "published"]]);
+      assert.deepEqual(versions.map(({ versionNo, status }) => [versionNo, status]), tunedIn050.has(record.code)
+        ? [[1, "retired"], [2, "retired"], [3, "published"]]
+        : [[1, "retired"], [2, "published"]]);
     }
 
     const plan = await resolveAplusPromptTemplate(prompts, "aplus_plan");
