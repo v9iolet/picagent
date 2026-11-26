@@ -122,7 +122,7 @@ async function offlineBrowser(t, { pendingCopy, legacyEtsy = false } = {}) {
             const preview = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/preview\/(original|thumbnail)$/);
             const version = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
             const response = upload || (path === "/api/model-settings"
-              ? { status: 200, body: { data: { channels: [], preferences: { image: null, vision: null } } } }
+              ? { status: 200, body: { data: { channels: [], preferences: { image: null, vision: null, video: null } } } }
               : preview ? await app.preview(preview[1], preview[2], preview[3])
               : version ? await app.previewTaskVersion(version[1], version[2]) : await app.request(req.method, path, {
               headers: req.headers,

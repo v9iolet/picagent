@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { downloadImageUrl } from "./download-image-url.js";
 import type { ImageEditRequest, ImageProvider } from "../types.js";
 import { failModelArchive, finishModelArchive, startModelArchive } from "../prompt-archive.js";
 import { failObservation, finishObservation, logObservation, recordImageFailure, recordImageSuccess, startGeneration } from "../observability.js";
@@ -26,7 +27,8 @@ async function readErrorBody(response: Response, apiKey: string): Promise<string
       if (text.endsWith(apiKey.slice(0, count))) { text = text.slice(0, -count) + "[REDACTED]"; break; }
     }
   }
-  const redacted = text.replace(/\bBearer\s+[^\s"<>]+/gi, "Bearer [REDACTED]")
+  const redacted = text.replace(/https?:\/\/[^\s"<>]+/gi, "[REDACTED URL]")
+    .replace(/\bBearer\s+[^\s"<>]+/gi, "Bearer [REDACTED]")
     .replace(/\bsk-[\w-]+/g, "[REDACTED]")
     .replace(/("(?:api[_-]?key|authorization|token|secret|password)"\s*:\s*")[^"]*/gi, "$1[REDACTED]");
   let result = "";
@@ -87,6 +89,7 @@ export class GptImageProvider implements ImageProvider {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     let responseSummary: unknown;
+    let responseFormatUsed: "b64_json" | "url" | undefined;
     try {
       const response = await fetch(endpoint, {
         redirect: "error",
@@ -102,27 +105,38 @@ export class GptImageProvider implements ImageProvider {
         const sizeUnsupported = response.status >= 400 && response.status < 500 && /\bsize\b|resolution|分辨率|尺寸/i.test(errorBody);
         throw new Error(sizeUnsupported ? "IMAGE_SIZE_UNSUPPORTED" : "IMAGE_PROVIDER_FAILED");
       }
-      const payload = await response.json().catch(() => null) as { data?: Array<{ b64_json?: unknown }> } | null;
-      const encoded = payload?.data?.[0]?.b64_json;
-      if (typeof encoded !== "string" || !encoded) throw new Error("INVALID_PROVIDER_RESPONSE");
-      const bytes = Buffer.from(encoded, "base64");
+      const payload = await response.json().catch(() => null) as { data?: Array<{ b64_json?: unknown; url?: unknown }> } | null;
+      const item = payload?.data?.[0];
+      const encoded = item?.b64_json;
+      let image;
+      if (typeof encoded === "string" && encoded.trim()) {
+        responseFormatUsed = "b64_json";
+        image = { bytes: Buffer.from(encoded, "base64"), mimeType: "image/png" };
+      } else if (typeof item?.url === "string" && item.url.trim()) {
+        responseFormatUsed = "url";
+        responseSummary = { httpStatus: response.status, responseFormatUsed };
+        image = await downloadImageUrl(item.url, controller.signal);
+      } else {
+        throw new Error("INVALID_PROVIDER_RESPONSE");
+      }
+      const { bytes, mimeType } = image;
       if (!bytes.length) throw new Error("INVALID_PROVIDER_RESPONSE");
-      responseSummary = { httpStatus: response.status, dataCount: payload?.data?.length ?? 0, mimeType: "image/png", byteLength: bytes.length };
-      await finishModelArchive(archive, responseSummary, [{ label: "generated-image", filename: "generated-image.png", mimeType: "image/png", bytes }]);
-      finishObservation(observation, { status: "succeeded", outputMimeType: "image/png", outputByteLength: bytes.length }, { http_status: response.status, output_type: "image" });
+      responseSummary = { httpStatus: response.status, dataCount: payload?.data?.length, responseFormatUsed, mimeType, byteLength: bytes.length };
+      await finishModelArchive(archive, responseSummary, [{ label: "generated-image", mimeType, bytes }]);
+      finishObservation(observation, { status: "succeeded", outputMimeType: mimeType, outputByteLength: bytes.length }, { http_status: response.status, output_type: "image", responseFormatUsed });
       recordImageSuccess(request.flow ?? "image-edit", "openai-compatible-image", request.model, Date.now() - startedAt);
-      logObservation("image.completed", { request_id: requestId, flow: request.flow ?? "image-edit", provider: "openai-compatible-image", model: request.model, duration_ms: Date.now() - startedAt, status: "success" });
-      return { bytes, mimeType: "image/png" };
+      logObservation("image.completed", { request_id: requestId, flow: request.flow ?? "image-edit", provider: "openai-compatible-image", model: request.model, duration_ms: Date.now() - startedAt, status: "success", responseFormatUsed });
+      return image;
     } catch (error) {
-      const normalized = error instanceof DOMException && error.name === "AbortError"
+      const normalized = controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")
         ? new Error("IMAGE_PROVIDER_TIMEOUT")
         : error instanceof Error && ["INVALID_PROVIDER_RESPONSE", "IMAGE_SIZE_UNSUPPORTED"].includes(error.message)
           ? error
           : new Error("IMAGE_PROVIDER_FAILED");
       await failModelArchive(archive, normalized, responseSummary);
-      failObservation(observation, normalized);
+      failObservation(observation, normalized, responseFormatUsed ? { responseFormatUsed } : undefined);
       recordImageFailure(request.flow ?? "image-edit", "openai-compatible-image", request.model, Date.now() - startedAt, normalized.message);
-      logObservation("image.failed", { request_id: requestId, flow: request.flow ?? "image-edit", provider: "openai-compatible-image", model: request.model, duration_ms: Date.now() - startedAt, status: "error", error_code: normalized.message });
+      logObservation("image.failed", { request_id: requestId, flow: request.flow ?? "image-edit", provider: "openai-compatible-image", model: request.model, duration_ms: Date.now() - startedAt, status: "error", error_code: normalized.message, ...(responseFormatUsed && { responseFormatUsed }) });
       throw normalized;
     } finally {
       clearTimeout(timeout);

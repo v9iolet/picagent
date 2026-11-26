@@ -61,7 +61,7 @@ async function offlineCanvas(t, sizes = ["1K", "2K"], aspectRatios = ["1:1", "3:
         imageOptions,
       }],
     }],
-    preferences: { image: { channelId: "offline", modelId: "gpt-image-2" }, vision: null },
+    preferences: { image: { channelId: "offline", modelId: "gpt-image-2" }, vision: null, video: null },
   };
   const vite = await createServer({
     cacheDir: "node_modules/.vite-browser-canvas",
@@ -430,7 +430,7 @@ test("默认生图模型：套图配置、新建任务与检查器可选七种�
   const modelId = "gpt-image-2.5-flare-special";
   await page.route("**/api/model-settings", route => route.fulfill({ json: { data: {
     channels: [{ id: "offline", models: [{ id: modelId, capabilities: ["image"] }] }],
-    preferences: { image: { channelId: "offline", modelId }, vision: null },
+    preferences: { image: { channelId: "offline", modelId }, vision: null, video: null },
   } } }));
   const ratios = ["1:1", "2:3", "3:2", "3:4", "4:3", "16:9", "9:16"];
   async function assertRatioOptions(select, initial) {

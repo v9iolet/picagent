@@ -150,7 +150,10 @@ test("A+ 帮写对照有序原图与商品卡事实，保留草稿中的画面�
   assert.match(userPrompt, /商品原图对应顺序：\["front","side"\]/);
   assert.match(userPrompt, /商品卡事实：商品名称：随行水杯/);
   assert.match(userPrompt, /已有草稿与画面偏好：低角度侧光/);
-  assert.match(systemPrompt, /3–5 条补充卖点与视觉呈现方向/);
+  assert.match(systemPrompt, /3–4 条精炼要点.*300 字以内/);
+  assert.match(systemPrompt, /核心补充亮点 \+ 画面呈现方向/);
+  assert.match(systemPrompt, /禁止输出.*纯白底主图拍摄建议、主图合规建议/);
+  assert.match(systemPrompt, /无法确认归属的线状物、道具或杂物，不得写成随货线缆、赠品或配件/);
   assert.match(systemPrompt, /严禁编造参数/);
   assert.doesNotMatch(systemPrompt + userPrompt, /模块规则|模块代码|【待补充/);
 });
