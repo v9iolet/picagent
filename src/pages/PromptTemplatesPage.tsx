@@ -1,3 +1,4 @@
+import { Modal } from "../components/ui/Modal";
 import { useToast } from "../components/ui/ToastProvider";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { suiteApi, type ApiLibraryResource, type ApiPromptTemplate, type ApiPromptTemplateCopy } from "../api/client";
@@ -70,13 +71,6 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
   };
 
   useEffect(() => { load().catch(() => undefined); }, [statusFilter, stageFilter]);
-  useEffect(() => {
-    if (!promptModal) return;
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setPromptModal(null); };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [promptModal]);
-
   const reloadTemplateVersions = async (templateId: string, preferredVersionId?: string) => {
     const versions = await suiteApi.listPromptTemplateVersions(templateId);
     setTemplateVersions(versions);
@@ -384,24 +378,27 @@ export function PromptTemplatesPage({ navigate }: { navigate: (to: string) => vo
         </aside>
       </main>
       {promptModal && (
-        <div className="style-library-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPromptModal(null); }}>
-          <section className="style-library-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="template-prompt-title">
-            <header>
-              <div>
-                <span className="style-library-modal-kicker">PROMPT TEMPLATE</span>
-                <h2 id="template-prompt-title">{promptModal.title}</h2>
-                <p>{stageLabel(promptModal.stage)} · v{String(promptModal.source?.versionNo ?? "-")} · {templateStatusLabel(promptModal.status)}</p>
-              </div>
-              <button className="icon-btn" type="button" aria-label="关闭正文预览" onClick={() => setPromptModal(null)}><Icon name="x" /></button>
-            </header>
-            <div className="style-library-modal-body is-template-only">
-              <div className="style-library-modal-content">
-                <div className="style-library-modal-prompt-head"><strong>System Prompt 正文</strong><span>当前版本快照</span></div>
-                <pre className="style-library-modal-prompt">{promptTextFor(promptModal)}</pre>
-              </div>
+        <Modal
+          backdropClassName="style-library-modal-backdrop"
+          className="style-library-prompt-modal"
+          onClose={() => setPromptModal(null)}
+          aria-labelledby="template-prompt-title"
+        >
+          <header>
+            <div>
+              <span className="style-library-modal-kicker">PROMPT TEMPLATE</span>
+              <h2 id="template-prompt-title">{promptModal.title}</h2>
+              <p>{stageLabel(promptModal.stage)} · v{String(promptModal.source?.versionNo ?? "-")} · {templateStatusLabel(promptModal.status)}</p>
             </div>
-          </section>
-        </div>
+            <button className="icon-btn" type="button" aria-label="关闭正文预览" onClick={() => setPromptModal(null)}><Icon name="x" /></button>
+          </header>
+          <div className="style-library-modal-body is-template-only">
+            <div className="style-library-modal-content">
+              <div className="style-library-modal-prompt-head"><strong>System Prompt 正文</strong><span>当前版本快照</span></div>
+              <pre className="style-library-modal-prompt">{promptTextFor(promptModal)}</pre>
+            </div>
+          </div>
+        </Modal>
       )}
       {error && <div className="suite-toast show" role="alert">{error}</div>}
     </AppShell>

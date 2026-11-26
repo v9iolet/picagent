@@ -19,7 +19,7 @@ const infoLimit = APLUS_PRODUCT_INFO_MAX_LENGTH;
 
 export function AplusConfigPanel({
   config, profiles, images, busy, blocked, submitting, aiWriting, aiWrite, stale, awaitingConfirmation,
-  onChange, onUpload, onRemove, onAiWrite, onUndoAiWrite, onSubmit, onViewPlan,
+  onChange, onUpload, onUploadError, onRemove, onAiWrite, onUndoAiWrite, onSubmit, onViewPlan,
 }: {
   config: AplusConfig;
   profiles: ApiPlatformProfile[];
@@ -33,6 +33,7 @@ export function AplusConfigPanel({
   awaitingConfirmation: boolean;
   onChange: (config: AplusConfig) => void;
   onUpload: (files: File[]) => void;
+  onUploadError: (message: string) => void;
   onRemove: (image: ApiImage) => void;
   onAiWrite: () => void;
   onUndoAiWrite: () => void;
@@ -62,7 +63,7 @@ export function AplusConfigPanel({
       <fieldset className="ss-scroll" disabled={busy}>
         <div className="ss-eyebrow">A+ STUDIO</div>
         <h1>A+详情</h1>
-        <StudioProductImageUpload images={images} busy={busy} canUpload upload={onUpload} remove={onRemove} />
+        <StudioProductImageUpload images={images} busy={busy} canUpload upload={onUpload} onUploadError={onUploadError} remove={onRemove} />
         <section>
           <h2>生成设置</h2>
           <div className="ss-fields">

@@ -8,6 +8,9 @@
     sans-serif;
   color: var(--pa-ink);
 }
+.ss-dialog {
+  font: 14px/1.5 system-ui, sans-serif;
+}
 .ss-layout *,
 .ss-dialog * {
   box-sizing: border-box;
@@ -16,10 +19,12 @@
 .ss-layout h2,
 .ss-layout h3,
 .ss-layout figure,
-.ss-layout p {
+.ss-layout p,
+.ss-dialog :is(h1, h2, h3, figure) {
   margin: 0;
 }
 .ss-layout small,
+.ss-dialog small,
 .ss-help {
   color: var(--pa-muted);
   font-size: 12px;
@@ -253,6 +258,8 @@
 }
 .ss-layout select,
 .ss-layout textarea,
+.ss-dialog select,
+.ss-dialog textarea,
 .ss-dialog input {
   background: var(--pa-surface);
   color: var(--pa-ink);
@@ -262,7 +269,8 @@
   padding: 6px 8px;
   min-width: 0;
 }
-.ss-layout textarea {
+.ss-layout textarea,
+.ss-dialog textarea {
   width: 100%;
   resize: vertical;
 }
@@ -876,7 +884,8 @@
   width: 90vw;
   max-width: 1250px;
 }
-.ss-dialog::backdrop {
+.ss-dialog-backdrop {
+  padding: 0;
   background: #15213877;
 }
 .ss-dialog header {
@@ -946,7 +955,7 @@
 .ss-layout-entry-badge + .ss-layout-entry-arrow {
   margin-left: 0;
 }
-.ss-dialog.ss-layout-dialog[open] {
+.ss-dialog.ss-layout-dialog {
   display: flex;
   flex-direction: column;
   width: min(1040px, calc(100vw - 32px));

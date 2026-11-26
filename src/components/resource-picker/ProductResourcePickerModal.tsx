@@ -1,3 +1,4 @@
+import { Modal } from "../ui/Modal";
 import { useEffect, useState } from "react";
 import {
   ApiHttpError,
@@ -124,15 +125,6 @@ export function ProductResourcePickerModal({
     };
   }, [open, limit]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !loading) onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, loading, onClose]);
-
   if (!open) return null;
 
   const toggle = (item: ApiLibraryResource) => {
@@ -194,116 +186,110 @@ export function ProductResourcePickerModal({
   const resolvedSubtitle = subtitle ?? `最多 ${limit} 张已发布白底底图，按顺序作为主图和补充角度`;
 
   return (
-    <div
-      className="wb-prompt-modal-backdrop rp-modal-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !loading) onClose();
-      }}
+    <Modal
+      size="lg"
+      aria-label={title}
+      onClose={onClose}
+      dismissDisabled={loading}
+      backdropClassName="wb-prompt-modal-backdrop rp-modal-backdrop"
+      className="wb-prompt-modal wb-white-picker rp-picker-modal"
     >
-      <section
-        className="wb-prompt-modal wb-white-picker rp-picker-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-      >
-        <div className="wb-prompt-popover-head rp-picker-head">
-          <div>
-            <span className="wb-modal-eyebrow rp-modal-eyebrow">{eyebrow}</span>
-            <strong>{title}</strong>
-            <small>{resolvedSubtitle}</small>
-          </div>
-          <button type="button" aria-label="关闭图片库选择器" disabled={loading} onClick={onClose}>
-            <Icon name="x" />
-          </button>
+      <div className="wb-prompt-popover-head rp-picker-head">
+        <div>
+          <span className="wb-modal-eyebrow rp-modal-eyebrow">{eyebrow}</span>
+          <strong>{title}</strong>
+          <small>{resolvedSubtitle}</small>
         </div>
+        <button type="button" aria-label="关闭图片库选择器" disabled={loading} onClick={onClose}>
+          <Icon name="x" />
+        </button>
+      </div>
 
-        {removedNotice && (
-          <p className="rp-picker-notice" role="status">
-            {removedNotice}
-          </p>
-        )}
+      {removedNotice && (
+        <p className="rp-picker-notice" role="status">
+          {removedNotice}
+        </p>
+      )}
 
-        {loadError ? (
-          <p className="rp-picker-state is-error" role="alert">
-            图片库加载失败
-          </p>
-        ) : !items ? (
-          <p className="rp-picker-state" role="status">
-            正在加载图片库…
-          </p>
-        ) : (
-          !items.length && <p className="rp-picker-state">暂无已发布的白底底图</p>
-        )}
+      {loadError ? (
+        <p className="rp-picker-state is-error" role="alert">
+          图片库加载失败
+        </p>
+      ) : !items ? (
+        <p className="rp-picker-state" role="status">
+          正在加载图片库…
+        </p>
+      ) : (
+        !items.length && <p className="rp-picker-state">暂无已发布的白底底图</p>
+      )}
 
-        <div className="wb-white-picker-grid rp-picker-grid">
-          {items?.map((item) => {
-            const active = selected.some((ref) => ref.resourceId === item.id);
-            return (
+      <div className="wb-white-picker-grid rp-picker-grid">
+        {items?.map((item) => {
+          const active = selected.some((ref) => ref.resourceId === item.id);
+          return (
+            <button
+              type="button"
+              key={item.id}
+              aria-pressed={active}
+              disabled={loading || (!active && selected.length >= limit)}
+              className={`wb-white-picker-item rp-picker-item ${active ? "is-selected" : ""}`}
+              onClick={() => toggle(item)}
+            >
+              <span className="wb-picker-check rp-picker-check">{active ? "✓" : ""}</span>
+              {item.previewUrl && <img src={item.previewUrl} alt={item.title} />}
+              <strong>{item.title}</strong>
+              <small>
+                白底底图 · {item.resourceVersionId.slice(0, 8)}
+              </small>
+            </button>
+          );
+        })}
+      </div>
+
+      {selected.length > 0 && (
+        <div className="wb-white-picker-order rp-picker-order">
+          <strong>已选顺序（{selected.length}/{limit}）</strong>
+          {selected.map((item, index) => (
+            <div key={item.resourceId}>
+              <span>
+                {index + 1}. {item.title ?? item.resourceId.slice(0, 8)}
+              </span>
+              <button type="button" disabled={loading || index === 0} onClick={() => move(index, -1)}>
+                上移
+              </button>
               <button
                 type="button"
-                key={item.id}
-                aria-pressed={active}
-                disabled={loading || (!active && selected.length >= limit)}
-                className={`wb-white-picker-item rp-picker-item ${active ? "is-selected" : ""}`}
-                onClick={() => toggle(item)}
+                disabled={loading || index === selected.length - 1}
+                onClick={() => move(index, 1)}
               >
-                <span className="wb-picker-check rp-picker-check">{active ? "✓" : ""}</span>
-                {item.previewUrl && <img src={item.previewUrl} alt={item.title} />}
-                <strong>{item.title}</strong>
-                <small>
-                  白底底图 · {item.resourceVersionId.slice(0, 8)}
-                </small>
+                下移
               </button>
-            );
-          })}
+              <button
+                type="button"
+                className="rp-picker-remove-btn"
+                disabled={loading}
+                onClick={() => removeSelected(item.resourceId)}
+              >
+                移除
+              </button>
+            </div>
+          ))}
         </div>
+      )}
 
-        {selected.length > 0 && (
-          <div className="wb-white-picker-order rp-picker-order">
-            <strong>已选顺序（{selected.length}/{limit}）</strong>
-            {selected.map((item, index) => (
-              <div key={item.resourceId}>
-                <span>
-                  {index + 1}. {item.title ?? item.resourceId.slice(0, 8)}
-                </span>
-                <button type="button" disabled={loading || index === 0} onClick={() => move(index, -1)}>
-                  上移
-                </button>
-                <button
-                  type="button"
-                  disabled={loading || index === selected.length - 1}
-                  onClick={() => move(index, 1)}
-                >
-                  下移
-                </button>
-                <button
-                  type="button"
-                  className="rp-picker-remove-btn"
-                  disabled={loading}
-                  onClick={() => removeSelected(item.resourceId)}
-                >
-                  移除
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="wb-prompt-modal-actions rp-picker-actions">
-          <button type="button" disabled={loading} onClick={onClose}>
-            取消
-          </button>
-          <button
-            type="button"
-            className="wb-primary-action rp-primary-action"
-            disabled={(!allowEmpty && !selected.length) || loading}
-            onClick={() => void confirm()}
-          >
-            {loading ? "保存中…" : confirmLabel}
-          </button>
-        </div>
-      </section>
-    </div>
+      <div className="wb-prompt-modal-actions rp-picker-actions">
+        <button type="button" disabled={loading} onClick={onClose}>
+          取消
+        </button>
+        <button
+          type="button"
+          className="wb-primary-action rp-primary-action"
+          disabled={(!allowEmpty && !selected.length) || loading}
+          onClick={() => void confirm()}
+        >
+          {loading ? "保存中…" : confirmLabel}
+        </button>
+      </div>
+    </Modal>
   );
 }

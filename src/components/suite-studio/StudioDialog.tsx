@@ -1,41 +1,38 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import type { ReactNode } from "react";
+import { Modal } from "../ui/Modal";
 
 export function StudioDialog({
   title,
   close,
   children,
+  dismissDisabled,
   wide = false,
   className = "",
 }: {
   title: string;
   close: () => void;
   children: ReactNode;
+  dismissDisabled?: boolean;
   wide?: boolean;
   className?: string;
 }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const d = ref.current!;
-    d.showModal();
-    return () => d.close();
-  }, []);
   return (
-    <dialog
-      ref={ref}
-      className={`ss-dialog${wide ? " wide" : ""} ${className}`.trim()}
+    <Modal
       aria-label={title}
-      onCancel={(e) => {
-        e.preventDefault();
-        close();
-      }}
+      size={wide ? "xl" : "md"}
+      className={`ss-dialog${wide ? " wide" : ""} ${className}`.trim()}
+      backdropClassName="ss-dialog-backdrop"
+      closeOnBackdrop={false}
+      dismissDisabled={dismissDisabled}
+      onClose={close}
     >
       <header>
         <h2>{title}</h2>
-        <button onClick={close} aria-label="关闭">
+        <button onClick={close} aria-label="关闭" disabled={dismissDisabled}>
           ×
         </button>
       </header>
       {children}
-    </dialog>
+    </Modal>
   );
 }

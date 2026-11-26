@@ -9,7 +9,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  PRODUCT_CARD_ALLOWED_IMAGE_MIMES,
   PRODUCT_CARD_FIELD_LABELS,
   PRODUCT_CARD_FIELD_LIMITS,
   PRODUCT_CARD_MAX_IMAGE_BYTES,
@@ -26,6 +25,7 @@ import type {
   ApiProductCardUpdateImagePayload,
 } from "../../api/client";
 import { InfoTip } from "../../components/ui/InfoTip";
+import { IMAGE_UPLOAD_ACCEPT, imageMimeType } from "../../hooks/useImageUpload";
 import { Icon } from "../../pages/shared";
 import "./ProductCardEditorForm.css";
 
@@ -107,18 +107,7 @@ export function toUpdateSupplierImagePayloads(
   );
 }
 
-const ALLOWED_MIME_SET = new Set<string>(PRODUCT_CARD_ALLOWED_IMAGE_MIMES);
 let imageDraftSeq = 0;
-
-function inferImageMimeType(file: File): string {
-  const normalized = file.type.trim().toLowerCase();
-  if (ALLOWED_MIME_SET.has(normalized)) return normalized;
-  const lowerName = file.name.toLowerCase();
-  if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) return "image/jpeg";
-  if (lowerName.endsWith(".png")) return "image/png";
-  if (lowerName.endsWith(".webp")) return "image/webp";
-  return normalized;
-}
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
@@ -158,8 +147,8 @@ export async function readSupplierImageFiles(
       errors.push(`供应商参考图最多上传 ${PRODUCT_CARD_MAX_SUPPLIER_IMAGES} 张`);
       break;
     }
-    const mimeType = inferImageMimeType(file);
-    if (!ALLOWED_MIME_SET.has(mimeType)) {
+    const mimeType = imageMimeType(file, "any-type");
+    if (!mimeType) {
       errors.push(`「${file.name}」格式不支持，仅支持 JPG / PNG / WebP`);
       continue;
     }
@@ -555,7 +544,7 @@ export function ProductCardEditorForm({
                   type="file"
                   className="pc-supplier-file-input"
                   aria-label="上传供应商参考图"
-                  accept="image/jpeg,image/png,image/webp"
+                  accept={IMAGE_UPLOAD_ACCEPT}
                   multiple
                   disabled={isLocked || supplierImages.length >= PRODUCT_CARD_MAX_SUPPLIER_IMAGES}
                   onChange={(event) => void handleSupplierFiles(event.target.files)}

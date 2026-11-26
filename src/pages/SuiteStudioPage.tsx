@@ -671,9 +671,6 @@ export function SuiteStudioPage({
     setBusy(true);
     setNotice("");
     try {
-      if (files.length + images.length > 6) throw Error("每个批次最多上传 6 张商品原图。");
-      if (files.some((f) => !["image/png", "image/jpeg", "image/webp"].includes(f.type)))
-        throw Error("请上传 PNG、JPEG 或 WebP 格式的图片。");
       let id = currentSuiteId;
       let nextImages = [...images];
       if (!id) {
@@ -800,6 +797,7 @@ export function SuiteStudioPage({
           busy={busy}
           canUpload={!clone}
           upload={(files) => void upload(files)}
+          onUploadError={setNotice}
           generate={() => void generate()}
           remove={async (im) => {
             if (!currentSuiteId) return;

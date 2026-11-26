@@ -38,6 +38,7 @@ interface Props {
   busy: boolean;
   canUpload: boolean;
   upload: (files: File[]) => void;
+  onUploadError: (message: string) => void;
   remove: (image: ApiImage) => void;
   generate: () => void;
 }
@@ -50,6 +51,7 @@ export function ConfigPanel({
   busy,
   canUpload,
   upload,
+  onUploadError,
   remove,
   generate,
 }: Props) {
@@ -90,7 +92,7 @@ export function ConfigPanel({
       <fieldset className="ss-scroll" disabled={busy}>
         <div className="ss-eyebrow">SUITE STUDIO</div>
         <h1>商品套图</h1>
-        <StudioProductImageUpload images={images} busy={busy} canUpload={canUpload} upload={upload} remove={remove} />
+        <StudioProductImageUpload images={images} busy={busy} canUpload={canUpload} upload={upload} onUploadError={onUploadError} remove={remove} />
         <section>
           <h2>生成设置</h2>
           <div className="ss-fields">
