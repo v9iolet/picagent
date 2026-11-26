@@ -15,7 +15,7 @@ import { defaultImageOptions, IMAGE_QUALITIES, resolveClosestImageSize, resolveI
 import { PURE_WHITE_MAIN_IMAGE_REQUIREMENTS } from "../shared/platform-main-background.js";
 import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
 import { allocateSellingPointLayouts, resolveSellingPointLayouts } from "../shared/selling-point-layouts.js";
-import { GptImageProvider, ImageUrlDownloadError } from "./providers/gpt-image-provider.js";
+import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { DashScopeLlmClient } from "./providers/dashscope-llm-client.js";
 import type { ModelSettings } from "./model-settings.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -401,7 +401,6 @@ function safeDecodePathParam(value: string): string | null {
 
 export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; productCardRepository?: ProductCardRepository; productOnboardingRepository?: ProductOnboardingRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>; clearFinalVersions?(childTaskIds: string[]): Promise<void>; setOnVersionCompleted?(listener: ImageEditVersionCompletedListener): void }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
   const imageGenerationConcurrency = Math.max(1, Math.floor(Number.isFinite(deps.imageGenerationConcurrency) ? deps.imageGenerationConcurrency! : 3));
-  const imageRetryDelayMs = Math.max(0, Math.floor(Number.isFinite(deps.imageRetryDelayMs) ? deps.imageRetryDelayMs! : 1500));
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
   const resolveImage = async () => {
     const selected = await resolveModel("image");
@@ -581,7 +580,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     return visionImages;
   };
 
-  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, failedAttempt?: TaskGenerationAttempt, sourceVersionIds: Record<string, string> = {}, editSource?: { version: TaskImageVersion; versions: TaskImageVersion[] }) => {
+  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, failedAttempt?: TaskGenerationAttempt, sourceVersionIds: Record<string, string> = {}, editSource?: { version: TaskImageVersion; versions: TaskImageVersion[] }, singleTaskPrompt?: string) => {
     if (!deps.taskRepository) throw new Error("TASK_REPOSITORY_NOT_CONFIGURED");
     const existing = (await deps.taskRepository.listBatches(suiteId)).find((batch) => batch.idempotencyKey === idempotencyKey);
     if (existing) return { batch: existing, duplicate: true };
@@ -880,7 +879,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null,
       });
     }
-    const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
+    const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts }, singleTaskPrompt);
     if (!reservation.duplicate) {
       const jobs = attempts.map((attempt, index) => ({
         attempt,
@@ -926,21 +925,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const frozenQuality = IMAGE_QUALITIES.find((quality) => quality === attempt.requestSummary.quality);
       const quality: ImageQuality = attempt.contextSnapshot.tool === "regenerate" ? frozenQuality ?? "high" : "medium";
       const editRequest: Parameters<ImageProvider["edit"]>[0] = { requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.providerPrompt ?? attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality, n: 1, responseFormat: "b64_json" };
-      let generated: Awaited<ReturnType<ImageProvider["edit"]>>;
-      try {
-        generated = await provider.edit(editRequest);
-      } catch (firstError) {
-        if (firstError instanceof ImageUrlDownloadError) throw firstError;
-        const firstCode = classifyTaskImageError(firstError);
-        if (firstCode !== "TASK_IMAGE_PROVIDER_FAILED" && firstCode !== "TASK_IMAGE_PROVIDER_TIMEOUT") {
-          throw firstError;
-        }
-        if (imageRetryDelayMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, imageRetryDelayMs));
-        }
-        if (task.originKind === "aplus" && (await deps.taskRepository.getAttempt(attempt.id))?.status !== "running") return;
-        generated = await provider.edit(editRequest);
-      }
+      const generated = await provider.edit(editRequest);
       if (task.originKind === "aplus" && (await deps.taskRepository.getAttempt(attempt.id))?.status !== "running") return;
       const processed = await processGeneratedImage(generated.bytes);
       const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
@@ -2286,22 +2271,20 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
         } catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
       }
-      if (typeof body.promptDraft === "string") await deps.taskRepository.updateTask(task.id, { promptDraft: body.promptDraft });
-      const current = await deps.taskRepository.getTask(task.id);
-      if (!current || current.status === "archived") return fail("INVALID_SUITE_TASK", 404);
-      const additionalPrompt = current.originKind === "aplus" && typeof rawAdditionalPrompt === "string"
+      const singleTaskPrompt = typeof body.promptDraft === "string" ? body.promptDraft : undefined;
+      const additionalPrompt = task.originKind === "aplus" && typeof rawAdditionalPrompt === "string"
         ? rawAdditionalPrompt.trim() : "";
-      const prompt = additionalPrompt ? `${current.promptDraft}\n\n单卡人工补充：${additionalPrompt}` : current.promptDraft;
-      const generationTask = additionalPrompt
-        ? { ...current, promptDraft: prompt, promptSha256: createHash("sha256").update(prompt).digest("hex") }
-        : current;
+      const draft = singleTaskPrompt ?? task.promptDraft;
+      const prompt = additionalPrompt ? `${draft}\n\n单卡人工补充：${additionalPrompt}` : draft;
+      const generationTask = prompt === task.promptDraft ? task
+        : { ...task, promptDraft: prompt, promptSha256: createHash("sha256").update(prompt).digest("hex") };
       try {
         const history = await deps.taskRepository.listTaskVersions(task.id);
         const currentVersion = history.versions.find((version) => version.isCurrent);
         const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);
-        const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (current?.sourceRevision ?? 0);
-        const useCurrentVersionAsSource = current.originKind !== "replica" && current.originKind !== "aplus" && currentVersion && sourceUnchanged;
-        const result = await createTaskBatch(task.suiteId, [generationTask], "single", idempotencyKey, undefined, useCurrentVersionAsSource ? { [task.id]: currentVersion.id } : {});
+        const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (task.sourceRevision ?? 0);
+        const useCurrentVersionAsSource = task.originKind !== "replica" && task.originKind !== "aplus" && currentVersion && sourceUnchanged;
+        const result = await createTaskBatch(task.suiteId, [generationTask], "single", idempotencyKey, undefined, useCurrentVersionAsSource ? { [task.id]: currentVersion.id } : {}, undefined, singleTaskPrompt);
         return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
       }
       catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
@@ -2390,24 +2373,30 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return ok({ attempt: attemptView(previous), version: version ? versionView(version) : null }, previous.status === "running" ? 202 : 200);
       }
       const createdAt = new Date().toISOString();
-      const reservation = await deps.repository.beginBaseGeneration({
-        id: randomUUID(),
-        suiteId,
-        inputImageId,
-        baseVersionId: randomUUID(),
-        idempotencyKey,
-        model,
-        channel,
-        endpoint: "/v1/images/edits",
-        prompt,
-        promptTemplateVersionId: templateVersionId,
-        dynamicInput: validatedInput.value,
-        size: "1K",
-        quality: "medium",
-        n: 1,
-        responseFormat: "b64_json",
-        createdAt,
-      });
+      let reservation: Awaited<ReturnType<SuiteRepository["beginBaseGeneration"]>>;
+      try {
+        reservation = await deps.repository.beginBaseGeneration({
+          id: randomUUID(),
+          suiteId,
+          inputImageId,
+          baseVersionId: randomUUID(),
+          idempotencyKey,
+          model,
+          channel,
+          endpoint: "/v1/images/edits",
+          prompt,
+          promptTemplateVersionId: templateVersionId,
+          dynamicInput: validatedInput.value,
+          size: "1K",
+          quality: "medium",
+          n: 1,
+          responseFormat: "b64_json",
+          createdAt,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === "BASE_GENERATION_IN_PROGRESS") return fail(error.message, 409);
+        throw error;
+      }
       if (reservation.duplicate) {
         return ok({ attempt: attemptView(reservation.attempt), version: reservation.existingVersion ? versionView(reservation.existingVersion) : null }, reservation.attempt.status === "running" ? 202 : 200);
       }

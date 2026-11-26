@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { APLUS_ADDITIONAL_PROMPT_MAX_LENGTH, APLUS_MODULES, APLUS_SIZE_PRESETS, type AplusModuleCode, type AplusSizePresetKey } from "../../../shared/aplus";
 import { sanitizeDeliveryName } from "../../../shared/workbench-delivery";
-import { suiteApi } from "../../api/client";
+import { createGenerationActions, suiteApi } from "../../api/client";
 import { StudioDialog } from "../../components/suite-studio/StudioDialog";
 import {
   JOB_SUCCESS_STATUSES, readImageEditJobStatus, readRetryJobStatus, StudioImageEditorHost, useResultJob,
@@ -35,6 +35,7 @@ export function AplusResultCards({
   refresh: () => Promise<void>;
   onNotice: (notice: string) => void;
 }) {
+  const [submitGeneration] = useState(createGenerationActions);
   const [editor, setEditor] = useState<{ card: AplusResultCard; initialTool?: "restore_product" | "change_text" } | null>(null);
   const [dragged, setDragged] = useState<AplusModuleCode | null>(null);
   const [preview, setPreview] = useState<AplusSizePresetKey | null>(null);
@@ -196,7 +197,8 @@ export function AplusResultCards({
           <form className="aplus-action-form" onSubmit={(event) => {
             event.preventDefault();
             void act(async () => {
-              const { batchId } = await aplusApi.redraw(redraw.parentTaskId, prompt.trim());
+              const { batchId } = await submitGeneration(redraw.parentTaskId, prompt.trim(),
+                (key) => aplusApi.redraw(redraw.parentTaskId, prompt.trim(), key));
               onJob({ id: batchId, taskId: redraw.parentTaskId, kind: "redraw" });
               setRedraw(null);
             });

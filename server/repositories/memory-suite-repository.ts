@@ -78,6 +78,9 @@ export class MemorySuiteRepository implements SuiteRepository {
       const attempt = this.attempts.get(existingId)!;
       return { attempt, existingVersion: this.versions.get(attempt.baseVersionId) ?? null, duplicate: true };
     }
+    if ([...this.attempts.values()].some((attempt) => attempt.inputImageId === input.inputImageId && attempt.status === "running")) {
+      throw new Error("BASE_GENERATION_IN_PROGRESS");
+    }
     const versionNumber = Math.max(0, ...[...this.attempts.values()].filter((attempt) => attempt.inputImageId === input.inputImageId && attempt.status !== "failed").map((attempt) => attempt.versionNumber)) + 1;
     const attempt: GenerationAttempt = { ...input, versionNumber, status: "running", errorCode: null, errorMessage: null, completedAt: null };
     this.attempts.set(attempt.id, attempt);

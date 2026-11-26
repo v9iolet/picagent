@@ -1,7 +1,7 @@
 import type { ListingConfig } from "../../../shared/listing-config";
 import { readProductCardSnapshot, type ProductCardSnapshot } from "../../../shared/product-card";
 import {
-  createIdempotencyKey,
+  postGeneration, createGenerationActions,
   type ApiImage,
   type ApiListingSummary,
   type ApiPlanSnapshot,
@@ -97,17 +97,10 @@ export interface StudioState {
   progress: { total: number; completed: number; percent: number };
 }
 const path = (id: string) => `/api/suites/${encodeURIComponent(id)}`;
+const submitGeneration = createGenerationActions();
 async function json<T>(url: string, body?: object): Promise<T> {
-  const response = await fetch(
-    url,
-    body
-      ? {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Idempotency-Key": createIdempotencyKey() },
-          body: JSON.stringify(body),
-        }
-      : { cache: "no-store" },
-  );
+  if (body) return submitGeneration(url, body, (key) => postGeneration<T>(url, body, key));
+  const response = await fetch(url, { cache: "no-store" });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error?.message ?? `请求失败 (${response.status})`);
   return data.data;

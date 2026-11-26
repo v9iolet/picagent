@@ -158,7 +158,43 @@ export class PostgresTaskRepository implements TaskRepository {
       patch.sourceInputImageId !== undefined, patch.sourceLibraryReferenceId !== undefined, patch.sourceResourceVersionId !== undefined]);
     return r.rows[0] ?? null;
   }
-  async beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }) { const c = await this.pool.connect(); try { await c.query("BEGIN"); const found = await c.query<TaskGenerationBatch>("SELECT " + batchCols + " FROM suite_workbench.task_generation_batches WHERE suite_id=$1 AND idempotency_key=$2", [input.batch.suiteId,input.batch.idempotencyKey]); if (found.rows[0]) { const slots = await c.query<TaskResultSlot>("SELECT " + slotCols + " FROM suite_workbench.task_result_slots WHERE batch_id=$1 ORDER BY slot_ordinal", [found.rows[0].id]); const attempts = await c.query<TaskGenerationAttempt>("SELECT " + attemptCols + " FROM suite_workbench.task_generation_attempts WHERE slot_id = ANY($1::uuid[])", [slots.rows.map((x) => x.id)]); await c.query("COMMIT"); return { batch: found.rows[0], slots: slots.rows, attempts: attempts.rows, duplicate: true }; } await c.query("INSERT INTO suite_workbench.task_generation_batches (id,suite_id,kind,requested_count,task_ids_json,status,idempotency_key,created_at,started_at) VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$7)", [input.batch.id,input.batch.suiteId,input.batch.kind,input.batch.requestedCount,JSON.stringify(input.batch.taskIds),input.batch.idempotencyKey,input.batch.createdAt]); for (const slot of input.slots) await c.query("INSERT INTO suite_workbench.task_result_slots (id,batch_id,task_id,slot_ordinal,retry_of_slot_id,status,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [slot.id,slot.batchId,slot.taskId,slot.slotOrdinal,slot.retryOfSlotId,slot.status,slot.createdAt]); for (const a of input.attempts) await c.query("INSERT INTO suite_workbench.task_generation_attempts (id,slot_id,attempt_no,provider,model,endpoint,request_summary_json,prompt_snapshot_json,prompt_sha256,context_snapshot_json,source_kind,source_object_key,source_input_image_id,source_base_version_id,source_library_reference_id,source_resource_version_id,status,started_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)", [a.id,a.slotId,a.attemptNo,a.provider,a.model,a.endpoint,JSON.stringify(a.requestSummary),JSON.stringify(a.promptSnapshot),a.promptSha256,JSON.stringify(a.contextSnapshot),a.sourceKind,a.sourceObjectKey,a.sourceInputImageId,a.sourceBaseVersionId,a.sourceLibraryReferenceId ?? null,a.sourceResourceVersionId ?? null,a.status,a.startedAt]); await c.query("UPDATE suite_workbench.suite_tasks SET status='generating',updated_at=$2 WHERE id=ANY($1::uuid[])", [input.batch.taskIds,input.batch.createdAt]); await c.query("COMMIT"); return { ...input, duplicate: false }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
+  async beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }, singleTaskPrompt?: string) {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`task-batch:${input.batch.suiteId}:${input.batch.idempotencyKey}`]);
+      const found = await c.query<TaskGenerationBatch>("SELECT " + batchCols + " FROM suite_workbench.task_generation_batches WHERE suite_id=$1 AND idempotency_key=$2", [input.batch.suiteId,input.batch.idempotencyKey]);
+      if (found.rows[0]) {
+        const slots = await c.query<TaskResultSlot>("SELECT " + slotCols + " FROM suite_workbench.task_result_slots WHERE batch_id=$1 ORDER BY slot_ordinal", [found.rows[0].id]);
+        const attempts = await c.query<TaskGenerationAttempt>("SELECT " + attemptCols + " FROM suite_workbench.task_generation_attempts WHERE slot_id = ANY($1::uuid[])", [slots.rows.map((x) => x.id)]);
+        await c.query("COMMIT");
+        return { batch: found.rows[0], slots: slots.rows, attempts: attempts.rows, duplicate: true };
+      }
+      await c.query("SELECT id FROM suite_workbench.suite_tasks WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE", [input.batch.taskIds]);
+      const running = await c.query(`SELECT 1 FROM suite_workbench.task_result_slots s
+        JOIN suite_workbench.task_generation_attempts a ON a.slot_id=s.id
+        WHERE s.task_id=ANY($1::uuid[]) AND a.status='running' LIMIT 1`, [input.batch.taskIds]);
+      if (running.rowCount) throw new Error("TASK_GENERATION_IN_PROGRESS");
+      if (singleTaskPrompt !== undefined) {
+        const updated = await c.query<{ revision: number }>(`UPDATE suite_workbench.suite_tasks SET prompt_draft=$2,
+          prompt_sha256=$3, prompt_revision=prompt_revision + (prompt_draft <> $2)::int
+          WHERE id=$1 RETURNING prompt_revision AS revision`,
+        [input.batch.taskIds[0], singleTaskPrompt, createHash("sha256").update(singleTaskPrompt).digest("hex")]);
+        input.attempts[0].promptSnapshot.promptRevision = updated.rows[0].revision;
+      }
+      await c.query("INSERT INTO suite_workbench.task_generation_batches (id,suite_id,kind,requested_count,task_ids_json,status,idempotency_key,created_at,started_at) VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$7)", [input.batch.id,input.batch.suiteId,input.batch.kind,input.batch.requestedCount,JSON.stringify(input.batch.taskIds),input.batch.idempotencyKey,input.batch.createdAt]);
+      for (const slot of input.slots) await c.query("INSERT INTO suite_workbench.task_result_slots (id,batch_id,task_id,slot_ordinal,retry_of_slot_id,status,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [slot.id,slot.batchId,slot.taskId,slot.slotOrdinal,slot.retryOfSlotId,slot.status,slot.createdAt]);
+      for (const a of input.attempts) await c.query("INSERT INTO suite_workbench.task_generation_attempts (id,slot_id,attempt_no,provider,model,endpoint,request_summary_json,prompt_snapshot_json,prompt_sha256,context_snapshot_json,source_kind,source_object_key,source_input_image_id,source_base_version_id,source_library_reference_id,source_resource_version_id,status,started_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)", [a.id,a.slotId,a.attemptNo,a.provider,a.model,a.endpoint,JSON.stringify(a.requestSummary),JSON.stringify(a.promptSnapshot),a.promptSha256,JSON.stringify(a.contextSnapshot),a.sourceKind,a.sourceObjectKey,a.sourceInputImageId,a.sourceBaseVersionId,a.sourceLibraryReferenceId ?? null,a.sourceResourceVersionId ?? null,a.status,a.startedAt]);
+      await c.query("UPDATE suite_workbench.suite_tasks SET status='generating',updated_at=$2 WHERE id=ANY($1::uuid[])", [input.batch.taskIds,input.batch.createdAt]);
+      await c.query("COMMIT");
+      return { ...input, duplicate: false };
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
   async getBatch(id: string) { const r = await this.pool.query<TaskGenerationBatch>("SELECT " + batchCols + " FROM suite_workbench.task_generation_batches WHERE id=$1", [id]); return r.rows[0] ?? null; }
   async listBatches(suiteId: string) { const r = await this.pool.query<TaskGenerationBatch>("SELECT " + batchCols + " FROM suite_workbench.task_generation_batches WHERE suite_id=$1 ORDER BY created_at DESC", [suiteId]); return r.rows; }
   async getSlot(id: string) { const r = await this.pool.query<TaskResultSlot>("SELECT " + slotCols + " FROM suite_workbench.task_result_slots WHERE id=$1", [id]); return r.rows[0] ?? null; }

@@ -611,7 +611,7 @@ test("partial_failed 批次单卡点击失败重试成功后，批次徽标立�
   const { app, page, url, sample } = await offlineProgressFixture(t, {
     imageRetryDelayMs: 0,
     providerEdit: async (call, defaultResult) => {
-      if (call === 2 || call === 3) throw new Error("IMAGE_PROVIDER_FAILED");
+      if (call === 2) throw new Error("IMAGE_PROVIDER_FAILED");
       return defaultResult;
     },
   });

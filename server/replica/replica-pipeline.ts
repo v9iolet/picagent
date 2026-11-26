@@ -6,7 +6,7 @@ import { errorMessages, fail } from "../api-errors.js";
 import { asRecord, dataOf, now, ok, type AppResponse } from "../api-response.js";
 import { processImage, type ProcessedImage } from "../image.js";
 import { resolvePublishedProductCardSnapshot } from "../product-cards-api.js";
-import { waitUntil } from "../suite-pipeline.js";
+import { pendingImageGeneration, waitUntil } from "../suite-pipeline.js";
 import type {
   LibraryRepository,
   LlmClient,
@@ -370,11 +370,7 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
           currentPhase: "image_generating",
           updatedAt: now(),
         });
-        const pendingTasks: SuiteTask[] = [];
-        for (const task of taskRows) {
-          const history = await taskRepository.listTaskVersions(task.id);
-          if (!history.versions.some((version) => version.isCurrent)) pendingTasks.push(task);
-        }
+        const { pendingTasks, waitForActive } = await pendingImageGeneration(taskRepository, taskRows);
         if (pendingTasks.length) {
           const generationResponse = await request("POST", `/api/suites/${suiteId}/generation`, {
             headers: { "idempotency-key": `${executionKey}:images` },
@@ -392,6 +388,7 @@ export function createReplicaPipeline(deps: ReplicaPipelineDependencies) {
             600_000,
           );
         }
+        await waitForActive();
       }
 
       const histories = await Promise.all(taskRows.map((task) => taskRepository.listTaskVersions(task.id)));

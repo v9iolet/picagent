@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { readProductCardSnapshot } from "../../../shared/product-card";
-import { suiteApi } from "../../api/client";
+import { createGenerationActions, suiteApi } from "../../api/client";
 import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
 import { download, message, studioApi } from "../../components/suite-studio/studio";
 import { StudioDialog } from "../../components/suite-studio/StudioDialog";
@@ -133,6 +133,7 @@ export function ReplicaBatchPreview({
     ? runningStatusText(currentPhase, completed, total)
     : (STATUS_LABELS[effectiveStatus ?? ""] ?? "历史批次");
 
+  const [submitGeneration] = useState(createGenerationActions);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<BatchNotice | null>(null);
   const [preview, setPreview] = useState<{ url: string; title: string } | null>(null);
@@ -257,7 +258,7 @@ export function ReplicaBatchPreview({
 
   const handleRegenerateCard = (card: ReplicaResultCard, nextPrompt?: string) =>
     void act(async () => {
-      const result = await suiteApi.generateTask(card.parentTaskId, nextPrompt);
+      const result = await submitGeneration(card.parentTaskId, nextPrompt, (key) => suiteApi.generateTask(card.parentTaskId, nextPrompt, key));
       setPromptCard(null);
       setRetryingTaskId(card.parentTaskId);
       setRetryJob(result.batchId);

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { suiteApi, type ApiPlatformProfile } from "../../api/client";
+import { createGenerationActions, suiteApi, type ApiPlatformProfile } from "../../api/client";
 import { readProductCardSnapshot } from "../../../shared/product-card";
 import { SUITE_CATEGORY_GROUPS, SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
 import { pipelineErrorMessages } from "../../../shared/suite-pipeline-errors";
@@ -214,6 +214,7 @@ export function BatchResults({
         ? pipelineErrorMessages[run.errorCode ?? persistedMessage ?? ""] ??
           pipelineErrorMessages[phaseErrors[run.currentPhase]] ?? pipelineErrorMessages.PIPELINE_FAILED
         : null;
+  const [submitGeneration] = useState(createGenerationActions);
   const [picked, setPicked] = useState<string[]>([]),
     [menu, setMenu] = useState(false),
     [busy, setBusy] = useState(false),
@@ -272,7 +273,7 @@ export function BatchResults({
           taskIds: [card.parentTaskId],
           generationParams: { size },
         });
-      const result = await suiteApi.generateTask(card.parentTaskId);
+      const result = await submitGeneration(card.parentTaskId, size, (key) => suiteApi.generateTask(card.parentTaskId, undefined, key));
       setRetryJob(result.batchId);
       setNotice("已提交单张生成。");
     });

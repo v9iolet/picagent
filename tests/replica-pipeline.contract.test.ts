@@ -919,72 +919,75 @@ test("analysis failure can be resumed via POST /api/replicas/:suiteId/resume and
   assert.equal(f.providerCalls.length, 1);
 });
 
-test("interrupted image generation resumes via POST /api/replicas/:suiteId/resume and skips cards with current version", async () => {
-  let failCard2 = true;
-  const generatedCardTitles: string[] = [];
-  const f = await replicaFixture({
-    providerEdit: async (request, _call, defaultPng) => {
-      const isCard2 = request.prompt.includes("卡 2");
-      generatedCardTitles.push(isCard2 ? "card-2" : "card-1");
-      if (isCard2 && failCard2) {
-        throw new Error("IMAGE_PROVIDER_FAILED");
-      }
-      return { bytes: defaultPng, mimeType: "image/png" };
-    },
+for (const error of ["IMAGE_PROVIDER_FAILED", "IMAGE_PROVIDER_TIMEOUT", "INVALID_PROVIDER_RESPONSE"]) {
+  test(`复刻遇到 ${error} 停止出图，手动继续时跳过已有版本`, async () => {
+    let failCard2 = true;
+    const generatedCardTitles: string[] = [];
+    const f = await replicaFixture({
+      providerEdit: async (request, _call, defaultPng) => {
+        const isCard2 = request.prompt.includes("卡 2");
+        generatedCardTitles.push(isCard2 ? "card-2" : "card-1");
+        if (isCard2 && failCard2) {
+          throw new Error(error);
+        }
+        return { bytes: defaultPng, mimeType: "image/png" };
+      },
+    });
+
+    const ref1 = await makePng(80, 80, { r: 15, g: 25, b: 35 });
+    const ref2 = await makePng(80, 80, { r: 35, g: 45, b: 55 });
+    const prod = await makePng(64, 64, { r: 220, g: 210, b: 200 });
+
+    const created = await f.app.request("POST", "/api/replicas", {
+      headers: { "Idempotency-Key": "interrupt-resume-1" },
+      body: {
+        references: [
+          { filename: "ref1.png", mimeType: "image/png", bytesBase64: ref1.toString("base64") },
+          { filename: "ref2.png", mimeType: "image/png", bytesBase64: ref2.toString("base64") },
+        ],
+        products: [{ filename: "prod.png", mimeType: "image/png", bytesBase64: prod.toString("base64") }],
+        sceneType: "social_post",
+        cloneLevel: "compose",
+        styleUnified: true,
+        language: "zh",
+        ratio: "1:1",
+        size: "1K",
+      },
+    });
+    assert.equal(created.status, 201);
+    const { suiteId, runId } = (created.body as any).data;
+
+    // Wait for partial_failed (card 1 succeeded, card 2 failed)
+    const partialState = await waitStudioState(f.app, suiteId, (data) => data.pipeline?.status === "partial_failed");
+    assert.equal(partialState.cards.length, 2);
+    assert.equal(partialState.progress.completed, 1);
+
+    // Simulate server restart interrupt state in image_generating phase
+    await f.pipelineRepository.updateRun(runId, {
+      status: "failed",
+      currentPhase: "image_generating",
+      errorCode: "PIPELINE_INTERRUPTED",
+      errorMessage: "生成服务中断，请继续流水线",
+    });
+
+    const callsBeforeResume = generatedCardTitles.length;
+    assert.deepEqual(generatedCardTitles.filter((title) => title === "card-2"), ["card-2"]);
+    failCard2 = false;
+    const resumed = await f.app.request("POST", `/api/replicas/${suiteId}/resume`, {
+      headers: { "Idempotency-Key": "resume-images-1" },
+    });
+    assert.equal(resumed.status, 202);
+
+    const completedState = await waitStudioState(f.app, suiteId, (data) => data.pipeline?.status === "completed");
+    assert.equal(completedState.pipeline.currentPhase, "done");
+    assert.equal(completedState.progress.completed, 2);
+    // LLM was NOT re-called during image resume
+    assert.equal(f.llmCalls.length, 1);
+    // Only card 2 was generated after resume; card 1 was skipped
+    const callsAfterResume = generatedCardTitles.slice(callsBeforeResume);
+    assert.deepEqual(callsAfterResume, ["card-2"]);
   });
-
-  const ref1 = await makePng(80, 80, { r: 15, g: 25, b: 35 });
-  const ref2 = await makePng(80, 80, { r: 35, g: 45, b: 55 });
-  const prod = await makePng(64, 64, { r: 220, g: 210, b: 200 });
-
-  const created = await f.app.request("POST", "/api/replicas", {
-    headers: { "Idempotency-Key": "interrupt-resume-1" },
-    body: {
-      references: [
-        { filename: "ref1.png", mimeType: "image/png", bytesBase64: ref1.toString("base64") },
-        { filename: "ref2.png", mimeType: "image/png", bytesBase64: ref2.toString("base64") },
-      ],
-      products: [{ filename: "prod.png", mimeType: "image/png", bytesBase64: prod.toString("base64") }],
-      sceneType: "social_post",
-      cloneLevel: "compose",
-      styleUnified: true,
-      language: "zh",
-      ratio: "1:1",
-      size: "1K",
-    },
-  });
-  assert.equal(created.status, 201);
-  const { suiteId, runId } = (created.body as any).data;
-
-  // Wait for partial_failed (card 1 succeeded, card 2 failed)
-  const partialState = await waitStudioState(f.app, suiteId, (data) => data.pipeline?.status === "partial_failed");
-  assert.equal(partialState.cards.length, 2);
-  assert.equal(partialState.progress.completed, 1);
-
-  // Simulate server restart interrupt state in image_generating phase
-  await f.pipelineRepository.updateRun(runId, {
-    status: "failed",
-    currentPhase: "image_generating",
-    errorCode: "PIPELINE_INTERRUPTED",
-    errorMessage: "生成服务中断，请继续流水线",
-  });
-
-  const callsBeforeResume = generatedCardTitles.length;
-  failCard2 = false;
-  const resumed = await f.app.request("POST", `/api/replicas/${suiteId}/resume`, {
-    headers: { "Idempotency-Key": "resume-images-1" },
-  });
-  assert.equal(resumed.status, 202);
-
-  const completedState = await waitStudioState(f.app, suiteId, (data) => data.pipeline?.status === "completed");
-  assert.equal(completedState.pipeline.currentPhase, "done");
-  assert.equal(completedState.progress.completed, 2);
-  // LLM was NOT re-called during image resume
-  assert.equal(f.llmCalls.length, 1);
-  // Only card 2 was generated after resume; card 1 was skipped
-  const callsAfterResume = generatedCardTitles.slice(callsBeforeResume);
-  assert.deepEqual(callsAfterResume, ["card-2"]);
-});
+}
 
 test("editing replica card prompt and regenerating creates a new version with frozen snapshots", async () => {
   const f = await replicaFixture();

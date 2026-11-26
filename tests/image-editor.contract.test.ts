@@ -3,6 +3,7 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import sharp from "sharp";
+import { waitUntil } from "../server/suite-pipeline.js";
 import { computeOutpaintCanvas } from "../shared/image-editor.js";
 import { buildImageEditPrompt, imageEditProductInputs, ImageEditorService, MemoryImageEditorRepository, type EditOperation, type ImageEditCommand, type ImageEditProvider, type ImageSource } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
@@ -818,7 +819,7 @@ test("product restoration defaults to all originals, accepts one candidate or a 
     assert.deepEqual(snapshot.operations[0].payload, { referenceObjectKeys: keys });
     assert.equal(snapshot.maskApplied, false);
     assert.match(attempt.command.prompt, /^第 1 张为待编辑图[\s\S]*保持原图的构图、背景、文字[\s\S]*形状、结构比例、颜色、材质/);
-    for (let check = 0; check < 30 && calls.length <= i; check += 1) await settle();
+    await waitUntil(() => repository.getAttempt(attempt.id), (item) => item?.status === "succeeded", 5000);
     assert.deepEqual(calls[i].images?.map((image) => image.bytes), [png, ...images]);
   }
   for (const [key, version, selection, code] of [

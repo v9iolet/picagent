@@ -220,6 +220,8 @@ export class PostgresSuiteRepository implements SuiteRepository {
         await client.query("COMMIT");
         return { attempt: normalizeAttempt(existing.rows[0]), existingVersion: version.rows[0] ? normalizeBaseVersion(version.rows[0]) : null, duplicate: true };
       }
+      const running = await client.query("SELECT 1 FROM suite_workbench.generation_attempts WHERE input_image_id=$1 AND status='running' LIMIT 1", [input.inputImageId]);
+      if (running.rowCount) throw new Error("BASE_GENERATION_IN_PROGRESS");
       const next = await client.query<{ version_number: number }>("SELECT COALESCE(MAX(version_number), 0) + 1 AS version_number FROM suite_workbench.generation_attempts WHERE input_image_id = $1 AND status IN ('running', 'succeeded')", [input.inputImageId]);
       const result = await client.query<GenerationAttempt>(`INSERT INTO suite_workbench.generation_attempts
         (id, suite_id, input_image_id, base_version_id, version_number, idempotency_key, status, model, endpoint, prompt,
