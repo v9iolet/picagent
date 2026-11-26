@@ -99,15 +99,15 @@ export interface StudioState {
 }
 const path = (id: string) => `/api/suites/${encodeURIComponent(id)}`;
 const submitGeneration = createGenerationActions();
-async function json<T>(url: string, body?: object): Promise<T> {
+async function json<T>(url: string, body?: object, signal?: AbortSignal): Promise<T> {
   if (body) return submitGeneration(url, body, (key) => postGeneration<T>(url, body, key));
-  const response = await fetch(url, { cache: "no-store" });
+  const response = await fetch(url, { cache: "no-store", signal });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error?.message ?? `请求失败 (${response.status})`);
   return data.data;
 }
 export const studioApi = {
-  state: (id: string) => json<StudioState>(`${path(id)}/studio-state`),
+  state: (id: string, signal?: AbortSignal) => json<StudioState>(`${path(id)}/studio-state`, undefined, signal),
   feed: (params: {
     origin?: GenerationHistoryOrigin;
     keyword?: string;

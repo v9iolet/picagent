@@ -1,3 +1,4 @@
+import { usePolling } from "../hooks/usePolling";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { defaultImageOptions } from "../../shared/model-settings";
 import { modelSettingsApi, productCardsApi } from "../api/client";
@@ -268,33 +269,19 @@ export function ReplicaStudioPage({
       ? currentState.suite.id
       : undefined;
 
-  useEffect(() => {
+  usePolling(async signal => {
     if (!pollingSuiteId) return;
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    async function poll() {
-      const seq = ++requestSeqRef.current;
-      try {
-        const next = await replicaApi.state(pollingSuiteId!);
-        if (!live || currentSuiteIdRef.current !== pollingSuiteId) return;
-        applyState(next, seq);
-        if (next.pipeline?.status === "running") {
-          timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-        }
-      } catch (error) {
-        if (!live || currentSuiteIdRef.current !== pollingSuiteId) return;
-        setPageNotice(message(error));
-        timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-      }
-    }
-
-    timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-    return () => {
-      live = false;
-      if (timer !== undefined) clearTimeout(timer);
-    };
-  }, [pollingSuiteId, applyState]);
+    const seq = ++requestSeqRef.current;
+    const next = await replicaApi.state(pollingSuiteId, signal);
+    if (signal.aborted || currentSuiteIdRef.current !== pollingSuiteId) return;
+    applyState(next, seq);
+  }, {
+    enabled: Boolean(pollingSuiteId),
+    intervalMs: POLL_INTERVAL_MS,
+    onError: error => {
+      if (currentSuiteIdRef.current === pollingSuiteId) setPageNotice(message(error));
+    },
+  }, [pollingSuiteId]);
 
   const handleAddReferences = useCallback((files: File[]) => {
     replicaDraftStore.addReferences(files);
@@ -332,9 +319,10 @@ export function ReplicaStudioPage({
   }, []);
 
   const refresh = useCallback(
-    async (id: string) => {
+    async (id: string, signal?: AbortSignal) => {
       const seq = ++requestSeqRef.current;
-      const next = await replicaApi.state(id);
+      const next = await replicaApi.state(id, signal);
+      if (signal?.aborted) return;
       if (currentSuiteIdRef.current && currentSuiteIdRef.current !== id) return;
       applyState(next, seq);
     },

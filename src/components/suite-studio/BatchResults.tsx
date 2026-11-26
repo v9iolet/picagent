@@ -166,7 +166,7 @@ type Props = {
   state: StudioState;
   profiles: ApiPlatformProfile[];
   sizes: string[];
-  refresh: (id: string) => Promise<void>;
+  refresh: (id: string, signal?: AbortSignal) => Promise<void>;
   onEdit: (s: StudioState) => void;
   onDelete: (id: string) => void;
   onActivate: (id: string) => void;

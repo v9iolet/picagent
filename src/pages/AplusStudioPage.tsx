@@ -1,3 +1,4 @@
+import { usePolling } from "../hooks/usePolling";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   APLUS_SIZE_PRESETS, isAplusPlanStale, normalizeAplusLanguage, validateAplusSizePresets,
@@ -177,11 +178,11 @@ function AplusWorkspace({
     return () => { active = false; };
   }, [updateConfig, initialProductCardId]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (signal?: AbortSignal) => {
     if (!suiteId) return;
     const sequence = ++refreshSequence.current;
-    const next = await aplusApi.state(suiteId);
-    if (!mounted.current || sequence < appliedRefresh.current) return;
+    const next = await aplusApi.state(suiteId, signal);
+    if (signal?.aborted || !mounted.current || sequence < appliedRefresh.current) return;
     appliedRefresh.current = sequence;
     if (readAplusWorkspace()?.routeKey !== routeKey) commitDraft(draftFromBatch(next));
     saveAplusBatch(next);
@@ -202,21 +203,11 @@ function AplusWorkspace({
   useEffect(() => { if (suiteId) void load(); }, [suiteId, load]);
 
   const running = state?.pipeline?.status === "running";
-  useEffect(() => {
-    if (!running) return;
-    let active = true;
-    let timer: ReturnType<typeof setTimeout>;
-    async function poll() {
-      try {
-        await refresh();
-      } catch (error) {
-        if (active) setBatchError(message(error));
-      }
-      if (active) timer = setTimeout(poll, 2000);
-    }
-    timer = setTimeout(poll, 2000);
-    return () => { active = false; clearTimeout(timer); };
-  }, [running, refresh]);
+  usePolling(refresh, {
+    enabled: running,
+    intervalMs: 2000,
+    onError: error => setBatchError(message(error)),
+  }, [refresh]);
 
   const { images } = draft;
   const fallbackProfile = profiles.find(({ code }) => code === "amazon") ?? profiles[0];

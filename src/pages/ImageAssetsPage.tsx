@@ -1,3 +1,4 @@
+import { useToast } from "../components/ui/ToastProvider";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { suiteApi, type ApiLibraryResource, type ApiLibraryResourceType } from "../api/client";
 import { AppShell } from "../components/AppShell";
@@ -48,7 +49,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
   const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [toast, setToast] = useState("");
+  const { showToast: notify } = useToast();
   const [promptModal, setPromptModal] = useState<ApiLibraryResource | null>(null);
   const loadSequence = useRef(0);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
@@ -58,8 +59,6 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
     document.title = "图片库 · PicAgent";
     return () => { document.title = previous; };
   }, []);
-
-  const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2400); };
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -562,7 +561,6 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
         </div>
       )}
       {error && <div className="suite-toast show" role="alert">{error}</div>}
-      {toast && <div className="suite-toast show" role="status">{toast}</div>}
     </AppShell>
   );
 }
