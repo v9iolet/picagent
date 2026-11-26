@@ -22,7 +22,7 @@ const fail = (code: string, status = 400): ImageEditorApiResponse => {
 
 export function createImageEditorApi(service: ImageEditorService) {
   return {
-    async request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<ImageEditorApiResponse> {
+    async request(method: string, path: string, options: { headers?: Record<string, string | undefined>; body?: unknown } = {}): Promise<ImageEditorApiResponse> {
       const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
       const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
       if (method === "GET" && path === "/api/image-editor/capabilities") return ok(await service.capabilities());
