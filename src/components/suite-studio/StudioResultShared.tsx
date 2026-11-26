@@ -1,6 +1,6 @@
-import { useEffect, useRef, type ComponentProps } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
-import { suiteApi } from "../../api/client";
+import { createGenerationActions, suiteApi } from "../../api/client";
 import { ImageEditorModal } from "../../pages/WorkbenchBoardPage";
 import { message } from "./studio";
 
@@ -87,6 +87,7 @@ export function StudioImageEditorHost({
   onRetryJobStarted: (batchId: string, parentTaskId: string) => void;
   onNotify: (text: string) => void;
 }) {
+  const [submitGeneration] = useState(createGenerationActions);
   if (!card || !card.versionId || !card.previewUrl) return null;
   const targetTaskId = card.editChildTaskId ?? card.parentTaskId;
   const parentTaskId = card.parentTaskId;
@@ -111,25 +112,26 @@ export function StudioImageEditorHost({
           summary,
         );
       }}
-      onSubmit={async (selection, instruction) => {
+      onSubmit={async (selection, instruction, key) => {
         const res = await suiteApi.submitImageEdit(targetTaskId, {
           ...selection,
           sourceCardId: targetTaskId,
           parentVersionId: selection.sourceVersionId,
           summary: instruction,
-        });
+        }, key);
         onClose();
         onEditJobStarted(String((res.childTask as { id: string }).id), parentTaskId);
         onNotify("已提交图片编辑，正在生成图片…");
       }}
       onRegenerate={async () => {
         if (card.editChildTaskId) {
-          await suiteApi.regenerateImageEditTask(card.editChildTaskId);
+          await submitGeneration(targetTaskId, card.versionId, (key) => suiteApi.regenerateImageEditTask(targetTaskId, key));
           onClose();
           onEditJobStarted(card.editChildTaskId, parentTaskId);
           onNotify("已提交再次生成，正在更新图片…");
         } else {
-          const result = await suiteApi.regenerateTaskFromEdit(card.parentTaskId, card.versionId!);
+          const result = await submitGeneration(parentTaskId, card.versionId,
+            (key) => suiteApi.regenerateTaskFromEdit(parentTaskId, card.versionId!, key));
           onClose();
           onRetryJobStarted(result.batchId, parentTaskId);
           onNotify("已提交单张生成。");

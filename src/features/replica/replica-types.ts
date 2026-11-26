@@ -1,7 +1,7 @@
 import type { ImageOptions } from "../../../shared/model-settings";
 import type { ProductCardSnapshot } from "../../../shared/product-card";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
-import { createIdempotencyKey, type ApiImage, type ApiLibraryResource, type ApiSuite, type ApiTaskStatus } from "../../api/client";
+import { createGenerationActions, createIdempotencyKey, postGeneration, type ApiImage, type ApiLibraryResource, type ApiSuite, type ApiTaskStatus } from "../../api/client";
 import type { SelectedProductCardSummary } from "../../components/product-card-picker/types";
 
 export type ReplicaSceneType =
@@ -387,32 +387,18 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return payload.data;
 }
 
+const submitGeneration = createGenerationActions();
+
 export const replicaApi = {
   create(payload: ReplicaCreatePayload) {
-    return fetchJson<{ suiteId: string; runId: string }>("/api/replicas", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": createIdempotencyKey(),
-      },
-      body: JSON.stringify(payload),
-    });
+    return submitGeneration("create", payload, (key) => postGeneration<{ suiteId: string; runId: string }>("/api/replicas", payload, key));
   },
   state(suiteId: string) {
     return fetchJson<ReplicaStudioState>(`/api/suites/${encodeURIComponent(suiteId)}/studio-state`);
   },
   resume(suiteId: string) {
-    return fetchJson<{ suiteId: string; runId: string }>(
-      `/api/replicas/${encodeURIComponent(suiteId)}/resume`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": createIdempotencyKey(),
-        },
-        body: JSON.stringify({}),
-      },
-    );
+    return submitGeneration(suiteId, "resume", (key) =>
+      postGeneration<{ suiteId: string; runId: string }>(`/api/replicas/${encodeURIComponent(suiteId)}/resume`, {}, key));
   },
   saveReverseAsset(suiteId: string, taskId: string, title?: string) {
     return fetchJson<ApiLibraryResource>(

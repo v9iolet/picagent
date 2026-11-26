@@ -116,6 +116,7 @@ export type ImageEditVersionCompletedListener = (
 ) => Promise<AplusImageVersionMetadata | void>;
 
 export interface ImageEditCommand {
+  sessionId?: string;
   type: ImageEditOperationType;
   sourceVersionId: string;
   prompt: string;
@@ -247,6 +248,7 @@ export function removeDraftOperations(draft: EditDraft, operationIds: readonly s
 }
 
 export interface ImageEditorRepository {
+  hasActiveSubmission(sessionId: string, sourceVersionId: string, tool?: string): Promise<boolean>;
   getSubmission(idempotencyKey: string): Promise<EditSubmission | null>;
   getDraft(sessionId: string): Promise<EditDraft | null>;
   upsertDraftOperation(sessionId: string, operation: EditOperation, summary?: string): Promise<EditDraft>;
@@ -301,9 +303,20 @@ export class MemoryImageEditorRepository implements ImageEditorRepository {
     if (!old) return null;
     return structuredClone({ snapshot: this.snapshots.get(old.snapshotId)!, childTask: this.tasks.get(old.childTaskId)!, attempt: this.attempts.get(old.attemptId)!, duplicate: true });
   }
+  private activeSubmission(sessionId: string, sourceVersionId: string, tool?: string) {
+    return [...this.attempts.values()].some(({ status, command, childTaskId }) =>
+      status === "generating" && command.sourceVersionId === sourceVersionId && (!tool || command.type === tool) &&
+      (command.sessionId ?? this.tasks.get(childTaskId)?.sourceCardId) === sessionId);
+  }
+  async hasActiveSubmission(sessionId: string, sourceVersionId: string, tool?: string) {
+    return this.activeSubmission(sessionId, sourceVersionId, tool);
+  }
   async submit({ submittedDraft, ...input }: EditSubmissionInput) {
     const old = this.idempotency.get(input.idempotencyKey);
     if (old) return { snapshot: this.snapshots.get(old.snapshotId)!, childTask: this.tasks.get(old.childTaskId)!, attempt: this.attempts.get(old.attemptId)!, duplicate: true };
+    if (this.activeSubmission(input.attempt.command.sessionId ?? input.childTask.sourceCardId, input.snapshot.sourceVersionId, input.attempt.command.type)) {
+      throw new Error("IMAGE_EDIT_IN_PROGRESS");
+    }
     if (submittedDraft) {
       const draft = this.drafts.get(submittedDraft.sessionId);
       if (!draft) throw new Error("EDIT_DRAFT_CHANGED");
@@ -319,7 +332,9 @@ export class MemoryImageEditorRepository implements ImageEditorRepository {
     const old = this.idempotency.get(input.idempotencyKey);
     if (old) return { snapshot: this.snapshots.get(old.snapshotId)!, childTask: this.tasks.get(old.childTaskId)!, attempt: this.attempts.get(old.attemptId)!, duplicate: true };
     if (!this.snapshots.has(input.snapshot.id) || !this.tasks.has(input.childTask.id)) throw new Error("INVALID_IMAGE_EDIT_TASK");
-    const attemptNo = [...this.attempts.values()].filter((item) => item.childTaskId === input.childTask.id).reduce((max, item) => Math.max(max, item.attemptNo), 0) + 1;
+    const previous = [...this.attempts.values()].filter((item) => item.childTaskId === input.childTask.id);
+    if (previous.some((item) => item.status === "generating")) throw new Error("IMAGE_EDIT_IN_PROGRESS");
+    const attemptNo = previous.reduce((max, item) => Math.max(max, item.attemptNo), 0) + 1;
     const attempt = { ...input.attempt, attemptNo };
     this.attempts.set(attempt.id, structuredClone(attempt));
     this.tasks.set(input.childTask.id, structuredClone(input.childTask));
@@ -731,6 +746,7 @@ export class ImageEditorService {
     if (!draftOperations.length || (input.operationIds && draftOperations.length !== selected.size)) {
       const duplicate = await this.repository.getSubmission(input.idempotencyKey);
       if (duplicate) return duplicate;
+      if (await this.repository.hasActiveSubmission(input.sessionId, input.sourceVersionId, input.tool)) throw new Error("IMAGE_EDIT_IN_PROGRESS");
       throw new Error(draftOperations.length ? "EDIT_DRAFT_CHANGED" : "EDIT_OPERATIONS_REQUIRED");
     }
     const tool = input.tool ?? draftOperations[0].type;
@@ -818,7 +834,7 @@ export class ImageEditorService {
     };
     const taskId = randomUUID(); const now = new Date().toISOString(); const childTask: ImageEditChildTask = { id: taskId, sourceCardId: input.sourceCardId, sourceVersionId: snapshot.sourceVersionId, parentVersionId: snapshot.parentVersionId, snapshotId: snapshot.id, summary: snapshot.summary, status: "generating", currentVersionId: null, finalVersionId: null, errorCode: null, errorMessage: null, createdAt: now, updatedAt: now };
     const command: ImageEditCommand = {
-      type: materialized[0].type, sourceVersionId: snapshot.sourceVersionId, prompt,
+      sessionId: input.sessionId, type: materialized[0].type, sourceVersionId: snapshot.sourceVersionId, prompt,
       operations: snapshot.operations, attachedInputs: snapshot.attachedInputs, maskApplied: snapshot.maskApplied,
     };
     const attempt: ImageEditAttempt = { id: randomUUID(), childTaskId: taskId, snapshotId: snapshot.id, attemptNo: 1, status: "generating", command, provider: snapshot.provider, errorCode: null, errorMessage: null, createdAt: now, completedAt: null };
@@ -857,7 +873,7 @@ export class ImageEditorService {
     if (existing) return existing;
     const task = await this.repository.getChildTask(input.childTaskId);
     if (!task) throw new Error("INVALID_IMAGE_EDIT_TASK");
-    if (!task.currentVersionId) throw new Error("CURRENT_VERSION_REQUIRED");
+    if (!task.currentVersionId) throw new Error(task.status === "generating" ? "IMAGE_EDIT_IN_PROGRESS" : "CURRENT_VERSION_REQUIRED");
     const snapshot = await this.repository.getSnapshot(task.snapshotId);
     if (!snapshot) throw new Error("INVALID_IMAGE_EDIT_SNAPSHOT");
     const provider = await this.requireProvider();

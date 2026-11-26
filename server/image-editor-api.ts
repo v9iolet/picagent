@@ -12,6 +12,7 @@ const editErrors: Record<string, string> = {
   RESTORE_PRODUCT_IMAGE_TOO_LARGE: "商品外观依据图不能超过 10 MB",
 };
 const fail = (code: string, status = 400): ImageEditorApiResponse => {
+  if (code === "IMAGE_EDIT_IN_PROGRESS") return failApi(code, 409);
   if (code === "IMAGE_PROVIDER_NOT_CONFIGURED" || code === "OCR_PROVIDER_UNAVAILABLE") {
     const purpose = code === "OCR_PROVIDER_UNAVAILABLE" ? "多模态" : "生图";
     return { status: 503, body: { error: { code, message: `请前往配置 → 偏好设置，选择默认${purpose}模型` }, requestId: randomUUID() } };

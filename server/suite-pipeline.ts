@@ -82,6 +82,22 @@ export const waitUntil = async <T>(
   throw new Error("PIPELINE_TIMEOUT");
 };
 
+export async function pendingImageGeneration(repository: TaskRepository, tasks: SuiteTask[]) {
+  const pendingTasks: SuiteTask[] = [];
+  const activeAttemptIds: string[] = [];
+  for (const task of tasks) {
+    const { versions, attempts } = await repository.listTaskVersions(task.id);
+    if (versions.some((version) => version.isCurrent)) continue;
+    const running = attempts.filter((attempt) => attempt.status === "running");
+    if (running.length) activeAttemptIds.push(...running.map((attempt) => attempt.id));
+    else pendingTasks.push(task);
+  }
+  // A manual redraw may already own a missing card. Observe its result without resubmitting it.
+  const waitForActive = () => Promise.all(activeAttemptIds.map((id) =>
+    waitUntil(() => repository.getAttempt(id), (attempt) => attempt?.status !== "running", 600_000)));
+  return { pendingTasks, waitForActive };
+}
+
 class PipelineError extends Error {
   constructor(readonly code: string, message?: string) {
     super(message || errorMessages[code] || errorMessages.PIPELINE_FAILED);
@@ -424,11 +440,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       let batchId: string | undefined;
       if (resumePhase !== "done") {
         await pipelineRepository.updateRun(run.id, { currentPhase: "image_generating", updatedAt: now() });
-        const pendingTasks: SuiteTask[] = [];
-        for (const task of taskRows) {
-          const history = await deps.taskRepository.listTaskVersions(task.id);
-          if (!history.versions.some((version) => version.isCurrent)) pendingTasks.push(task);
-        }
+        const { pendingTasks, waitForActive } = await pendingImageGeneration(taskRepository, taskRows);
         if (pendingTasks.length) {
           const generationResponse = await request("POST", `/api/suites/${suiteId}/generation`, {
             headers: { "idempotency-key": `${executionKey}:images` },
@@ -446,6 +458,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
             600_000,
           );
         }
+        await waitForActive();
       }
       const histories = await Promise.all(taskRows.map((task) => taskRepository.listTaskVersions(task.id)));
       const missing = histories.filter((history) => !history.versions.some((version) => version.isCurrent));

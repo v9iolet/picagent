@@ -123,14 +123,23 @@ export class PostgresImageEditorRepository implements ImageEditorRepository {
   async saveOcrSnapshot(sessionId: string, snapshot: import("../image-editor.js").OcrSnapshot) { await this.pool.query(`INSERT INTO suite_workbench.image_edit_ocr_snapshots(session_id,source_version_id,status,blocks_json,error,provider_json,updated_at) VALUES($1,$2,$3,$4,$5,$6,now()) ON CONFLICT(session_id,source_version_id) DO UPDATE SET status=EXCLUDED.status,blocks_json=EXCLUDED.blocks_json,error=EXCLUDED.error,provider_json=EXCLUDED.provider_json,updated_at=now()`, [sessionId, snapshot.sourceVersionId, snapshot.status, JSON.stringify(snapshot.blocks), snapshot.error ?? null, snapshot.provider ? JSON.stringify(snapshot.provider) : null]); }
   async getAttempt(id: string) { const r = await this.pool.query<ImageEditAttempt>(`SELECT ${attemptRow} FROM suite_workbench.image_edit_attempts WHERE id=$1`, [id]); return r.rows[0] ?? null; }
   async getSubmission(idempotencyKey: string) {
-    const result = await this.pool.query<{ snapshotId: string; childTaskId: string; attemptId: string }>(
-      'SELECT snapshot_id AS "snapshotId",child_task_id AS "childTaskId",attempt_id AS "attemptId" FROM suite_workbench.image_edit_idempotency WHERE idempotency_key=$1',
-      [idempotencyKey],
-    );
-    const row = result.rows[0];
-    if (!row) return null;
-    const [snapshot, childTask, attempt] = await Promise.all([this.getSnapshot(row.snapshotId), this.getChildTask(row.childTaskId), this.getAttempt(row.attemptId)]);
-    return snapshot && childTask && attempt ? { snapshot, childTask, attempt, duplicate: true } : null;
+    return this.readSubmission(this.pool, idempotencyKey);
+  }
+  private async readSubmission(db: Pool | PoolClient, idempotencyKey: string) {
+    const { rows: [ids] } = await db.query(`SELECT snapshot_id,child_task_id,attempt_id
+      FROM suite_workbench.image_edit_idempotency WHERE idempotency_key=$1`, [idempotencyKey]);
+    if (!ids) return null;
+    const { rows: [snapshot] } = await db.query<EditSnapshot>(`SELECT ${snapshotRow} FROM suite_workbench.image_edit_snapshots WHERE id=$1`, [ids.snapshot_id]);
+    const { rows: [childTask] } = await db.query<ImageEditChildTask>(`SELECT ${taskRow} FROM suite_workbench.image_edit_child_tasks WHERE id=$1`, [ids.child_task_id]);
+    const { rows: [attempt] } = await db.query<ImageEditAttempt>(`SELECT ${attemptRow} FROM suite_workbench.image_edit_attempts WHERE id=$1`, [ids.attempt_id]);
+    return { snapshot, childTask, attempt, duplicate: true };
+  }
+  async hasActiveSubmission(sessionId: string, sourceVersionId: string, tool?: string, db: Pool | PoolClient = this.pool) {
+    const active = await db.query(`SELECT 1 FROM suite_workbench.image_edit_attempts a
+      JOIN suite_workbench.image_edit_child_tasks t ON t.id=a.child_task_id
+      WHERE a.status='generating' AND COALESCE(a.command_json->>'sessionId', t.source_card_id)=$1
+        AND t.source_version_id=$2 AND ($3::text IS NULL OR a.command_json->>'type'=$3) LIMIT 1`, [sessionId, sourceVersionId, tool]);
+    return Boolean(active.rowCount);
   }
   async submit({ submittedDraft, ...input }: EditSubmissionInput) {
     const client = await this.pool.connect();
@@ -138,13 +147,15 @@ export class PostgresImageEditorRepository implements ImageEditorRepository {
     try {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [idempotencyKey]);
-      const existing = await client.query(
-        `SELECT 1 FROM suite_workbench.image_edit_idempotency WHERE idempotency_key=$1`, [idempotencyKey],
-      );
-      if (existing.rowCount) {
+      const existing = await this.readSubmission(client, idempotencyKey);
+      if (existing) {
         await client.query("COMMIT");
-        return (await this.getSubmission(idempotencyKey))!;
+        return existing;
       }
+      const sessionId = attempt.command.sessionId ?? childTask.sourceCardId;
+      const scope = [sessionId, snapshot.sourceVersionId, attempt.command.type];
+      await client.query("SELECT pg_advisory_xact_lock(1, hashtext($1))", [JSON.stringify(scope)]);
+      if (await this.hasActiveSubmission(sessionId, snapshot.sourceVersionId, attempt.command.type, client)) throw new Error("IMAGE_EDIT_IN_PROGRESS");
       if (submittedDraft) {
         const updated = await this.updateDraft(client, submittedDraft.sessionId,
           (draft) => removeDraftOperations(draft, [], submittedDraft.operations));
@@ -187,7 +198,34 @@ export class PostgresImageEditorRepository implements ImageEditorRepository {
       client.release();
     }
   }
-  async appendAttempt(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }) { const c = await this.pool.connect(); try { await c.query("BEGIN"); await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.idempotencyKey]); const old = await c.query(`SELECT snapshot_id AS "snapshotId",child_task_id AS "childTaskId",attempt_id AS "attemptId" FROM suite_workbench.image_edit_idempotency WHERE idempotency_key=$1`, [input.idempotencyKey]); if (old.rowCount) { await c.query("COMMIT"); return { snapshot: (await this.getSnapshot(old.rows[0].snapshotId))!, childTask: (await this.getChildTask(old.rows[0].childTaskId))!, attempt: (await this.getAttempt(old.rows[0].attemptId))!, duplicate: true }; } const existing = await c.query<{ snapshotId: string }>(`SELECT snapshot_id AS "snapshotId" FROM suite_workbench.image_edit_child_tasks WHERE id=$1 FOR UPDATE`, [input.childTask.id]); if (!existing.rowCount || existing.rows[0].snapshotId !== input.snapshot.id) throw new Error("INVALID_IMAGE_EDIT_TASK"); const next = await c.query<{ n: number }>(`SELECT COALESCE(MAX(attempt_no),0)+1 AS n FROM suite_workbench.image_edit_attempts WHERE child_task_id=$1`, [input.childTask.id]); const attemptNo = Number(next.rows[0].n); await c.query(`INSERT INTO suite_workbench.image_edit_attempts(id,child_task_id,snapshot_id,attempt_no,command_json,provider_json,status,error_code,error_message,created_at,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [input.attempt.id,input.attempt.childTaskId,input.attempt.snapshotId,attemptNo,JSON.stringify(input.attempt.command),JSON.stringify(input.attempt.provider),input.attempt.status,input.attempt.errorCode,input.attempt.errorMessage,input.attempt.createdAt,input.attempt.completedAt]); await c.query(`UPDATE suite_workbench.image_edit_child_tasks SET status=$2,error_code=$3,error_message=$4,updated_at=$5 WHERE id=$1`, [input.childTask.id,input.childTask.status,input.childTask.errorCode,input.childTask.errorMessage,input.childTask.updatedAt]); await c.query(`INSERT INTO suite_workbench.image_edit_idempotency(idempotency_key,snapshot_id,child_task_id,attempt_id) VALUES($1,$2,$3,$4)`, [input.idempotencyKey,input.snapshot.id,input.childTask.id,input.attempt.id]); await c.query("COMMIT"); return { snapshot: input.snapshot, childTask: (await this.getChildTask(input.childTask.id))!, attempt: (await this.getAttempt(input.attempt.id))!, duplicate: false }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
+  async appendAttempt(input: { idempotencyKey: string; snapshot: EditSnapshot; childTask: ImageEditChildTask; attempt: ImageEditAttempt }) {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.idempotencyKey]);
+      const duplicate = await this.readSubmission(c, input.idempotencyKey);
+      if (duplicate) {
+        await c.query("COMMIT");
+        return duplicate;
+      }
+      const existing = await c.query<{ snapshotId: string }>(`SELECT snapshot_id AS "snapshotId" FROM suite_workbench.image_edit_child_tasks WHERE id=$1 FOR UPDATE`, [input.childTask.id]);
+      if (!existing.rowCount || existing.rows[0].snapshotId !== input.snapshot.id) throw new Error("INVALID_IMAGE_EDIT_TASK");
+      const active = await c.query("SELECT 1 FROM suite_workbench.image_edit_attempts WHERE child_task_id=$1 AND status='generating' LIMIT 1", [input.childTask.id]);
+      if (active.rowCount) throw new Error("IMAGE_EDIT_IN_PROGRESS");
+      const next = await c.query<{ n: number }>(`SELECT COALESCE(MAX(attempt_no),0)+1 AS n FROM suite_workbench.image_edit_attempts WHERE child_task_id=$1`, [input.childTask.id]);
+      const attemptNo = Number(next.rows[0].n);
+      const savedAttempt = await c.query<ImageEditAttempt>(`INSERT INTO suite_workbench.image_edit_attempts(id,child_task_id,snapshot_id,attempt_no,command_json,provider_json,status,error_code,error_message,created_at,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING ${attemptRow}`, [input.attempt.id,input.attempt.childTaskId,input.attempt.snapshotId,attemptNo,JSON.stringify(input.attempt.command),JSON.stringify(input.attempt.provider),input.attempt.status,input.attempt.errorCode,input.attempt.errorMessage,input.attempt.createdAt,input.attempt.completedAt]);
+      const savedTask = await c.query<ImageEditChildTask>(`UPDATE suite_workbench.image_edit_child_tasks SET status=$2,error_code=$3,error_message=$4,updated_at=$5 WHERE id=$1 RETURNING ${taskRow}`, [input.childTask.id,input.childTask.status,input.childTask.errorCode,input.childTask.errorMessage,input.childTask.updatedAt]);
+      await c.query(`INSERT INTO suite_workbench.image_edit_idempotency(idempotency_key,snapshot_id,child_task_id,attempt_id) VALUES($1,$2,$3,$4)`, [input.idempotencyKey,input.snapshot.id,input.childTask.id,input.attempt.id]);
+      await c.query("COMMIT");
+      return { snapshot: input.snapshot, childTask: savedTask.rows[0], attempt: savedAttempt.rows[0], duplicate: false };
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
   async completeAttempt(input: CompleteImageEditAttemptInput) {
     const client = await this.pool.connect();
     try {

@@ -525,7 +525,7 @@ export interface TaskRepository {
   getTask(taskId: string): Promise<SuiteTask | null>;
   listTasks(suiteId: string): Promise<SuiteTask[]>;
   updateTask(taskId: string, patch: Partial<Pick<SuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status" | "sourceLibraryReferenceId" | "sourceResourceVersionId" | "sourceRevision">>): Promise<SuiteTask | null>;
-  beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }): Promise<{ batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[]; duplicate: boolean }>;
+  beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }, singleTaskPrompt?: string): Promise<{ batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[]; duplicate: boolean }>;
   getBatch(batchId: string): Promise<TaskGenerationBatch | null>;
   listBatches(suiteId: string): Promise<TaskGenerationBatch[]>;
   getSlot(slotId: string): Promise<TaskResultSlot | null>;

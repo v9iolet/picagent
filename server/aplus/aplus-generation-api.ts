@@ -3,7 +3,7 @@ import { APLUS_MODULES } from "../../shared/aplus.js";
 import type { ImageOptions } from "../../shared/model-settings.js";
 import { errorMessages, fail } from "../api-errors.js";
 import { now, ok } from "../api-response.js";
-import { waitUntil } from "../suite-pipeline.js";
+import { pendingImageGeneration, waitUntil } from "../suite-pipeline.js";
 import type { PipelineRepository, PromptRepository, SuitePipelineRun, SuiteRepository, SuiteTask, TaskGenerationBatch, TaskRepository } from "../types.js";
 import { selectAplusGenerationSize } from "./aplus-image.js";
 import type { AplusRunConfig } from "./aplus-plan.js";
@@ -23,13 +23,13 @@ interface AplusGenerationDependencies {
 export function createAplusGenerationApi(deps: AplusGenerationDependencies) {
   const response = (run: SuitePipelineRun, status = 200) => ok({ suiteId: run.suiteId, runId: run.id }, status);
 
-  function generate(run: SuitePipelineRun, generation: NonNullable<AplusRunConfig["generation"]>, taskRepository: TaskRepository) {
+  function generate(run: SuitePipelineRun, generation: NonNullable<AplusRunConfig["generation"]>, taskRepository: TaskRepository, interrupted = false) {
     const execute = async () => {
       await taskRepository.createAplusTasks(generation.tasks);
       const taskIds = new Set(generation.tasks.map((task) => task.id));
       const savedTasks = (await taskRepository.listTasks(run.suiteId)).filter((task) => taskIds.has(task.id));
       const generationKeyPrefix = `aplus:${run.id}:`;
-      if (run.resumeCount) {
+      if (interrupted) {
         const batches = await taskRepository.listBatches(run.suiteId);
         const interrupted = new Set(batches.filter((batch) => batch.status === "running" && batch.idempotencyKey.startsWith(generationKeyPrefix)).map((batch) => batch.id));
         if (interrupted.size) {
@@ -50,20 +50,21 @@ export function createAplusGenerationApi(deps: AplusGenerationDependencies) {
       }
       const tasks = savedTasks.filter((task) => task.status !== "archived");
       const histories = () => Promise.all(tasks.map((task) => taskRepository.listTaskVersions(task.id)));
-      const pending = (await histories()).flatMap((history, index) => history.versions.some((version) => version.isCurrent) ? [] : [tasks[index]]);
+      const { pendingTasks, waitForActive } = await pendingImageGeneration(taskRepository, tasks);
 
       let batchId: string | undefined;
-      if (pending.length) {
-        const { batch } = await deps.createBatch(run.suiteId, pending, `${generationKeyPrefix}r${run.resumeCount ?? 0}:images`);
+      if (pendingTasks.length) {
+        const { batch } = await deps.createBatch(run.suiteId, pendingTasks, `${generationKeyPrefix}r${run.resumeCount ?? 0}:images`);
         batchId = batch.id;
         await waitUntil(() => taskRepository.getBatch(batch.id), (current) => current !== null && current.status !== "running", 600_000);
       }
 
+      await waitForActive();
       const missing = (await histories()).filter((history) => !history.versions.some((version) => version.isCurrent));
       const batchSlots = missing.length && batchId
         ? new Set((await taskRepository.listSlots(run.suiteId)).filter((slot) => slot.batchId === batchId).map((slot) => slot.id))
         : null;
-      const failure = missing.flatMap(({ attempts }) => attempts.filter((attempt) => attempt.status === "failed" && batchSlots?.has(attempt.slotId)))[0];
+      const failure = missing.map(({ attempts }) => attempts.filter((attempt) => attempt.status === "failed" && (!batchSlots || batchSlots.has(attempt.slotId))).at(-1)).find(Boolean);
       await deps.pipelines.updateRun(run.id, {
         status: !missing.length ? "completed" : missing.length < tasks.length ? "partial_failed" : "failed",
         currentPhase: missing.length ? "image_generating" : "done",
@@ -80,16 +81,15 @@ export function createAplusGenerationApi(deps: AplusGenerationDependencies) {
   }
 
   async function confirm(suiteId: string, payload: unknown, key?: string) {
-    const confirmationKey = key?.trim() || null;
-    if (confirmationKey) {
-      const loaded = await deps.planning.loadRun(suiteId);
-      if (!loaded.ok) return loaded.response;
-      if (loaded.value.config.generation?.confirmationKey === confirmationKey) return response(loaded.value.run);
-    }
+    const confirmationKey = key?.trim();
+    if (!confirmationKey) return fail("MISSING_IDEMPOTENCY_KEY", 400);
+    const loaded = await deps.planning.loadRun(suiteId);
+    if (!loaded.ok) return loaded.response;
+    if (loaded.value.config.generation?.confirmationKey === confirmationKey) return response(loaded.value.run);
 
     const prepared = await deps.planning.prepareConfirmation(suiteId, payload);
     if (!prepared.ok) {
-      if (confirmationKey && prepared.response.status === 409) {
+      if (prepared.response.status === 409) {
         const current = await deps.planning.loadRun(suiteId);
         if (current.ok && current.value.config.generation?.confirmationKey === confirmationKey) return response(current.value.run);
       }
@@ -151,7 +151,7 @@ export function createAplusGenerationApi(deps: AplusGenerationDependencies) {
     }, run);
     if (!next) {
       const current = await deps.planning.loadRun(suiteId);
-      return confirmationKey && current.ok && current.value.config.generation?.confirmationKey === confirmationKey
+      return current.ok && current.value.config.generation?.confirmationKey === confirmationKey
         ? response(current.value.run)
         : fail("APLUS_PLAN_CHANGED", 409);
     }
@@ -178,7 +178,7 @@ export function createAplusGenerationApi(deps: AplusGenerationDependencies) {
       const current = await deps.pipelines.getRun(run.id);
       return current && usedKey(current) ? response(current, current.status === "running" ? 202 : 200) : fail("APLUS_PLAN_ACTION_NOT_ALLOWED", 409);
     }
-    generate(next, generation, deps.tasks);
+    generate(next, generation, deps.tasks, run.errorCode === "PIPELINE_INTERRUPTED");
     return response(next, 202);
   }
 

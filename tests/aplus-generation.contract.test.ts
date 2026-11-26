@@ -1,3 +1,4 @@
+import { verifyGenerationConcurrency } from "./image-generation-concurrency.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -120,6 +121,12 @@ async function dimensions(storage: MemoryStorage, key: string) {
   const { width, height } = await sharp(object.bytes).metadata();
   return { width, height };
 }
+
+test("Memory 并发出图复用同一请求并拒绝正在生成的资源", async () => {
+  await verifyGenerationConcurrency(
+    new MemorySuiteRepository(), new MemoryTaskRepository(), new MemoryPipelineRepository(), new MemoryPromptRepository(), new MemoryImageEditorRepository(),
+  );
+});
 
 test("像素渠道按预设精确比例换算，档位渠道取最接近比例，高级 Web 强制 1K", () => {
   const pixels = defaultImageOptions("gpt-image-2");
@@ -478,31 +485,65 @@ test("通用比例沿用生成图，续跑跳过当前版本及原样保留请�
   }
 });
 
-test("无效图片按卡记录中文错误，每卡仅请求一次，手动续跑后整批可完成", async () => {
-  let repaired = false;
-  const f = await fixture(["aplus_standard"], async () => {
-    if (!repaired) throw new Error("INVALID_PROVIDER_RESPONSE");
+test("A+ 手动继续时等待已在重绘的卡片，重绘失败也不自动再次提交", async (t) => {
+  const active = Promise.withResolvers<void>();
+  const f = await fixture(["1:1"], async (call) => {
+    if (call === 1) throw new Error("IMAGE_PROVIDER_FAILED");
+    if (call === modules.length + 1) {
+      await active.promise;
+      throw new Error("IMAGE_PROVIDER_TIMEOUT");
+    }
   });
   data(await f.confirm(), 202);
-  const run = await f.waitForRun();
-  assert.equal(run?.status, "failed");
-  assert.equal(run.errorCode, "INVALID_GENERATED_IMAGE");
-  assert.equal(f.calls.length, modules.length);
-  const studio = data<{ pipeline: { errorMessage: string }; cards: Array<{ parentTaskId: string; errorMessage: string }> }>(
-    await f.app.request("GET", `${f.path}/studio-state`),
-  );
-  assert.equal(studio.pipeline.errorMessage, "图像生成服务返回了无效图片");
-  assert.equal(studio.cards.length, modules.length);
-  for (const card of studio.cards) {
-    const { attempts } = await f.tasks.listTaskVersions(card.parentTaskId);
-    assert.deepEqual(attempts.map(({ errorCode }) => errorCode), ["INVALID_GENERATED_IMAGE"]);
-    assert.equal(card.errorMessage, studio.pipeline.errorMessage);
+  assert.equal((await f.waitForRun())?.status, "partial_failed");
+  const [task] = await f.tasks.listTasks(f.suiteId);
+  data(await f.app.request("POST", `/api/suite-tasks/${task.id}/generation`, {
+    headers: { "idempotency-key": "manual-redraw" },
+  }), 202);
+  try {
+    await waitUntil(async () => f.calls.length, (count) => count === modules.length + 1, 5000);
+    const observed = t.mock.method(f.tasks, "getAttempt");
+    data(await f.app.request("POST", `${f.path}/resume`, { headers: { "idempotency-key": "resume" } }), 202);
+    await waitUntil(async () => observed.mock.callCount(), (count) => count > 0, 5000);
+    assert.equal((await f.tasks.listTaskVersions(task.id)).attempts.length, 2);
+  } finally {
+    active.resolve();
   }
-  repaired = true;
-  data(await f.app.request("POST", `${f.path}/resume`, { headers: { "idempotency-key": "resume" } }), 202);
-  assert.equal((await f.waitForRun())?.status, "completed");
-  assert.equal(f.calls.length, 2 * modules.length);
+  assert.equal((await f.waitForRun())?.status, "partial_failed");
+  assert.equal(f.calls.length, modules.length + 1);
 });
+
+for (const [error, code, message] of [
+  ["INVALID_PROVIDER_RESPONSE", "INVALID_GENERATED_IMAGE", "图像生成服务返回了无效图片"],
+  ["IMAGE_PROVIDER_FAILED", "TASK_IMAGE_PROVIDER_FAILED", "套图图片生成失败"],
+  ["IMAGE_PROVIDER_TIMEOUT", "TASK_IMAGE_PROVIDER_TIMEOUT", "图像生成服务响应超时"],
+]) {
+  test(`A+ 遇到 ${error} 每卡只请求一次，手动续跑后完成`, async () => {
+    let repaired = false;
+    const f = await fixture(["aplus_standard"], async () => {
+      if (!repaired) throw new Error(error);
+    });
+    data(await f.confirm(), 202);
+    const run = await f.waitForRun();
+    assert.equal(run?.status, "failed");
+    assert.equal(run.errorCode, code);
+    assert.equal(f.calls.length, modules.length);
+    const studio = data<{ pipeline: { errorMessage: string }; cards: Array<{ parentTaskId: string; errorMessage: string }> }>(
+      await f.app.request("GET", `${f.path}/studio-state`),
+    );
+    assert.equal(studio.pipeline.errorMessage, message);
+    assert.equal(studio.cards.length, modules.length);
+    for (const card of studio.cards) {
+      const { attempts } = await f.tasks.listTaskVersions(card.parentTaskId);
+      assert.deepEqual(attempts.map(({ errorCode }) => errorCode), [code]);
+      assert.equal(card.errorMessage, studio.pipeline.errorMessage);
+    }
+    repaired = true;
+    data(await f.app.request("POST", `${f.path}/resume`, { headers: { "idempotency-key": "resume" } }), 202);
+    assert.equal((await f.waitForRun())?.status, "completed");
+    assert.equal(f.calls.length, 2 * modules.length);
+  });
+}
 
 test("图片 URL 连续返回 503 时每张只重试下载，批次不再请求付费生图", async (t) => {
   const provider = new GptImageProvider("https://provider.example.test/v1", "fake");
@@ -527,6 +568,8 @@ test("图片 URL 连续返回 503 时每张只重试下载，批次不再请求�
 
 test("确认缺参或类型错误返回 400，配置已变则返回 409 且不建卡", async () => {
   const f = await fixture(premiumPresets);
+  checkError(await f.app.request("POST", `${f.path}/confirm`, { body: f.payload }), 400, "MISSING_IDEMPOTENCY_KEY");
+  checkError(await f.confirm(f.payload, " "), 400, "MISSING_IDEMPOTENCY_KEY");
   checkError(await f.confirm({ ...f.payload, resolution: undefined }), 400, "APLUS_INVALID_RESOLUTION");
   checkError(await f.confirm({ ...f.payload, inputImageIds: undefined }), 400, "APLUS_INVALID_INPUT_IMAGES");
   checkError(await f.confirm({ ...f.payload, productCardRevision: "1" }), 400, "PRODUCT_CARD_NOT_AVAILABLE");

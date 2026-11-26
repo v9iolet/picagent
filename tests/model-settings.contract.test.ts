@@ -4,6 +4,7 @@ import { MemoryPromptRepository } from "../server/repositories/memory-prompt-rep
 import { parsePromptMarkdown } from "../server/prompt-library.js";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { waitUntil } from "../server/suite-pipeline.js";
 import { createSuiteStudioApp } from "../server/app.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
@@ -122,13 +123,13 @@ test("base refinement uses the selected channel, retains its source, and switche
   assert.equal((await api.request("DELETE", path + "/channels/" + first)).status, 409);
   assert.equal((await submit("first")).status, 202);
   assert.equal((await select(second)).status, 200);
+  const historyWithVersions = (count: number) => waitUntil(
+    async () => (await api.request("GET", imagePath + "/base-versions")).body.data,
+    (data) => data.versions.length === count, 5000,
+  );
+  await historyWithVersions(1);
   assert.equal((await submit("second")).status, 202);
-  let history;
-  for (let index = 0; index < 100; index += 1) {
-    history = (await api.request("GET", imagePath + "/base-versions")).body.data;
-    if (history.versions.length === 2) break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  const history = await historyWithVersions(2);
   assert.equal(history.versions.length, 2);
   assert.deepEqual(history.attempts.map((attempt) => attempt.channel.channelId).sort(), [first, second].sort());
   assert.deepEqual(calls.map(({ url, key }) => [url, key]).sort(), [["/first/v1/images/edits", "Bearer old-token"], ["/second/v1/images/edits", "Bearer replacement-token"]]);

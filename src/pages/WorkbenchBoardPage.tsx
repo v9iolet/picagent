@@ -15,7 +15,7 @@ import {
   type LaneLayoutOptions,
   type ResolvedDeliverySlot,
 } from "../../shared/workbench-delivery";
-import { modelSettingsApi, suiteApi, type ApiCanvasLayout, type ApiImageEditProductInput, type ApiImageEditSelection, type ApiImageEditTool, type ApiLibraryResource, type ApiPromptTemplateCopy, type ApiProductMaterialRef, type ApiSuiteTask, type ApiTaskVersion, type ApiWorkbench } from "../api/client";
+import { ApiHttpError, createGenerationActions, createIdempotencyKey, modelSettingsApi, suiteApi, type ApiCanvasLayout, type ApiImageEditProductInput, type ApiImageEditSelection, type ApiImageEditTool, type ApiLibraryResource, type ApiPromptTemplateCopy, type ApiProductMaterialRef, type ApiSuiteTask, type ApiTaskVersion, type ApiWorkbench } from "../api/client";
 import { AppShell } from "../components/AppShell";
 import { BeforeAfterLightbox, type LightboxPreview } from "../components/BeforeAfterLightbox";
 import { CustomTaskModal } from "../components/CustomTaskModal";
@@ -749,7 +749,7 @@ export function ImageEditorModal({
   version: ImageEditorVersionInput;
   initialTool?: EditTool;
   onClose: () => void;
-  onSubmit: (selection: ApiImageEditSelection, instruction: string) => Promise<void>;
+  onSubmit: (selection: ApiImageEditSelection, instruction: string, idempotencyKey: string) => Promise<void>;
   onOperationAdded?: (operation: DraftOperation, instruction: string) => Promise<void>;
   onRegenerate?: () => Promise<void>;
 }) {
@@ -777,6 +777,7 @@ export function ImageEditorModal({
   const [uploadingRestoreInput, setUploadingRestoreInput] = useState(false);
   const [productInputsError, setProductInputsError] = useState(false);
   const workingDrafts = useRef<Partial<Record<ApiImageEditTool, DraftOperation>>>({});
+  const submittedDraft = useRef<{ signature: string; key: string } | null>(null);
   const pendingDraftWrite = useRef(Promise.resolve());
   const [loadingDraft, setLoadingDraft] = useState(true);
   const [toolNotice, setToolNotice] = useState("");
@@ -1167,14 +1168,18 @@ export function ImageEditorModal({
     setSaving(true);
     setEditorError("");
     try {
-      await writeDraft(async () => {
-        for (const operation of finalOperations) {
-          await onOperationAdded?.(operation, operation.summary);
-          if (activeOperationType === "change_text") {
-            setOperations((current) => [...current.filter((item) => item.operationId !== operation.operationId), operation]);
+      const signature = JSON.stringify([task.id, version.id, finalOperations]);
+      if (submittedDraft.current?.signature !== signature) {
+        await writeDraft(async () => {
+          for (const operation of finalOperations) {
+            await onOperationAdded?.(operation, operation.summary);
+            if (activeOperationType === "change_text") {
+              setOperations((current) => [...current.filter((item) => item.operationId !== operation.operationId), operation]);
+            }
           }
-        }
-      });
+        });
+        submittedDraft.current = { signature, key: createIdempotencyKey() };
+      }
       setOperations((current) => [
         ...current.filter((item) => !finalOperations.some((submitted) => submitted.operationId === item.operationId)),
         ...finalOperations,
@@ -1182,12 +1187,17 @@ export function ImageEditorModal({
       await onSubmit(
         { tool: activeOperationType, sourceVersionId: version.id, operationIds: finalOperations.map((item) => item.operationId) },
         finalOperations.map((item) => item.summary).join("；"),
+        submittedDraft.current.key,
       );
+      submittedDraft.current = null;
       setOperations((current) => current.filter((item) => !finalOperations.some((submitted) => submitted.operationId === item.operationId)));
       if (activeOperationType === "change_text") {
         setTextEdits((current) => current.map((row) => ({ ...row, newText: row.originalText })));
       }
     } catch (errorValue) {
+      if (errorValue instanceof ApiHttpError && (errorValue.code === "EDIT_DRAFT_CHANGED" || errorValue.code === "EDIT_OPERATIONS_REQUIRED")) {
+        submittedDraft.current = null;
+      }
       setEditorError(errorValue instanceof Error ? errorValue.message : "生成提交失败");
     } finally {
       setSaving(false);
@@ -1700,6 +1710,7 @@ export function WorkbenchBoardPage(props: WorkbenchBoardPageProps) {
 }
 
 function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPageProps) {
+  const [submitGeneration] = useState(createGenerationActions);
   const [workbench, setWorkbench] = useState<ApiWorkbench | null>(null);
   const [mode, setMode] = useState<BoardMode>(() => new URLSearchParams(search).get("view") === "gallery" ? "gallery" : "compose");
   const [canvasFilter, setCanvasFilter] = useState<CanvasFilter>("all");
@@ -1976,15 +1987,19 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     notify("提示词已保存");
   };
 
+  const generateCard = (task: ApiSuiteTask, prompt = task.promptDraft) =>
+    submitGeneration(task.id, [prompt, task.generationParams, task.sourceRevision, task.sourceInputImageId, workbench?.effectiveStyleGuide],
+      (key) => suiteApi.generateTask(task.id, prompt, key));
+
   const generateOne = async (task: ApiSuiteTask, promptOverride?: string) => {
     if (latestWorkbench.current?.imageEditChildren?.some((child) => String(child.task.id) === task.id)) return regenerateTask(task);
-    await suiteApi.generateTask(task.id, promptOverride ?? task.promptDraft);
+    await generateCard(task, promptOverride);
     await reload();
     notify("已提交单卡生成");
   };
 
-  const submitEdit = async (task: ApiSuiteTask, selection: ApiImageEditSelection, instruction: string) => {
-    await suiteApi.submitImageEdit(task.id, { ...selection, sourceCardId: task.id, parentVersionId: selection.sourceVersionId, summary: instruction });
+  const submitEdit = async (task: ApiSuiteTask, selection: ApiImageEditSelection, instruction: string, key: string) => {
+    await suiteApi.submitImageEdit(task.id, { ...selection, sourceCardId: task.id, parentVersionId: selection.sourceVersionId, summary: instruction }, key);
     setEditor(null);
     await reload();
     notify("编辑已加入对话，正在生成子卡片");
@@ -1998,14 +2013,14 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     const child = latestWorkbench.current?.imageEditChildren?.find((item) => String(item.task.id) === task.id);
     if (child) {
       const latest = child.attempts[child.attempts.length - 1];
-      if (latest && String(latest.status) === "failed") await suiteApi.retryImageEdit(String(latest.id));
-      else await suiteApi.regenerateImageEditTask(task.id);
+      if (latest && String(latest.status) === "failed") await submitGeneration(task.id, ["retry", latest.id], (key) => suiteApi.retryImageEdit(String(latest.id), key));
+      else await submitGeneration(task.id, ["regenerate", editSourceVersionId], (key) => suiteApi.regenerateImageEditTask(task.id, key));
     } else if (editSourceVersionId) {
-      await suiteApi.regenerateTaskFromEdit(task.id, editSourceVersionId);
+      await submitGeneration(task.id, editSourceVersionId, (key) => suiteApi.regenerateTaskFromEdit(task.id, editSourceVersionId, key));
     } else {
       const failed = [...task.attempts].reverse().find((attempt) => attempt.status === "failed");
-      if (task.status === "failed" && failed) await suiteApi.retryTaskAttempt(failed.id);
-      else await suiteApi.generateTask(task.id, task.promptDraft);
+      if (task.status === "failed" && failed) await submitGeneration(task.id, failed.id, (key) => suiteApi.retryTaskAttempt(failed.id, key));
+      else await generateCard(task);
     }
     await reload();
     notify("已提交再次生成");
@@ -2031,7 +2046,9 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
       notify(onlyUnfinished ? "所有任务均已生成完成" : "当前没有可提交的任务");
       return;
     }
-    await suiteApi.generateBatch(suiteId, tasks.map((task) => task.id));
+    const inputs = tasks.map((task) => [task.id, task.promptDraft, task.sourceRevision, task.sourceInputImageId, task.generationParams]);
+    await submitGeneration(suiteId, [workbench.effectiveStyleGuide, inputs],
+      (key) => suiteApi.generateBatch(suiteId, tasks.map((task) => task.id), key));
     await reload();
     notify(`已提交 ${tasks.length} 个任务`);
   };
@@ -2040,16 +2057,13 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
     if (!workbench) return;
     const failedTasks = workbench.tasks.filter((task) => task.status === "failed");
     if (!failedTasks.length) return;
-    let submitted = 0;
-    for (const task of failedTasks) {
-      const failedAttempt = [...task.attempts].reverse().find((attempt) => attempt.status === "failed");
-      if (failedAttempt) {
-        await suiteApi.retryTaskAttempt(failedAttempt.id);
-        submitted += 1;
-      }
-    }
+    const attempts = failedTasks.flatMap((task) => [...task.attempts].reverse().find((attempt) => attempt.status === "failed") ?? []);
+    const ids = attempts.map((attempt) => attempt.id);
+    await submitGeneration(`retry-failed:${suiteId}`, ids, async (key) => {
+      for (const id of ids) await suiteApi.retryTaskAttempt(id, `${key}:${id}`);
+    });
     await reload();
-    notify(`已重新提交 ${submitted} 个失败任务`);
+    notify(`已重新提交 ${ids.length} 个失败任务`);
   };
 
   const batchSyncParams = async (imageType: "main" | "detail" | "all") => {
@@ -2407,7 +2421,7 @@ function WorkbenchBoardInner({ suiteId, search, navigate }: WorkbenchBoardPagePr
           onClose={() => setEditor(null)}
           onOperationAdded={(operation, instruction) => persistEditOperation(editor.task, operation, instruction)}
           onRegenerate={() => regenerateTask(editor.task, editor.version.id)}
-          onSubmit={(spec, instruction) => submitEdit(editor.task, spec, instruction)}
+          onSubmit={(spec, instruction, key) => submitEdit(editor.task, spec, instruction, key)}
         />
       )}
 

@@ -133,6 +133,28 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload?.data as T;
 }
 
+// Each resource keeps its last unacknowledged action, independent of other cards.
+export function createGenerationActions() {
+  const pending = new Map<string, { signature: string; key: string }>();
+  return async function submit<T>(resource: string, inputs: unknown, send: (key: string) => Promise<T>): Promise<T> {
+    const signature = JSON.stringify(inputs);
+    const previous = pending.get(resource);
+    const key = previous && previous.signature === signature ? previous.key : createIdempotencyKey();
+    pending.set(resource, { signature, key });
+    const result = await send(key);
+    if (pending.get(resource)?.key === key) pending.delete(resource);
+    return result;
+  };
+}
+
+export async function postGeneration<T>(path: string, payload: object, key = createIdempotencyKey()): Promise<T> {
+  const result = await request<T>(path, {
+    method: "POST", headers: { "content-type": "application/json", "idempotency-key": key }, body: JSON.stringify(payload),
+  });
+  if (result == null) throw new Error("未收到生成任务编号，请重试");
+  return result;
+}
+
 export type { ListingConfig } from "../../shared/listing-config";
 export interface ApiListingSummary extends Omit<ListingConfig, "sellingPoints"> {
   id: string;
@@ -214,12 +236,8 @@ export const suiteApi = {
   publishPromptTemplate(versionId: string) { return request<ApiPromptTemplateCopy>(`/api/prompt-templates/${encodeURIComponent(versionId)}/publish`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() } }); },
   retirePromptTemplate(versionId: string) { return request<ApiPromptTemplateCopy>(`/api/prompt-templates/${encodeURIComponent(versionId)}/retire`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() } }); },
   listPlatforms() { return request<ApiPlatformProfile[]>("/api/platforms"); },
-  generateBase(suiteId: string, inputImageId: string, templateVersionId: string, dynamicInput: Record<string, unknown>) {
-    return request<{ attempt: ApiGenerationAttempt; version: ApiBaseVersion | null }>(`/api/suites/${encodeURIComponent(suiteId)}/input-images/${encodeURIComponent(inputImageId)}/base-generation`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() },
-      body: JSON.stringify({ templateVersionId, dynamicInput }),
-    });
+  generateBase(suiteId: string, inputImageId: string, templateVersionId: string, dynamicInput: Record<string, unknown>, idempotencyKey?: string) {
+    return postGeneration<{ attempt: ApiGenerationAttempt; version: ApiBaseVersion | null }>(`/api/suites/${encodeURIComponent(suiteId)}/input-images/${encodeURIComponent(inputImageId)}/base-generation`, { templateVersionId, dynamicInput }, idempotencyKey);
   },
   selectBaseVersion(suiteId: string, inputImageId: string, versionId: string) {
     return request<ApiBaseVersion>(`/api/suites/${encodeURIComponent(suiteId)}/input-images/${encodeURIComponent(inputImageId)}/base-versions/${encodeURIComponent(versionId)}/select`, { method: "POST" });
@@ -257,16 +275,24 @@ export const suiteApi = {
   },
   createTasks(suiteId: string, planSnapshotId?: string) { return request<{ planSnapshotId: string; tasks: ApiSuiteTask[]; createdTaskIds: string[] }>(`/api/suites/${encodeURIComponent(suiteId)}/tasks`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(planSnapshotId ? { planSnapshotId } : {}) }); },
   updateTask(taskId: string, body: Partial<Pick<ApiSuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status">>) { return request<ApiSuiteTask>(`/api/suite-tasks/${encodeURIComponent(taskId)}`, { method: "PATCH", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
-  generateBatch(suiteId: string, taskIds?: string[]) { return request<{ batchId: string; status: string; requestedCount?: number }>(`/api/suites/${encodeURIComponent(suiteId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(taskIds ? { taskIds } : {}) }); },
-  generateTask(taskId: string, promptDraft?: string) { return request<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(promptDraft === undefined ? {} : { promptDraft }) }); },
-  regenerateTaskFromEdit(taskId: string, editSourceVersionId: string) { return request<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ editSourceVersionId }) }); },
-  retryTaskAttempt(attemptId: string) {
-    return request<{ batchId: string }>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`, { method: "POST", headers: { "idempotency-key": createIdempotencyKey() } });
+  generateBatch(suiteId: string, taskIds?: string[], idempotencyKey?: string) {
+    return postGeneration<{ batchId: string; status: string; requestedCount?: number }>(`/api/suites/${encodeURIComponent(suiteId)}/generation`, taskIds ? { taskIds } : {}, idempotencyKey);
+  },
+  generateTask(taskId: string, promptDraft?: string, idempotencyKey?: string) {
+    return postGeneration<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { promptDraft }, idempotencyKey);
+  },
+  regenerateTaskFromEdit(taskId: string, editSourceVersionId: string, idempotencyKey?: string) {
+    return postGeneration<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { editSourceVersionId }, idempotencyKey);
+  },
+  retryTaskAttempt(attemptId: string, idempotencyKey?: string) {
+    return postGeneration<{ batchId: string }>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`, {}, idempotencyKey);
   },
   getBatch(batchId: string) { return request<{ batch: ApiTaskBatch; slots: ApiTaskSlot[]; attempts: ApiTaskAttempt[] }>(`/api/generation-batches/${encodeURIComponent(batchId)}`); },
   getTaskVersions(taskId: string) { return request<{ versions: ApiTaskVersion[]; attempts: ApiTaskAttempt[] }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/versions`); },
   selectTaskVersion(taskId: string, versionId: string, selection: "current" | "final") { return request<ApiTaskVersion>(`/api/suite-tasks/${encodeURIComponent(taskId)}/versions/${encodeURIComponent(versionId)}/select`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ selection }) }); },
-  retryAttempt(attemptId: string) { return request<{ batchId: string; status: string }>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({}) }); },
+  retryAttempt(attemptId: string, idempotencyKey?: string) {
+    return postGeneration<{ batchId: string; status: string }>(`/api/generation-attempts/${encodeURIComponent(attemptId)}/retry`, {}, idempotencyKey);
+  },
   imageEditorCapabilities() { return request<{ provider: { name: string; version: string; capabilitiesVersion: string; channel?: ModelChannelSnapshot } | null; capabilities: Record<string, boolean>; outpaintRatios?: OutpaintRatio[] }>("/api/image-editor/capabilities"); },
   getImageEditDraft(sessionId: string, sourceVersionId: string) { return request<{ sessionId: string; operations: Array<Record<string, unknown>>; summary: string; productInputs: ApiImageEditProductInput[] }>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}?sourceVersionId=${encodeURIComponent(sourceVersionId)}`); },
   uploadImageEditRestoreInput(sessionId: string, sourceVersionId: string, file: File) {
@@ -279,10 +305,16 @@ export const suiteApi = {
   },
   upsertImageEditOperation(sessionId: string, operation: Record<string, unknown>, summary?: string) { return request<Record<string, unknown>>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/operations`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ operation, summary }) }); },
   removeImageEditOperation(sessionId: string, operationId: string) { return request<Record<string, unknown>>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(operationId)}`, { method: "DELETE" }); },
-  submitImageEdit(sessionId: string, body: ApiImageEditSelection & { sourceCardId: string; parentVersionId?: string; summary?: string }) { return request<Record<string, unknown>>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/submit`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify(body) }); },
+  submitImageEdit(sessionId: string, body: ApiImageEditSelection & { sourceCardId: string; parentVersionId?: string; summary?: string }, idempotencyKey?: string) {
+    return postGeneration<Record<string, unknown>>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/submit`, body, idempotencyKey);
+  },
   getImageEditTask(taskId: string) { return request<Record<string, unknown>>(`/api/image-editor/tasks/${encodeURIComponent(taskId)}`); },
-  retryImageEdit(attemptId: string) { return request<Record<string, unknown>>(`/api/image-editor/attempts/${encodeURIComponent(attemptId)}/retry`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({}) }); },
-  regenerateImageEditTask(taskId: string) { return request<Record<string, unknown>>(`/api/image-editor/tasks/${encodeURIComponent(taskId)}/regenerate`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: "{}" }); },
+  retryImageEdit(attemptId: string, idempotencyKey?: string) {
+    return postGeneration<Record<string, unknown>>(`/api/image-editor/attempts/${encodeURIComponent(attemptId)}/retry`, {}, idempotencyKey);
+  },
+  regenerateImageEditTask(taskId: string, idempotencyKey?: string) {
+    return postGeneration<Record<string, unknown>>(`/api/image-editor/tasks/${encodeURIComponent(taskId)}/regenerate`, {}, idempotencyKey);
+  },
   recognizeImageEditText(sessionId: string, sourceVersionId: string) { return request<{ sourceVersionId: string; status: "succeeded" | "failed"; blocks: Array<{ id: string; text: string; confidence: number; bounds: { x: number; y: number; width: number; height: number }; rotation: number }>; error?: string }>(`/api/image-editor/sessions/${encodeURIComponent(sessionId)}/ocr`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceVersionId }) }); },
   selectImageEditVersion(taskId: string, versionId: string, selection: "current" | "final") { return request<Record<string, unknown>>(`/api/image-editor/tasks/${encodeURIComponent(taskId)}/versions/${encodeURIComponent(versionId)}/select`, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": createIdempotencyKey() }, body: JSON.stringify({ selection }) }); },
   getLayout(suiteId: string) { return request<ApiCanvasLayout | null>(`/api/suites/${encodeURIComponent(suiteId)}/workbench/layout`); },

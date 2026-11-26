@@ -1,3 +1,4 @@
+import { verifyGenerationConcurrency } from "./image-generation-concurrency.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -745,7 +746,7 @@ test("PG 保存 A+ 商品还原交付图与图片库来源，044–046 启动重
     for (const [index, { objectKey }] of productInputs.entries()) {
       await storage.put({ key: objectKey, bytes: productBytes[index], contentType: "image/png" });
     }
-    await tasks.beginBatch({
+    const initialReservation = await tasks.beginBatch({
       batch: { id: batchId, suiteId: suite.id, kind: "single", requestedCount: 1, taskIds: [taskId], status: "running", idempotencyKey: "image", createdAt: timestamp, startedAt: timestamp, finishedAt: null },
       slots: [{ id: slotId, batchId, taskId, slotOrdinal: 1, retryOfSlotId: null, status: "generating", selectedVersionId: null, createdAt: timestamp, completedAt: null }],
       attempts: [{
@@ -915,7 +916,17 @@ test("PG 保存 A+ 商品还原交付图与图片库来源，044–046 启动重
       .map(({ code, templateVersionId, versionNo }) => [code, templateVersionId, versionNo]);
     const editorPrompts = await publishedEditorPrompts();
     assert.equal(editorPrompts.length, 2);
+    const orphanBatchId = randomUUID(), orphanSlotId = randomUUID(), orphanAttemptId = randomUUID();
+    await tasks.beginBatch({
+      batch: { ...initialReservation.batch, id: orphanBatchId, idempotencyKey: "unacknowledged-redraw" },
+      slots: [{ ...initialReservation.slots[0], batchId: orphanBatchId, id: orphanSlotId }],
+      attempts: [{ ...initialReservation.attempts[0], slotId: orphanSlotId, id: orphanAttemptId }],
+    });
     await runMigrations(pool, { recoverStaleAttempts: true });
+    assert.equal((await tasks.getAttempt(orphanAttemptId))?.errorCode, "PIPELINE_INTERRUPTED");
+    assert.equal((await tasks.getBatch(orphanBatchId))?.status, "failed");
+    assert.equal((await tasks.getSlot(orphanSlotId))?.status, "failed");
+    assert.equal((await tasks.listTaskVersions(taskId)).attempts.length, 2);
     assert.deepEqual(await publishedEditorPrompts(), editorPrompts);
     assert.deepEqual((await platforms.find("amazon"))?.detailSizePresets, configured);
     assert.equal((await suites.getSuite(suite.id))?.origin, "aplus");
@@ -2303,6 +2314,14 @@ async function withConcurrentMigratedSchemas<T>(run: (db: { pool: Pool; schemas:
   }
 }
 
+test("Postgres 并发出图复用同一请求并拒绝正在生成的资源", { skip }, async () => {
+  await withConcurrentMigratedSchemas(async ({ pool }) => {
+    await verifyGenerationConcurrency(
+      new PostgresSuiteRepository(pool), new PostgresTaskRepository(pool), new PostgresPipelineRepository(pool), new PostgresPromptRepository(pool), new PostgresImageEditorRepository(pool),
+    );
+  });
+});
+
 test("PG task batch status converges under concurrent completeAttempt and failAttempt calls without leaving batch running", { skip }, async () => {
   await withConcurrentMigratedSchemas(async ({ pool }) => {
     const suites = new PostgresSuiteRepository(pool);
@@ -2443,7 +2462,7 @@ test("PG task batch status converges under concurrent completeAttempt and failAt
       const slotId = randomUUID();
       const attemptId = randomUUID();
       const task = createdTasks[0];
-      await tasks.beginBatch({
+      const reserve = () => tasks.beginBatch({
         batch: {
           id: batchId,
           suiteId: suite.id,
@@ -2490,6 +2509,13 @@ test("PG task batch status converges under concurrent completeAttempt and failAt
           finishedAt: null,
         }],
       });
+
+      const reservations = await Promise.all([reserve(), reserve()]);
+      assert.deepEqual(reservations.map((r) => r.duplicate).sort(), [false, true]);
+      for (const r of reservations) {
+        assert.equal(r.batch.id, batchId);
+        assert.deepEqual(r.attempts.map((a) => a.id), [attemptId]);
+      }
 
       const finishedAt = new Date(Date.parse(timestamp) + 60_000 + raceRound * 1000).toISOString();
       const settled = await Promise.allSettled([
