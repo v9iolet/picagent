@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { pipelineErrorMessages } from "../shared/suite-pipeline-errors.js";
 import type { AppResponse } from "./api-response.js";
 import { commonErrorMessages } from "./errors/common.js";
+import { authErrorMessages } from "./errors/auth.js";
 import { suitePlanErrorMessages } from "./errors/suite-plan.js";
 import { taskGenerationErrorMessages } from "./errors/task-generation.js";
 import { libraryReverseErrorMessages } from "./errors/library-reverse.js";
@@ -13,6 +14,7 @@ import { mergeErrorCatalogs } from "./errors/merge-error-catalogs.js";
 export const errorMessages: Record<string, string> = mergeErrorCatalogs(
   pipelineErrorMessages,
   commonErrorMessages,
+  authErrorMessages,
   suitePlanErrorMessages,
   taskGenerationErrorMessages,
   libraryReverseErrorMessages,
