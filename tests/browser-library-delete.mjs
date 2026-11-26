@@ -427,8 +427,11 @@ test("复刻结果区删除一张单卡后：/assets 中该卡生成图消失，
   await batch.locator("[data-replica-card]").nth(1).waitFor();
   const secondCard = batch.locator("[data-replica-card]").nth(1);
   await secondCard.getByRole("button", { name: /更多操作/ }).click();
-  await secondCard.getByRole("menuitem", { name: "删除", exact: true }).click();
-  const deleteDialog = page.getByRole("dialog", { name: "删除复刻卡片" });
+  assert.deepEqual(await secondCard.getByRole("menuitem").allTextContents(), ["查看/编辑提示词", "保存到图片资源库", "存为爆品图反推资产"]);
+  await page.keyboard.press("Escape");
+  await secondCard.getByRole("menu").waitFor({ state: "hidden" });
+  await secondCard.getByRole("button", { name: "删除", exact: true }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "删除结果卡" });
   await deleteDialog.waitFor();
   await deleteDialog.getByRole("button", { name: "确认删除", exact: true }).click();
   await deleteDialog.waitFor({ state: "hidden" });

@@ -4,7 +4,6 @@ import { createAplusPlanningApi } from "./aplus/aplus-planning-api.js";
 import { createAplusGenerationApi } from "./aplus/aplus-generation-api.js";
 import { createAplusResultsApi } from "./aplus/aplus-results-api.js";
 import { storeAplusDelivery } from "./aplus/aplus-image.js";
-import { APLUS_ADDITIONAL_PROMPT_MAX_LENGTH } from "../shared/aplus.js";
 import { fail, errorMessages } from "./api-errors.js";
 import { ok, asRecord, dataOf, type AppResponse } from "./api-response.js";
 export type { AppResponse } from "./api-response.js";
@@ -45,6 +44,7 @@ import {
   type DeliveryEditChildLike,
   type DeliveryExportFormat,
   type DeliveryExportPresetId,
+  ADDITIONAL_PROMPT_MAX_LENGTH,
 } from "../shared/workbench-delivery.js";
 import { createZipBuffer } from "./zip.js";
 import { composeVerticalImages } from "./delivery-image.js";
@@ -580,7 +580,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     return visionImages;
   };
 
-  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, failedAttempt?: TaskGenerationAttempt, sourceVersionIds: Record<string, string> = {}, editSource?: { version: TaskImageVersion; versions: TaskImageVersion[] }, singleTaskPrompt?: string) => {
+  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, failedAttempt?: TaskGenerationAttempt, sourceVersionIds: Record<string, string> = {}, editSource?: { version: TaskImageVersion; versions: TaskImageVersion[]; promptSuffix: string }, singleTaskPrompt?: string) => {
     if (!deps.taskRepository) throw new Error("TASK_REPOSITORY_NOT_CONFIGURED");
     const existing = (await deps.taskRepository.listBatches(suiteId)).find((batch) => batch.idempotencyKey === idempotencyKey);
     if (existing) return { batch: existing, duplicate: true };
@@ -626,8 +626,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           ...attachedInputs.map((input, i) => ({ ...input, filename: `product-${i + 1}` })),
         ];
         const frozenPrompt = String(version.promptSnapshot.finalPrompt ?? version.promptSnapshot.prompt ?? "");
-        const finalPrompt = declareImageEditInputs(frozenPrompt, attachedInputs);
-        const providerPrompt = declareImageEditInputs(String(version.promptSnapshot.providerPrompt ?? frozenPrompt), attachedInputs);
+        const finalPrompt = declareImageEditInputs(frozenPrompt + editSource.promptSuffix, attachedInputs);
+        const providerPrompt = declareImageEditInputs(String(version.promptSnapshot.providerPrompt ?? frozenPrompt) + editSource.promptSuffix, attachedInputs);
         const stored = await deps.storage.get(version.objectKey);
         if (!stored) throw new Error("TASK_INVALID_SOURCE");
         const { width, height } = await sharp(stored.bytes).metadata();
@@ -2258,24 +2258,23 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       if (!task || task.status === "archived") return fail("INVALID_SUITE_TASK", 404);
       const body = asRecord(options.body, { allowArrays: true });
       const rawAdditionalPrompt = body.additionalPrompt;
-      if (task.originKind === "aplus" && rawAdditionalPrompt !== undefined &&
-        (typeof rawAdditionalPrompt !== "string" || rawAdditionalPrompt.length > APLUS_ADDITIONAL_PROMPT_MAX_LENGTH)) {
+      if (rawAdditionalPrompt !== undefined &&
+        (typeof rawAdditionalPrompt !== "string" || rawAdditionalPrompt.length > ADDITIONAL_PROMPT_MAX_LENGTH)) {
         return fail("APLUS_INVALID_ADDITIONAL_PROMPT", 400);
       }
+      const additionalPrompt = typeof rawAdditionalPrompt === "string" ? rawAdditionalPrompt.trim() : "";
+      const promptSuffix = additionalPrompt ? `\n\n单卡人工补充：${additionalPrompt}` : "";
       if (typeof body.editSourceVersionId === "string") {
         try {
           const { versions } = await deps.taskRepository.listTaskVersions(task.id);
           const version = versions.find((item) => item.id === body.editSourceVersionId);
           if (!version) return fail("TASK_CURRENT_VERSION_NOT_FOUND", 409);
-          const result = await createTaskBatch(task.suiteId, [task], "single", idempotencyKey, undefined, {}, { version, versions });
+          const result = await createTaskBatch(task.suiteId, [task], "single", idempotencyKey, undefined, {}, { version, versions, promptSuffix });
           return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
         } catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
       }
       const singleTaskPrompt = typeof body.promptDraft === "string" ? body.promptDraft : undefined;
-      const additionalPrompt = task.originKind === "aplus" && typeof rawAdditionalPrompt === "string"
-        ? rawAdditionalPrompt.trim() : "";
-      const draft = singleTaskPrompt ?? task.promptDraft;
-      const prompt = additionalPrompt ? `${draft}\n\n单卡人工补充：${additionalPrompt}` : draft;
+      const prompt = (singleTaskPrompt ?? task.promptDraft) + promptSuffix;
       const generationTask = prompt === task.promptDraft ? task
         : { ...task, promptDraft: prompt, promptSha256: createHash("sha256").update(prompt).digest("hex") };
       try {

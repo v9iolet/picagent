@@ -8,7 +8,7 @@ import {
 } from "../../../shared/aplus";
 import type { ProductCardSnapshot } from "../../../shared/product-card";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
-import { createIdempotencyKey, postGeneration, request, type ApiTaskStatus, type ApiPlatformProfile, type ApiImage, type ApiSuite } from "../../api/client";
+import { createIdempotencyKey, request, type ApiTaskStatus, type ApiPlatformProfile, type ApiImage, type ApiSuite } from "../../api/client";
 import type { SelectedProductCardSummary } from "../../components/product-card-picker/types";
 import type { Pipeline } from "../../components/suite-studio/studio";
 
@@ -128,8 +128,6 @@ export const aplusApi = {
   longImageUrl: (id: string, preset: AplusSizePresetKey, revision?: string) =>
     `${path(id)}/long-image?${new URLSearchParams({ preset, ...(revision ? { revision } : {}) })}`,
   zipUrl: (id: string) => `${path(id)}/export`,
-  redraw: (taskId: string, additionalPrompt: string, idempotencyKey?: string) =>
-    postGeneration<{ batchId: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { additionalPrompt }, idempotencyKey),
 };
 
 export const aplusPath = (id: string) => `/create/aplus?suite=${encodeURIComponent(id)}`;

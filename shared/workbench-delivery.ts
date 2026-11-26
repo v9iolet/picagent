@@ -1,6 +1,8 @@
 import { listingFieldEnabled, type ListingContent, type ListingRules } from "./listing-config.js";
 import type { AplusImageVersionMetadata } from "./aplus.js";
 
+export const ADDITIONAL_PROMPT_MAX_LENGTH = 500;
+
 export type DeliverySourceRole = "edit_final" | "parent_final" | "edit_current" | "parent_current" | "pending";
 
 export interface DeliveryVersionLike extends AplusImageVersionMetadata {

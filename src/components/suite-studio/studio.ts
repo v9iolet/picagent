@@ -6,6 +6,7 @@ import {
   type ApiListingSummary,
   type ApiPlanSnapshot,
   type ApiSuite,
+  type ApiTaskStatus,
 } from "../../api/client";
 import { SUPPORTED_OUTPUT_LANGUAGES, type ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { defaultImageOptions, type ModelSettingsView } from "../../../shared/model-settings";
@@ -89,7 +90,7 @@ export interface StudioState {
   pipeline: Pipeline | null;
   listingCopy: ApiListingSummary | null;
   inputImages: ApiImage[];
-  cards: ResolvedDeliverySlot[];
+  cards: Array<ResolvedDeliverySlot & { taskStatus?: ApiTaskStatus }>;
   planning: {
     snapshot: ApiPlanSnapshot | null;
     notGeneratedReasons: { category: string; reasons: string[] }[];

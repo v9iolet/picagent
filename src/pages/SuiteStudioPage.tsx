@@ -37,7 +37,8 @@ import "../components/suite-studio/studio.css";
 const POLL_INTERVAL_MS = 2500;
 
 function isBatchPolling(state: StudioState): boolean {
-  return state.pipeline?.status === "running" || state.listingCopy?.status === "running";
+  return state.pipeline?.status === "running" || state.listingCopy?.status === "running" ||
+    state.cards.some((card) => card.taskStatus === "generating");
 }
 
 function isActiveNonTerminalFeedItem(

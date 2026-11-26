@@ -1,7 +1,8 @@
 import { useRef, useState } from "react";
-import { APLUS_ADDITIONAL_PROMPT_MAX_LENGTH, APLUS_MODULES, APLUS_SIZE_PRESETS, type AplusModuleCode, type AplusSizePresetKey } from "../../../shared/aplus";
+import { APLUS_MODULES, APLUS_SIZE_PRESETS, type AplusModuleCode, type AplusSizePresetKey } from "../../../shared/aplus";
 import { sanitizeDeliveryName } from "../../../shared/workbench-delivery";
-import { createGenerationActions, suiteApi } from "../../api/client";
+import { createGenerationActions } from "../../api/client";
+import { ResultCardActions, type ResultCardEditor } from "../../components/suite-studio/ResultCardActions";
 import { StudioDialog } from "../../components/suite-studio/StudioDialog";
 import {
   JOB_SUCCESS_STATUSES, readImageEditJobStatus, readRetryJobStatus, StudioImageEditorHost, useResultJob,
@@ -36,15 +37,14 @@ export function AplusResultCards({
   onNotice: (notice: string) => void;
 }) {
   const [submitGeneration] = useState(createGenerationActions);
-  const [editor, setEditor] = useState<{ card: AplusResultCard; initialTool?: "restore_product" | "change_text" } | null>(null);
+  const [editor, setEditor] = useState<ResultCardEditor | null>(null);
   const [dragged, setDragged] = useState<AplusModuleCode | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const pressedControl = useRef(false);
   const [preview, setPreview] = useState<AplusSizePresetKey | null>(null);
   const [previewError, setPreviewError] = useState(false);
-  const [redraw, setRedraw] = useState<AplusResultCard | null>(null);
-  const [prompt, setPrompt] = useState("");
-  const [deleting, setDeleting] = useState<AplusResultCard | null>(null);
+  const [singlePreview, setSinglePreview] = useState<{ url: string; title: string } | null>(null);
+  const draggedControl = useRef(false);
   const [working, setWorking] = useState(false);
   const [dialogError, setDialogError] = useState("");
   const orderedCards = [...cards].sort((a, b) => a.sortOrder - b.sortOrder);
@@ -66,7 +66,7 @@ export function AplusResultCards({
     try {
       await action();
     } catch (error) {
-      if (redraw || deleting || preview) setDialogError(message(error));
+      if (preview) setDialogError(message(error));
       else onNotice(message(error));
     } finally {
       setWorking(false);
@@ -93,6 +93,7 @@ export function AplusResultCards({
   }
 
   function clearDrag() {
+    pressedControl.current = false;
     setDragged(null);
     setDragOverId(null);
   }
@@ -125,6 +126,7 @@ export function AplusResultCards({
                 const pending = job?.taskId === card.parentTaskId || card.taskStatus === "generating";
                 const locked = disabled || working || Boolean(job) || pending;
                 const url = deliveryUrl(card);
+                const previewUrl = url ?? card.previewUrl;
                 const isDropTarget = canReorder && dragged !== null && dragged !== card.moduleCode;
                 return (
                   <article
@@ -133,10 +135,13 @@ export function AplusResultCards({
                     draggable={canReorder}
                     onPointerDownCapture={(event) => {
                       // Native dragstart targets the draggable article even when the press started on a button.
+                      draggedControl.current = false;
                       pressedControl.current = event.target instanceof Element && Boolean(event.target.closest("button, a, input, select, textarea"));
                     }}
+                    onPointerUpCapture={() => { pressedControl.current = false; }}
                     onDragStart={(event) => {
                       if (!canReorder || pressedControl.current) {
+                        draggedControl.current = pressedControl.current;
                         event.preventDefault();
                         return;
                       }
@@ -159,9 +164,18 @@ export function AplusResultCards({
                     onDragEnd={clearDrag}
                   >
                     <div className={`aplus-card-image${pending && !url && !card.previewUrl ? " is-pending" : ""}`} style={{ aspectRatio: size.ratio.replace(":", " / ") }}>
-                      {url || card.previewUrl
-                        ? <img src={url ?? card.previewUrl!} alt={title} loading="lazy" draggable={false} />
-                        : <span>{pending ? "生成中…" : card.taskStatus === "failed" ? "生成失败" : "等待生成"}</span>}
+                      {previewUrl ? (
+                        <button
+                          type="button"
+                          className="aplus-card-image-btn"
+                          aria-label={`放大 ${title}`}
+                          onClick={(event) => {
+                            if (!draggedControl.current || event.detail === 0) setSinglePreview({ url: previewUrl, title });
+                          }}
+                        >
+                          <img src={previewUrl} alt={title} loading="lazy" draggable={false} />
+                        </button>
+                      ) : <span>{pending ? "生成中…" : card.taskStatus === "failed" ? "生成失败" : "等待生成"}</span>}
                     </div>
                     <div className="aplus-card-body">
                       <div className="aplus-section-heading">
@@ -175,16 +189,16 @@ export function AplusResultCards({
                         {card.deliverySize && !pending && <small>{card.deliverySize.width}×{card.deliverySize.height}</small>}
                       </div>
                       {card.errorMessage && !pending && <small role="status">{card.errorMessage}</small>}
-                      <div className="aplus-card-actions">
-                        <button type="button" disabled={!url || working} onClick={() => downloadCard(card)}>下载</button>
-                        <button type="button" disabled={locked} onClick={() => { setDialogError(""); setPrompt(""); setRedraw(card); }}>重绘</button>
-                        <button type="button" disabled={locked || !card.previewUrl} onClick={() => setEditor({ card })}>图片编辑</button>
-                        <button type="button" disabled={locked || !card.previewUrl} onClick={() => setEditor({ card, initialTool: "restore_product" })}>商品还原</button>
-                        {card.actions.includes("change_text") && (
-                          <button type="button" disabled={locked} onClick={() => setEditor({ card, initialTool: "change_text" })}>AI 改字</button>
-                        )}
-                        <button type="button" disabled={locked} onClick={() => { setDialogError(""); setDeleting(card); }}>删除</button>
-                      </div>
+                      <ResultCardActions
+                        card={card}
+                        disabled={locked}
+                        onDownload={url ? () => downloadCard(card) : undefined}
+                        onEdit={setEditor}
+                        allowChangeText={card.actions.includes("change_text")}
+                        submitGeneration={submitGeneration}
+                        onRedrawStarted={(id) => onJob({ id, taskId: card.parentTaskId, kind: "redraw" })}
+                        onArchived={refresh}
+                      />
                     </div>
                   </article>
                 );
@@ -204,43 +218,9 @@ export function AplusResultCards({
           </div>
         </StudioDialog>
       )}
-      {redraw && (
-        <StudioDialog title="重绘图片" close={() => { if (!working) setRedraw(null); }}>
-          <form className="aplus-action-form" onSubmit={(event) => {
-            event.preventDefault();
-            void act(async () => {
-              const { batchId } = await submitGeneration(redraw.parentTaskId, prompt.trim(),
-                (key) => aplusApi.redraw(redraw.parentTaskId, prompt.trim(), key));
-              onJob({ id: batchId, taskId: redraw.parentTaskId, kind: "redraw" });
-              setRedraw(null);
-            });
-          }}>
-            <label>
-              附加提示词（选填）
-              <textarea
-                rows={4}
-                maxLength={APLUS_ADDITIONAL_PROMPT_MAX_LENGTH}
-                value={prompt}
-                disabled={working}
-                onChange={(event) => setPrompt(event.target.value)}
-              />
-            </label>
-            {dialogError && <p role="alert">{dialogError}</p>}
-            <button className="ss-primary" type="submit" disabled={working}>确认重绘</button>
-          </form>
-        </StudioDialog>
-      )}
-      {deleting && (
-        <StudioDialog title="删除结果卡" close={() => { if (!working) setDeleting(null); }}>
-          <div className="aplus-action-form">
-            <p>删除「{deleting.title}」当前结果卡？</p>
-            {dialogError && <p role="alert">{dialogError}</p>}
-            <button type="button" disabled={working} onClick={() => void act(async () => {
-              await suiteApi.updateTask(deleting.parentTaskId, { status: "archived" });
-              setDeleting(null);
-              await refresh();
-            })}>确认删除</button>
-          </div>
+      {singlePreview && (
+        <StudioDialog title={singlePreview.title} close={() => setSinglePreview(null)}>
+          <img className="ss-zoom" src={singlePreview.url} alt={singlePreview.title} />
         </StudioDialog>
       )}
       <StudioImageEditorHost

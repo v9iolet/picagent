@@ -278,8 +278,9 @@ export const suiteApi = {
   generateBatch(suiteId: string, taskIds?: string[], idempotencyKey?: string) {
     return postGeneration<{ batchId: string; status: string; requestedCount?: number }>(`/api/suites/${encodeURIComponent(suiteId)}/generation`, taskIds ? { taskIds } : {}, idempotencyKey);
   },
-  generateTask(taskId: string, promptDraft?: string, idempotencyKey?: string) {
-    return postGeneration<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { promptDraft }, idempotencyKey);
+  generateTask(taskId: string, options?: string | { promptDraft?: string; additionalPrompt?: string }, idempotencyKey?: string) {
+    const body = typeof options === "string" ? { promptDraft: options } : options ?? {};
+    return postGeneration<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, body, idempotencyKey);
   },
   regenerateTaskFromEdit(taskId: string, editSourceVersionId: string, idempotencyKey?: string) {
     return postGeneration<{ batchId: string; status: string }>(`/api/suite-tasks/${encodeURIComponent(taskId)}/generation`, { editSourceVersionId }, idempotencyKey);
