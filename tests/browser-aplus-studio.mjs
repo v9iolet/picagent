@@ -269,6 +269,7 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
   await page.getByText("已完成 · 4 张", { exact: true }).waitFor();
   const groups = page.locator(".aplus-results-group");
   assert.equal(await groups.count(), 2);
+  assert.equal(await groups.locator("article").getByRole("button", { name: /上移|下移/ }).count(), 0);
   assert.deepEqual(await groups.first().locator(".aplus-card-body strong").allTextContents(), ["使用场景图", "首屏主视觉"]);
   assert.equal(confirmations[0].resolution, "1K");
   assert.equal(confirmations[0].productCardId, card.id);
@@ -309,9 +310,11 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
     return bytes;
   }
 
+  await web.locator("article").last().getByRole("button", { name: "重绘" }).dragTo(web.locator("article").first());
   assert.deepEqual(await firstPixel(await readLongPreview()), [255, 0, 0]);
   await web.getByRole("img", { name: "拖动排序 首屏主视觉" }).dragTo(web.locator("article").first());
   await web.locator("article").first().getByText("首屏主视觉", { exact: true }).waitFor();
+  assert.deepEqual(await web.locator(".aplus-card-body strong").allTextContents(), ["首屏主视觉", "使用场景图"]);
   assert.deepEqual(await mobile.locator(".aplus-card-body strong").allTextContents(), ["首屏主视觉", "使用场景图"]);
   assert.deepEqual(await firstPixel(await readLongPreview()), [0, 0, 128]);
   const [longDownload] = await Promise.all([
@@ -376,6 +379,13 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
   assert.deepEqual(await firstPixel(zip.get("aplus_premium_web/01_hero.png")), [0, 255, 0]);
   assert.deepEqual(await firstPixel(zip.get("aplus_premium_mobile/01_hero.png")), [0, 0, 128]);
 
+  await mobile.locator("article").last().dragTo(mobile.locator("article").first(), { sourcePosition: { x: 12, y: 12 } });
+  await mobile.locator("article").first().getByText("使用场景图", { exact: true }).waitFor();
+  for (const group of [web, mobile]) {
+    assert.deepEqual(await group.locator(".aplus-card-body strong").allTextContents(), ["使用场景图", "首屏主视觉"]);
+  }
+  assert.deepEqual(await firstPixel(await readLongPreview()), [255, 0, 0]);
+
   await button("改名").click();
   await page.getByLabel("任务名").fill("通勤随行杯 A+");
   await button("保存").click();
@@ -408,6 +418,11 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
   await groups.first().getByRole("button", { name: "删除", exact: true }).first().click();
   await button("确认删除").click();
   await page.getByText("已完成 · 3 张", { exact: true }).waitFor();
+  await mobile.locator("article").filter({ hasText: "使用场景图" }).getByRole("button", { name: "删除", exact: true }).click();
+  await button("确认删除").click();
+  await page.getByText("已完成 · 2 张", { exact: true }).waitFor();
+  assert.equal(await groups.getByRole("img", { name: /^拖动排序/ }).count(), 0);
+  assert.equal(await groups.locator('article[draggable="true"]').count(), 0);
 
   await page.goto(url(`/create/canvas/${batchId}`));
   await page.getByText("A+详情批次暂不支持在生图画布中打开。").waitFor();
