@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { createGenerationActions, suiteApi } from "../../api/client";
-import { ImageEditorModal } from "../../pages/WorkbenchBoardPage";
+import { LazyImageEditorModal } from "../../features/image-editor/LazyImageEditorModal";
 import { message } from "./studio";
 
 export const JOB_SUCCESS_STATUSES = ["completed", "succeeded"] as const;
@@ -81,7 +81,7 @@ export function StudioImageEditorHost({
   onNotify,
 }: {
   card: ResolvedDeliverySlot | null;
-  initialTool?: ComponentProps<typeof ImageEditorModal>["initialTool"];
+  initialTool?: ComponentProps<typeof LazyImageEditorModal>["initialTool"];
   onClose: () => void;
   onEditJobStarted: (childTaskId: string, parentTaskId: string) => void;
   onRetryJobStarted: (batchId: string, parentTaskId: string) => void;
@@ -92,7 +92,7 @@ export function StudioImageEditorHost({
   const targetTaskId = card.editChildTaskId ?? card.parentTaskId;
   const parentTaskId = card.parentTaskId;
   return (
-    <ImageEditorModal
+    <LazyImageEditorModal
       key={card.versionId}
       initialTool={initialTool}
       task={{ id: targetTaskId, title: card.title, promptDraft: card.promptText }}

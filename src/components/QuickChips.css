@@ -1,0 +1,33 @@
+.wb-quick-chips-block {
+  display: grid;
+  gap: 6px;
+}
+
+.wb-quick-chips-block > span {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--pa-muted);
+}
+
+.wb-quick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wb-quick-chips button {
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--pa-border);
+  background: var(--pa-surface-soft);
+  color: var(--pa-ink);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.wb-quick-chips button:hover {
+  border-color: var(--pa-accent);
+  background: var(--pa-accent-soft);
+  color: var(--pa-accent);
+}
