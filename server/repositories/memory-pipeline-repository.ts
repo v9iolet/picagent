@@ -1,4 +1,10 @@
-import type { PipelineRepository, SuitePipelinePhase, SuitePipelineRun } from "../types.js";
+import { isDeepStrictEqual } from "node:util";
+import type { PipelineRepository, PipelineRunVersion, SuitePipelinePhase, SuitePipelineRun } from "../types.js";
+
+function matchesVersion(current: SuitePipelineRun, expected: PipelineRunVersion) {
+  return current.status === expected.status && current.currentPhase === expected.currentPhase &&
+    (current.resumeCount ?? 0) === (expected.resumeCount ?? 0) && isDeepStrictEqual(current.config, expected.config);
+}
 
 export class MemoryPipelineRepository implements PipelineRepository {
   private runs = new Map<string, SuitePipelineRun>();
@@ -16,7 +22,7 @@ export class MemoryPipelineRepository implements PipelineRepository {
   async getRun(id: string) { return this.runs.get(id) ?? null; }
   async resumeRun(previous: SuitePipelineRun, key: string, phase: SuitePipelinePhase, config: SuitePipelineRun["config"]) {
     const current = this.runs.get(previous.id);
-    if (!current || current.status !== previous.status || current.resumeCount !== previous.resumeCount ||
+    if (!current || !matchesVersion(current, previous) ||
         current.resumeKeys?.includes(key) || current.lastResumeKey === key ||
         [...this.runs.values()].some((other) => other.suiteId === previous.suiteId && other.status === "running")) return null;
     const next: SuitePipelineRun = {
@@ -28,9 +34,9 @@ export class MemoryPipelineRepository implements PipelineRepository {
   }
   async getLatestRun(suiteId: string) { return (await this.listRuns(suiteId))[0] ?? null; }
   async listRuns(suiteId: string) { return [...this.runs.values()].filter((run) => run.suiteId === suiteId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }
-  async updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>) {
+  async updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>, expected?: PipelineRunVersion) {
     const current = this.runs.get(id);
-    if (!current) return null;
+    if (!current || (expected && !matchesVersion(current, expected))) return null;
     const next = { ...current, ...patch };
     this.runs.set(id, next);
     return next;

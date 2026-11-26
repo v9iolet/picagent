@@ -48,7 +48,11 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
   }));
   const storage = new MemoryStorage(),
     editorRepository = new MemoryImageEditorRepository();
-  const source = { bytes: sample, mimeType: "image/jpeg", width: 64, height: 64 };
+  const productInputs = [{ objectKey: "test/suite-product.jpg", role: "product" }];
+  await storage.put({ key: productInputs[0].objectKey, bytes: sample, contentType: "image/jpeg" });
+  const source = { bytes: sample, mimeType: "image/jpeg", width: 64, height: 64, productInputs };
+  let ocrAttempts = 0;
+  const recognizedTexts = ["折叠插脚", "随身携带", "限时优惠", "商品型号"];
   const editor = new ImageEditorService(
     editorRepository,
     {
@@ -63,17 +67,18 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
     {
       name: "offline OCR",
       version: "1",
-      recognize: async () => ({
-        blocks: [
-          {
-            id: "line1",
-            text: "折叠插脚",
+      recognize: async () => {
+        if (++ocrAttempts === 1) throw new Error("OCR_TIMEOUT");
+        return {
+          blocks: recognizedTexts.map((text, index) => ({
+            id: `line-${index + 1}`,
+            text,
             confidence: 1,
-            bounds: { x: 0.1, y: 0.1, width: 0.5, height: 0.2 },
+            bounds: { x: 0.1, y: 0.1 + index * 0.2, width: 0.5, height: 0.12 },
             rotation: 0,
-          },
-        ],
-      }),
+          })),
+        };
+      },
     },
   );
   const app = createSuiteStudioApp({
@@ -98,6 +103,10 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
       provider: "fake",
       model: "offline",
       isFake: true,
+      async translateTexts({ items }) {
+        const translations = ["Foldable plug", "Portable", "Limited offer", "Model number"];
+        return items.map(({ id, text }, index) => ({ id, originalText: text, translatedText: translations[index] }));
+      },
       async generatePlan(input) {
         const id = input.inputImageIds[0],
           groups = JSON.parse(input.dynamicInput.category_groups);
@@ -168,13 +177,13 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
         models: [
           {
             id: "offline-image",
-            capabilities: ["image", "vision"],
+            capabilities: ["image", "vision", "video"],
             imageOptions: { sizes: ["1K", "4K"], aspectRatios: ["1:1", "3:2"], sizeMode: "tier" },
           },
         ],
       },
     ],
-    preferences: { image: { channelId: "demo", modelId: "offline-image" }, vision: null },
+    preferences: { image: { channelId: "demo", modelId: "offline-image" }, vision: null, video: null },
   };
   const calls = [];
   const vite = await createServer({
@@ -374,33 +383,86 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.waitForTimeout(3200);
   assert.equal(statePolls(), afterCompletion, "终态后不得继续轮询");
   const first = cards.first();
-  assert.equal(await first.getByRole("button", { name: "编辑文字" }).count(), 0);
-  await first.getByRole("button", { name: "编辑图片" }).click();
+  assert.deepEqual(await first.locator(".ss-actions button").allTextContents(), ["下载", "重绘", "图片编辑", "商品还原", "AI 改字", "删除"]);
+  await first.getByRole("button", { name: "图片编辑" }).click();
   const dialog = page.getByRole("dialog", { name: "图片编辑器" });
   await dialog.waitFor();
   assert.equal(new URL(page.url()).pathname, `/create/suite/${suiteId}`);
   assert.equal(await dialog.isVisible(), true);
-  await dialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
-  await dialog.getByRole("button", { name: /折叠插脚/ }).waitFor();
-  await dialog.getByLabel("新文字").fill("折叠设计");
-  const opReq = page.waitForResponse((res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/operations"));
+  await dialog.getByRole("button", { name: "关闭图片编辑器" }).click();
+  await first.getByRole("button", { name: "AI 改字", exact: true }).click();
+  await dialog.getByRole("status").filter({ hasText: "文字识别请求超时" }).waitFor();
+  await dialog.getByRole("button", { name: "重新识别" }).click();
+  const firstText = dialog.getByRole("button", { name: "折叠插脚", exact: true });
+  await firstText.waitFor();
+  await dialog.getByRole("button", { name: "放大画布" }).click();
+  await dialog.getByRole("button", { name: "放大画布" }).click();
+  const lastText = dialog.getByRole("button", { name: "商品型号", exact: true });
+  await lastText.click();
+  assert.equal(await lastText.getAttribute("aria-pressed"), "true");
+  assert.ok(await dialog.locator(".wb-editor-canvas-scroll").evaluate((element) => element.scrollTop > 0));
+  await firstText.click();
+  assert.equal(await firstText.getAttribute("aria-pressed"), "true");
+  const inputs = dialog.locator(".wb-text-edit-row textarea");
+  assert.deepEqual(await inputs.evaluateAll((fields) => fields.map((field) => field.value)), ["折叠插脚", "随身携带", "限时优惠", "商品型号"]);
+  const generate = dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" });
+  assert.equal(await generate.isDisabled(), true);
+  await dialog.getByLabel("翻译目标语言").selectOption("英文");
+  await dialog.getByRole("button", { name: "一键翻译", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".wb-text-edit-row textarea")?.value === "Foldable plug");
+  assert.deepEqual(await inputs.evaluateAll((fields) => fields.map((field) => field.value)), ["Foldable plug", "Portable", "Limited offer", "Model number"]);
+  await dialog.getByLabel("新文字：折叠插脚").fill("折叠设计");
+  await dialog.getByLabel("新文字：随身携带").fill("轻巧随行");
+  await dialog.locator(".wb-text-edit-row").filter({ hasText: "限时优惠" }).getByRole("button", { name: "删除", exact: true }).click();
+  const deletedText = dialog.getByLabel("新文字：限时优惠");
+  assert.equal(await deletedText.inputValue(), "");
+  await deletedText.fill(" 　");
+  await dialog.locator(".wb-text-edit-row").filter({ hasText: "商品型号" }).getByRole("button", { name: "重置", exact: true }).click();
+  await dialog.getByText("已修改 3 条", { exact: true }).waitFor();
+  assert.equal(fixture.calls.filter((x) => x.path.endsWith("/operations")).length, 0);
   const submitReq = page.waitForResponse((res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/submit"));
-  await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
-  await Promise.all([opReq, submitReq]);
+  await generate.click();
+  const submitted = await submitReq;
+  assert.equal(submitted.status(), 202);
   await dialog.waitFor({ state: "hidden" });
   assert.equal(new URL(page.url()).pathname, `/create/suite/${suiteId}`);
-  assert.equal(
-    fixture.calls.find((x) => x.path.endsWith("/operations")).body.operation.payload.newText,
-    "折叠设计",
-  );
-  assert.ok(fixture.calls.some((x) => x.path.endsWith("/submit")));
+  const edits = fixture.calls.filter((x) => x.path.endsWith("/operations")).map((x) => x.body.operation);
+  assert.deepEqual(edits.map(({ payload }) => [payload.originalText, payload.newText]), [
+    ["折叠插脚", "折叠设计"], ["随身携带", "轻巧随行"], ["限时优惠", ""],
+  ]);
+  assert.equal(edits[2].summary, "删除文字：限时优惠");
+  assert.deepEqual(submitted.request().postDataJSON().operationIds, edits.map((item) => item.operationId));
   await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
-  await first.getByRole("combobox").selectOption("4K");
+  await first.getByRole("button", { name: "重绘", exact: true }).click();
+  const redrawDialog = page.getByRole("dialog", { name: "重绘图片" });
+  const resolution = redrawDialog.getByLabel("输出分辨率");
+  assert.deepEqual(await resolution.locator("option").allTextContents(), ["原分辨率", "1K", "4K"]);
+  await resolution.selectOption("4K");
+  await redrawDialog.getByLabel("附加提示词（选填）").fill("增强磨砂纹理");
+  const generationRoute = "**/api/suite-tasks/*/generation";
+  const submittedKeys = [];
+  await page.route(generationRoute, async (route) => {
+    submittedKeys.push(route.request().headers()["idempotency-key"]);
+    const response = await route.fetch();
+    if (submittedKeys.length === 1) {
+      assert.equal(response.status(), 202);
+      await route.abort("failed");
+    } else {
+      await route.fulfill({ response });
+    }
+  });
+  await redrawDialog.getByRole("button", { name: "确认重绘" }).click();
+  await redrawDialog.getByRole("alert").waitFor();
   const regenReq = page.waitForResponse(
     (res) => res.request().method() === "POST" && res.url().includes("/api/suite-tasks/") && res.url().endsWith("/generation"),
   );
-  await first.getByRole("button", { name: "重新生成" }).click();
-  await regenReq;
+  await redrawDialog.getByRole("button", { name: "确认重绘" }).click();
+  const acknowledged = await regenReq;
+  assert.deepEqual(acknowledged.request().postDataJSON(), { additionalPrompt: "增强磨砂纹理" });
+  assert.equal(acknowledged.status(), 200);
+  assert.ok(submittedKeys[0]);
+  assert.deepEqual(submittedKeys, [submittedKeys[0], submittedKeys[0]]);
+  await page.unroute(generationRoute);
   await batch.getByText("图片已更新", { exact: true }).waitFor();
   assert.deepEqual(fixture.calls.find((x) => x.path.endsWith("/tasks/batch-params")).body.generationParams, {
     size: "4K",
@@ -411,6 +473,17 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
     ).path,
     /\/generation$/,
   );
+  const second = cards.nth(1);
+  await second.getByRole("button", { name: "商品还原", exact: true }).click();
+  await dialog.getByRole("radio", { name: "使用全部商品原图", checked: true }).waitFor();
+  await dialog.locator(".wb-restore-grid img").first().evaluate((image) => image.decode());
+  const restoreRequest = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await dialog.getByRole("button", { name: "还原商品", exact: true }).click();
+  const restored = await restoreRequest;
+  assert.equal(restored.status(), 202);
+  assert.deepEqual((await restored.json()).data.snapshot.attachedInputs, [{ objectKey: "test/suite-product.jpg", role: "product" }]);
+  await dialog.waitFor({ state: "hidden" });
+  await second.locator('img[src^="/api/image-editor/tasks/"]').waitFor();
   await platform.selectOption({ label: "淘宝" });
   assert.equal(await refine.count(), 0);
   await platformTip.click();
@@ -435,6 +508,14 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.getByRole("button", { name: "返回套图", exact: true }).click();
   await page.waitForURL(`**/create/suite/${suiteId}`);
   await batch.locator('[data-status="completed"]').waitFor();
+  await cards.last().getByRole("button", { name: "删除", exact: true }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "删除结果卡" });
+  assert.equal(await cards.count(), 7);
+  const archived = page.waitForResponse((res) => res.request().method() === "PATCH" && res.url().includes("/api/suite-tasks/"));
+  await deleteDialog.getByRole("button", { name: "确认删除" }).click();
+  assert.equal((await archived).request().postDataJSON().status, "archived");
+  await deleteDialog.waitFor({ state: "hidden" });
+  assert.equal(await cards.count(), 6);
   await page.goBack();
   await page.getByRole("tab", { name: "成品展示板", selected: true }).waitFor();
   await page.goto(fixture.url + "settings");
@@ -456,7 +537,9 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
   await page.keyboard.press("Escape");
   await sizeModeTip.waitFor({ state: "hidden" });
   assert.equal(await channelDialog.isVisible(), true, "First Escape inside native <dialog> must close only InfoTip, keeping <dialog> open");
+  assert.ok(await channelDialog.getByRole("checkbox", { name: "视频" }).isChecked());
   await page.getByLabel("生图", { exact: true }).uncheck();
+  assert.equal(await channelDialog.getByRole("group", { name: "生图尺寸能力" }).count(), 0);
   await page.getByRole("button", { name: "保存渠道", exact: true }).click();
   await page.waitForFunction(() => !document.querySelector("dialog[open]"));
   assert.equal(
@@ -466,6 +549,14 @@ test("商品套图：空态、静默草稿、平台联动、七张实图、选�
     ),
     false,
   );
+  await page.getByRole("link", { name: "偏好设置" }).click();
+  const video = page.getByRole("combobox", { name: "默认视频模型" });
+  await video.selectOption({ label: "离线测试 · offline-image" });
+  await page.getByRole("button", { name: "保存偏好" }).click();
+  await page.getByText("偏好设置已保存", { exact: true }).first().waitFor();
+  assert.deepEqual(fixture.calls.find((x) => x.method === "PATCH" && x.path.endsWith("/preferences")).body, {
+    video: { channelId: "demo", modelId: "offline-image" },
+  });
 });
 
 test("旧版结构计划模板失败时显示中文发布指引", async (t) => {

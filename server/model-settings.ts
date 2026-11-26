@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { capabilityLabels, defaultImageOptions, type ImageOptions, type ChannelModel, type ModelCapability, type ModelChannelInput, type ModelChannelSnapshot, type ModelPreferences, type ModelSettingsView } from "../shared/model-settings.js";
+import { capabilityLabels, defaultImageOptions, MODEL_CAPABILITIES, IMAGE_QUALITIES, type ImageOptions, type ChannelModel, type ModelCapability, type ModelChannelInput, type ModelChannelSnapshot, type ModelPreferences, type ModelSettingsView } from "../shared/model-settings.js";
 import { parseProviderJson } from "./providers/provider-json.js";
 
 interface StoredChannel extends ModelChannelInput { id: string }
@@ -57,7 +57,11 @@ function validateImageOptions(value: unknown): ImageOptions {
   if (!validList(options.sizes, /^(1K|2K|4K)$/) || !validList(options.aspectRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/) || (options.sizeMode !== "tier" && options.sizeMode !== "pixels")) {
     throw new SettingsError("INVALID_IMAGE_OPTIONS", "请配置非空的分辨率档位（1K/2K/4K）、有效比例和尺寸模式");
   }
-  return { sizes: [...new Set(options.sizes)], aspectRatios: [...new Set(options.aspectRatios)], sizeMode: options.sizeMode };
+  const quality = IMAGE_QUALITIES.find((value) => value === options.quality);
+  if (options.quality !== undefined && !quality) {
+    throw new SettingsError("INVALID_IMAGE_OPTIONS", "请为图片编辑选择有效的出图质量");
+  }
+  return { sizes: [...new Set(options.sizes)], aspectRatios: [...new Set(options.aspectRatios)], sizeMode: options.sizeMode, ...(quality ? { quality } : {}) };
 }
 
 function validateChannel(value: unknown): ModelChannelInput {
@@ -73,7 +77,7 @@ function validateChannel(value: unknown): ModelChannelInput {
     const model = object(entry);
     const id = typeof model.id === "string" ? model.id.trim() : "";
     if (!id || models.has(id) || !Array.isArray(model.capabilities) || !model.capabilities.length ||
-      model.capabilities.some((value: unknown) => value !== "image" && value !== "vision")) {
+      model.capabilities.some((value) => !MODEL_CAPABILITIES.includes(value))) {
       throw new SettingsError("INVALID_CHANNEL_MODELS", "同一渠道的模型 ID 必须非空且唯一，每个模型至少选择一种能力");
     }
     models.set(id, { id, capabilities: [...new Set<ModelCapability>(model.capabilities)], ...(model.imageOptions === undefined ? {} : { imageOptions: validateImageOptions(model.imageOptions) }) });
@@ -83,7 +87,7 @@ function validateChannel(value: unknown): ModelChannelInput {
 }
 
 function assertReferences(state: ModelSettingsState, status: 400 | 409) {
-  for (const capability of ["image", "vision"] as const) {
+  for (const capability of MODEL_CAPABILITIES) {
     const ref = state.preferences[capability];
     if (!ref) continue;
     const channel = state.channels.find((item) => item.id === ref.channelId);
@@ -99,7 +103,7 @@ function assertReferences(state: ModelSettingsState, status: 400 | 409) {
 function view(state: ModelSettingsState): ModelSettingsView {
   return {
     channels: state.channels.map(({ apiKey, ...channel }) => ({ ...channel, hasApiKey: Boolean(apiKey) })),
-    preferences: state.preferences,
+    preferences: { ...state.preferences, video: state.preferences.video ?? null },
   };
 }
 
@@ -180,7 +184,7 @@ export class ModelSettings {
     if (method === "PATCH" && path === "/api/model-settings/preferences") {
       const body = object(input);
       return this.repository.update((state) => {
-        for (const capability of ["image", "vision"] as const) {
+        for (const capability of MODEL_CAPABILITIES) {
           const value = body[capability];
           if (value === undefined) continue;
           if (value === null) { state.preferences[capability] = null; continue; }

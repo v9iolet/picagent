@@ -1,13 +1,14 @@
 import { useState } from "react";
-import { suiteApi, type ApiPlatformProfile } from "../../api/client";
+import { createGenerationActions, suiteApi, type ApiPlatformProfile } from "../../api/client";
 import { readProductCardSnapshot } from "../../../shared/product-card";
 import { SUITE_CATEGORY_GROUPS, SUITE_CATEGORY_NAMES } from "../../../shared/suite-categories";
 import { pipelineErrorMessages } from "../../../shared/suite-pipeline-errors";
-import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
+import { ResultCardActions, type ResultCardEditor } from "./ResultCardActions";
 import { ListingCopyDrawer } from "../listing-copy/ListingCopyDrawer";
 import { SelectedProductCardBar } from "../product-card-picker/SelectedProductCardBar";
 import { download, fromRun, message, studioApi, totalImages, type StudioState } from "./studio";
 import { StudioDialog } from "./StudioDialog";
+import { StudioProgressBar, type StudioProgressStep } from "./StudioProgressBar";
 import {
   JOB_SUCCESS_STATUSES,
   readImageEditJobStatus,
@@ -43,7 +44,6 @@ const phaseErrors: Record<string, string> = {
   image_generating: "IMAGE_GENERATION_FAILED",
   done: "IMAGE_GENERATION_FAILED",
 };
-type StepState = "done" | "active" | "pending" | "failed";
 
 function runningBadgeText(phase: string, completed: number, total: number): string {
   switch (phase) {
@@ -100,8 +100,8 @@ function buildProgressModel(
     },
   ];
 
-  const steps: Array<{ key: string; index: string; label: string; state: StepState }> = baseSteps.map((step) => {
-    let state: StepState = "pending";
+  const steps: StudioProgressStep[] = baseSteps.map((step) => {
+    let state: StudioProgressStep["state"] = "pending";
     if (running) {
       if (step.order < currentOrder) state = "done";
       else if (step.order === currentOrder) state = "active";
@@ -115,12 +115,13 @@ function buildProgressModel(
     return { key: step.key, index: step.index, label: step.label, state };
   });
 
-  let copyStep: { label: string; state: StepState } | null = null;
+  let copyStep: Pick<StudioProgressStep, "label" | "state">;
   if (listingCopyEnabled || listingCopy) {
     if (listingCopy?.status === "running") copyStep = { label: "生成文案中…", state: "active" };
     else if (listingCopy?.status === "succeeded") copyStep = { label: "文案已生成", state: "done" };
     else if (listingCopy?.status === "failed") copyStep = { label: "文案生成失败", state: "failed" };
     else copyStep = { label: "等待规划", state: "pending" };
+    steps.push({ key: "listing_copy", index: "文", label: "上架文案 · " + copyStep.label, state: copyStep.state, alignEnd: true });
   }
 
   let percent = 15;
@@ -159,7 +160,7 @@ function buildProgressModel(
     headline = "套图已生成，正在并行生成商品上架文案…";
   }
 
-  return { steps, copyStep, percent, headline };
+  return { steps, percent, headline };
 }
 type Props = {
   state: StudioState;
@@ -213,16 +214,16 @@ export function BatchResults({
         ? pipelineErrorMessages[run.errorCode ?? persistedMessage ?? ""] ??
           pipelineErrorMessages[phaseErrors[run.currentPhase]] ?? pipelineErrorMessages.PIPELINE_FAILED
         : null;
+  const [submitGeneration] = useState(createGenerationActions);
   const [picked, setPicked] = useState<string[]>([]),
     [menu, setMenu] = useState(false),
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState(""),
     [supplement, setSupplement] = useState("");
   const [preview, setPreview] = useState<{ url: string; title: string } | null>(null);
-  const [editCard, setEditCard] = useState<ResolvedDeliverySlot | null>(null);
+  const [editor, setEditor] = useState<ResultCardEditor | null>(null);
   const [editJob, setEditJob] = useState("");
-  const [retryJob, setRetryJob] = useState(""),
-    [retrySize, setRetrySize] = useState<Record<string, string>>({});
+  const [retryJob, setRetryJob] = useState("");
   const [showListingCopy, setShowListingCopy] = useState(false);
   const act = async (fn: () => Promise<void>) => {
     if (busy) return;
@@ -262,18 +263,6 @@ export function BatchResults({
       await studioApi.resume(id, action, fields);
       onActivate(id);
       await refresh(id);
-    });
-  const retry = (card: ResolvedDeliverySlot) =>
-    void act(async () => {
-      const size = retrySize[card.parentTaskId];
-      if (size)
-        await suiteApi.batchUpdateTaskParams(id, {
-          taskIds: [card.parentTaskId],
-          generationParams: { size },
-        });
-      const result = await suiteApi.generateTask(card.parentTaskId);
-      setRetryJob(result.batchId);
-      setNotice("已提交单张生成。");
     });
   const selected = ready.map((card) => card.parentTaskId).filter((task) => picked.includes(task));
   const structure = s.planning.snapshot?.structure,
@@ -376,41 +365,7 @@ export function BatchResults({
         <SelectedProductCardBar card={productCardSnapshot} readOnly compact />
       )}
       {progressModel && (
-        <div className="ss-progress">
-          <div className="ss-progress-head">
-            <strong>{progressModel.headline}</strong>
-            <span className="ss-progress-pct">{progressModel.percent}%</span>
-          </div>
-          <div
-            className="ss-progress-track"
-            role="progressbar"
-            aria-label="套图生成进度"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={progressModel.percent}
-            aria-valuetext={`${progressModel.percent}% · ${progressModel.headline}`}
-          >
-            <div className="ss-progress-fill" style={{ width: `${progressModel.percent}%` }} />
-          </div>
-          <ol className="ss-progress-steps" aria-label="生成阶段进度">
-            {progressModel.steps.map((step) => (
-              <li key={step.key} className="ss-step" data-step-state={step.state}>
-                <span className="ss-step-badge" aria-hidden="true">
-                  {step.state === "done" ? "✓" : step.index}
-                </span>
-                <span>{step.label}</span>
-              </li>
-            ))}
-            {progressModel.copyStep && (
-              <li className="ss-step ss-step-copy" data-step-state={progressModel.copyStep.state}>
-                <span className="ss-step-badge" aria-hidden="true">
-                  {progressModel.copyStep.state === "done" ? "✓" : "文"}
-                </span>
-                <span>上架文案 · {progressModel.copyStep.label}</span>
-              </li>
-            )}
-          </ol>
-        </div>
+        <StudioProgressBar {...progressModel} progressLabel="套图生成进度" stepsLabel="生成阶段进度" />
       )}
       {errorMessage && !running && <p className="ss-note">{errorMessage}</p>}
       {run?.status === "waiting_base_refine_decision" && (
@@ -516,42 +471,16 @@ export function BatchResults({
                   {type}
                 </strong>
               </div>
-              <div className="ss-actions">
-                {card.previewUrl && (
-                  <>
-                    <button
-                      onClick={() =>
-                        void act(() => download(card.previewUrl!, card.exportFilename ?? `${card.title}.png`))
-                      }
-                    >
-                      下载
-                    </button>
-                    <button
-                      disabled={busy || !!editJob || !card.versionId}
-                      onClick={() => setEditCard(card)}
-                    >
-                      编辑图片
-                    </button>
-                  </>
-                )}
-                {!running && (
-                  <>
-                    <select
-                      aria-label={"重试分辨率 " + card.title}
-                      value={retrySize[task] ?? ""}
-                      onChange={(e) => setRetrySize({ ...retrySize, [task]: e.target.value })}
-                    >
-                      <option value="">原分辨率</option>
-                      {sizes.map((v) => (
-                        <option key={v}>{v}</option>
-                      ))}
-                    </select>
-                    <button disabled={busy || !!retryJob} onClick={() => retry(card)}>
-                      {card.previewUrl ? "重新生成" : "失败重试"}
-                    </button>
-                  </>
-                )}
-              </div>
+              <ResultCardActions
+                card={card}
+                disabled={busy || running || card.taskStatus === "generating" || Boolean(retryJob || editJob)}
+                onDownload={card.previewUrl ? () => void act(() => download(card.previewUrl!, card.exportFilename ?? `${card.title}.png`)) : undefined}
+                onEdit={setEditor}
+                resolution={{ suiteId: id, sizes }}
+                submitGeneration={submitGeneration}
+                onRedrawStarted={(batchId) => { setRetryJob(batchId); setNotice("已提交单张生成。"); }}
+                onArchived={() => refresh(id)}
+              />
             </article>
           );
         })}
@@ -576,8 +505,9 @@ export function BatchResults({
       )}
       {showListingCopy && <ListingCopyDrawer state={s} profiles={profiles} close={() => setShowListingCopy(false)} />}
       <StudioImageEditorHost
-        card={editCard}
-        onClose={() => setEditCard(null)}
+        card={editor?.card ?? null}
+        initialTool={editor?.initialTool}
+        onClose={() => setEditor(null)}
         onEditJobStarted={setEditJob}
         onRetryJobStarted={setRetryJob}
         onNotify={setNotice}

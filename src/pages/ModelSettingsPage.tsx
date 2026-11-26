@@ -1,12 +1,16 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type MouseEvent } from "react";
-import { capabilityLabels, defaultImageOptions, type ImageOptions, type ModelCapability, type ModelChannel, type ModelChannelInput, type ModelPreferences, type ModelReference, type ModelSettingsView } from "../../shared/model-settings";
+import { MODEL_CAPABILITIES, capabilityLabels, defaultImageOptions, type ImageOptions, type ModelCapability, type ModelChannel, type ModelChannelInput, type ModelPreferences, type ModelReference, type ModelSettingsView } from "../../shared/model-settings";
 import { modelSettingsApi } from "../api/client";
 import { Icon } from "./shared";
 import { AppShell } from "../components/AppShell";
 import { InfoTip } from "../components/ui/InfoTip";
 import "./ModelSettingsPage.css";
 
-const capabilities = ["image", "vision"] as const;
+const capabilityDescriptions = {
+  image: "用于白底精修、套图与 A+ 详情出图、创作板生图和图片编辑。",
+  vision: "用于商品建档、套图与 A+ 详情规划、AI 帮写、爆品图复刻和 OCR。",
+  video: "预留用于后续商品视频与动态素材生成。",
+};
 const emptyChannel = (): ModelChannelInput => ({ name: "", protocol: "openai-compatible", baseUrl: "", apiKey: "", models: [] });
 const choiceValue = (ref: ModelReference | null) => ref ? JSON.stringify([ref.channelId, ref.modelId]) : "";
 
@@ -35,6 +39,12 @@ function ImageOptionsFields({ options, onChange }: { options: ImageOptions; onCh
         <option value="tier">档位（tier）</option><option value="pixels">像素（pixels）</option>
       </select>
     </div>
+    <label>编辑出图质量
+      <select value={options.quality ?? ""} onChange={(event) => onChange({ ...options, quality: event.target.value ? event.target.value as ImageOptions["quality"] : undefined })}>
+        <option value="">默认（高）</option>
+        <option value="low">低</option><option value="medium">中</option><option value="high">高</option>
+      </select>
+    </label>
   </div>;
 }
 
@@ -209,7 +219,7 @@ function ChannelDrawer({ channel, onClose, onSave }: {
                 <strong>{model.id}</strong>
                 <button type="button" className="settings-button settings-danger" aria-label={`移除模型 ${model.id}`} onClick={() => setDraft((value) => ({ ...value, models: value.models.filter(({ id }) => id !== model.id) }))}>移除</button>
               </div>
-              <div className="settings-capabilities">{capabilities.map((capability) => <label key={capability}>
+              <div className="settings-capabilities">{MODEL_CAPABILITIES.map((capability) => <label key={capability}>
                 <input type="checkbox" checked={model.capabilities.includes(capability)} onChange={(event) => setCapability(model.id, capability, event.target.checked)} />
                 {capabilityLabels[capability]}
               </label>)}</div>
@@ -235,7 +245,7 @@ function Preferences({ settings, onSave }: { settings: ModelSettingsView; onSave
   const [draft, setDraft] = useState(settings.preferences);
   const [saving, setSaving] = useState(false);
   const baseId = useId();
-  const changed = capabilities.filter((capability) => choiceValue(draft[capability]) !== choiceValue(settings.preferences[capability]));
+  const changed = MODEL_CAPABILITIES.filter((capability) => choiceValue(draft[capability]) !== choiceValue(settings.preferences[capability]));
   const options = (capability: ModelCapability) => settings.channels.flatMap((channel) => channel.models
     .filter((model) => model.capabilities.includes(capability))
     .map((model) => ({ ref: { channelId: channel.id, modelId: model.id }, label: `${channel.name} · ${model.id}` })));
@@ -248,7 +258,7 @@ function Preferences({ settings, onSave }: { settings: ModelSettingsView; onSave
   };
   return <form className="settings-preferences" onSubmit={submit}>
     <fieldset disabled={saving} className="settings-fields">
-      {capabilities.map((capability) => {
+      {MODEL_CAPABILITIES.map((capability) => {
         const choices = options(capability);
         const selectId = `${baseId}-${capability}`;
         return <div key={capability} className="settings-fields" style={{ gap: 6 }}>
@@ -258,7 +268,7 @@ function Preferences({ settings, onSave }: { settings: ModelSettingsView; onSave
               label={`${capabilityLabels[capability]}适用范围说明`}
               title="适用范围"
               align="start"
-              content={capability === "image" ? "用于白底精修、创作板生图与图片编辑。" : "用于商品建档、套图规划、爆品图复刻与 OCR。"}
+              content={capabilityDescriptions[capability]}
             />
           </div>
           <select id={selectId} value={choiceValue(draft[capability])} onChange={(event) => setDraft({ ...draft, [capability]: choices.find(({ ref }) => choiceValue(ref) === event.target.value)?.ref ?? null })}>

@@ -1,8 +1,11 @@
 import { listingFieldEnabled, type ListingContent, type ListingRules } from "./listing-config.js";
+import type { AplusImageVersionMetadata } from "./aplus.js";
+
+export const ADDITIONAL_PROMPT_MAX_LENGTH = 500;
 
 export type DeliverySourceRole = "edit_final" | "parent_final" | "edit_current" | "parent_current" | "pending";
 
-export interface DeliveryVersionLike {
+export interface DeliveryVersionLike extends AplusImageVersionMetadata {
   id: string;
   attemptId?: string;
   versionNumber: number;
@@ -45,7 +48,7 @@ export interface DeliveryEditChildLike {
   task: Record<string, unknown>;
   snapshot?: Record<string, unknown> | null;
   attempts?: Array<Record<string, unknown>>;
-  versions: Array<{
+  versions: Array<AplusImageVersionMetadata & {
     id: string;
     previewUrl?: string;
     versionNumber: number;
@@ -58,7 +61,7 @@ export interface DeliveryEditChildLike {
   }>;
 }
 
-export interface ResolvedDeliverySlot {
+export interface ResolvedDeliverySlot extends AplusImageVersionMetadata {
   slotIndex: number;
   typeOrdinal: number;
   imageType: "main" | "detail";
@@ -195,10 +198,14 @@ function timestampOf(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function aplusDeliveryMetadata({ generatedSize, deliverySize, deliveryObjectKey }: AplusImageVersionMetadata): AplusImageVersionMetadata {
+  return { generatedSize, deliverySize, deliveryObjectKey };
+}
+
 export function resolveDeliverySlots(
   tasks: DeliveryTaskLike[],
   imageEditChildren: DeliveryEditChildLike[] = [],
-  options: { defaultTemplateVersionId?: string | null; preferLatestByTime?: boolean } = {},
+  options: { defaultTemplateVersionId?: string | null; preferLatestByTime?: boolean; currentVersionsOnly?: boolean } = {},
 ): ResolvedDeliverySlot[] {
   const activeTasks = tasks
     .filter((task) => task.status !== "archived")
@@ -251,7 +258,7 @@ export function resolveDeliverySlots(
       return String(b.task.id ?? "").localeCompare(String(a.task.id ?? ""));
     });
 
-    const editFinalCandidate = children
+    const editFinalCandidate = options.currentVersionsOnly ? undefined : children
       .map((child) => {
         const finalId = typeof child.task.finalVersionId === "string" ? child.task.finalVersionId : null;
         if (!finalId) return null;
@@ -260,7 +267,7 @@ export function resolveDeliverySlots(
       })
       .find((entry): entry is { child: DeliveryEditChildLike; version: DeliveryEditChildLike["versions"][number] } => Boolean(entry));
 
-    const parentFinal = task.versions.find((version) => version.isFinal) ?? null;
+    const parentFinal = options.currentVersionsOnly ? null : task.versions.find((version) => version.isFinal) ?? null;
 
     const editCurrentCandidates = children
       .map((child) => {
@@ -374,6 +381,7 @@ export function resolveDeliverySlots(
         versionNumber: chosen.version.versionNumber,
         previewUrl,
         objectKey: chosen.version.objectKey ?? null,
+        ...(task.originKind === "aplus" && aplusDeliveryMetadata(chosen.version)),
         width: chosen.version.width ?? null,
         height: chosen.version.height ?? null,
         mimeType,
@@ -409,6 +417,7 @@ export function resolveDeliverySlots(
         versionNumber: chosen.versionNumber,
         previewUrl: chosen.previewUrl ?? null,
         objectKey: chosen.objectKey ?? null,
+        ...(task.originKind === "aplus" && aplusDeliveryMetadata(chosen)),
         width: chosen.width ?? null,
         height: chosen.height ?? null,
         mimeType,
@@ -783,61 +792,6 @@ export function evaluateDeliveryCompliance(
     finalizedCount: finalized.length,
     checks,
   };
-}
-
-export interface OutpaintPreviewBox {
-  targetWidth: number;
-  targetHeight: number;
-  anchor: "center" | "left" | "right";
-  /** Normalized 0..1 position of the original image inside the expanded target frame */
-  innerX: number;
-  innerY: number;
-  innerWidth: number;
-  innerHeight: number;
-}
-
-export function computeOutpaintPreviewBox(
-  sourceWidth: number,
-  sourceHeight: number,
-  direction: "all" | "horizontal" | "vertical" | "left" | "right",
-  targetRatio: "original" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9",
-): OutpaintPreviewBox {
-  const safeW = Math.max(1, sourceWidth);
-  const safeH = Math.max(1, sourceHeight);
-  const sourceRatio = safeW / safeH;
-  const ratioMap: Record<typeof targetRatio, number | null> = {
-    original: null,
-    "1:1": 1,
-    "3:4": 3 / 4,
-    "4:3": 4 / 3,
-    "9:16": 9 / 16,
-    "16:9": 16 / 9,
-  };
-  const desiredRatio = ratioMap[targetRatio] ?? sourceRatio;
-  let targetWidth = safeW;
-  let targetHeight = safeH;
-  if (targetRatio === "original") {
-    if (direction === "all") {
-      targetWidth = Math.ceil(safeW * 1.25);
-      targetHeight = Math.ceil(safeH * 1.25);
-    } else if (direction === "horizontal" || direction === "left" || direction === "right") {
-      targetWidth = Math.ceil(safeW * 1.3);
-    } else if (direction === "vertical") {
-      targetHeight = Math.ceil(safeH * 1.3);
-    }
-  } else if (sourceRatio < desiredRatio) {
-    targetWidth = Math.max(safeW, Math.ceil(safeH * desiredRatio));
-  } else {
-    targetHeight = Math.max(safeH, Math.ceil(safeW / desiredRatio));
-  }
-
-  const innerWidth = Math.min(1, safeW / targetWidth);
-  const innerHeight = Math.min(1, safeH / targetHeight);
-  const anchor: "center" | "left" | "right" = direction === "left" ? "right" : direction === "right" ? "left" : "center";
-  const innerX = anchor === "left" ? 0 : anchor === "right" ? 1 - innerWidth : (1 - innerWidth) / 2;
-  const innerY = (1 - innerHeight) / 2;
-
-  return { targetWidth, targetHeight, anchor, innerX, innerY, innerWidth, innerHeight };
 }
 
 export interface ListingCopyMarkdownInput {

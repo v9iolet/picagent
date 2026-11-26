@@ -199,7 +199,7 @@ async function offlineProgressFixture(t, { imageGate, copyGate, providerEdit, im
                 calls.push({ method: req.method, path, body });
                 const execute = async () =>
                   path === "/api/model-settings"
-                    ? { status: 200, body: { data: { channels: [], preferences: { image: null, vision: null } } } }
+                    ? { status: 200, body: { data: { channels: [], preferences: { image: null, vision: null, video: null } } } }
                     : app.request(req.method, path, { headers: req.headers, body });
                 response = interceptApi ? await interceptApi({ method: req.method, path, body, next: execute }) : await execute();
               }
@@ -258,9 +258,8 @@ test("商品套图：切到生图画布再切回自动恢复记录、展示多�
     await page.getByRole("button", { name: "一键生成套图与商品上架文案（2张）", exact: true }).click();
 
     const batch = page.getByRole("region", { name: "生成批次" });
-    await batch.locator('[data-status="running"]').waitFor();
     await batch.locator('[data-copy-status="running"]').waitFor({ timeout: 10000 });
-    assert.match(await batch.locator('[data-status="running"]').textContent(), /生成图片中/);
+    await batch.locator('[data-status="running"]').filter({ hasText: "生成图片中" }).waitFor();
     assert.equal(await batch.locator('[data-copy-status="running"]').textContent(), "生成文案中…");
 
     const progressBar = batch.getByRole("progressbar", { name: "套图生成进度" });
@@ -609,10 +608,13 @@ test("会话内切页缓存：未上传草稿、已上传未生成草稿、生�
 });
 
 test("partial_failed 批次单卡点击失败重试成功后，批次徽标立即收敛为已完成且清除失败告警", async (t) => {
+  const redrawGate = Promise.withResolvers();
+  t.after(() => redrawGate.resolve());
   const { app, page, url, sample } = await offlineProgressFixture(t, {
     imageRetryDelayMs: 0,
     providerEdit: async (call, defaultResult) => {
-      if (call === 2 || call === 3) throw new Error("IMAGE_PROVIDER_FAILED");
+      if (call === 2) throw new Error("IMAGE_PROVIDER_FAILED");
+      if (call === 3) await redrawGate.promise;
       return defaultResult;
     },
   });
@@ -631,7 +633,15 @@ test("partial_failed 批次单卡点击失败重试成功后，批次徽标立�
   await batch.getByText("套图图片生成失败", { exact: true }).waitFor();
   assert.equal(await batch.locator("[data-result-card] img").count(), 1);
 
-  await batch.getByRole("button", { name: "失败重试", exact: true }).click();
+  const failedCard = batch.locator("[data-result-card]").filter({ hasText: "未生成" });
+  assert.equal(await failedCard.getByRole("button", { name: "下载", exact: true }).isDisabled(), true);
+  await failedCard.getByRole("button", { name: "重绘", exact: true }).click();
+  await page.getByRole("dialog", { name: "重绘图片" }).getByRole("button", { name: "确认重绘" }).click();
+  await page.getByRole("dialog", { name: "重绘图片" }).waitFor({ state: "hidden" });
+  await page.reload();
+  assert.equal(await failedCard.getByRole("button", { name: "删除", exact: true }).isDisabled(), true);
+  assert.equal(await failedCard.getByRole("button", { name: "重绘", exact: true }).isDisabled(), true);
+  redrawGate.resolve();
   await batch.locator('[data-status="completed"]').waitFor({ timeout: 12000 });
   assert.equal(await batch.locator('[data-status="completed"]').textContent(), "已完成");
   assert.equal(await batch.getByText("套图图片生成失败", { exact: true }).count(), 0);

@@ -44,7 +44,7 @@ async function startTestServer() {
   const [tpl] = await promptRepository.importRecords(parsePromptMarkdown("### 底图精修模板\n\n```plain\n保持商品实拍结构，纯白棚拍底图。\n```", "base.md"));
   await promptRepository.publishVersion(tpl.templateVersionId);
 
-  let settingsState = { channels: [], preferences: { image: null, vision: null } };
+  let settingsState = { channels: [], preferences: { image: null, vision: null, video: null } };
   const modelSettings = new ModelSettings({
     read: async () => structuredClone(settingsState),
     update: async (change) => { settingsState = change(structuredClone(settingsState)); return structuredClone(settingsState); },
@@ -261,18 +261,15 @@ async function run() {
     assert.ok(await page.locator(".wb-outpaint-origin img").isVisible(), "Outpaint origin image anchor must render");
 
     // Cross-border one-click image translation inside change_text
-    await page.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
-    await page.waitForSelector(".wb-translate-box");
-    await page.waitForSelector('button:has-text("一键翻译全部 (2)")');
+    await page.locator(".wb-editor-tools button", { hasText: "编辑文字" }).click();
+    await page.getByRole("button", { name: "一键翻译", exact: true }).waitFor();
     await page.getByLabel("翻译目标语言").selectOption("日语");
-    await page.getByRole("button", { name: "一键翻译全部 (2)" }).click();
+    await page.getByRole("button", { name: "一键翻译", exact: true }).click();
     await page.waitForFunction(() => {
-      const inputs = Array.from(document.querySelectorAll(".wb-translate-row input"));
+      const inputs = Array.from(document.querySelectorAll(".wb-text-edit-row textarea"));
       return inputs.some((el) => el.value.includes("65W 超急速充電"));
     });
-    await page.getByRole("button", { name: "将全部译文批量加入对话" }).click();
-    await page.waitForSelector('.wb-editor-operations button:has-text("65W 超急速充電")');
-    await page.waitForSelector('.wb-editor-operations button:has-text("折りたたみプラグ・携帯設計")');
+    assert.deepEqual(await page.locator(".wb-text-edit-row textarea").evaluateAll((fields) => fields.map((field) => field.value)), ["65W 超急速充電", "折りたたみプラグ・携帯設計"]);
     await page.getByRole("button", { name: "关闭图片编辑器" }).click();
 
     // 5. Delivery Gallery View: mobile 390px toggle, compliance pre-check card, multi-platform export bar + ZIP verification

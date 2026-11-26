@@ -607,7 +607,6 @@ test("image_generating restart completes a partial batch by rendering only the m
   const secondImage = Promise.withResolvers<void>();
   const fixture = await pipelineFixture({ beforeImage: async (call) => {
     if (call === 2) await secondImage.promise;
-    if (call === 3) throw new Error("provider disconnected");
   } });
   const { app, suite, taskRepository } = fixture;
   const oldPoll = t.mock.method(taskRepository, "getBatch", stopped);
@@ -658,7 +657,7 @@ test("current task versions distinguish partial from complete image failure and 
     assert.equal(done.errorCode, "TASK_IMAGE_PROVIDER_FAILED");
     assert.equal(done.errorMessage, "套图图片生成失败");
     assert.equal(done.taskIds.length, 2);
-    assert.equal(fixture.providerCallCount(), expected === "failed" ? 4 : 3);
+    assert.equal(fixture.providerCallCount(), 2);
   }
 });
 
@@ -812,52 +811,60 @@ test("batch image generation enforces configured concurrency ceiling across six 
   assert.equal((state.body as any).data.cards.length, 6);
 });
 
-test("transient image provider failures retry once while IMAGE_SIZE_UNSUPPORTED fails immediately", async () => {
-  const retryTimes: number[] = [];
-  const transientFailed = await pipelineFixture({
-    imageRetryDelayMs: 15,
-    providerEdit: async (call, defaultResult) => {
-      retryTimes.push(Date.now());
-      if (call === 1) throw new Error("IMAGE_PROVIDER_FAILED");
-      return defaultResult;
-    },
+for (const [error, expected] of [
+  ["IMAGE_PROVIDER_FAILED", "TASK_IMAGE_PROVIDER_FAILED"],
+  ["IMAGE_PROVIDER_TIMEOUT", "TASK_IMAGE_PROVIDER_TIMEOUT"],
+  ["INVALID_PROVIDER_RESPONSE", "INVALID_GENERATED_IMAGE"],
+  ["IMAGE_SIZE_UNSUPPORTED", "IMAGE_SIZE_UNSUPPORTED"],
+]) {
+  test(`套图遇到 ${error} 只调用一次生图，手动重绘才再次调用`, async () => {
+    const f = await pipelineFixture({
+      providerEdit: async (call, result) => {
+        if (call === 1) throw new Error(error);
+        return result;
+      },
+    });
+    assert.equal((await start(f.app, f.suite.id, "start", oneCard)).status, 202);
+    assert.equal((await waitPipeline(f.app, f.suite.id, ["failed"])).errorCode, expected);
+    assert.equal(f.providerCallCount(), 1);
+    const [task] = await f.taskRepository.listTasks(f.suite.id);
+    const redraw = await f.app.request("POST", `/api/suite-tasks/${task.id}/generation`, {
+      headers: { "idempotency-key": "manual" },
+    });
+    assert.equal(redraw.status, 202);
+    await eventually(async () => (await f.taskRepository.getBatch(redraw.body.data.batchId))?.status === "completed");
+    assert.equal(f.providerCallCount(), 2);
   });
-  assert.equal((await start(transientFailed.app, transientFailed.suite.id, "retry-transient-fail", oneCard)).status, 202);
-  const recovered = await waitPipeline(transientFailed.app, transientFailed.suite.id, ["completed"]);
-  assert.equal(recovered.status, "completed");
-  assert.equal(transientFailed.providerCallCount(), 2);
-  assert.ok(retryTimes[1] - retryTimes[0] >= 10, `expected retry delay >= 10ms, got ${retryTimes[1] - retryTimes[0]}ms`);
+}
 
-  const transientTimeout = await pipelineFixture({
-    imageRetryDelayMs: 0,
-    providerEdit: async (call, defaultResult) => {
-      if (call === 1) throw new Error("IMAGE_PROVIDER_TIMEOUT");
-      return defaultResult;
-    },
+test("套图单卡的附加提示词只进入本次重绘，非法输入不会启动生图", async () => {
+  const f = await pipelineFixture();
+  await start(f.app, f.suite.id, "start", oneCard);
+  await waitPipeline(f.app, f.suite.id, ["completed"]);
+  const [task] = await f.taskRepository.listTasks(f.suite.id);
+  const redraw = (additionalPrompt: unknown) => f.app.request("POST", `/api/suite-tasks/${task.id}/generation`, {
+    headers: { "idempotency-key": "manual-redraw" }, body: { additionalPrompt },
   });
-  assert.equal((await start(transientTimeout.app, transientTimeout.suite.id, "retry-transient-timeout", oneCard)).status, 202);
-  const timeoutRecovered = await waitPipeline(transientTimeout.app, transientTimeout.suite.id, ["completed"]);
-  assert.equal(timeoutRecovered.status, "completed");
-  assert.equal(transientTimeout.providerCallCount(), 2);
-
-  const unsupportedSize = await pipelineFixture({
-    imageRetryDelayMs: 0,
-    providerEdit: async () => {
-      throw new Error("IMAGE_SIZE_UNSUPPORTED");
-    },
-  });
-  assert.equal((await start(unsupportedSize.app, unsupportedSize.suite.id, "no-retry-size", oneCard)).status, 202);
-  const failed = await waitPipeline(unsupportedSize.app, unsupportedSize.suite.id, ["failed"]);
-  assert.equal(failed.status, "failed");
-  assert.equal(failed.errorCode, "IMAGE_SIZE_UNSUPPORTED");
-  assert.equal(unsupportedSize.providerCallCount(), 1);
+  for (const invalid of ["长".repeat(501), null, 42]) {
+    assert.equal((await redraw(invalid)).status, 400);
+  }
+  assert.equal(f.providerCallCount(), 1);
+  const submitted = await redraw("  增强金属反光  ");
+  assert.equal(submitted.status, 202);
+  await eventually(async () => (await f.taskRepository.getBatch(submitted.body.data.batchId))?.status === "completed");
+  const { versions } = await f.taskRepository.listTaskVersions(task.id);
+  const current = versions.find((version) => version.isCurrent)!;
+  assert.equal(current.promptSnapshot.prompt, task.promptDraft + "\n\n单卡人工补充：增强金属反光");
+  assert.match(String(current.promptSnapshot.providerPrompt), /单卡人工补充：增强金属反光/);
+  assert.equal((await f.taskRepository.getTask(task.id))?.promptDraft, task.promptDraft);
+  assert.equal(f.providerCallCount(), 2);
 });
 
 test("partial_failed pipeline converges to completed once single-card retry fills all cards", async () => {
   const fixture = await pipelineFixture({
     imageRetryDelayMs: 0,
     providerEdit: async (call, defaultResult) => {
-      if (call === 2 || call === 3) throw new Error("IMAGE_PROVIDER_FAILED");
+      if (call === 2) throw new Error("IMAGE_PROVIDER_FAILED");
       return defaultResult;
     },
   });

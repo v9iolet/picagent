@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { readProductCardSnapshot } from "../../../shared/product-card";
-import { suiteApi } from "../../api/client";
+import { createGenerationActions, suiteApi } from "../../api/client";
 import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
 import { download, message, studioApi } from "../../components/suite-studio/studio";
+import { ResultCardActions, type ResultCardEditor } from "../../components/suite-studio/ResultCardActions";
 import { StudioDialog } from "../../components/suite-studio/StudioDialog";
+import { StudioProgressBar } from "../../components/suite-studio/StudioProgressBar";
 import {
   JOB_SUCCESS_STATUSES,
   readImageEditJobStatus,
@@ -132,6 +134,7 @@ export function ReplicaBatchPreview({
     ? runningStatusText(currentPhase, completed, total)
     : (STATUS_LABELS[effectiveStatus ?? ""] ?? "历史批次");
 
+  const [submitGeneration] = useState(createGenerationActions);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<BatchNotice | null>(null);
   const [preview, setPreview] = useState<{ url: string; title: string } | null>(null);
@@ -141,9 +144,8 @@ export function ReplicaBatchPreview({
 
   const [promptCard, setPromptCard] = useState<ReplicaResultCard | null>(null);
   const [promptDraftInput, setPromptDraftInput] = useState("");
-  const [editCard, setEditCard] = useState<ReplicaResultCard | null>(null);
+  const [editor, setEditor] = useState<ResultCardEditor | null>(null);
   const [confirmDeleteBatch, setConfirmDeleteBatch] = useState(false);
-  const [confirmDeleteCard, setConfirmDeleteCard] = useState<ReplicaResultCard | null>(null);
 
   const [retryJob, setRetryJob] = useState("");
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
@@ -254,14 +256,14 @@ export function ReplicaBatchPreview({
       onDelete(id);
     });
 
-  const handleRegenerateCard = (card: ReplicaResultCard, nextPrompt?: string) =>
+  const handleRegenerateCard = (card: ReplicaResultCard, nextPrompt: string) =>
     void act(async () => {
-      const result = await suiteApi.generateTask(card.parentTaskId, nextPrompt);
+      const result = await submitGeneration(card.parentTaskId, nextPrompt, (key) => suiteApi.generateTask(card.parentTaskId, nextPrompt, key));
       setPromptCard(null);
       setRetryingTaskId(card.parentTaskId);
       setRetryJob(result.batchId);
       setNotice({
-        text: nextPrompt !== undefined ? "已提交新提示词重新生成…" : "已提交重新生成…",
+        text: "已提交新提示词重新生成…",
       });
     });
 
@@ -302,17 +304,6 @@ export function ReplicaBatchPreview({
         linkTo: "/assets",
       });
     });
-
-  const handleConfirmDeleteCard = () => {
-    if (!confirmDeleteCard) return;
-    const target = confirmDeleteCard;
-    void act(async () => {
-      await suiteApi.updateTask(target.parentTaskId, { status: "archived" });
-      await refresh(id);
-      setConfirmDeleteCard(null);
-      setNotice({ text: `已删除「${target.title}」。` });
-    });
-  };
 
   const canResume =
     !running &&
@@ -419,35 +410,16 @@ export function ReplicaBatchPreview({
       )}
 
       {progress && (
-        <div className="ss-progress">
-          <div className="ss-progress-head">
-            <strong>{progress.headline}</strong>
-            <span className="ss-progress-pct">{progress.percent}%</span>
-          </div>
-          <div
-            className="ss-progress-track"
-            role="progressbar"
-            aria-label="复刻生成进度"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={progress.percent}
-            aria-valuetext={`${progress.percent}% · ${progress.headline}`}
-          >
-            <div className="ss-progress-fill" style={{ width: `${progress.percent}%` }} />
-          </div>
-          <ol className="ss-progress-steps" aria-label="复刻阶段进度">
-            <li className="ss-step" data-step-state={progress.analyzeState}>
-              <span className="ss-step-badge" aria-hidden="true">
-                {progress.analyzeState === "done" ? "✓" : "1"}
-              </span>
-              <span>分析参考图</span>
-            </li>
-            <li className="ss-step" data-step-state={progress.generateState}>
-              <span className="ss-step-badge" aria-hidden="true">2</span>
-              <span>{total > 0 ? `生成复刻图 (${completed}/${total})` : "生成复刻图"}</span>
-            </li>
-          </ol>
-        </div>
+        <StudioProgressBar
+          headline={progress.headline}
+          percent={progress.percent}
+          progressLabel="复刻生成进度"
+          stepsLabel="复刻阶段进度"
+          steps={[
+            { key: "replica_analyzing", index: "1", label: "分析参考图", state: progress.analyzeState },
+            { key: "image_generating", index: "2", label: total > 0 ? `生成复刻图 (${completed}/${total})` : "生成复刻图", state: progress.generateState },
+          ]}
+        />
       )}
 
       {canResume && (
@@ -550,119 +522,47 @@ export function ReplicaBatchPreview({
                   </p>
                 )}
 
-                <div className="ss-actions rp-card-actions">
-                  {card.previewUrl ? (
-                    <>
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() =>
-                          void act(() =>
-                            download(card.previewUrl!, card.exportFilename ?? `${card.title}.png`),
-                          )
-                        }
-                      >
-                        下载
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busy || cardGenerating || !!editJob || !card.versionId}
-                        onClick={() => {
-                          setOpenMenuTaskId(null);
-                          setEditCard(card);
-                        }}
-                      >
-                        编辑图片
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busy || cardGenerating}
-                        onClick={() => handleOpenPromptDialog(card)}
-                      >
-                        提示词
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busy || cardGenerating || !!retryJob || running}
-                        onClick={() => handleRegenerateCard(card)}
-                      >
-                        重新生成
-                      </button>
-                      <div className="ss-menu rp-card-menu" data-card-menu>
-                        <button
-                          type="button"
-                          aria-label={`更多操作 ${card.title}`}
-                          aria-expanded={menuOpen}
-                          disabled={busy}
-                          onClick={() =>
-                            setOpenMenuTaskId((current) =>
-                              current === card.parentTaskId ? null : card.parentTaskId,
-                            )
-                          }
-                        >
-                          ···
+                <ResultCardActions
+                  card={card}
+                  disabled={busy || running || cardGenerating || Boolean(retryJob || editJob)}
+                  onDownload={card.previewUrl ? () => void act(() => download(card.previewUrl!, card.exportFilename ?? `${card.title}.png`)) : undefined}
+                  onEdit={setEditor}
+                  submitGeneration={submitGeneration}
+                  onRedrawStarted={(batchId) => {
+                    setRetryingTaskId(card.parentTaskId);
+                    setRetryJob(batchId);
+                    setNotice({ text: "已提交单张生成。" });
+                  }}
+                  onArchived={async () => {
+                    await refresh(id);
+                    setNotice({ text: `已删除「${card.title}」。` });
+                  }}
+                >
+                  <div className="ss-menu rp-card-menu" data-card-menu>
+                    <button
+                      type="button"
+                      aria-label={`更多操作 ${card.title}`}
+                      aria-expanded={menuOpen}
+                      disabled={busy}
+                      onClick={() => setOpenMenuTaskId(menuOpen ? null : card.parentTaskId)}
+                    >
+                      ···
+                    </button>
+                    {menuOpen && (
+                      <div className="ss-menu-list rp-card-menu-list" role="menu">
+                        <button type="button" role="menuitem" disabled={busy || cardGenerating} onClick={() => handleOpenPromptDialog(card)}>
+                          查看/编辑提示词
                         </button>
-                        {menuOpen && (
-                          <div className="ss-menu-list rp-card-menu-list" role="menu">
-                            <button
-                              type="button"
-                              role="menuitem"
-                              disabled={busy || !card.versionId}
-                              onClick={() => handleSaveToLibrary(card)}
-                            >
-                              保存到图片资源库
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              disabled={busy}
-                              onClick={() => handleSaveReverseAsset(card)}
-                            >
-                              存为爆品图反推资产
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="rp-danger-menuitem"
-                              disabled={busy || cardGenerating || running}
-                              onClick={() => {
-                                setOpenMenuTaskId(null);
-                                setConfirmDeleteCard(card);
-                              }}
-                            >
-                              删除
-                            </button>
-                          </div>
-                        )}
+                        <button type="button" role="menuitem" disabled={busy || !card.versionId} onClick={() => handleSaveToLibrary(card)}>
+                          保存到图片资源库
+                        </button>
+                        <button type="button" role="menuitem" disabled={busy || !card.previewUrl} onClick={() => handleSaveReverseAsset(card)}>
+                          存为爆品图反推资产
+                        </button>
                       </div>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        disabled={busy || cardGenerating || !!retryJob || running}
-                        onClick={() => handleRegenerateCard(card)}
-                      >
-                        重新生成
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busy || cardGenerating}
-                        onClick={() => handleOpenPromptDialog(card)}
-                      >
-                        提示词
-                      </button>
-                      <button
-                        type="button"
-                        className="rp-danger-btn"
-                        disabled={busy || cardGenerating || running}
-                        onClick={() => setConfirmDeleteCard(card)}
-                      >
-                        删除
-                      </button>
-                    </>
-                  )}
-                </div>
+                    )}
+                  </div>
+                </ResultCardActions>
               </article>
             );
           })}
@@ -791,8 +691,9 @@ export function ReplicaBatchPreview({
       )}
 
       <StudioImageEditorHost
-        card={editCard}
-        onClose={() => setEditCard(null)}
+        card={editor?.card ?? null}
+        initialTool={editor?.initialTool}
+        onClose={() => setEditor(null)}
         onEditJobStarted={(childTaskId, parentTaskId) => {
           setEditingTaskId(parentTaskId);
           setEditJob(childTaskId);
@@ -818,28 +719,6 @@ export function ReplicaBatchPreview({
                 className="rp-danger-solid-btn"
                 disabled={busy}
                 onClick={handleConfirmDeleteBatch}
-              >
-                确认删除
-              </button>
-            </div>
-          </div>
-        </StudioDialog>
-      )}
-
-      {confirmDeleteCard && (
-        <StudioDialog title="删除复刻卡片" close={() => setConfirmDeleteCard(null)}>
-          <p>确定删除「{confirmDeleteCard.title}」吗？删除后该卡片将从本批次结果区和批量导出中移除。</p>
-          <div className="rp-dialog-actions">
-            <span />
-            <div className="rp-dialog-actions-right">
-              <button type="button" onClick={() => setConfirmDeleteCard(null)}>
-                取消
-              </button>
-              <button
-                type="button"
-                className="rp-danger-solid-btn"
-                disabled={busy}
-                onClick={handleConfirmDeleteCard}
               >
                 确认删除
               </button>

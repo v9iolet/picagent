@@ -630,8 +630,6 @@ body:has(.suite-mode-switch button:nth-child(2).active) .flow-version-row { padd
 .wb-editor-tools button small { color:var(--suite-muted); font-size:9px; }
 .wb-editor-tools button:disabled { opacity:.48; cursor:not-allowed; }
 .wb-editor-error { color:#a3342b !important; }
-.wb-ocr-blocks { grid-column:1 / -1; display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 18px; border-bottom:1px solid var(--suite-line); background:#fffdf2; font-size:10px; }
-.wb-ocr-blocks button { min-height:28px; padding:0 8px; border:1px solid #e1c45f; border-radius:6px; background:#fff; color:var(--suite-ink); }
 .wb-outpaint-overlay { position:absolute; right:14px; top:14px; display:grid; gap:3px; padding:8px 10px; border:1px dashed #4c78a8; background:repeating-conic-gradient(#eef2f6 0 25%, #fff 0 50%) 50% / 12px 12px; color:#24364b; font-size:10px; pointer-events:none; }
 .wb-outpaint-overlay strong { font-size:12px; }
 .wb-version-selector { position:fixed; right:24px; bottom:24px; z-index:91; display:grid; gap:6px; min-width:220px; padding:10px; border:1px solid var(--suite-line); border-radius:8px; background:#fff; box-shadow:0 12px 30px rgba(20,31,45,.16); }
@@ -654,7 +652,6 @@ body:has(.suite-mode-switch button:nth-child(2).active) .flow-version-row { padd
 .wb-editor-backdrop { padding: 12px; }
 .wb-editor-modal { height: calc(100dvh - 24px); max-height: none; display: grid; grid-template-rows: auto minmax(0,1fr); }
 .wb-editor-body { min-height:0; overflow:hidden; grid-template-rows:minmax(0,1fr) auto; }
-.wb-editor-body:has(.wb-ocr-blocks) { grid-template-rows:auto minmax(0,1fr) auto; }
 .wb-editor-tools, .wb-editor-options { min-height:0; overflow-y:auto; }
 .wb-editor-stage { min-height:0; overflow:hidden; }
 .wb-editor-canvas { min-height:0; }
@@ -666,6 +663,8 @@ body:has(.suite-mode-switch button:nth-child(2).active) .flow-version-row { padd
 .wb-mask-mode button.is-active:hover:not(:disabled),
 .ss-layout .wb-mask-mode button.is-active:hover:not(:disabled) { border-color:#27272A; background:#27272A; color:#FFFFFF; }
 .wb-editor-options textarea { min-height:88px; resize:vertical; border:1px solid var(--suite-line); border-radius:6px; background:#fff; padding:8px; color:var(--suite-ink); font:inherit; line-height:1.5; }
+.wb-editor-source-prompt summary { cursor:pointer; }
+.wb-editor-source-prompt p { margin-top:7px; white-space:pre-wrap; overflow-wrap:anywhere; }
 .wb-editor-option-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .wb-editor-option-head button, .wb-danger-link { min-height:30px; border:1px solid var(--suite-line); border-radius:6px; background:#fff; color:var(--suite-ink); padding:0 8px; font:inherit; font-size:10px; }
 .wb-danger-link { color:#9b3636; }

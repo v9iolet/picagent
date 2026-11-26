@@ -89,7 +89,7 @@ async function offlineHistoryFixture(t, { interceptApi } = {}) {
                 calls.push({ method: req.method, path, body });
                 const execute = async () =>
                   path === "/api/model-settings"
-                    ? { status: 200, body: { data: { channels: [], preferences: { image: null, vision: null } } } }
+                    ? { status: 200, body: { data: { channels: [], preferences: { image: null, vision: null, video: null } } } }
                     : app.request(req.method, path, { headers: req.headers, body });
                 response = interceptApi ? await interceptApi({ method: req.method, path, body, next: execute }) : await execute();
               }

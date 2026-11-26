@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import type { PipelineRepository, SuitePipelinePhase, SuitePipelineRun } from "../types.js";
+import type { PipelineRepository, PipelineRunVersion, SuitePipelinePhase, SuitePipelineRun } from "../types.js";
 
 const cols = `id,suite_id AS "suiteId",idempotency_key AS "idempotencyKey",status,current_phase AS "currentPhase",resume_count AS "resumeCount",last_resume_key AS "lastResumeKey",resume_keys_json AS "resumeKeys",structure_snapshot_id AS "structureSnapshotId",task_ids_json AS "taskIds",config_json AS config,error_code AS "errorCode",error_message AS "errorMessage",created_at AS "createdAt",updated_at AS "updatedAt",completed_at AS "completedAt"`;
 
@@ -44,9 +44,10 @@ export class PostgresPipelineRepository implements PipelineRepository {
          SET status='running', current_phase=$2, config_json=$3, resume_count=resume_count+1,
              last_resume_key=$4, resume_keys_json=resume_keys_json || jsonb_build_array($4::text),
              error_code=NULL, error_message=NULL, completed_at=NULL, updated_at=now()
-         WHERE id=$1 AND status=$5 AND resume_count=$6 AND NOT (resume_keys_json ? $4)
+         WHERE id=$1 AND status=$5 AND resume_count=$6 AND current_phase=$7 AND config_json=$8::jsonb
+           AND NOT (resume_keys_json ? $4)
          RETURNING ${cols}`,
-        [previous.id, phase, JSON.stringify(config), key, previous.status, previous.resumeCount ?? 0],
+        [previous.id, phase, JSON.stringify(config), key, previous.status, previous.resumeCount ?? 0, previous.currentPhase, JSON.stringify(previous.config)],
       );
       return result.rows[0] ? normalizeRun(result.rows[0]) : null;
     } catch (error) {
@@ -57,7 +58,7 @@ export class PostgresPipelineRepository implements PipelineRepository {
   async getRun(id: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE id=$1`, [id]); return result.rows[0] ? normalizeRun(result.rows[0]) : null; }
   async getLatestRun(suiteId: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 ORDER BY created_at DESC LIMIT 1`, [suiteId]); return result.rows[0] ? normalizeRun(result.rows[0]) : null; }
   async listRuns(suiteId: string) { const result = await this.pool.query<SuitePipelineRun>(`SELECT ${cols} FROM suite_workbench.suite_pipeline_runs WHERE suite_id=$1 ORDER BY created_at DESC`, [suiteId]); return result.rows.map(normalizeRun); }
-  async updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>) {
+  async updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>, expected?: PipelineRunVersion) {
     const fields: string[] = []; const values: unknown[] = []; let n = 1;
     const add = (column: string, value: unknown) => { fields.push(`${column}=$${n++}`); values.push(value); };
     if (patch.status !== undefined) add("status", patch.status);
@@ -72,7 +73,12 @@ export class PostgresPipelineRepository implements PipelineRepository {
     add("updated_at", patch.updatedAt ?? new Date().toISOString());
     if (patch.completedAt !== undefined) add("completed_at", patch.completedAt);
     values.push(id);
-    const result = await this.pool.query<SuitePipelineRun>(`UPDATE suite_workbench.suite_pipeline_runs SET ${fields.join(",")} WHERE id=$${n} RETURNING ${cols}`, values);
+    const conditions = [`id=$${n++}`];
+    if (expected) {
+      conditions.push(`status=$${n++}`, `current_phase=$${n++}`, `resume_count=$${n++}`, `config_json=$${n++}::jsonb`);
+      values.push(expected.status, expected.currentPhase, expected.resumeCount ?? 0, JSON.stringify(expected.config));
+    }
+    const result = await this.pool.query<SuitePipelineRun>(`UPDATE suite_workbench.suite_pipeline_runs SET ${fields.join(",")} WHERE ${conditions.join(" AND ")} RETURNING ${cols}`, values);
     return result.rows[0] ? normalizeRun(result.rows[0]) : null;
   }
 }

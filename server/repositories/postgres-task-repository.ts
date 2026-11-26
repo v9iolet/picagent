@@ -1,16 +1,62 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import type { CanvasLayout, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskPreviewVersion, TaskRepository, TaskResultSlot } from "../types.js";
+import type { AplusModuleCode } from "../../shared/aplus.js";
+import type { CanvasLayout, CompleteTaskAttemptInput, InputImage, PlanSnapshot, SuiteTask, TaskGenerationAttempt, TaskGenerationBatch, TaskImageVersion, TaskPreviewVersion, TaskRepository, TaskResultSlot } from "../types.js";
 
-const taskCols = `id,suite_id AS "suiteId",plan_snapshot_id AS "planSnapshotId",plan_item_id AS "planItemId",ordinal,image_type AS "imageType",title,purpose,prompt_draft AS "promptDraft",prompt_revision AS "promptRevision",source_input_image_id AS "sourceInputImageId",generation_params_json AS "generationParams",status,archived_at AS "archivedAt",created_at AS "createdAt",updated_at AS "updatedAt",category_code AS "categoryCode",reference_image_ids_json AS "referenceImageIds",fact_refs_json AS "factRefs",global_style_card_json AS "globalStyleCard",prompt_sha256 AS "promptSha256",origin_kind AS "originKind",reverse_plan_id AS "reversePlanId",reverse_reference_id AS "reverseReferenceId",reverse_prompt_version_id AS "reversePromptVersionId",reverse_task_group_id AS "reverseTaskGroupId",replica_reference_id AS "replicaReferenceId",replica_reference_object_key AS "replicaReferenceObjectKey",source_library_reference_id AS "sourceLibraryReferenceId",source_resource_version_id AS "sourceResourceVersionId",source_revision AS "sourceRevision"`;
+const taskCols = `id,suite_id AS "suiteId",plan_snapshot_id AS "planSnapshotId",plan_item_id AS "planItemId",ordinal,image_type AS "imageType",title,purpose,prompt_draft AS "promptDraft",prompt_revision AS "promptRevision",source_input_image_id AS "sourceInputImageId",generation_params_json AS "generationParams",status,archived_at AS "archivedAt",created_at AS "createdAt",updated_at AS "updatedAt",category_code AS "categoryCode",reference_image_ids_json AS "referenceImageIds",fact_refs_json AS "factRefs",global_style_card_json AS "globalStyleCard",prompt_sha256 AS "promptSha256",origin_kind AS "originKind",reverse_plan_id AS "reversePlanId",reverse_reference_id AS "reverseReferenceId",reverse_prompt_version_id AS "reversePromptVersionId",reverse_task_group_id AS "reverseTaskGroupId",replica_reference_id AS "replicaReferenceId",replica_reference_object_key AS "replicaReferenceObjectKey",source_library_reference_id AS "sourceLibraryReferenceId",source_resource_version_id AS "sourceResourceVersionId",source_revision AS "sourceRevision",module_code AS "moduleCode",size_preset AS "sizePreset",sort_order AS "sortOrder"`;
 const batchCols = `id,suite_id AS "suiteId",kind,requested_count AS "requestedCount",task_ids_json AS "taskIds",status,idempotency_key AS "idempotencyKey",created_at AS "createdAt",started_at AS "startedAt",finished_at AS "finishedAt"`;
 const slotCols = `id,batch_id AS "batchId",task_id AS "taskId",slot_ordinal AS "slotOrdinal",retry_of_slot_id AS "retryOfSlotId",status,selected_version_id AS "selectedVersionId",created_at AS "createdAt",completed_at AS "completedAt"`;
 const attemptCols = `id,slot_id AS "slotId",attempt_no AS "attemptNo",provider,model,endpoint,request_summary_json AS "requestSummary",prompt_snapshot_json AS "promptSnapshot",prompt_sha256 AS "promptSha256",context_snapshot_json AS "contextSnapshot",source_kind AS "sourceKind",source_object_key AS "sourceObjectKey",source_input_image_id AS "sourceInputImageId",source_base_version_id AS "sourceBaseVersionId",source_library_reference_id AS "sourceLibraryReferenceId",source_resource_version_id AS "sourceResourceVersionId",status,error_code AS "errorCode",error_message AS "errorMessage",external_request_id AS "externalRequestId",started_at AS "startedAt",finished_at AS "finishedAt"`;
 const attemptColsJoined = `a.id,a.slot_id AS "slotId",a.attempt_no AS "attemptNo",a.provider,a.model,a.endpoint,a.request_summary_json AS "requestSummary",a.prompt_snapshot_json AS "promptSnapshot",a.prompt_sha256 AS "promptSha256",a.context_snapshot_json AS "contextSnapshot",a.source_kind AS "sourceKind",a.source_object_key AS "sourceObjectKey",a.source_input_image_id AS "sourceInputImageId",a.source_base_version_id AS "sourceBaseVersionId",a.source_library_reference_id AS "sourceLibraryReferenceId",a.source_resource_version_id AS "sourceResourceVersionId",a.status,a.error_code AS "errorCode",a.error_message AS "errorMessage",a.external_request_id AS "externalRequestId",a.started_at AS "startedAt",a.finished_at AS "finishedAt"`;
-const versionCols = `id,task_id AS "taskId",slot_id AS "slotId",attempt_id AS "attemptId",version_number AS "versionNumber",object_key AS "objectKey",process_object_keys_json AS "processObjectKeys",sha256,width,height,mime_type AS "mimeType",prompt_snapshot_json AS "promptSnapshot",context_snapshot_json AS "contextSnapshot",is_current AS "isCurrent",is_final AS "isFinal",created_at AS "createdAt"`;
+const versionCols = `id,task_id AS "taskId",slot_id AS "slotId",attempt_id AS "attemptId",version_number AS "versionNumber",object_key AS "objectKey",process_object_keys_json AS "processObjectKeys",sha256,width,height,mime_type AS "mimeType",prompt_snapshot_json AS "promptSnapshot",context_snapshot_json AS "contextSnapshot",is_current AS "isCurrent",is_final AS "isFinal",created_at AS "createdAt",generated_size_json AS "generatedSize",delivery_size_json AS "deliverySize",delivery_object_key AS "deliveryObjectKey"`;
 
 export class PostgresTaskRepository implements TaskRepository {
   constructor(private readonly pool: Pool) {}
+  async createAplusTasks(tasks: SuiteTask[]) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const task of tasks) {
+        await client.query(
+          `INSERT INTO suite_workbench.suite_tasks
+            (id,suite_id,ordinal,image_type,title,purpose,prompt_draft,source_input_image_id,generation_params_json,
+             status,reference_image_ids_json,prompt_sha256,origin_kind,module_code,size_preset,sort_order,created_at,updated_at)
+           VALUES ($1,$2,$3,'detail',$4,$5,$6,$7,$8,'pending',$9,$10,'aplus',$11,$12,$13,$14,$14)
+           ON CONFLICT (id) DO NOTHING`,
+          [task.id, task.suiteId, task.ordinal, task.title, task.purpose, task.promptDraft, task.sourceInputImageId,
+            JSON.stringify(task.generationParams), JSON.stringify(task.referenceImageIds ?? []), task.promptSha256,
+            task.moduleCode, task.sizePreset, task.sortOrder, task.createdAt],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  async reorderAplusModules(suiteId: string, modules: AplusModuleCode[]) {
+    const result = await this.pool.query(
+      `WITH active AS MATERIALIZED (
+         SELECT id, module_code FROM suite_workbench.suite_tasks
+         WHERE suite_id = $1 AND origin_kind = 'aplus' AND status <> 'archived'
+         ORDER BY id FOR UPDATE
+       ), requested AS (
+         SELECT module_code, sort_order FROM unnest($2::text[]) WITH ORDINALITY AS m(module_code, sort_order)
+       )
+       UPDATE suite_workbench.suite_tasks AS task
+       SET sort_order = requested.sort_order, updated_at = now()
+       FROM active JOIN requested USING (module_code)
+       WHERE task.id = active.id
+         AND (SELECT count(DISTINCT module_code) FROM active) = cardinality($2::text[])
+         AND NOT EXISTS (
+           SELECT 1 FROM active LEFT JOIN requested USING (module_code) WHERE requested.module_code IS NULL
+         )`,
+      [suiteId, modules],
+    );
+    return Boolean(result.rowCount);
+  }
   async createCustomTask(input: { suiteId: string; planSnapshotId: string | null; imageType: "main" | "detail"; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }) {
     const client = await this.pool.connect();
     try {
@@ -112,13 +158,96 @@ export class PostgresTaskRepository implements TaskRepository {
       patch.sourceInputImageId !== undefined, patch.sourceLibraryReferenceId !== undefined, patch.sourceResourceVersionId !== undefined]);
     return r.rows[0] ?? null;
   }
-  async beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }) { const c = await this.pool.connect(); try { await c.query("BEGIN"); const found = await c.query<TaskGenerationBatch>("SELECT " + batchCols + " FROM suite_workbench.task_generation_batches WHERE suite_id=$1 AND idempotency_key=$2", [input.batch.suiteId,input.batch.idempotencyKey]); if (found.rows[0]) { const slots = await c.query<TaskResultSlot>("SELECT " + slotCols + " FROM suite_workbench.task_result_slots WHERE batch_id=$1 ORDER BY slot_ordinal", [found.rows[0].id]); const attempts = await c.query<TaskGenerationAttempt>("SELECT " + attemptCols + " FROM suite_workbench.task_generation_attempts WHERE slot_id = ANY($1::uuid[])", [slots.rows.map((x) => x.id)]); await c.query("COMMIT"); return { batch: found.rows[0], slots: slots.rows, attempts: attempts.rows, duplicate: true }; } await c.query("INSERT INTO suite_workbench.task_generation_batches (id,suite_id,kind,requested_count,task_ids_json,status,idempotency_key,created_at,started_at) VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$7)", [input.batch.id,input.batch.suiteId,input.batch.kind,input.batch.requestedCount,JSON.stringify(input.batch.taskIds),input.batch.idempotencyKey,input.batch.createdAt]); for (const slot of input.slots) await c.query("INSERT INTO suite_workbench.task_result_slots (id,batch_id,task_id,slot_ordinal,retry_of_slot_id,status,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [slot.id,slot.batchId,slot.taskId,slot.slotOrdinal,slot.retryOfSlotId,slot.status,slot.createdAt]); for (const a of input.attempts) await c.query("INSERT INTO suite_workbench.task_generation_attempts (id,slot_id,attempt_no,provider,model,endpoint,request_summary_json,prompt_snapshot_json,prompt_sha256,context_snapshot_json,source_kind,source_object_key,source_input_image_id,source_base_version_id,source_library_reference_id,source_resource_version_id,status,started_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)", [a.id,a.slotId,a.attemptNo,a.provider,a.model,a.endpoint,JSON.stringify(a.requestSummary),JSON.stringify(a.promptSnapshot),a.promptSha256,JSON.stringify(a.contextSnapshot),a.sourceKind,a.sourceObjectKey,a.sourceInputImageId,a.sourceBaseVersionId,a.sourceLibraryReferenceId ?? null,a.sourceResourceVersionId ?? null,a.status,a.startedAt]); await c.query("UPDATE suite_workbench.suite_tasks SET status='generating',updated_at=$2 WHERE id=ANY($1::uuid[])", [input.batch.taskIds,input.batch.createdAt]); await c.query("COMMIT"); return { ...input, duplicate: false }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
+  async beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }, singleTaskPrompt?: string) {
+    const c = await this.pool.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`task-batch:${input.batch.suiteId}:${input.batch.idempotencyKey}`]);
+      const found = await c.query<TaskGenerationBatch>("SELECT " + batchCols + " FROM suite_workbench.task_generation_batches WHERE suite_id=$1 AND idempotency_key=$2", [input.batch.suiteId,input.batch.idempotencyKey]);
+      if (found.rows[0]) {
+        const slots = await c.query<TaskResultSlot>("SELECT " + slotCols + " FROM suite_workbench.task_result_slots WHERE batch_id=$1 ORDER BY slot_ordinal", [found.rows[0].id]);
+        const attempts = await c.query<TaskGenerationAttempt>("SELECT " + attemptCols + " FROM suite_workbench.task_generation_attempts WHERE slot_id = ANY($1::uuid[])", [slots.rows.map((x) => x.id)]);
+        await c.query("COMMIT");
+        return { batch: found.rows[0], slots: slots.rows, attempts: attempts.rows, duplicate: true };
+      }
+      await c.query("SELECT id FROM suite_workbench.suite_tasks WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE", [input.batch.taskIds]);
+      const running = await c.query(`SELECT 1 FROM suite_workbench.task_result_slots s
+        JOIN suite_workbench.task_generation_attempts a ON a.slot_id=s.id
+        WHERE s.task_id=ANY($1::uuid[]) AND a.status='running' LIMIT 1`, [input.batch.taskIds]);
+      if (running.rowCount) throw new Error("TASK_GENERATION_IN_PROGRESS");
+      if (singleTaskPrompt !== undefined) {
+        const updated = await c.query<{ revision: number }>(`UPDATE suite_workbench.suite_tasks SET prompt_draft=$2,
+          prompt_sha256=$3, prompt_revision=prompt_revision + (prompt_draft <> $2)::int
+          WHERE id=$1 RETURNING prompt_revision AS revision`,
+        [input.batch.taskIds[0], singleTaskPrompt, createHash("sha256").update(singleTaskPrompt).digest("hex")]);
+        input.attempts[0].promptSnapshot.promptRevision = updated.rows[0].revision;
+      }
+      await c.query("INSERT INTO suite_workbench.task_generation_batches (id,suite_id,kind,requested_count,task_ids_json,status,idempotency_key,created_at,started_at) VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$7)", [input.batch.id,input.batch.suiteId,input.batch.kind,input.batch.requestedCount,JSON.stringify(input.batch.taskIds),input.batch.idempotencyKey,input.batch.createdAt]);
+      for (const slot of input.slots) await c.query("INSERT INTO suite_workbench.task_result_slots (id,batch_id,task_id,slot_ordinal,retry_of_slot_id,status,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)", [slot.id,slot.batchId,slot.taskId,slot.slotOrdinal,slot.retryOfSlotId,slot.status,slot.createdAt]);
+      for (const a of input.attempts) await c.query("INSERT INTO suite_workbench.task_generation_attempts (id,slot_id,attempt_no,provider,model,endpoint,request_summary_json,prompt_snapshot_json,prompt_sha256,context_snapshot_json,source_kind,source_object_key,source_input_image_id,source_base_version_id,source_library_reference_id,source_resource_version_id,status,started_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)", [a.id,a.slotId,a.attemptNo,a.provider,a.model,a.endpoint,JSON.stringify(a.requestSummary),JSON.stringify(a.promptSnapshot),a.promptSha256,JSON.stringify(a.contextSnapshot),a.sourceKind,a.sourceObjectKey,a.sourceInputImageId,a.sourceBaseVersionId,a.sourceLibraryReferenceId ?? null,a.sourceResourceVersionId ?? null,a.status,a.startedAt]);
+      await c.query("UPDATE suite_workbench.suite_tasks SET status='generating',updated_at=$2 WHERE id=ANY($1::uuid[])", [input.batch.taskIds,input.batch.createdAt]);
+      await c.query("COMMIT");
+      return { ...input, duplicate: false };
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    } finally {
+      c.release();
+    }
+  }
   async getBatch(id: string) { const r = await this.pool.query<TaskGenerationBatch>("SELECT " + batchCols + " FROM suite_workbench.task_generation_batches WHERE id=$1", [id]); return r.rows[0] ?? null; }
   async listBatches(suiteId: string) { const r = await this.pool.query<TaskGenerationBatch>("SELECT " + batchCols + " FROM suite_workbench.task_generation_batches WHERE suite_id=$1 ORDER BY created_at DESC", [suiteId]); return r.rows; }
   async getSlot(id: string) { const r = await this.pool.query<TaskResultSlot>("SELECT " + slotCols + " FROM suite_workbench.task_result_slots WHERE id=$1", [id]); return r.rows[0] ?? null; }
   async listSlots(suiteId: string) { const r = await this.pool.query<TaskResultSlot>("SELECT " + slotCols + " FROM suite_workbench.task_result_slots WHERE task_id IN (SELECT id FROM suite_workbench.suite_tasks WHERE suite_id=$1) ORDER BY created_at", [suiteId]); return r.rows; }
   async getAttempt(id: string) { const r = await this.pool.query<TaskGenerationAttempt>("SELECT " + attemptCols + " FROM suite_workbench.task_generation_attempts WHERE id=$1", [id]); return r.rows[0] ?? null; }
-  async completeAttempt(input: { attemptId: string; slotId: string; taskId: string; objectKey: string; processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string; completedAt: string }) { const c = await this.pool.connect(); try { await c.query("BEGIN"); const a = (await c.query<TaskGenerationAttempt>("SELECT " + attemptCols + " FROM suite_workbench.task_generation_attempts WHERE id=$1 FOR UPDATE", [input.attemptId])).rows[0]; if (!a || a.status !== "running") throw new Error("INVALID_TASK_ATTEMPT"); const next = await c.query<{ n: number }>("SELECT COALESCE(MAX(version_number),0)+1 AS n FROM suite_workbench.task_image_versions WHERE task_id=$1", [input.taskId]); await c.query("UPDATE suite_workbench.task_image_versions SET is_current=false WHERE task_id=$1", [input.taskId]); const versionId = randomUUID(); await c.query("INSERT INTO suite_workbench.task_image_versions (id,task_id,slot_id,attempt_id,version_number,object_key,process_object_keys_json,sha256,width,height,mime_type,prompt_snapshot_json,context_snapshot_json,is_current,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,true,$14)", [versionId,input.taskId,input.slotId,input.attemptId,next.rows[0].n,input.objectKey,JSON.stringify(input.processObjectKeys),input.sha256,input.width,input.height,input.mimeType,JSON.stringify(a.promptSnapshot),JSON.stringify(a.contextSnapshot),input.completedAt]); await c.query("UPDATE suite_workbench.task_generation_attempts SET status='succeeded',finished_at=$2 WHERE id=$1", [input.attemptId,input.completedAt]); await c.query("UPDATE suite_workbench.task_result_slots SET status='succeeded',selected_version_id=$2,completed_at=$3 WHERE id=$1", [input.slotId,versionId,input.completedAt]); await c.query("UPDATE suite_workbench.suite_tasks SET status=CASE WHEN status='archived' THEN 'archived' ELSE 'generated' END,updated_at=$2 WHERE id=$1", [input.taskId,input.completedAt]); const slot = await c.query<{ batchId: string }>('SELECT batch_id AS "batchId" FROM suite_workbench.task_result_slots WHERE id=$1', [input.slotId]); await this.refreshBatch(c,slot.rows[0]?.batchId ?? "",input.completedAt); await c.query("COMMIT"); const v = await this.pool.query<TaskImageVersion>("SELECT " + versionCols + ", '/api/suite-tasks/' || task_id || '/versions/' || id || '/preview' AS \"previewUrl\" FROM suite_workbench.task_image_versions WHERE id=$1", [versionId]); return { attempt: (await this.getAttempt(input.attemptId))!, version: v.rows[0] }; } catch (e) { await c.query("ROLLBACK"); throw e; } finally { c.release(); } }
+  async completeAttempt(input: CompleteTaskAttemptInput) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows: [attempt] } = await client.query<TaskGenerationAttempt>(
+        `SELECT ${attemptCols} FROM suite_workbench.task_generation_attempts WHERE id=$1 FOR UPDATE`,
+        [input.attemptId],
+      );
+      if (!attempt || attempt.status !== "running") throw new Error("INVALID_TASK_ATTEMPT");
+      const { rows: [next] } = await client.query<{ n: number }>(
+        "SELECT COALESCE(MAX(version_number),0)+1 AS n FROM suite_workbench.task_image_versions WHERE task_id=$1",
+        [input.taskId],
+      );
+      await client.query("UPDATE suite_workbench.task_image_versions SET is_current=false WHERE task_id=$1", [input.taskId]);
+      const { rows: [version] } = await client.query<TaskImageVersion>(
+        `INSERT INTO suite_workbench.task_image_versions
+           (id,task_id,slot_id,attempt_id,version_number,object_key,process_object_keys_json,sha256,
+            width,height,mime_type,prompt_snapshot_json,context_snapshot_json,is_current,created_at,
+            generated_size_json,delivery_size_json,delivery_object_key)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,true,$14,$15,$16,$17)
+         RETURNING ${versionCols}, '/api/suite-tasks/' || task_id || '/versions/' || id || '/preview' AS "previewUrl"`,
+        [
+          randomUUID(), input.taskId, input.slotId, input.attemptId, next.n, input.objectKey,
+          JSON.stringify(input.processObjectKeys), input.sha256, input.width, input.height,
+          input.mimeType, JSON.stringify(attempt.promptSnapshot), JSON.stringify(attempt.contextSnapshot),
+          input.completedAt, input.generatedSize ?? null, input.deliverySize ?? null, input.deliveryObjectKey ?? null,
+        ],
+      );
+      const { rows: [completedAttempt] } = await client.query<TaskGenerationAttempt>(
+        `UPDATE suite_workbench.task_generation_attempts SET status='succeeded',finished_at=$2 WHERE id=$1 RETURNING ${attemptCols}`,
+        [input.attemptId, input.completedAt],
+      );
+      const { rows: [slot] } = await client.query<{ batchId: string }>(
+        `UPDATE suite_workbench.task_result_slots SET status='succeeded',selected_version_id=$2,completed_at=$3 WHERE id=$1
+         RETURNING batch_id AS "batchId"`,
+        [input.slotId, version.id, input.completedAt],
+      );
+      await client.query("UPDATE suite_workbench.suite_tasks SET status=CASE WHEN status='archived' THEN 'archived' ELSE 'generated' END,updated_at=$2 WHERE id=$1", [input.taskId, input.completedAt]);
+      await this.refreshBatch(client, slot?.batchId ?? "", input.completedAt);
+      await client.query("COMMIT");
+      return { attempt: completedAttempt, version };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
   async failAttempt(id: string, code: string, message: string, finishedAt: string) {
     const c = await this.pool.connect();
     try {

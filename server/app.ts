@@ -1,12 +1,16 @@
 import { planSnapshotView, isStructurePlanV2, taskView, taskAttemptView, taskSlotView, taskVersionView, taskBatchView } from "./suite-views.js";
 import { createSuitePipeline } from "./suite-pipeline.js";
+import { createAplusPlanningApi } from "./aplus/aplus-planning-api.js";
+import { createAplusGenerationApi } from "./aplus/aplus-generation-api.js";
+import { createAplusResultsApi } from "./aplus/aplus-results-api.js";
+import { storeAplusDelivery } from "./aplus/aplus-image.js";
 import { fail, errorMessages } from "./api-errors.js";
 import { ok, asRecord, dataOf, type AppResponse } from "./api-response.js";
 export type { AppResponse } from "./api-response.js";
 import { isProductImageResource, isStoredProductImageReference } from "./library-reference-policy.js";
 import { createListingCopyApi } from "./listing-copy-api.js";
 import { MemoryListingRepository, type ListingRepository } from "./listing-copy.js";
-import { defaultImageOptions, resolveImageSize, type ModelCapability } from "../shared/model-settings.js";
+import { defaultImageOptions, IMAGE_QUALITIES, resolveClosestImageSize, resolveImageSize, type ImageQuality, type ModelCapability } from "../shared/model-settings.js";
 import { PURE_WHITE_MAIN_IMAGE_REQUIREMENTS } from "../shared/platform-main-background.js";
 import { DETAIL_CATEGORY_CODES, SUITE_CATEGORY_NAMES as DETAIL_CATEGORY_NAMES, SUITE_CATEGORY_GROUPS, SUITE_IMAGE_LIMITS, type SuiteCategoryGroups } from "../shared/suite-categories.js";
 import { allocateSellingPointLayouts, resolveSellingPointLayouts } from "../shared/selling-point-layouts.js";
@@ -40,9 +44,12 @@ import {
   type DeliveryEditChildLike,
   type DeliveryExportFormat,
   type DeliveryExportPresetId,
+  ADDITIONAL_PROMPT_MAX_LENGTH,
 } from "../shared/workbench-delivery.js";
 import { createZipBuffer } from "./zip.js";
+import { composeVerticalImages } from "./delivery-image.js";
 import type { ImageEditorApiResponse } from "./image-editor-api.js";
+import { declareImageEditInputs, imageEditProductInputs, type ImageEditVersionCompletedListener } from "./image-editor.js";
 import type {
   BaseImageVersion,
   CategoryPromptItem,
@@ -70,6 +77,7 @@ import type {
   SuiteTask,
   TaskGenerationAttempt,
   TaskGenerationBatch,
+  TaskImageVersion,
   TaskResultSlot,
   LibraryRepository,
   ReverseRepository, ReverseReference, ReversePromptVersion,
@@ -84,10 +92,16 @@ export interface SuiteStudioApp {
   upload(suiteId: string, file: UploadFile): Promise<AppResponse>;
   preview(suiteId: string, imageId: string, kind: "original" | "thumbnail"): Promise<AppResponse>;
   previewBaseVersion(suiteId: string, imageId: string, versionId: string): Promise<AppResponse>;
-  previewTaskVersion(taskId: string, versionId: string): Promise<AppResponse>;
+  previewTaskVersion(taskId: string, versionId: string, delivery?: boolean): Promise<AppResponse>;
   previewLibraryResource(resourceId: string): Promise<AppResponse>;
   previewReverseReference(planId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
   previewReplicaReference(suiteId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+export function hasValidTaskVersionIds(taskId: string, versionId: string): boolean {
+  return UUID_PATTERN.test(taskId) && UUID_PATTERN.test(versionId);
 }
 
 function extensionForImageMime(mimeType: string): string {
@@ -95,6 +109,16 @@ function extensionForImageMime(mimeType: string): string {
   if (lower.includes("jpeg") || lower.includes("jpg")) return "jpg";
   if (lower.includes("webp")) return "webp";
   return "png";
+}
+
+function taskVersionProductInputs(version: TaskImageVersion, versions: TaskImageVersion[]) {
+  const products = imageEditProductInputs(version.contextSnapshot.inputImages);
+  // Older single-card generations recorded their preceding output as the sole product input.
+  if (products.length === 1 && Array.isArray(version.contextSnapshot.inputImages) && version.contextSnapshot.inputImages.length === 1) {
+    const preceding = versions.find((item) => item.objectKey === products[0].objectKey && item.versionNumber < version.versionNumber);
+    if (preceding) return taskVersionProductInputs(preceding, versions);
+  }
+  return products;
 }
 
 function platformForPlanning(profile: PlatformProfile | null, background: unknown): PlatformProfile | undefined {
@@ -375,9 +399,8 @@ function safeDecodePathParam(value: string): string | null {
   }
 }
 
-export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; productCardRepository?: ProductCardRepository; productOnboardingRepository?: ProductOnboardingRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>; clearFinalVersions?(childTaskIds: string[]): Promise<void>; setOnVersionCompleted?(listener: (childTask: { id: string; sourceCardId: string }) => Promise<void>): void }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
+export function createSuiteStudioApp(deps: { listingRepository?: ListingRepository; repository: SuiteRepository; storage: StorageAdapter; modelSettings?: ModelSettings; provider?: ImageProvider; promptRepository?: PromptRepository; platformRepository?: PlatformRepository; planRepository?: PlanRepository; categoryPromptRepository?: CategoryPromptRepository; taskRepository?: TaskRepository; pipelineRepository?: PipelineRepository; productCardRepository?: ProductCardRepository; productOnboardingRepository?: ProductOnboardingRepository; replicaRepository?: ReplicaRepository; ragClient?: RagClient; llmClient?: LlmClient; libraryRepository?: LibraryRepository; reverseRepository?: ReverseRepository; imageEditorApi?: { request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>; clearFinalVersions?(childTaskIds: string[]): Promise<void>; setOnVersionCompleted?(listener: ImageEditVersionCompletedListener): void }; imageGenerationConcurrency?: number; imageRetryDelayMs?: number }): SuiteStudioApp {
   const imageGenerationConcurrency = Math.max(1, Math.floor(Number.isFinite(deps.imageGenerationConcurrency) ? deps.imageGenerationConcurrency! : 3));
-  const imageRetryDelayMs = Math.max(0, Math.floor(Number.isFinite(deps.imageRetryDelayMs) ? deps.imageRetryDelayMs! : 1500));
   const resolveModel = (capability: ModelCapability) => deps.modelSettings?.resolve(capability);
   const resolveImage = async () => {
     const selected = await resolveModel("image");
@@ -557,7 +580,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     return visionImages;
   };
 
-  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, failedAttempt?: TaskGenerationAttempt, sourceVersionIds: Record<string, string> = {}) => {
+  const createTaskBatch = async (suiteId: string, tasks: SuiteTask[], kind: "batch" | "single" | "retry", idempotencyKey: string, failedAttempt?: TaskGenerationAttempt, sourceVersionIds: Record<string, string> = {}, editSource?: { version: TaskImageVersion; versions: TaskImageVersion[]; promptSuffix: string }, singleTaskPrompt?: string) => {
     if (!deps.taskRepository) throw new Error("TASK_REPOSITORY_NOT_CONFIGURED");
     const existing = (await deps.taskRepository.listBatches(suiteId)).find((batch) => batch.idempotencyKey === idempotencyKey);
     if (existing) return { batch: existing, duplicate: true };
@@ -580,10 +603,49 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (latestPlanSnapshot) taskPlans.set(latestPlanSnapshot.id, latestPlanSnapshot);
     for (const [index, task] of tasks.entries()) {
       const providerName = channel ? "openai-compatible-image" : provider ? "image-provider" : "unconfigured";
+      const generationParams = task.generationParams ?? {};
+      const isAplusTask = task.originKind === "aplus";
+      const aplusRequestSize = isAplusTask && typeof generationParams.requestSize === "string" ? generationParams.requestSize : null;
+      const aplusSizeFields = isAplusTask ? {
+        ratio: generationParams.ratio,
+        generatedSize: generationParams.generatedSize,
+      } : {};
       if (failedAttempt) {
         attempts.push({
           ...failedAttempt, id: randomUUID(), slotId: slots[index].id, attemptNo: 1,
           provider: providerName, model, contextSnapshot: { ...failedAttempt.contextSnapshot, channel, model },
+          status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null,
+        });
+        continue;
+      }
+      if (editSource?.version.taskId === task.id) {
+        const { version, versions } = editSource;
+        const attachedInputs = taskVersionProductInputs(version, versions);
+        const inputImages = [
+          { objectKey: version.objectKey, role: "source", filename: `source.${extensionForImageMime(version.mimeType)}` },
+          ...attachedInputs.map((input, i) => ({ ...input, filename: `product-${i + 1}` })),
+        ];
+        const frozenPrompt = String(version.promptSnapshot.finalPrompt ?? version.promptSnapshot.prompt ?? "");
+        const finalPrompt = declareImageEditInputs(frozenPrompt + editSource.promptSuffix, attachedInputs);
+        const providerPrompt = declareImageEditInputs(String(version.promptSnapshot.providerPrompt ?? frozenPrompt) + editSource.promptSuffix, attachedInputs);
+        const stored = await deps.storage.get(version.objectKey);
+        if (!stored) throw new Error("TASK_INVALID_SOURCE");
+        const { width, height } = await sharp(stored.bytes).metadata();
+        attempts.push({
+          id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits",
+          requestSummary: {
+            n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((image) => image.role),
+            size: aplusRequestSize ?? resolveClosestImageSize(width, height, imageOptions), quality: imageOptions.quality ?? "high",
+            ...aplusSizeFields,
+          },
+          promptSnapshot: { ...version.promptSnapshot, finalPrompt, providerPrompt, inputImages },
+          promptSha256: createHash("sha256").update(finalPrompt).digest("hex"),
+          contextSnapshot: {
+            ...version.contextSnapshot, channel, model, suiteTaskId: task.id, sourceRevision: task.sourceRevision ?? 0,
+            tool: "regenerate", sourceVersionId: version.id, inputImages, attachedInputs,
+          },
+          sourceKind: "original", sourceObjectKey: version.objectKey, sourceInputImageId: null,
+          sourceBaseVersionId: null, sourceLibraryReferenceId: null, sourceResourceVersionId: null,
           status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null,
         });
         continue;
@@ -593,16 +655,33 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const taskPlan = task.planSnapshotId ? taskPlans.get(task.planSnapshotId) : null;
       const useOriginalImages = taskPlan?.requestSummary.useOriginalImages === true;
       let sourceKind: "base" | "original" | "library" = "original"; let sourceObjectKey = ""; let sourceBaseVersionId: string | null = null; let sourceInputImageId: string | null = null; let sourceLibraryReferenceId: string | null = null; let sourceResourceVersionId: string | null = null;
-      const generationParams = task.generationParams ?? {};
       const materialRefs = Array.isArray(generationParams.productMaterialRefs) ? generationParams.productMaterialRefs.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object").slice(0, 3) : [];
       const inputImages: Array<{ bytes: Buffer; mimeType: string; filename: string; role: string; objectKey: string; resourceId?: string; resourceVersionId?: string; libraryReferenceId?: string }> = [];
       const currentTaskVersionId = sourceVersionIds[task.id];
       const isReplicaTask = task.originKind === "replica";
+      const aplusPromptMeta = isAplusTask ? asRecord(generationParams.aplusPromptSnapshot) : null;
       const replicaPromptMeta = isReplicaTask ? asRecord(generationParams.replicaPromptSnapshot) : null;
       const replicaCloneLevel = isReplicaTask ? resolveReplicaCloneLevel(generationParams) : "high";
       let replicaProductCount = 0;
 
-      if (isReplicaTask) {
+      if (isAplusTask) {
+        for (const imageId of task.referenceImageIds ?? []) {
+          const original = await deps.repository.getInputImage(suiteId, imageId);
+          if (!original) throw new Error("TASK_INVALID_SOURCE");
+          const stored = await deps.storage.get(original.originalObjectKey);
+          if (!stored) throw new Error("TASK_INVALID_SOURCE");
+          inputImages.push({
+            bytes: stored.bytes,
+            mimeType: stored.contentType,
+            filename: `product-${inputImages.length + 1}.${extensionForImageMime(stored.contentType)}`,
+            role: "product",
+            objectKey: original.originalObjectKey,
+          });
+        }
+        if (!inputImages.length) throw new Error("TASK_INVALID_SOURCE");
+        sourceObjectKey = inputImages[0].objectKey;
+        sourceInputImageId = task.sourceInputImageId;
+      } else if (isReplicaTask) {
         const replicaProducts = await replicaRepository.listProductImages(suiteId);
         replicaProductCount = replicaProducts.length;
         for (const [productIndex, product] of replicaProducts.entries()) {
@@ -723,7 +802,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }
 
       const inputSnapshot = inputImages.map((item) => ({ role: item.role, filename: item.filename, mimeType: item.mimeType, resourceId: item.resourceId ?? null, resourceVersionId: item.resourceVersionId ?? null, libraryReferenceId: item.libraryReferenceId ?? null, objectKey: item.objectKey }));
-      const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import" && task.originKind !== "replica";
+      const shouldApplyStyleOverride = Boolean(activeStyleOverride) && task.originKind !== "reverse_import" && !isReplicaTask && !isAplusTask;
       const replicaRolePrefix = isReplicaTask ? buildReplicaRolePrefix(replicaProductCount, replicaCloneLevel) : null;
       const finalPrompt = isReplicaTask
         ? (task.promptDraft.startsWith(replicaRolePrefix!) ? task.promptDraft : `${replicaRolePrefix}\n${task.promptDraft}`)
@@ -741,9 +820,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         ? { ...(task.globalStyleCard ?? {}), promptPrefix: activeStyleOverride, overridden: true }
         : (task.globalStyleCard ?? {});
       const effectiveTemplateVersionId =
-        (isReplicaTask && typeof replicaPromptMeta?.templateVersionId === "string"
-          ? replicaPromptMeta.templateVersionId
-          : null) ?? planTemplateVersionId;
+        (typeof aplusPromptMeta?.templateVersionId === "string" ? aplusPromptMeta.templateVersionId : null) ??
+        (typeof replicaPromptMeta?.templateVersionId === "string" ? replicaPromptMeta.templateVersionId : null) ??
+        planTemplateVersionId;
       const effectivePromptSha256 =
         isReplicaTask || shouldApplyStyleOverride
           ? createHash("sha256").update(finalPrompt).digest("hex")
@@ -763,9 +842,44 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
             styleSketch: replicaProductCount === 0,
           }
         : {};
-      attempts.push({ id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits", requestSummary: { n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role), size: resolveImageSize(typeof generationParams.size === "string" ? generationParams.size : "1K", typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4", imageOptions.sizeMode), quality: generationParams.quality ?? "medium" }, promptSnapshot: { prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId, reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null, referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [], globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, ...replicaFrozenFields, finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs, explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot }, promptSha256: effectivePromptSha256, contextSnapshot: { channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId, reversePlanId: task.reversePlanId ?? null, reverseReferenceId: task.reverseReferenceId ?? null, replicaReferenceId: task.replicaReferenceId ?? null, sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null, globalStyleCard: effectiveGlobalStyleCard, styleOverride: shouldApplyStyleOverride ? activeStyleOverride : null, inputImages: inputImages.map((item) => ({ objectKey: item.objectKey, mimeType: item.mimeType, filename: item.filename, role: item.role })) }, sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId, status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null });
+      const aplusFrozenFields = isAplusTask ? {
+        ...aplusPromptMeta, moduleCode: task.moduleCode, sizePreset: task.sizePreset, sortOrder: task.sortOrder,
+      } : {};
+      const size = aplusRequestSize ?? resolveImageSize(
+        typeof generationParams.size === "string" ? generationParams.size : "1K",
+        typeof generationParams.ratio === "string" ? generationParams.ratio : task.imageType === "main" ? "1:1" : "3:4",
+        imageOptions.sizeMode,
+      );
+      const styleOverride = shouldApplyStyleOverride ? activeStyleOverride : null;
+      attempts.push({
+        id: randomUUID(), slotId: slots[index].id, attemptNo: 1, provider: providerName, model, endpoint: "/v1/images/edits",
+        requestSummary: {
+          n: 1, imageCount: inputImages.length, inputRoles: inputImages.map((item) => item.role),
+          size, quality: generationParams.quality ?? "medium", ...aplusSizeFields,
+        },
+        promptSnapshot: {
+          prompt: task.promptDraft, promptRevision: task.promptRevision, planSnapshotId: task.planSnapshotId,
+          planItemId: task.planItemId, templateVersionId: effectiveTemplateVersionId,
+          reversePromptVersionId: task.reversePromptVersionId ?? null, categoryCode: task.categoryCode ?? null,
+          referenceImageIds: task.referenceImageIds ?? [], factRefs: task.factRefs ?? [],
+          globalStyleCard: effectiveGlobalStyleCard, styleOverride, ...replicaFrozenFields, ...aplusFrozenFields,
+          finalPrompt, providerPrompt, generationParams, productMaterialRefs: materialRefs,
+          explosiveReferenceEnabled: generationParams.explosiveReferenceEnabled !== false, inputImages: inputSnapshot,
+        },
+        promptSha256: effectivePromptSha256,
+        contextSnapshot: {
+          channel, model, suiteTaskId: task.id, planSnapshotId: task.planSnapshotId, planItemId: task.planItemId,
+          templateVersionId: effectiveTemplateVersionId, reversePlanId: task.reversePlanId ?? null,
+          reverseReferenceId: task.reverseReferenceId ?? null, replicaReferenceId: task.replicaReferenceId ?? null,
+          sourceRevision: task.sourceRevision ?? 0, imageType: task.imageType, categoryCode: task.categoryCode ?? null,
+          globalStyleCard: effectiveGlobalStyleCard, styleOverride,
+          inputImages: inputImages.map(({ objectKey, mimeType, filename, role }) => ({ objectKey, mimeType, filename, role })),
+        },
+        sourceKind, sourceObjectKey, sourceInputImageId, sourceBaseVersionId, sourceLibraryReferenceId, sourceResourceVersionId,
+        status: "running", errorCode: null, errorMessage: null, externalRequestId: null, startedAt: now, finishedAt: null,
+      });
     }
-    const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts });
+    const reservation = await deps.taskRepository.beginBatch({ batch, slots, attempts }, singleTaskPrompt);
     if (!reservation.duplicate) {
       const jobs = attempts.map((attempt, index) => ({
         attempt,
@@ -787,6 +901,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   };
 
   const classifyTaskImageError = (error: unknown) => {
+    if (error instanceof Error && (error.message === "INVALID_PROVIDER_RESPONSE" || error.message === "INVALID_GENERATED_IMAGE")) return "INVALID_GENERATED_IMAGE";
     if (error instanceof Error && error.message === "IMAGE_SIZE_UNSUPPORTED") return "IMAGE_SIZE_UNSUPPORTED";
     if (error instanceof Error && error.message.includes("TIMEOUT")) return "TASK_IMAGE_PROVIDER_TIMEOUT";
     return "TASK_IMAGE_PROVIDER_FAILED";
@@ -795,8 +910,9 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const executeTaskAttempt = async (attempt: TaskGenerationAttempt, task: SuiteTask, slot: TaskResultSlot, provider: ImageProvider | undefined) => {
     if (!deps.taskRepository) return;
     const finish = new Date().toISOString();
-    if (!provider) { await deps.taskRepository.failAttempt(attempt.id, "TASK_IMAGE_PROVIDER_NOT_CONFIGURED", errorMessages.TASK_IMAGE_PROVIDER_NOT_CONFIGURED, finish); return; }
     try {
+      if (task.originKind === "aplus" && (await deps.taskRepository.getAttempt(attempt.id))?.status !== "running") return;
+      if (!provider) { await deps.taskRepository.failAttempt(attempt.id, "TASK_IMAGE_PROVIDER_NOT_CONFIGURED", errorMessages.TASK_IMAGE_PROVIDER_NOT_CONFIGURED, finish); return; }
       const source = await deps.storage.get(attempt.sourceObjectKey);
       if (!source) { await deps.taskRepository.failAttempt(attempt.id, "TASK_INVALID_SOURCE", errorMessages.TASK_INVALID_SOURCE, finish); return; }
       const snapshotInputs = Array.isArray(attempt.contextSnapshot.inputImages) ? attempt.contextSnapshot.inputImages as Array<Record<string, unknown>> : [];
@@ -806,27 +922,21 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return;
       }
       if (images.length > 1 && provider.supportsMultipleImages === false) { await deps.taskRepository.failAttempt(attempt.id, "TASK_PROVIDER_MULTI_IMAGE_UNSUPPORTED", "当前图片模型不支持多图输入", finish); return; }
-      const editRequest: Parameters<ImageProvider["edit"]>[0] = { requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.providerPrompt ?? attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality: "medium", n: 1, responseFormat: "b64_json" };
-      let generated: Awaited<ReturnType<ImageProvider["edit"]>>;
-      try {
-        generated = await provider.edit(editRequest);
-      } catch (firstError) {
-        const firstCode = classifyTaskImageError(firstError);
-        if (firstCode !== "TASK_IMAGE_PROVIDER_FAILED" && firstCode !== "TASK_IMAGE_PROVIDER_TIMEOUT") {
-          throw firstError;
-        }
-        if (imageRetryDelayMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, imageRetryDelayMs));
-        }
-        generated = await provider.edit(editRequest);
-      }
+      const frozenQuality = IMAGE_QUALITIES.find((quality) => quality === attempt.requestSummary.quality);
+      const quality: ImageQuality = attempt.contextSnapshot.tool === "regenerate" ? frozenQuality ?? "high" : "medium";
+      const editRequest: Parameters<ImageProvider["edit"]>[0] = { requestId: attempt.id, flow: "suite-task-generation", endpoint: "/v1/images/edits", image: images[0].bytes, imageMimeType: images[0].mimeType, imageFilename: images[0].filename, images, model: attempt.model, prompt: String(attempt.promptSnapshot.providerPrompt ?? attempt.promptSnapshot.finalPrompt), size: String(attempt.requestSummary.size ?? "1K"), quality, n: 1, responseFormat: "b64_json" };
+      const generated = await provider.edit(editRequest);
+      if (task.originKind === "aplus" && (await deps.taskRepository.getAttempt(attempt.id))?.status !== "running") return;
       const processed = await processGeneratedImage(generated.bytes);
       const objectKey = `suites/${task.suiteId}/tasks/${task.id}/versions/${randomUUID()}/final.png`;
       await deps.storage.put({ key: objectKey, bytes: processed.bytes, contentType: processed.mimeType });
       if (task.originKind === "replica") {
         await clearReplicaCardFinalLocks(task);
       }
-      await deps.taskRepository.completeAttempt({ attemptId: attempt.id, slotId: slot.id, taskId: task.id, objectKey, processObjectKeys: [], sha256: processed.sha256, width: processed.width, height: processed.height, mimeType: processed.mimeType, completedAt: new Date().toISOString() });
+      const delivery = task.originKind === "aplus" && task.sizePreset
+        ? await storeAplusDelivery(deps.storage, task.sizePreset, processed, objectKey)
+        : {};
+      await deps.taskRepository.completeAttempt({ attemptId: attempt.id, slotId: slot.id, taskId: task.id, objectKey, processObjectKeys: [], sha256: processed.sha256, width: processed.width, height: processed.height, mimeType: processed.mimeType, completedAt: new Date().toISOString(), ...delivery });
       const latestRun = await pipelineRepository.getLatestRun(task.suiteId);
       if (latestRun && (latestRun.status === "partial_failed" || latestRun.status === "failed")) {
         const activeTasks = (await deps.taskRepository.listTasks(task.suiteId)).filter((item) => item.status !== "archived");
@@ -847,8 +957,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }
     } catch (error) {
       const code = classifyTaskImageError(error);
-      const errorMessage = errorMessages[code] ?? (code === "TASK_IMAGE_PROVIDER_TIMEOUT" ? errorMessages.IMAGE_PROVIDER_TIMEOUT : errorMessages.TASK_IMAGE_PROVIDER_FAILED);
-      await deps.taskRepository.failAttempt(attempt.id, code, errorMessage, new Date().toISOString()).catch(() => undefined);
+      await deps.taskRepository.failAttempt(attempt.id, code, errorMessages[code], new Date().toISOString()).catch(() => undefined);
     }
   };
 
@@ -911,10 +1020,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     return null;
   };
 
-  deps.imageEditorApi?.setOnVersionCompleted?.(async (childTask) => {
+  deps.imageEditorApi?.setOnVersionCompleted?.(async (childTask, generated) => {
     const rootTask = await resolveRootTaskForEditCard(childTask.sourceCardId);
     if (rootTask?.originKind === "replica") {
       await clearReplicaCardFinalLocks(rootTask);
+    }
+    if (rootTask?.originKind === "aplus" && rootTask.sizePreset) {
+      return storeAplusDelivery(deps.storage, rootTask.sizePreset, generated, generated.objectKey);
     }
   });
   const pipeline = createSuitePipeline({
@@ -936,6 +1048,30 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     resolveVision,
     resolveImageOptions: async () => (await resolveImage()).imageOptions,
     request,
+  });
+  const promptRepository = deps.promptRepository;
+  const aplusPrompts = promptRepository && {
+    listPublished: (stage: PromptStage) => promptRepository.listPublished(stage),
+    getPublishedVersion: (versionId: string, stage: PromptStage) => observedPromptLoad(promptRepository, versionId, stage),
+  };
+  const aplusPlanning = createAplusPlanningApi({
+    repository: deps.repository,
+    storage: deps.storage,
+    pipelines: pipelineRepository,
+    platforms: deps.platformRepository,
+    productCards: productCardRepository,
+    prompts: aplusPrompts,
+    resolveVision,
+  });
+  const aplusGeneration = createAplusGenerationApi({
+    planning: aplusPlanning, repository: deps.repository, tasks: deps.taskRepository,
+    pipelines: pipelineRepository, prompts: aplusPrompts,
+    resolveImageOptions: async () => (await resolveImage()).imageOptions,
+    createBatch: (suiteId, tasks, key) => createTaskBatch(suiteId, tasks, "batch", key),
+  });
+  const aplusResults = createAplusResultsApi({
+    repository: deps.repository, tasks: deps.taskRepository, storage: deps.storage,
+    getStudioState: (suiteId) => pipeline.getStudioState(suiteId, "aplus"),
   });
 
   async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
@@ -972,13 +1108,16 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return fail(error instanceof Error ? error.message : "LLM_FAILED", 502);
       }
     }
-    const editVersionPreviewMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
+    const editVersionPreviewMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview(\/delivery)?$/);
     if (method === "GET" && editVersionPreviewMatch) {
+      const [, taskId, versionId, delivery] = editVersionPreviewMatch;
+      if (!hasValidTaskVersionIds(taskId, versionId)) return fail("INVALID_TASK_VERSION", 404);
       if (!deps.imageEditorApi) return fail("IMAGE_EDITOR_NOT_CONFIGURED", 503);
-      const taskRes = await deps.imageEditorApi.request("GET", `/api/image-editor/tasks/${editVersionPreviewMatch[1]}`);
-      const taskData = dataOf(taskRes) as { versions?: Array<{ id?: string; objectKey?: string }> } | null;
-      const version = taskRes.status === 200 ? taskData?.versions?.find((item) => item.id === editVersionPreviewMatch[2]) : null;
-      return version?.objectKey ? previewObject(version.objectKey, deps.storage) : fail("NOT_FOUND", 404);
+      const taskRes = await deps.imageEditorApi.request("GET", `/api/image-editor/tasks/${taskId}`);
+      const taskData = dataOf(taskRes) as { versions?: Array<{ id?: string; objectKey?: string; deliveryObjectKey?: string }> } | null;
+      const version = taskRes.status === 200 ? taskData?.versions?.find((item) => item.id === versionId) : null;
+      const objectKey = delivery ? version?.deliveryObjectKey : version?.objectKey;
+      return objectKey ? previewObject(objectKey, deps.storage) : fail("NOT_FOUND", 404);
     }
     const selectEditVersionMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/select$/);
     if (path.startsWith("/api/image-editor/")) {
@@ -997,6 +1136,26 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       return res;
     }
     const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
+
+    if (method === "POST" && path === "/api/aplus/ai-write") return aplusPlanning.aiWrite(options.body);
+    if (method === "POST" && path === "/api/aplus") return aplusPlanning.start(idempotencyKey, options.body);
+    const aplusMatch = path.match(/^\/api\/aplus\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/(studio-state|plan|replan|confirm|resume)$/i);
+    if (aplusMatch) {
+      const [, suiteId, action] = aplusMatch;
+      if (method === "GET" && action === "studio-state") return pipeline.getStudioState(suiteId, "aplus");
+      if (method === "PATCH" && action === "plan") return aplusPlanning.editPlan(suiteId, options.body);
+      if (method === "POST" && action === "replan") return aplusPlanning.start(idempotencyKey, options.body, suiteId);
+      if (method === "POST" && action === "confirm") return aplusGeneration.confirm(suiteId, options.body, idempotencyKey);
+      if (method === "POST" && action === "resume") return aplusGeneration.resume(suiteId, idempotencyKey);
+    }
+    const aplusResultMatch = path.match(/^\/api\/aplus\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/(order|long-image|export)(?:\?(.*))?$/i);
+    if (aplusResultMatch) {
+      const [, suiteId, action, query] = aplusResultMatch;
+      if (method === "PATCH" && action === "order") return aplusResults.reorder(suiteId, options.body);
+      if (method === "GET" && (action === "long-image" || action === "export")) {
+        return aplusResults.exportResult(suiteId, action, new URLSearchParams(query).get("preset"));
+      }
+    }
 
     if (method === "POST" && path === "/api/replicas") return replicaPipeline.createReplica(idempotencyKey, options.body);
     const replicaStudioStateMatch = path.match(/^\/api\/replicas\/([^/]+)\/studio-state$/);
@@ -1063,7 +1222,10 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const body = asRecord(options.body, { allowArrays: true });
       let suite = typeof body.targetSuiteId === "string" ? await deps.repository.getSuite(body.targetSuiteId) : null;
       if (typeof body.targetSuiteId === "string" && !suite) return fail("INVALID_SUITE_ID", 404);
-      if (suite?.origin === "replica") return fail("INVALID_SUITE_ORIGIN", 400, "复刻批次不支持导入画布任务");
+      if (suite?.origin === "replica" || suite?.origin === "aplus") {
+        const label = suite.origin === "aplus" ? "A+详情批次" : "复刻批次";
+        return fail("INVALID_SUITE_ORIGIN", 400, `${label}不支持导入画布任务`);
+      }
       if (!suite) suite = await deps.repository.createSuite(typeof body.name === "string" && body.name.trim() ? body.name.trim() : `爆品图反推 ${new Date().toISOString().slice(0, 10)}`, `${idempotencyKey}:suite`, "canvas");
       const taskGroupId = typeof body.taskGroupId === "string" ? body.taskGroupId : randomUUID();
       const result = await deps.taskRepository.createReverseTasks({ suiteId: suite.id, reversePlanId: plan.id, taskGroupId, mode: plan.mode, idempotencyKey, items: items.map(({ reference, prompt }) => ({ referenceId: reference.id, ordinal: reference.ordinal, filename: reference.filename, promptVersionId: prompt.id, prompt: prompt.prompt })) });
@@ -1083,7 +1245,8 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     if (method === "GET" && suiteListMatch) {
       const canvasOnly = new URLSearchParams(suiteListMatch[1]).get("view") === "canvas";
       const suites = await deps.repository.listSuites();
-      const enriched = await Promise.all(suites.map(async (suite) => {
+      const visibleSuites = canvasOnly ? suites.filter(({ origin }) => origin !== "replica" && origin !== "aplus") : suites;
+      const enriched = await Promise.all(visibleSuites.map(async (suite) => {
         const [inputImages, tasks] = await Promise.all([
           deps.repository.getInputImages(suite.id),
           deps.taskRepository ? deps.taskRepository.listTasks(suite.id) : Promise.resolve([]),
@@ -1115,7 +1278,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
           isDemo: suite.name.includes("演示") || suite.name.includes("Demo"),
         };
       }));
-      return ok(canvasOnly ? enriched.filter((suite) => suite.origin !== "replica" && (suite.origin === "canvas" || suite.taskCount > 0)) : enriched);
+      return ok(canvasOnly ? enriched.filter((suite) => suite.origin === "canvas" || suite.taskCount > 0) : enriched);
     }
     const enrichLibraryResource = (resource: import("./types.js").LibraryResource): import("./types.js").LibraryResource => {
       if (resource.resourceType !== "prompt_template") return resource;
@@ -1778,29 +1941,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       let stitchedDetailPath: string | null = null;
       if (stitchDetail && detailForStitch.length > 0) {
         const targetWidth = preset.detailWidth ?? 1200;
-        const resizedSlices = await Promise.all(
-          detailForStitch.map((sliceBytes) =>
-            sharp(sliceBytes)
-              .resize({ width: targetWidth, withoutEnlargement: false })
-              .png()
-              .toBuffer({ resolveWithObject: true }),
-          ),
-        );
-        const totalHeight = resizedSlices.reduce((sum, slice) => sum + slice.info.height, 0);
-        let top = 0;
-        const composites = resizedSlices.map((slice) => {
-          const entry = { input: slice.data, top, left: 0 };
-          top += slice.info.height;
-          return entry;
-        });
-        let stitched = sharp({
-          create: {
-            width: targetWidth,
-            height: Math.max(1, totalHeight),
-            channels: 4,
-            background: { r: 255, g: 255, b: 255, alpha: 1 },
-          },
-        }).composite(composites);
+        let stitched = await composeVerticalImages(detailForStitch, targetWidth);
         const stitchFmt: DeliveryExportFormat = formatRaw === "original" ? "png" : formatRaw;
         if (stitchFmt === "jpeg") stitched = stitched.flatten({ background: { r: 255, g: 255, b: 255 } }).jpeg({ quality, mozjpeg: true });
         else if (stitchFmt === "webp") stitched = stitched.webp({ quality });
@@ -2116,15 +2257,33 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       const task = await deps.taskRepository.getTask(taskGenerationMatch[1]);
       if (!task || task.status === "archived") return fail("INVALID_SUITE_TASK", 404);
       const body = asRecord(options.body, { allowArrays: true });
-      if (typeof body.promptDraft === "string") await deps.taskRepository.updateTask(task.id, { promptDraft: body.promptDraft });
-      const current = await deps.taskRepository.getTask(task.id);
+      const rawAdditionalPrompt = body.additionalPrompt;
+      if (rawAdditionalPrompt !== undefined &&
+        (typeof rawAdditionalPrompt !== "string" || rawAdditionalPrompt.length > ADDITIONAL_PROMPT_MAX_LENGTH)) {
+        return fail("APLUS_INVALID_ADDITIONAL_PROMPT", 400);
+      }
+      const additionalPrompt = typeof rawAdditionalPrompt === "string" ? rawAdditionalPrompt.trim() : "";
+      const promptSuffix = additionalPrompt ? `\n\n单卡人工补充：${additionalPrompt}` : "";
+      if (typeof body.editSourceVersionId === "string") {
+        try {
+          const { versions } = await deps.taskRepository.listTaskVersions(task.id);
+          const version = versions.find((item) => item.id === body.editSourceVersionId);
+          if (!version) return fail("TASK_CURRENT_VERSION_NOT_FOUND", 409);
+          const result = await createTaskBatch(task.suiteId, [task], "single", idempotencyKey, undefined, {}, { version, versions, promptSuffix });
+          return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
+        } catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
+      }
+      const singleTaskPrompt = typeof body.promptDraft === "string" ? body.promptDraft : undefined;
+      const prompt = (singleTaskPrompt ?? task.promptDraft) + promptSuffix;
+      const generationTask = prompt === task.promptDraft ? task
+        : { ...task, promptDraft: prompt, promptSha256: createHash("sha256").update(prompt).digest("hex") };
       try {
         const history = await deps.taskRepository.listTaskVersions(task.id);
         const currentVersion = history.versions.find((version) => version.isCurrent);
         const currentAttempt = history.attempts.find((attempt) => attempt.id === currentVersion?.attemptId);
-        const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (current?.sourceRevision ?? 0);
-        const useCurrentVersionAsSource = current?.originKind !== "replica" && currentVersion && sourceUnchanged;
-        const result = await createTaskBatch(task.suiteId, [current!], "single", idempotencyKey, undefined, useCurrentVersionAsSource ? { [task.id]: currentVersion.id } : {});
+        const sourceUnchanged = (currentAttempt?.contextSnapshot.sourceRevision ?? 0) === (task.sourceRevision ?? 0);
+        const useCurrentVersionAsSource = task.originKind !== "replica" && task.originKind !== "aplus" && currentVersion && sourceUnchanged;
+        const result = await createTaskBatch(task.suiteId, [generationTask], "single", idempotencyKey, undefined, useCurrentVersionAsSource ? { [task.id]: currentVersion.id } : {}, undefined, singleTaskPrompt);
         return ok({ batchId: result.batch.id, status: result.batch.status }, result.duplicate ? 200 : 202);
       }
       catch (error) { return fail(error instanceof Error ? error.message : "TASK_INVALID_SOURCE", 409); }
@@ -2168,14 +2327,15 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
       }
       return version ? ok(version) : fail("INVALID_TASK_VERSION", 404);
     }
-    const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
-    if (method === "GET" && taskPreviewMatch) return await previewTaskVersion(taskPreviewMatch[1], taskPreviewMatch[2]);
+    const taskPreviewMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview(\/delivery)?$/);
+    if (method === "GET" && taskPreviewMatch) return await previewTaskVersion(taskPreviewMatch[1], taskPreviewMatch[2], Boolean(taskPreviewMatch[3]));
 
     const removeImageMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)$/);
     if (method === "DELETE" && removeImageMatch) {
       const [suiteId, inputImageId] = removeImageMatch.slice(1);
       const image = await deps.repository.getInputImage(suiteId, inputImageId);
       if (!image) return fail("INVALID_INPUT_IMAGE", 404);
+      if ((await deps.repository.getSuite(suiteId))?.origin === "aplus") return fail("INPUT_IMAGE_HAS_HISTORY", 409);
       try {
         const removed = await deps.repository.removeInputImage(suiteId, inputImageId);
         if (!removed) return fail("INVALID_INPUT_IMAGE", 404);
@@ -2212,24 +2372,30 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
         return ok({ attempt: attemptView(previous), version: version ? versionView(version) : null }, previous.status === "running" ? 202 : 200);
       }
       const createdAt = new Date().toISOString();
-      const reservation = await deps.repository.beginBaseGeneration({
-        id: randomUUID(),
-        suiteId,
-        inputImageId,
-        baseVersionId: randomUUID(),
-        idempotencyKey,
-        model,
-        channel,
-        endpoint: "/v1/images/edits",
-        prompt,
-        promptTemplateVersionId: templateVersionId,
-        dynamicInput: validatedInput.value,
-        size: "1K",
-        quality: "medium",
-        n: 1,
-        responseFormat: "b64_json",
-        createdAt,
-      });
+      let reservation: Awaited<ReturnType<SuiteRepository["beginBaseGeneration"]>>;
+      try {
+        reservation = await deps.repository.beginBaseGeneration({
+          id: randomUUID(),
+          suiteId,
+          inputImageId,
+          baseVersionId: randomUUID(),
+          idempotencyKey,
+          model,
+          channel,
+          endpoint: "/v1/images/edits",
+          prompt,
+          promptTemplateVersionId: templateVersionId,
+          dynamicInput: validatedInput.value,
+          size: "1K",
+          quality: "medium",
+          n: 1,
+          responseFormat: "b64_json",
+          createdAt,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === "BASE_GENERATION_IN_PROGRESS") return fail(error.message, 409);
+        throw error;
+      }
       if (reservation.duplicate) {
         return ok({ attempt: attemptView(reservation.attempt), version: reservation.existingVersion ? versionView(reservation.existingVersion) : null }, reservation.attempt.status === "running" ? 202 : 200);
       }
@@ -2361,6 +2527,7 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
   const upload = async (suiteId: string, file: UploadFile): Promise<AppResponse> => {
     const suite = await deps.repository.getSuite(suiteId);
     if (!suite) return fail("INVALID_SUITE_ID", 404);
+    if (suite.origin === "aplus") return fail("INPUT_IMAGE_HAS_HISTORY", 409);
     if (file.idempotencyKey && uploadIdempotency.has(`${suiteId}:${file.idempotencyKey}`)) return ok(uploadIdempotency.get(`${suiteId}:${file.idempotencyKey}`)!, 201);
     const images = await deps.repository.getInputImages(suiteId);
     if (images.length >= 6 && !file.idempotencyKey) return fail("TOO_MANY_IMAGES", 400);
@@ -2402,11 +2569,13 @@ export function createSuiteStudioApp(deps: { listingRepository?: ListingReposito
     return previewObject(version.objectKey, deps.storage);
   };
 
-  const previewTaskVersion = async (taskId: string, versionId: string) => {
+  const previewTaskVersion = async (taskId: string, versionId: string, delivery = false) => {
+    if (!hasValidTaskVersionIds(taskId, versionId)) return fail("INVALID_TASK_VERSION", 404);
     if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
     const history = await deps.taskRepository.listTaskVersions(taskId);
     const version = history.versions.find((item) => item.id === versionId);
-    return version ? previewObject(version.objectKey, deps.storage) : fail("INVALID_TASK_VERSION", 404);
+    const objectKey = delivery ? version?.deliveryObjectKey : version?.objectKey;
+    return objectKey ? previewObject(objectKey, deps.storage) : fail("INVALID_TASK_VERSION", 404);
   };
 
   const previewLibraryResource = async (resourceId: string) => {

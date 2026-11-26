@@ -36,7 +36,7 @@ test("商品套图：选择视觉风格、管理九套版式、缩减张数并�
       case "GET /api/platforms":
         return reply([{ code: "taobao", name: "淘宝", marketScope: "domestic", mainImageBackground: "flexible" }]);
       case "GET /api/model-settings":
-        return reply({ channels: [], preferences: { image: null, vision: null } });
+        return reply({ channels: [], preferences: { image: null, vision: null, video: null } });
       case "GET /api/suites/feed":
         return reply({ items: [], total: 0 });
       case `GET /api/suites/${suite.id}/studio-state`:

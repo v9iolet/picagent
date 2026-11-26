@@ -520,7 +520,7 @@ test("changing task params while an attempt is reserved cannot change the dispat
 test("a tier-only image model dispatches the selected tier without pixel conversion", async (t) => {
   const { ModelSettings } = await import("../server/model-settings.js");
   const settings = new ModelSettings({
-    read: async () => ({ channels: [{ id: "tier-channel", name: "档位渠道", protocol: "openai-compatible", baseUrl: "https://example.test/v1", apiKey: "dummy-tier-key", models: [{ id: "custom-image", capabilities: ["image"], imageOptions: { sizes: ["1K", "2K"], aspectRatios: ["1:1", "3:4"], sizeMode: "tier" } }] }], preferences: { image: { channelId: "tier-channel", modelId: "custom-image" }, vision: null } }),
+    read: async () => ({ channels: [{ id: "tier-channel", name: "档位渠道", protocol: "openai-compatible", baseUrl: "https://example.test/v1", apiKey: "dummy-tier-key", models: [{ id: "custom-image", capabilities: ["image"], imageOptions: { sizes: ["1K", "2K"], aspectRatios: ["1:1", "3:4"], sizeMode: "tier" } }] }], preferences: { image: { channelId: "tier-channel", modelId: "custom-image" }, vision: null, video: null } }),
     update: async () => { throw new Error("not used"); },
   });
   const taskRepository = new MemoryTaskRepository();

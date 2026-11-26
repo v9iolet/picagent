@@ -44,17 +44,21 @@ interface ResolvedLibraryEntry {
 
 function mapMemoryTaskVersion(task: SuiteTask, version: TaskImageVersion, attempt?: TaskGenerationAttempt): LibraryResource {
   const isReplica = task.originKind === "replica";
-  const taskStage = isReplica ? ("replica_prompt" as const) : ("task_image" as const);
-  const kindLabel = isReplica ? "爆品图复刻" : task.imageType === "main" ? "主图" : "详情页";
-  const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
+  const isAplus = task.originKind === "aplus";
+  const taskStage = isAplus ? "aplus_image" : isReplica ? "replica_prompt" : "task_image";
+  const kindLabel = isAplus ? "A+详情" : isReplica ? "爆品图复刻" : task.imageType === "main" ? "主图" : "详情页";
+  const originMeta = isAplus || isReplica ? { origin: task.originKind, originKind: task.originKind } : {};
+  const deliveryKey = isAplus ? version.deliveryObjectKey : null;
+  const { width, height } = (deliveryKey && version.deliverySize) || version;
   const channel = version.contextSnapshot?.channel ?? null;
   return {
     id: `task-version:${version.id}`,
     resourceType: "task_image_version",
     title: `${task.title} · 版本 ${version.versionNumber}`,
-    summary: `${kindLabel} · ${version.width} × ${version.height}`,
+    summary: `${kindLabel} · ${width} × ${height}`,
     mimeType: version.mimeType,
-    previewUrl: version.previewUrl || `/api/suite-tasks/${task.id}/versions/${version.id}/preview`,
+    previewUrl: deliveryKey ? `/api/suite-tasks/${task.id}/versions/${version.id}/preview/delivery`
+      : version.previewUrl || `/api/suite-tasks/${task.id}/versions/${version.id}/preview`,
     suiteId: task.suiteId,
     taskId: task.id,
     imageVersionId: version.id,
@@ -63,7 +67,7 @@ function mapMemoryTaskVersion(task: SuiteTask, version: TaskImageVersion, attemp
     resourceVersionId: version.id,
     stage: taskStage,
     source: {
-      objectKey: version.objectKey,
+      objectKey: deliveryKey || version.objectKey,
       versionNumber: version.versionNumber,
       promptSummary: task.promptDraft.slice(0, 180),
       model: attempt?.model ?? null,
@@ -79,9 +83,10 @@ function mapMemoryTaskVersion(task: SuiteTask, version: TaskImageVersion, attemp
 
 function mapMemoryProcessImage(task: SuiteTask, version: TaskImageVersion, objectKey: string, index: number, attempt?: TaskGenerationAttempt): LibraryResource {
   const isReplica = task.originKind === "replica";
-  const taskStage = isReplica ? ("replica_prompt" as const) : ("task_image" as const);
-  const kindLabel = isReplica ? "爆品图复刻" : task.imageType === "main" ? "主图" : "详情页";
-  const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
+  const isAplus = task.originKind === "aplus";
+  const taskStage = isAplus ? "aplus_image" : isReplica ? "replica_prompt" : "task_image";
+  const kindLabel = isAplus ? "A+详情" : isReplica ? "爆品图复刻" : task.imageType === "main" ? "主图" : "详情页";
+  const originMeta = isAplus || isReplica ? { origin: task.originKind, originKind: task.originKind } : {};
   const channel = version.contextSnapshot?.channel ?? null;
   return {
     id: `process:${version.id}:${index}`,
@@ -113,10 +118,14 @@ function mapMemoryProcessImage(task: SuiteTask, version: TaskImageVersion, objec
 }
 
 function mapMemoryEditVersion(bundle: EditTaskBundle, version: ImageEditVersion, rootTask: SuiteTask | null): LibraryResource {
-  const isReplica = rootTask?.originKind === "replica";
-  const taskStage = isReplica ? ("replica_prompt" as const) : ("task_image" as const);
-  const kindLabel = isReplica ? "爆品图复刻" : rootTask?.imageType === "main" ? "主图" : "详情页";
-  const originMeta = isReplica ? { origin: "replica", originKind: "replica" } : {};
+  const originKind = rootTask?.originKind;
+  const isReplica = originKind === "replica";
+  const isAplus = originKind === "aplus";
+  const taskStage = isAplus ? "aplus_image" : isReplica ? "replica_prompt" : "task_image";
+  const kindLabel = isAplus ? "A+详情" : isReplica ? "爆品图复刻" : rootTask?.imageType === "main" ? "主图" : "详情页";
+  const originMeta = isAplus || isReplica ? { origin: originKind, originKind } : {};
+  const deliveryKey = isAplus ? version.deliveryObjectKey : null;
+  const { width, height } = (deliveryKey && version.deliverySize) || version;
   const attempt = bundle.attempts.find((item) => item.id === version.attemptId) ?? bundle.attempts[bundle.attempts.length - 1];
   const command = attempt?.command;
   const provider = attempt?.provider ?? bundle.snapshot?.provider;
@@ -130,9 +139,9 @@ function mapMemoryEditVersion(bundle: EditTaskBundle, version: ImageEditVersion,
     id: `edit-version:${version.id}`,
     resourceType: "task_image_version",
     title: `${baseTitle} · 编辑版本 ${version.versionNumber}`,
-    summary: `编辑生成 · ${kindLabel} · ${version.width} × ${version.height}`,
-    mimeType: version.mimeType,
-    previewUrl: `/api/image-editor/tasks/${bundle.task.id}/versions/${version.id}/preview`,
+    summary: `编辑生成 · ${kindLabel} · ${width} × ${height}`,
+    mimeType: deliveryKey && deliveryKey !== version.objectKey ? "image/png" : version.mimeType,
+    previewUrl: `/api/image-editor/tasks/${bundle.task.id}/versions/${version.id}/preview${deliveryKey ? "/delivery" : ""}`,
     suiteId: rootTask?.suiteId ?? null,
     taskId: rootTask?.id ?? bundle.task.id,
     imageVersionId: version.id,
@@ -141,7 +150,7 @@ function mapMemoryEditVersion(bundle: EditTaskBundle, version: ImageEditVersion,
     resourceVersionId: version.id,
     stage: taskStage,
     source: {
-      objectKey: version.objectKey,
+      objectKey: deliveryKey || version.objectKey,
       generatedBy: "image_editor",
       editChildTaskId: bundle.task.id,
       editSnapshotId: bundle.task.snapshotId,

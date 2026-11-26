@@ -1,14 +1,19 @@
+import { verifyGenerationConcurrency } from "./image-generation-concurrency.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Client, Pool, escapeIdentifier, type PoolClient, type QueryResultRow } from "pg";
+import sharp from "sharp";
+import { defaultImageOptions } from "../shared/model-settings.js";
 import { createSuiteStudioApp } from "../server/app.js";
 import { loadPostgresConfig } from "../server/config.js";
 import { ImageEditorService } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import type { ListingImage, ListingJob, ListingVersion } from "../server/listing-copy.js";
+import { ModelSettings, PostgresModelSettingsRepository } from "../server/model-settings.js";
 import { runMigrations } from "../server/migrations.js";
+import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
 import { PostgresImageEditorRepository } from "../server/repositories/postgres-image-editor-repository.js";
 import { PostgresLibraryRepository } from "../server/repositories/postgres-library-repository.js";
 import { PostgresTaskRepository } from "../server/repositories/postgres-task-repository.js";
@@ -20,7 +25,10 @@ import { importPromptRecordsWithPolicy, parseNormalizedPromptMarkdown } from "..
 import { PostgresPlatformRepository } from "../server/repositories/postgres-platform-repository.js";
 import { PostgresSuiteRepository } from "../server/repositories/postgres-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
-import type { SuitePipelineRun } from "../server/types.js";
+import { waitUntil } from "../server/suite-pipeline.js";
+import type { ImageEditRequest, SuitePipelineRun } from "../server/types.js";
+import { APLUS_MODULES } from "../shared/aplus.js";
+import { resolveAplusPromptTemplate } from "../server/aplus/aplus-prompt.js";
 
 const skip = process.env.PG_CONTRACT_TEST !== "1";
 const timestamp = "2026-01-01T00:00:00.000Z";
@@ -651,6 +659,402 @@ test("031 extends origin, task origin_kind, pipeline phase, adds replica tables,
   });
 });
 
+test("PG 保存 A+ 商品还原交付图与图片库来源，044–046 启动重放保留数据", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const suites = new PostgresSuiteRepository(pool);
+    const tasks = new PostgresTaskRepository(pool);
+    const pipelines = new PostgresPipelineRepository(pool);
+    const platforms = new PostgresPlatformRepository(pool);
+    const storage = new MemoryStorage();
+    const app = createSuiteStudioApp({ repository: suites, storage, platformRepository: platforms, taskRepository: tasks });
+    const response = await app.request("GET", "/api/platforms");
+    assert.equal(response.status, 200);
+    const profiles: Awaited<ReturnType<typeof platforms.listEnabled>> = response.body.data;
+    assert.equal(profiles.length, 16);
+    const common = ["1:1", "3:4", "9:16", "16:9"];
+    for (const { code, marketScope, detailSizePresets } of profiles) {
+      const expected = code === "amazon"
+        ? { options: ["aplus_premium_web", "aplus_premium_mobile", "aplus_standard", ...common], default: "aplus_standard" }
+        : { options: common, default: marketScope === "domestic" ? "3:4" : "1:1" };
+      assert.deepEqual(detailSizePresets, expected, code);
+      assert.deepEqual((await platforms.find(code))?.detailSizePresets, expected, code);
+    }
+    const configured = { options: ["aplus_standard", "16:9"], default: "16:9" };
+    for (const malformed of [{ options: "bad", default: "1:1" }, { options: common }, { options: [3], default: "3:4" }]) {
+      await pool.query("UPDATE suite_workbench.platform_profiles SET detail_size_presets=$1 WHERE code='amazon'", [malformed]);
+      assert.deepEqual((await platforms.find("amazon"))?.detailSizePresets, profiles.find((profile) => profile.code === "amazon")?.detailSizePresets);
+    }
+    await pool.query("UPDATE suite_workbench.platform_profiles SET detail_size_presets=$1 WHERE code='amazon'", [configured]);
+
+    const creationKey = "aplus-planning-contract";
+    const uploadDraft = await suites.createSuite("PG 上传草稿", creationKey);
+    const suite = await suites.createSuite("PG A+ 批次", creationKey, "aplus");
+    assert.equal(suite.origin, "aplus");
+    assert.notEqual(suite.id, uploadDraft.id);
+    assert.equal((await suites.findAplusSuiteByIdempotencyKey(creationKey))?.id, suite.id);
+    assert.equal((await suites.createSuite("重复提交", creationKey, "aplus")).id, suite.id);
+    const taskId = randomUUID();
+    const taskRow = {
+      id: taskId, suiteId: suite.id, planSnapshotId: null, planItemId: null, ordinal: 1,
+      title: "首屏主视觉", purpose: "展示商品", promptDraft: "提示词", sourceInputImageId: null, promptRevision: 1,
+      generationParams: { size: "1K", requestSize: "2496x1024" }, archivedAt: null,
+      moduleCode: "hero", sizePreset: "aplus_premium_web", sortOrder: 1, imageType: "detail", originKind: "aplus",
+      status: "pending", createdAt: timestamp, updatedAt: timestamp,
+    } as const;
+    await tasks.createAplusTasks([taskRow]);
+    await tasks.createAplusTasks([taskRow]);
+    assert.equal((await tasks.listTasks(suite.id)).length, 1);
+    const task = await tasks.getTask(taskId);
+    assert.equal(task?.originKind, "aplus");
+    assert.equal(task.moduleCode, "hero");
+    assert.equal(task.sizePreset, "aplus_premium_web");
+    assert.equal(task.sortOrder, 1);
+    await tasks.createAplusTasks([
+      { ...taskRow, id: randomUUID(), ordinal: 2, sortOrder: 2, sizePreset: "aplus_premium_mobile" },
+      { ...taskRow, id: randomUUID(), ordinal: 3, sortOrder: 3, moduleCode: "usage_scene" },
+      { ...taskRow, id: randomUUID(), ordinal: 4, sortOrder: 4, moduleCode: "usage_scene", sizePreset: "aplus_premium_mobile" },
+    ]);
+    const orderPath = `/api/aplus/${suite.id}/order`;
+    assert.equal((await app.request("PATCH", orderPath, { body: { modules: ["hero"] } })).status, 409);
+    assert.deepEqual((await tasks.listTasks(suite.id)).map(({ sortOrder }) => sortOrder), [1, 2, 3, 4]);
+    const reordered = await app.request("PATCH", orderPath, { body: { modules: ["usage_scene", "hero"] } });
+    assert.equal(reordered.status, 200, JSON.stringify(reordered.body));
+    assert.deepEqual((await tasks.listTasks(suite.id)).map(({ sortOrder }) => sortOrder), [2, 2, 1, 1]);
+    const { run } = await pipelines.createRun({ ...runningPipeline(suite.id), currentPhase: "aplus_planning" });
+    assert.equal(run.currentPhase, "aplus_planning");
+    const awaiting = await pipelines.updateRun(run.id, {
+      currentPhase: "awaiting_confirmation", status: "waiting_human_input",
+      config: { planSnapshot: { modules: ["hero"] } },
+    }, run);
+    assert.equal(awaiting?.currentPhase, "awaiting_confirmation");
+    const edited = await pipelines.updateRun(run.id, {
+      config: { planSnapshot: { modules: [{ moduleCode: "hero", copyRequirements: "新文案" }] } },
+    }, awaiting);
+    assert.ok(edited);
+    assert.equal(await pipelines.updateRun(run.id, { config: {} }, awaiting), null);
+    assert.equal(await pipelines.resumeRun(awaiting, "stale-confirm", "image_generating", awaiting.config), null);
+
+    const batchId = randomUUID();
+    const slotId = randomUUID();
+    const attemptId = randomUUID();
+    const productInputs = ["product", "product_primary", "product_detail"].map((role, index) => ({
+      objectKey: `suites/${suite.id}/inputs/product-${index + 1}/original`, role,
+    }));
+    const normalizedProducts = productInputs.map(({ objectKey }) => ({ objectKey, role: "product" }));
+    const productBytes = await Promise.all(["red", "green", "blue"].map((background) =>
+      sharp({ create: { width: 80, height: 60, channels: 3, background } }).png().toBuffer()));
+    for (const [index, { objectKey }] of productInputs.entries()) {
+      await storage.put({ key: objectKey, bytes: productBytes[index], contentType: "image/png" });
+    }
+    const initialReservation = await tasks.beginBatch({
+      batch: { id: batchId, suiteId: suite.id, kind: "single", requestedCount: 1, taskIds: [taskId], status: "running", idempotencyKey: "image", createdAt: timestamp, startedAt: timestamp, finishedAt: null },
+      slots: [{ id: slotId, batchId, taskId, slotOrdinal: 1, retryOfSlotId: null, status: "generating", selectedVersionId: null, createdAt: timestamp, completedAt: null }],
+      attempts: [{
+        id: attemptId, slotId, attemptNo: 1, provider: "fake", model: "fake", endpoint: "/v1/images/edits",
+        requestSummary: {}, promptSnapshot: {}, promptSha256: "a".repeat(64),
+        contextSnapshot: { inputImages: [...productInputs, { objectKey: "reference.png", role: "reference" }] }, sourceKind: "original",
+        sourceObjectKey: productInputs[0].objectKey, sourceInputImageId: null, sourceBaseVersionId: null, status: "running",
+        errorCode: null, errorMessage: null, externalRequestId: null, startedAt: timestamp, finishedAt: null,
+      }],
+    });
+    const generatedSize = { width: 2496, height: 1024 };
+    const deliverySize = { width: 1464, height: 600 };
+    const { version } = await tasks.completeAttempt({
+      attemptId, slotId, taskId, completedAt: timestamp, processObjectKeys: ["generated.png"], sha256: "b".repeat(64),
+      objectKey: "generated.png", mimeType: "image/png", ...generatedSize,
+      generatedSize, deliverySize, deliveryObjectKey: "delivery.png",
+    });
+    assert.equal(version.objectKey, "generated.png");
+    assert.deepEqual(version.generatedSize, generatedSize);
+    assert.deepEqual(version.deliverySize, deliverySize);
+    assert.equal(version.deliveryObjectKey, "delivery.png");
+    const prompts = new PostgresPromptRepository(pool);
+    const editor = new PostgresImageEditorRepository(pool);
+    const library = new PostgresLibraryRepository(pool);
+    const original = await sharp({ create: { ...generatedSize, channels: 3, background: "navy" } }).png().toBuffer();
+    await storage.put({ key: version.objectKey, bytes: original, contentType: "image/png" });
+    await storage.put({ key: version.deliveryObjectKey!, bytes: await sharp(original).resize(deliverySize).png().toBuffer(), contentType: "image/png" });
+    const editorCalls: ImageEditRequest[] = [];
+    const fakeProvider = {
+      async edit(request: ImageEditRequest) {
+        editorCalls.push(request);
+        return { bytes: original, mimeType: "image/png" };
+      },
+    };
+    const service = new ImageEditorService(editor, {
+      name: "fake", version: "1", capabilitiesVersion: "1",
+      capabilities: () => ({ addText: true, imageToImage: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
+      edit: (command, source) => requestImageEditorEdit(fakeProvider, storage, "fake", defaultImageOptions("gpt-image-2"), command, source),
+    }, storage, async (sourceVersionId) => {
+      const source = await editor.getSourceVersion(sourceVersionId);
+      const object = source && await storage.get(source.objectKey);
+      if (!source || !object) return null;
+      const { width, height } = await sharp(object.bytes).metadata();
+      return { ...source, bytes: object.bytes, width, height };
+    }, undefined, (cardId, versionId) => editor.validateSource(cardId, versionId), prompts,
+    async (sourceVersionId) => (await editor.getSourceVersion(sourceVersionId))?.productInputs ?? null);
+    const editorApp = createSuiteStudioApp({ repository: suites, storage, taskRepository: tasks, imageEditorApi: createImageEditorApi(service), libraryRepository: library });
+    const assertLibraryImage = async (id: string, objectKey: string, previewUrl: string | null) => {
+      const resource = await library.getResource(id);
+      assert.ok(resource);
+      assert.equal(resource.stage, "aplus_image");
+      assert.equal(resource.source.origin, "aplus");
+      assert.equal(resource.source.originKind, "aplus");
+      assert.equal(resource.source.objectKey, objectKey);
+      assert.equal(resource.previewUrl, previewUrl);
+      const { items } = await library.listResources({ scope: "image", stage: "aplus_image", suiteId: suite.id, query: "A+详情" });
+      assert.deepEqual(items.find((item) => item.id === id), resource);
+      const bytes = (await storage.get(objectKey))!.bytes;
+      if (previewUrl) {
+        const { width, height } = await sharp(bytes).metadata();
+        assert.ok(resource.summary.endsWith(` · ${width} × ${height}`));
+      }
+      assert.deepEqual((await editorApp.request("GET", `/api/library/resources/${encodeURIComponent(id)}/preview`)).raw, bytes);
+      if (previewUrl) assert.deepEqual((await editorApp.request("GET", previewUrl)).raw, bytes);
+    };
+    const previewUrl = `/api/suite-tasks/${taskId}/versions/${version.id}/preview`;
+    await assertLibraryImage(`task-version:${version.id}`, version.deliveryObjectKey!, `${previewUrl}/delivery`);
+    await assertLibraryImage(`process:${version.id}:0`, version.objectKey, null);
+    await pool.query("UPDATE suite_workbench.task_image_versions SET delivery_object_key = NULL WHERE id = $1", [version.id]);
+    await assertLibraryImage(`task-version:${version.id}`, version.objectKey, previewUrl);
+    await pool.query("UPDATE suite_workbench.task_image_versions SET delivery_object_key = $2 WHERE id = $1", [version.id, version.deliveryObjectKey]);
+    const sessionPath = `/api/image-editor/sessions/${taskId}`;
+    const draft = await editorApp.request("GET", `${sessionPath}?sourceVersionId=${version.id}`);
+    assert.equal(draft.status, 200);
+    const candidates = draft.body.data.productInputs as Array<{ objectKey: string; thumbnailUrl: string }>;
+    assert.deepEqual(candidates.map(({ objectKey }) => objectKey), productInputs.map(({ objectKey }) => objectKey));
+    for (const { thumbnailUrl } of candidates) {
+      const thumbnail = await editorApp.request("GET", thumbnailUrl);
+      assert.equal(thumbnail.status, 200);
+      assert.equal((await sharp(thumbnail.raw!).metadata()).format, "webp");
+    }
+    const restore = await editorApp.request("POST", `${sessionPath}/operations`, { body: { operation: {
+      operationId: "restore", type: "restore_product", order: 1, summary: "商品还原",
+      sourceCardId: taskId, sourceVersionId: version.id, parentVersionId: version.id, payload: {},
+    } } });
+    assert.equal(restore.status, 200);
+    const submitted = await editorApp.request("POST", `${sessionPath}/submit`, {
+      headers: { "idempotency-key": "aplus-image-restore" },
+      body: { tool: "restore_product", sourceCardId: taskId, sourceVersionId: version.id, operationIds: ["restore"] },
+    });
+    assert.equal(submitted.status, 202, JSON.stringify(submitted.body));
+    const childId = submitted.body.data.childTask.id;
+    const child = await waitUntil(() => service.getTask(childId), (result) => Boolean(result && result.task.status !== "generating"), 5_000);
+    assert.equal(child?.task.status, "succeeded", child?.task.errorCode ?? undefined);
+    const [editedImage] = child!.versions;
+    assert.deepEqual(child?.snapshot?.attachedInputs, normalizedProducts);
+    assert.deepEqual(editorCalls.map(({ images }) => images?.map(({ role, bytes }) => [role, bytes])), [
+      [["source", original], ...productBytes.map((bytes) => ["product", bytes])],
+    ]);
+    assert.match(editorCalls[0].prompt, /^第 1 张为待编辑图，其余为商品外观依据/);
+    assert.equal(editorCalls[0].size, "2496x1024");
+    assert.deepEqual((await editor.getSourceVersion(editedImage.id))?.productInputs, normalizedProducts);
+    assert.deepEqual(editedImage.generatedSize, generatedSize);
+    assert.deepEqual(editedImage.deliverySize, deliverySize);
+    assert.notEqual(editedImage.deliveryObjectKey, editedImage.objectKey);
+    const delivery = await storage.get(editedImage.deliveryObjectKey!);
+    assert.ok(delivery);
+    const { width, height } = await sharp(delivery.bytes).metadata();
+    assert.deepEqual({ width, height }, deliverySize);
+    await assertLibraryImage(`edit-version:${editedImage.id}`, editedImage.deliveryObjectKey!, `/api/image-editor/tasks/${childId}/versions/${editedImage.id}/preview/delivery`);
+
+    for (const [type, payload] of [
+      ["change_text", { originalText: "旧文案", newText: "新文案", region: { x: 0.1, y: 0.1, width: 0.4, height: 0.2 } }],
+      ["re_edit", { prompt: "调整背景" }],
+    ] as const) {
+      await service.upsertOperation({ sessionId: `aplus-${type}`, operation: {
+        type, payload, operationId: type, order: 1, summary: type,
+        sourceCardId: childId, sourceVersionId: editedImage.id, parentVersionId: editedImage.id,
+      } });
+      const edited = await service.submit({
+        sessionId: `aplus-${type}`, idempotencyKey: `aplus-${type}`, sourceCardId: childId, sourceVersionId: editedImage.id, tool: type,
+      });
+      const result = await waitUntil(() => service.getTask(edited.childTask.id), (task) => task?.task.status !== "generating", 5_000);
+      assert.equal(result?.task.status, "succeeded", result?.task.errorCode ?? undefined);
+      const replay = await service.regenerate({ childTaskId: edited.childTask.id, idempotencyKey: `aplus-${type}-regenerate` });
+      const regenerated = await waitUntil(() => service.getTask(replay.childTask.id), (task) => task?.task.status !== "generating", 5_000);
+      assert.equal(regenerated?.task.status, "succeeded", regenerated?.task.errorCode ?? undefined);
+      assert.equal(regenerated?.versions.length, 2);
+      assert.deepEqual(regenerated?.versions[0].deliverySize, deliverySize);
+    }
+    assert.deepEqual(editorCalls.map(({ size }) => size), Array(5).fill("2496x1024"));
+
+    const previewTasks = [
+      { path: "/api/suite-tasks", taskId, versionId: version.id },
+      { path: "/api/image-editor/tasks", taskId: childId, versionId: editedImage.id },
+    ];
+    for (const target of previewTasks) {
+      for (const format of ["preview", "preview/delivery"]) {
+        for (const [taskId, versionId] of [["invalid", target.versionId], [target.taskId, "invalid"]]) {
+          const preview = await editorApp.request("GET", `${target.path}/${taskId}/versions/${versionId}/${format}`);
+          assert.equal(preview.status, 404);
+          assert.equal(preview.body.error.code, "INVALID_TASK_VERSION");
+        }
+      }
+    }
+
+    const stages = ["aplus_plan", "aplus_module_rule", "aplus_image", "aplus_ai_write"] as const;
+    for (const stage of stages) {
+      const templateId = randomUUID();
+      const versionId = randomUUID();
+      const target = stage === "aplus_image" ? "image_model" : "llm";
+      await pool.query(
+        "INSERT INTO prompt_library.prompt_templates (id,code,name,kind,stage,execution_target) VALUES ($1,$2,$2,'planner',$3,$4)",
+        [templateId, `test.${stage}`, stage, target],
+      );
+      await pool.query(
+        `INSERT INTO prompt_library.prompt_template_versions
+           (id,template_id,version_no,name,kind,stage,execution_target,body,status,source_file,source_heading,source_sha256)
+         VALUES ($1,$2,1,$3,'planner',$3,$4,'Fixture prompt','published','aplus-fixture.md',$5,$6)`,
+        [versionId, templateId, stage, target, stage, "a".repeat(64)],
+      );
+      await pool.query("UPDATE prompt_library.prompt_templates SET published_version_id=$1 WHERE id=$2", [versionId, templateId]);
+    }
+    const editorPromptCodes = new Set(["image-editor.restore_product", "image-editor.change_text"]);
+    const publishedEditorPrompts = async () => (await prompts.listPublished("task_image"))
+      .filter(({ code }) => editorPromptCodes.has(code))
+      .map(({ code, templateVersionId, versionNo }) => [code, templateVersionId, versionNo]);
+    const editorPrompts = await publishedEditorPrompts();
+    assert.equal(editorPrompts.length, 2);
+    const orphanBatchId = randomUUID(), orphanSlotId = randomUUID(), orphanAttemptId = randomUUID();
+    await tasks.beginBatch({
+      batch: { ...initialReservation.batch, id: orphanBatchId, idempotencyKey: "unacknowledged-redraw" },
+      slots: [{ ...initialReservation.slots[0], batchId: orphanBatchId, id: orphanSlotId }],
+      attempts: [{ ...initialReservation.attempts[0], slotId: orphanSlotId, id: orphanAttemptId }],
+    });
+    await runMigrations(pool, { recoverStaleAttempts: true });
+    assert.equal((await tasks.getAttempt(orphanAttemptId))?.errorCode, "PIPELINE_INTERRUPTED");
+    assert.equal((await tasks.getBatch(orphanBatchId))?.status, "failed");
+    assert.equal((await tasks.getSlot(orphanSlotId))?.status, "failed");
+    assert.equal((await tasks.listTaskVersions(taskId)).attempts.length, 2);
+    assert.deepEqual(await publishedEditorPrompts(), editorPrompts);
+    assert.deepEqual((await platforms.find("amazon"))?.detailSizePresets, configured);
+    assert.equal((await suites.getSuite(suite.id))?.origin, "aplus");
+    assert.equal((await tasks.getTask(taskId))?.originKind, "aplus");
+    assert.equal((await pipelines.getRun(run.id))?.currentPhase, "awaiting_confirmation");
+    assert.equal((await pipelines.resumeRun(edited, "current-confirm", "image_generating", edited.config))?.currentPhase, "image_generating");
+    assert.deepEqual((await tasks.listTaskVersions(taskId)).versions[0], version);
+    assert.deepEqual((await editor.listVersions(childId))[0], editedImage);
+    assert.deepEqual((await editor.getSourceVersion(editedImage.id))?.productInputs, normalizedProducts);
+    for (const stage of stages) {
+      const { rows: [template] } = await pool.query<{ stage: string }>(
+        "SELECT stage FROM prompt_library.prompt_templates WHERE code=$1", [`test.${stage}`],
+      );
+      assert.equal(template.stage, stage);
+      assert.equal((await prompts.listPublished(stage))[0]?.stage, stage);
+    }
+    const transaction = await pool.connect();
+    try {
+      await transaction.query("BEGIN");
+      await assert.rejects(transaction.query("UPDATE prompt_library.prompt_templates SET stage='invalid' WHERE code='test.aplus_plan'"), {
+        code: "23514", constraint: "prompt_templates_stage_check",
+      });
+    } finally {
+      await transaction.query("ROLLBACK");
+      transaction.release();
+    }
+  });
+});
+
+test("043 and 050–053 publish all 19 A+ Markdown templates and preserve user publishes and retirements on replay", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const versionThreeCodes = new Set([
+      "aplus.ai-write",
+      "aplus.plan", "aplus.image",
+      "aplus.module.accessories", "aplus.module.brand_story", "aplus.module.comparison",
+      "aplus.module.craftsmanship", "aplus.module.detail_closeup", "aplus.module.hero",
+      "aplus.module.ingredients", "aplus.module.multi_angle", "aplus.module.selling_points",
+      "aplus.module.spec_table", "aplus.module.usage_scene",
+    ]);
+    const singleStages = [
+      { stage: "aplus_plan", file: "aplus-plan.md" },
+      { stage: "aplus_image", file: "aplus-image.md" },
+      { stage: "aplus_ai_write", file: "aplus-ai-write.md" },
+    ] as const;
+    const published = [];
+    for (const { stage, file } of singleStages) {
+      assert.equal((await prompts.listPublished(stage)).length, 1);
+      published.push({ template: await resolveAplusPromptTemplate(prompts, stage), file });
+    }
+    assert.equal((await prompts.listPublished("aplus_module_rule")).length, 16);
+    for (const { code } of APLUS_MODULES) {
+      const template = await resolveAplusPromptTemplate(prompts, "aplus_module_rule", code);
+      published.push({ template, file: `aplus-module-${code}.md` });
+    }
+
+    const records = await Promise.all(published.map(async ({ template, file }) => {
+      assert.ok(template, file);
+      const sourceFile = `prompt/normalized/${file}`;
+      const record = parseNormalizedPromptMarkdown(await readFile(sourceFile, "utf8"), sourceFile);
+      const versionNo = versionThreeCodes.has(record.code) ? 3 : 2;
+      assert.deepEqual(template, { ...record, status: "published", versionNo, usedBy: template.usedBy });
+      assert.ok(template.usedBy?.length, file);
+      return record;
+    }));
+
+    await runMigrations(pool);
+    for (const publish of [false, true]) {
+      const reimported = await importPromptRecordsWithPolicy(prompts, records, { publish });
+      assert.deepEqual(reimported, published.map(({ template }) => template));
+    }
+    for (const record of records) {
+      const versions = await prompts.listVersions(record.templateId);
+      assert.deepEqual(versions.map(({ versionNo, status }) => [versionNo, status]), versionThreeCodes.has(record.code)
+        ? [[1, "retired"], [2, "retired"], [3, "published"]]
+        : [[1, "retired"], [2, "published"]]);
+    }
+
+    const plan = await resolveAplusPromptTemplate(prompts, "aplus_plan");
+    assert.ok(plan);
+    const draft = await prompts.copyVersion(plan.templateVersionId);
+    assert.ok(draft);
+    await prompts.publishVersion(draft.templateVersionId);
+    const hero = await resolveAplusPromptTemplate(prompts, "aplus_module_rule", "hero");
+    assert.ok(hero);
+    await prompts.retireVersion(hero.templateVersionId);
+
+    const aiWrite = await resolveAplusPromptTemplate(prompts, "aplus_ai_write");
+    assert.ok(aiWrite);
+    const custom = await prompts.copyVersion(aiWrite.templateVersionId);
+    assert.ok(custom);
+    await prompts.publishVersion(custom.templateVersionId);
+
+    await runMigrations(pool);
+    assert.equal((await resolveAplusPromptTemplate(prompts, "aplus_plan"))?.templateVersionId, draft.templateVersionId);
+    assert.equal(await resolveAplusPromptTemplate(prompts, "aplus_module_rule", "hero"), null);
+    assert.equal((await resolveAplusPromptTemplate(prompts, "aplus_ai_write"))?.templateVersionId, custom.templateVersionId);
+
+    await prompts.retireVersion(custom.templateVersionId);
+    await runMigrations(pool);
+    assert.equal(await resolveAplusPromptTemplate(prompts, "aplus_ai_write"), null);
+    assert.deepEqual((await prompts.listVersions(aiWrite.templateId)).map(({ versionNo }) => versionNo), [1, 2, 3, 4]);
+  });
+});
+
+test("053 fills the missing video preference and preserves configured defaults on replay", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const repository = new PostgresModelSettingsRepository(pool);
+    const settings = new ModelSettings(repository);
+    const path = "/api/model-settings";
+    const created = await settings.request("POST", path + "/channels", {
+      name: "商品视频", protocol: "openai-compatible", baseUrl: "https://channel.test", apiKey: "offline",
+      models: [{ id: "multimedia", capabilities: ["image", "video"] }],
+    });
+    assert.equal(created.status, 201);
+    const ref = { channelId: (await repository.read()).channels[0].id, modelId: "multimedia" };
+    await settings.request("PATCH", path + "/preferences", { image: ref });
+    await pool.query("UPDATE suite_workbench.model_settings SET state = state #- '{preferences,video}'");
+    const migration = await readFile("db/migrations/053_aplus_ai_write_tighten.sql", "utf8");
+    await pool.query(migration);
+    assert.deepEqual((await repository.read()).preferences, { image: ref, vision: null, video: null });
+    assert.equal((await settings.request("PATCH", path + "/preferences", { video: ref })).status, 200);
+    await pool.query(migration);
+    assert.deepEqual((await repository.read()).preferences, { image: ref, vision: null, video: ref });
+    assert.equal((await settings.resolve("video"))?.model, "multimedia");
+  });
+});
+
 test("PG replica repository normalizes null remark, creates replica tasks, recovers replica_analyzing runs, and keeps 032 prompt import idempotent", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const suites = new PostgresSuiteRepository(pool);
@@ -967,6 +1371,10 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
       ],
     });
     const task = created[0];
+    const productInputs = [
+      { objectKey: `replicas/${replicaSuite.id}/products/front/original`, role: "product" },
+      { objectKey: `replicas/${replicaSuite.id}/products/side/original`, role: "product" },
+    ];
     const batchId = randomUUID();
     const slotId = randomUUID();
     const attemptId = randomUUID();
@@ -1007,7 +1415,11 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
           requestSummary: {},
           promptSnapshot: { prompt: "PG 复刻提示词" },
           promptSha256: "b".repeat(64),
-          contextSnapshot: {},
+          contextSnapshot: { inputImages: [
+            { ...productInputs[0], role: "product_primary" },
+            { objectKey: `replicas/${replicaSuite.id}/references/${refId}/original`, role: "replica_reference" },
+            { ...productInputs[1], role: "product_detail" },
+          ] },
           sourceKind: "original",
           sourceObjectKey: `replicas/${replicaSuite.id}/references/${refId}/original`,
           sourceInputImageId: null,
@@ -1076,6 +1488,18 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
     assert.equal(afterClear.versions.some((v) => v.isFinal), false);
 
     const editorRepo = new PostgresImageEditorRepository(pool);
+    assert.equal(await editorRepo.getSourceVersion("invalid-version"), null);
+    await assert.rejects(editorRepo.validateSource(task.id, "invalid-version"), { message: "SOURCE_VERSION_NOT_FOUND" });
+    assert.equal(await editorRepo.validateSource(task.id, version.id), true);
+    assert.equal(await editorRepo.validateSource(randomUUID(), version.id), false);
+    assert.deepEqual(await editorRepo.getSourceVersion(version.id), {
+      objectKey: version.objectKey, mimeType: "image/png", generationPrompt: "PG 复刻提示词", productInputs,
+    });
+    const prompts = new PostgresPromptRepository(pool);
+    const restoreTemplate = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.restore_product");
+    assert.ok(restoreTemplate);
+    const restore = await prompts.getPublishedVersion(restoreTemplate.templateVersionId, "task_image");
+    assert.match(restore?.body ?? "", /保持原图的构图、背景、文字/);
     const snapId = randomUUID();
     const childId = randomUUID();
     const editAttemptId = randomUUID();
@@ -1088,6 +1512,9 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
         parentVersionId: version.id,
         summary: "测试编辑",
         sourcePrompt: "PG 复刻提示词",
+        tool: "restore_product",
+        attachedInputs: [productInputs[1]],
+        promptTemplateVersionId: restoreTemplate.templateVersionId,
         operations: [],
         provider: { name: "fake", version: "1", capabilitiesVersion: "1" },
         createdAt: timestamp,
@@ -1114,7 +1541,7 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
         snapshotId: snapId,
         attemptNo: 1,
         status: "generating",
-        command: { type: "re_edit", sourceVersionId: version.id, prompt: "测试编辑", operations: [] },
+        command: { type: "restore_product", sourceVersionId: version.id, prompt: "测试编辑", operations: [], attachedInputs: [productInputs[1]] },
         provider: { name: "fake", version: "1", capabilitiesVersion: "1" },
         errorCode: null,
         errorMessage: null,
@@ -1122,6 +1549,10 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
         completedAt: null,
       },
     });
+    const snapshot = await editorRepo.getSnapshot(snapId);
+    assert.equal(snapshot?.tool, "restore_product");
+    assert.deepEqual(snapshot?.attachedInputs, [productInputs[1]]);
+    assert.equal(snapshot.promptTemplateVersionId, restoreTemplate.templateVersionId);
     const completedEdit = await editorRepo.completeAttempt({
       attemptId: editAttemptId,
       objectKey: `image-edits/${childId}/versions/v1.png`,
@@ -1131,6 +1562,10 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
       mimeType: "image/png",
       completedAt: timestamp,
     });
+    assert.deepEqual(await editorRepo.getSourceVersion(completedEdit.version.id), {
+      objectKey: completedEdit.version.objectKey, mimeType: "image/png", generationPrompt: "测试编辑", productInputs,
+    });
+    assert.equal(await editorRepo.validateSource(childId, completedEdit.version.id), true);
     await editorRepo.selectVersion(childId, completedEdit.version.id, "final");
     assert.equal((await editorRepo.getChildTask(childId))?.finalVersionId, completedEdit.version.id);
     await editorRepo.clearFinalVersions([childId]);
@@ -1143,16 +1578,247 @@ test("PostgresTaskRepository sets archived_at on archive and PostgresLibraryRepo
   });
 });
 
+test("042 persists editor snapshot metadata and consumes only submitted drafts with the published edit prompt", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const editor = new PostgresImageEditorRepository(pool);
+    const prompts = new PostgresPromptRepository(pool);
+    const original = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.add_text");
+    assert.ok(original);
+    const draft = await prompts.copyVersion(original.templateVersionId);
+    assert.ok(draft);
+    await prompts.updateDraft(draft.templateVersionId, {
+      body: "保留图片中的商品和原有文字。",
+      userPromptTemplate: "只在{{region}}添加新文字「{{text}}」。",
+    });
+    await prompts.publishVersion(draft.templateVersionId);
+    await runMigrations(pool);
+    assert.equal((await prompts.getPublishedVersion(draft.templateVersionId, "task_image"))?.body, "保留图片中的商品和原有文字。");
+
+    const source = { bytes: Buffer.from("source"), width: 1024, height: 1024, mimeType: "image/png" };
+    const service = new ImageEditorService(editor, {
+      name: "fake", version: "1", capabilitiesVersion: "1",
+      capabilities: () => ({ addText: true, imageToImage: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
+      edit: async () => source,
+    }, new MemoryStorage(), async () => source, undefined, undefined, prompts);
+    const operation = {
+      operationId: "op1", type: "add_text" as const, order: 1, sourceCardId: "card",
+      sourceVersionId: "version-1", parentVersionId: "version-1", summary: "添加文字",
+      payload: { text: "样例", prompt: "保留原格式" },
+    };
+    await service.upsertOperation({ sessionId: "card", operation });
+    await service.upsertOperation({ sessionId: "card", operation: { ...operation, sourceVersionId: "version-2" } });
+    const result = await service.submit({
+      sessionId: "card", idempotencyKey: "042-editor-submit", sourceCardId: "card", sourceVersionId: "version-1",
+      tool: "add_text", operationIds: [operation.operationId],
+    });
+    assert.deepEqual((await editor.getDraft("card"))?.operations.map((item) => item.sourceVersionId), ["version-2"]);
+    const snapshot = await editor.getSnapshot(result.snapshot.id);
+    assert.equal(snapshot?.tool, "add_text");
+    assert.deepEqual(snapshot?.attachedInputs, []);
+    assert.equal(snapshot?.maskApplied, false);
+    assert.equal(snapshot?.promptTemplateVersionId, draft.templateVersionId);
+    assert.equal((await editor.getAttempt(result.attempt.id))?.command.prompt, "保留图片中的商品和原有文字。\n只在画面指定区域添加新文字「样例」。");
+    for (let i = 0; i < 30 && (await editor.getChildTask(result.childTask.id))?.status === "generating"; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal((await editor.getChildTask(result.childTask.id))?.status, "succeeded");
+
+    const constraints = [
+      ["SET prompt_template_version_id=$2", randomUUID(), "23503", "image_edit_snapshots_prompt_template_version_fk"],
+      ["SET attached_inputs_json=$2", "{}", "23514", "image_edit_snapshots_attached_inputs_array"],
+    ];
+    const tx = await pool.connect();
+    try {
+      for (const [update, invalidValue, code, constraint] of constraints) {
+        await tx.query("BEGIN");
+        try {
+          await assert.rejects(
+            tx.query(`UPDATE suite_workbench.image_edit_snapshots ${update} WHERE id=$1`, [result.snapshot.id, invalidValue]),
+            { code, constraint },
+          );
+        } finally {
+          await tx.query("ROLLBACK");
+        }
+      }
+    } finally {
+      tx.release();
+    }
+
+    const { rows: retained } = await pool.query<{ code: string }>(
+      "SELECT code FROM prompt_library.prompt_templates WHERE code <> $1", [original.code],
+    );
+    assert.deepEqual(await prompts.pruneExcept(retained.map(({ code }) => code)), { deleted: 0, disabled: 1 });
+    await runMigrations(pool);
+    assert.equal(await prompts.getPublishedVersion(draft.templateVersionId, "task_image"), null);
+    assert.equal((await prompts.getVersion(draft.templateVersionId))?.status, "retired");
+    assert.equal((await editor.getSnapshot(result.snapshot.id))?.promptTemplateVersionId, draft.templateVersionId);
+  });
+});
+
+test("045 publishes the batch text-edit prompt and respects subsequent published versions", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const current = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.change_text");
+    assert.ok(current);
+    assert.equal(current.versionNo, 2);
+    const template = await prompts.getPublishedVersion(current.templateVersionId, "task_image");
+    assert.match(template?.body ?? "", /^严格保持输入图片中的商品主体外观/);
+    assert.match(template?.userPromptTemplate ?? "", /newText 为空时移除原文字，用周围背景自然填补/);
+    const history = await prompts.listVersions(current.templateId);
+    assert.deepEqual(history.map(({ versionNo, status }) => [versionNo, status]), [[1, "retired"], [2, "published"]]);
+    assert.match(history[0].userPromptTemplate, /将\{\{region\}\}的原文字/);
+
+    await runMigrations(pool);
+    assert.equal((await prompts.listVersions(current.templateId)).length, 2);
+    assert.ok(await prompts.getPublishedVersion(current.templateVersionId, "task_image"));
+    const custom = await prompts.copyVersion(current.templateVersionId);
+    assert.ok(custom);
+    const instruction = "以原图字体呈现全部替换文字。";
+    await prompts.updateDraft(custom.templateVersionId, { userPromptTemplate: instruction });
+    await prompts.publishVersion(custom.templateVersionId);
+    await runMigrations(pool);
+    assert.equal((await prompts.getPublishedVersion(custom.templateVersionId, "task_image"))?.userPromptTemplate, instruction);
+    assert.equal((await prompts.listVersions(current.templateId)).length, 3);
+  });
+});
+
+test("048 publishes the three fallback prompts and preserves user-published versions on migration replay", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const published = await prompts.listPublished("task_image");
+    const expectations = [
+      ["redraw", /仅重绘\{\{region\}\}/],
+      ["erase", /仅消除\{\{region\}\}/],
+      ["outpaint", /仅补全灰色扩展区/],
+    ] as const;
+    for (const [tool, instruction] of expectations) {
+      const current = published.find(({ code }) => code === `image-editor.${tool}`);
+      assert.ok(current);
+      const history = await prompts.listVersions(current.templateId);
+      assert.deepEqual(history.map(({ versionNo, status }) => [versionNo, status]), [[1, "retired"], [2, "published"]]);
+      assert.match(history[1].userPromptTemplate, instruction);
+      const custom = await prompts.copyVersion(current.templateVersionId);
+      assert.ok(custom);
+      await prompts.updateDraft(custom.templateVersionId, { userPromptTemplate: "保留原图的光影与透视。" });
+      await prompts.publishVersion(custom.templateVersionId);
+    }
+
+    await runMigrations(pool);
+    for (const [tool] of expectations) {
+      const current = (await prompts.listPublished("task_image")).find(({ code }) => code === `image-editor.${tool}`);
+      assert.equal(current?.versionNo, 3);
+      assert.equal((await prompts.getPublishedVersion(current.templateVersionId, "task_image"))?.userPromptTemplate, "保留原图的光影与透视。");
+    }
+  });
+});
+
+test("048 replays after the original fallback templates are republished through the API", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const app = createSuiteStudioApp({ repository: new PostgresSuiteRepository(pool), storage: new MemoryStorage(), promptRepository: prompts });
+    const fallbackCodes = ["image-editor.redraw", "image-editor.erase", "image-editor.outpaint"];
+    const active = (await prompts.listPublished("task_image")).filter(({ code }) => fallbackCodes.includes(code));
+    assert.equal(active.length, fallbackCodes.length);
+    const originals = [];
+    for (const current of active) {
+      const [original] = await prompts.listVersions(current.templateId);
+      assert.equal(original.status, "retired");
+      const response = await app.request("POST", `/api/prompt-templates/${original.templateVersionId}/publish`);
+      assert.equal(response.status, 200);
+      originals.push(original);
+    }
+
+    await runMigrations(pool);
+    for (const original of originals) {
+      assert.ok(await prompts.getPublishedVersion(original.templateVersionId, "task_image"));
+      const history = await prompts.listVersions(original.templateId);
+      assert.deepEqual(history.map(({ versionNo, status }) => [versionNo, status]), [[1, "published"], [2, "retired"]]);
+    }
+  });
+});
+
+test("044 preserves the published product restoration template v2 on migration replay", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const original = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.restore_product");
+    assert.ok(original);
+    assert.equal(original.versionNo, 1);
+
+    const draft = await prompts.copyVersion(original.templateVersionId);
+    assert.ok(draft);
+    assert.equal(draft.versionNo, 2);
+    const instruction = "依据商品原图还原商品细节，保留待编辑图的构图和背景。";
+    await prompts.updateDraft(draft.templateVersionId, { userPromptTemplate: instruction });
+    await prompts.publishVersion(draft.templateVersionId);
+
+    await runMigrations(pool);
+    const current = (await prompts.listPublished("task_image")).find((item) => item.code === original.code);
+    assert.equal(current?.templateVersionId, draft.templateVersionId);
+    assert.equal((await prompts.getPublishedVersion(draft.templateVersionId, "task_image"))?.userPromptTemplate, instruction);
+    assert.deepEqual((await prompts.listVersions(original.templateId)).map(({ versionNo, status }) => [versionNo, status]), [[1, "retired"], [2, "published"]]);
+  });
+});
+
+test("047 publishes the AI edit wrapper and new submissions use the latest published version only for explicit changes", { skip }, async () => {
+  await withMigratedSchemas(async ({ pool }) => {
+    const prompts = new PostgresPromptRepository(pool);
+    const original = (await prompts.listPublished("task_image")).find((item) => item.code === "image-editor.re_edit");
+    assert.ok(original);
+    const template = await prompts.getPublishedVersion(original.templateVersionId, "task_image");
+    assert.match(template?.body ?? "", /^严格保持待编辑图中未指定修改的商品主体外观/);
+    assert.equal(template?.userPromptTemplate, "只执行以下修改：{{instruction}}");
+
+    const draft = await prompts.copyVersion(original.templateVersionId);
+    assert.ok(draft);
+    await prompts.updateDraft(draft.templateVersionId, { body: "保留未指定修改的内容。", userPromptTemplate: "按此调整：{{instruction}}" });
+    await prompts.publishVersion(draft.templateVersionId);
+    await runMigrations(pool);
+    assert.deepEqual((await prompts.listVersions(original.templateId)).map(({ versionNo, status }) => [versionNo, status]), [[1, "retired"], [2, "published"]]);
+
+    const sourceCardId = randomUUID();
+    const sourceVersionId = randomUUID();
+    const sourcePrompt = "来源版本的生成提示词";
+    const image = { bytes: Buffer.from("source"), mimeType: "image/png", width: 64, height: 64 };
+    const editor = new PostgresImageEditorRepository(pool);
+    const service = new ImageEditorService(editor, {
+      name: "fake-editor", version: "1", capabilitiesVersion: "1",
+      capabilities: () => ({ imageToImage: true, currentVersionInput: true, addText: false, changeText: false, redraw: false, erase: false, outpaint: false }),
+      edit: async () => image,
+    }, new MemoryStorage(), async () => ({ ...image, generationPrompt: sourcePrompt }), undefined, undefined, prompts);
+    const submit = async (prompt: string) => {
+      await service.upsertOperation({ sessionId: sourceCardId, operation: {
+        operationId: randomUUID(), type: "re_edit", order: 1, sourceCardId, sourceVersionId, parentVersionId: sourceVersionId,
+        summary: "AI 改图", payload: { prompt },
+      } });
+      const result = await service.submit({ sessionId: sourceCardId, idempotencyKey: randomUUID(), sourceCardId, sourceVersionId, tool: "re_edit" });
+      for (let i = 0; i < 30 && (await editor.getChildTask(result.childTask.id))?.status === "generating"; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const saved = await service.getTask(result.childTask.id);
+      assert.equal(saved?.task.status, "succeeded");
+      return saved;
+    };
+    const explicit = await submit("换成浅灰色背景");
+    assert.equal(explicit?.snapshot?.promptTemplateVersionId, draft.templateVersionId);
+    assert.equal(explicit?.attempts[0].command.prompt, "保留未指定修改的内容。\n按此调整：换成浅灰色背景");
+    const blank = await submit(" ");
+    assert.equal(blank?.snapshot?.promptTemplateVersionId, null);
+    assert.equal(blank?.attempts[0].command.prompt, sourcePrompt);
+  });
+});
+
 test("035 idempotently retires unused templates, preserves read-by-id & library filtering, and keeps active edit/publish working", { skip }, async () => {
   await withMigratedSchemas(async ({ pool }) => {
     const prompts = new PostgresPromptRepository(pool);
     const library = new PostgresLibraryRepository(pool);
+    const aplusCodes = ["aplus.ai-write", "aplus.image", "aplus.plan", ...APLUS_MODULES.map(({ code }) => `aplus.module.${code}`)].sort();
+    const editorCodes = ["image-editor.add_text", "image-editor.change_text", "image-editor.erase", "image-editor.outpaint", "image-editor.re_edit", "image-editor.redraw", "image-editor.restore_product"];
 
-    // 1. After fresh migrations (001..039): reverse.* seeded in 018 are retired; replica.* upgraded by 036 and product.onboarding seeded by 039 stay published with usedBy
+    // Legacy reverse templates are retired; replica, onboarding, A+ and editor templates remain published.
     const initialPublished = await prompts.listPublished();
     assert.deepEqual(
       initialPublished.map((item) => item.code).sort(),
-      ["product.onboarding", "replica.compose", "replica.high"],
+      [...aplusCodes, ...editorCodes, "product.onboarding", "replica.compose", "replica.high"],
     );
     assert.equal(initialPublished.find((i) => i.code === "replica.compose")?.versionNo, 2);
     assert.equal(initialPublished.find((i) => i.code === "replica.high")?.versionNo, 2);
@@ -1196,10 +1862,12 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
     assert.deepEqual(
       activeAfterImport.map((item) => item.code).sort(),
       [
+        ...aplusCodes,
         "general.base_refine",
         "general.category-prompt",
         "general.listing-copy",
         "general.structure-plan",
+        ...editorCodes,
         "product.onboarding",
         "replica.compose",
         "replica.high",
@@ -1208,12 +1876,12 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
 
     // Library repository filters published vs retired vs all accurately with usedBy
     const libPublished = await library.listResources({ resourceType: "prompt_template", status: "published", pageSize: 100 });
-    assert.equal(libPublished.items.length, 7);
+    assert.equal(libPublished.items.length, 7 + aplusCodes.length + editorCodes.length);
     assert.ok(libPublished.items.every((item) => (item.usedBy?.length ?? 0) > 0));
     const libRetired = await library.listResources({ resourceType: "prompt_template", status: "retired", pageSize: 100 });
     assert.equal(libRetired.items.length, 13); // 10 reverse + 2 plan + 1 repair
     const libAll = await library.listResources({ resourceType: "prompt_template", pageSize: 100 });
-    assert.equal(libAll.items.length, 20);
+    assert.equal(libAll.items.length, 20 + aplusCodes.length + editorCodes.length);
 
     // 3. Active template copy -> edit draft -> draft filtering -> publish flow works end-to-end in PG
     const baseRefine = activeAfterImport.find((i) => i.code === "general.base_refine")!;
@@ -1274,10 +1942,12 @@ test("035 idempotently retires unused templates, preserves read-by-id & library 
     assert.deepEqual(
       publishedAfterReplay.map((item) => item.code).sort(),
       [
+        ...aplusCodes,
         "general.base_refine",
         "general.category-prompt",
         "general.listing-copy",
         "general.structure-plan",
+        ...editorCodes,
         "product.onboarding",
         "replica.compose",
         "replica.high",
@@ -1644,6 +2314,14 @@ async function withConcurrentMigratedSchemas<T>(run: (db: { pool: Pool; schemas:
   }
 }
 
+test("Postgres 并发出图复用同一请求并拒绝正在生成的资源", { skip }, async () => {
+  await withConcurrentMigratedSchemas(async ({ pool }) => {
+    await verifyGenerationConcurrency(
+      new PostgresSuiteRepository(pool), new PostgresTaskRepository(pool), new PostgresPipelineRepository(pool), new PostgresPromptRepository(pool), new PostgresImageEditorRepository(pool),
+    );
+  });
+});
+
 test("PG task batch status converges under concurrent completeAttempt and failAttempt calls without leaving batch running", { skip }, async () => {
   await withConcurrentMigratedSchemas(async ({ pool }) => {
     const suites = new PostgresSuiteRepository(pool);
@@ -1784,7 +2462,7 @@ test("PG task batch status converges under concurrent completeAttempt and failAt
       const slotId = randomUUID();
       const attemptId = randomUUID();
       const task = createdTasks[0];
-      await tasks.beginBatch({
+      const reserve = () => tasks.beginBatch({
         batch: {
           id: batchId,
           suiteId: suite.id,
@@ -1831,6 +2509,13 @@ test("PG task batch status converges under concurrent completeAttempt and failAt
           finishedAt: null,
         }],
       });
+
+      const reservations = await Promise.all([reserve(), reserve()]);
+      assert.deepEqual(reservations.map((r) => r.duplicate).sort(), [false, true]);
+      for (const r of reservations) {
+        assert.equal(r.batch.id, batchId);
+        assert.deepEqual(r.attempts.map((a) => a.id), [attemptId]);
+      }
 
       const finishedAt = new Date(Date.parse(timestamp) + 60_000 + raceRound * 1000).toISOString();
       const settled = await Promise.allSettled([

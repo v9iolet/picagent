@@ -1,15 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { ok } from "./api-response.js";
-import { formatOcrErrorMessage, type ImageEditChildTask, type ImageEditorService } from "./image-editor.js";
-import type { ErrorEnvelope, ResponseEnvelope } from "./types.js";
+import { fail as failApi } from "./api-errors.js";
+import { ok, type AppResponse } from "./api-response.js";
+import { formatOcrErrorMessage, type ImageEditorService, type ImageEditVersionCompletedListener } from "./image-editor.js";
 
-export interface ImageEditorApiResponse { status: number; body: ResponseEnvelope<unknown> | ErrorEnvelope }
+export type ImageEditorApiResponse = AppResponse;
+const editErrors: Record<string, string> = {
+  MASK_SELECTION_REQUIRED: "请先在图片上绘制要编辑的区域",
+  RESTORE_PRODUCT_REFERENCE_REQUIRED: "请上传一张商品外观依据图",
+  RESTORE_PRODUCT_REFERENCE_INVALID: "这张依据图不适用于当前图片，请重新选择或上传",
+  RESTORE_PRODUCT_IMAGE_INVALID: "请选择有效的 PNG、JPG 或 WebP 图片",
+  RESTORE_PRODUCT_IMAGE_TOO_LARGE: "商品外观依据图不能超过 10 MB",
+};
 const fail = (code: string, status = 400): ImageEditorApiResponse => {
+  if (code === "IMAGE_EDIT_IN_PROGRESS") return failApi(code, 409);
   if (code === "IMAGE_PROVIDER_NOT_CONFIGURED" || code === "OCR_PROVIDER_UNAVAILABLE") {
     const purpose = code === "OCR_PROVIDER_UNAVAILABLE" ? "多模态" : "生图";
     return { status: 503, body: { error: { code, message: `请前往配置 → 偏好设置，选择默认${purpose}模型` }, requestId: randomUUID() } };
   }
-  return { status, body: { error: { code, message: code }, requestId: randomUUID() } };
+  return { status, body: { error: { code, message: editErrors[code] ?? code }, requestId: randomUUID() } };
 };
 
 export function createImageEditorApi(service: ImageEditorService) {
@@ -18,8 +26,36 @@ export function createImageEditorApi(service: ImageEditorService) {
       const body = options.body && typeof options.body === "object" ? options.body as Record<string, unknown> : {};
       const idempotencyKey = options.headers?.["idempotency-key"] ?? options.headers?.["Idempotency-Key"];
       if (method === "GET" && path === "/api/image-editor/capabilities") return ok(await service.capabilities());
-      const sessionMatch = path.match(/^\/api\/image-editor\/sessions\/([^/]+)$/);
-      if (method === "GET" && sessionMatch) { const draft = await service.getDraft(sessionMatch[1]); return draft ? ok(draft) : fail("EDIT_SESSION_NOT_FOUND", 404); }
+      const sessionMatch = path.match(/^\/api\/image-editor\/sessions\/([^/?]+)(?:\?(.*))?$/);
+      if (method === "GET" && sessionMatch) {
+        const sourceVersionId = new URLSearchParams(sessionMatch[2]).get("sourceVersionId");
+        if (sourceVersionId) {
+          try {
+            return ok(await service.getSession(sessionMatch[1], sourceVersionId));
+          } catch (error) {
+            return fail(error instanceof Error ? error.message : "EDIT_SESSION_NOT_FOUND", 404);
+          }
+        }
+        const draft = await service.getDraft(sessionMatch[1]);
+        return draft ? ok(draft) : fail("EDIT_SESSION_NOT_FOUND", 404);
+      }
+      const restoreInputsMatch = path.match(/^\/api\/image-editor\/sessions\/([^/]+)\/versions\/([^/]+)\/restore-inputs(?:\/([^/]+)\/thumbnail)?$/);
+      if (restoreInputsMatch) {
+        const [, sessionId, sourceVersionId, encodedKey] = restoreInputsMatch;
+        try {
+          if (method === "POST" && !encodedKey) {
+            if (!Buffer.isBuffer(body.bytes) || typeof body.mimeType !== "string") return fail("RESTORE_PRODUCT_IMAGE_INVALID");
+            return ok(await service.uploadRestoreInput(sessionId, sourceVersionId, body.bytes, body.mimeType), 201);
+          }
+          if (method === "GET" && encodedKey) {
+            const raw = await service.restoreInputThumbnail(sessionId, sourceVersionId, decodeURIComponent(encodedKey));
+            return { ...ok(null), raw, headers: { "content-type": "image/webp", "cache-control": "private, max-age=300" } };
+          }
+        } catch (error) {
+          const code = error instanceof Error ? error.message : "RESTORE_PRODUCT_IMAGE_INVALID";
+          return fail(code, method === "GET" ? 404 : code === "RESTORE_PRODUCT_IMAGE_TOO_LARGE" ? 413 : 400);
+        }
+      }
       const taskMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)$/);
       if (method === "GET" && taskMatch) { const result = await service.getTask(taskMatch[1]); return result ? ok(result) : fail("INVALID_IMAGE_EDIT_TASK", 404); }
       if (method === "GET" && path === "/api/image-editor/tasks") return ok(await service.listAllTasks());
@@ -51,10 +87,24 @@ export function createImageEditorApi(service: ImageEditorService) {
       const submitMatch = path.match(/^\/api\/image-editor\/sessions\/([^/]+)\/submit$/);
       if (method === "POST" && submitMatch) {
         if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
+        if (body.tool !== undefined && typeof body.tool !== "string") return fail("INVALID_IMAGE_EDIT_TOOL");
+        const { operationIds } = body;
+        if (operationIds !== undefined && (!Array.isArray(operationIds) || !operationIds.every((id) => typeof id === "string" && id))) {
+          return fail("INVALID_IMAGE_EDIT_OPERATION_IDS");
+        }
         try {
-          const result = await service.submit({ sessionId: submitMatch[1], idempotencyKey, sourceCardId: String(body.sourceCardId ?? ""), sourceVersionId: String(body.sourceVersionId ?? ""), parentVersionId: typeof body.parentVersionId === "string" ? body.parentVersionId : undefined, summary: typeof body.summary === "string" ? body.summary : undefined });
+          const result = await service.submit({
+            sessionId: submitMatch[1], idempotencyKey,
+            sourceCardId: String(body.sourceCardId ?? ""), sourceVersionId: String(body.sourceVersionId ?? ""),
+            parentVersionId: typeof body.parentVersionId === "string" ? body.parentVersionId : undefined,
+            summary: typeof body.summary === "string" ? body.summary : undefined,
+            tool: typeof body.tool === "string" ? body.tool : undefined, operationIds,
+          });
           return ok(result, result.duplicate ? 200 : 202);
-        } catch (error) { return fail(error instanceof Error ? error.message : "IMAGE_EDIT_SUBMIT_FAILED", 409); }
+        } catch (error) {
+          const code = error instanceof Error ? error.message : "IMAGE_EDIT_SUBMIT_FAILED";
+          return code === "OUTPAINT_RATIO_UNSUPPORTED" ? failApi(code, 400) : fail(code, 409);
+        }
       }
       const retryMatch = path.match(/^\/api\/image-editor\/attempts\/([^/]+)\/retry$/);
       if (method === "POST" && retryMatch) { if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY"); try { const result = await service.retry(retryMatch[1], idempotencyKey); return ok(result, result.duplicate ? 200 : 202); } catch (error) { return fail(error instanceof Error ? error.message : "IMAGE_EDIT_RETRY_FAILED", 409); } }
@@ -62,7 +112,7 @@ export function createImageEditorApi(service: ImageEditorService) {
       if (method === "POST" && regenerateMatch) {
         if (!idempotencyKey) return fail("MISSING_IDEMPOTENCY_KEY");
         try {
-          const result = await service.regenerate({ childTaskId: regenerateMatch[1], idempotencyKey, summary: typeof body.summary === "string" ? body.summary : undefined });
+          const result = await service.regenerate({ childTaskId: regenerateMatch[1], idempotencyKey });
           return ok(result, result.duplicate ? 200 : 202);
         } catch (error) { return fail(error instanceof Error ? error.message : "IMAGE_EDIT_REGENERATE_FAILED", 409); }
       }
@@ -73,7 +123,7 @@ export function createImageEditorApi(service: ImageEditorService) {
     clearFinalVersions(childTaskIds: string[]) {
       return service.clearFinalVersions(childTaskIds);
     },
-    setOnVersionCompleted(listener: (childTask: ImageEditChildTask) => Promise<void>) {
+    setOnVersionCompleted(listener: ImageEditVersionCompletedListener) {
       service.setOnVersionCompleted(listener);
     },
   };

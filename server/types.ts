@@ -1,5 +1,6 @@
+import type { AplusImageVersionMetadata, AplusModuleCode, AplusTaskMetadata, DetailSizePresets } from "../shared/aplus.js";
 import type { ListingConfigInput } from "../shared/listing-config.js";
-import type { ModelChannelSnapshot } from "../shared/model-settings.js";
+import type { ImageQuality, ModelChannelSnapshot } from "../shared/model-settings.js";
 import type {
   ProductCard,
   ProductCardFields,
@@ -11,7 +12,7 @@ import type {
 import type { PromptStage } from "./prompt-library.js";
 
 export type SuiteStatus = "draft" | "in_progress";
-export type SuiteOrigin = "suite_studio" | "canvas" | "replica";
+export type SuiteOrigin = "suite_studio" | "canvas" | "replica" | "aplus";
 
 export interface Suite {
   id: string;
@@ -50,6 +51,7 @@ export interface ErrorEnvelope { error: { code: string; message: string; missing
 
 export interface SuiteRepository {
   createSuite(name: string, idempotencyKey?: string, origin?: SuiteOrigin): Promise<Suite>;
+  findAplusSuiteByIdempotencyKey(key: string): Promise<Suite | null>;
   listSuites(): Promise<Suite[]>;
   getSuite(id: string): Promise<Suite | null>;
   renameSuite?(suiteId: string, name: string): Promise<Suite | null>;
@@ -84,6 +86,7 @@ export interface PromptRepository {
 
 export interface PlatformProfile {
   listingCopyRules?: import("../shared/listing-config.js").ListingRules;
+  detailSizePresets: DetailSizePresets;
   code: string;
   name: string;
   marketScope: "overseas" | "domestic";
@@ -171,7 +174,7 @@ export interface ImageEditRequest {
   model: string;
   prompt: string;
   size: string;
-  quality: "medium";
+  quality: ImageQuality;
   n: 1;
   responseFormat: "b64_json";
   images?: Array<{ bytes: Buffer; mimeType: string; filename: string; role?: string }>;
@@ -192,8 +195,13 @@ export interface RagClient {
 }
 export interface PlanLlmInput {
   requestId?: string; templateVersionId: string; templateBody: string; userPromptTemplate?: string; dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>;
-  chunks: RagChunk[]; inputImageIds: string[]; baseVersionIds: string[]; visionImages?: PlanVisionImage[]; platformProfile?: PlatformProfile; flow?: "plan" | "category-prompt" | "listing-copy";
+  chunks: RagChunk[]; inputImageIds: string[]; baseVersionIds: string[]; visionImages?: PlanVisionImage[]; platformProfile?: PlatformProfile; flow?: "plan" | "category-prompt" | "listing-copy" | "aplus-plan";
+  userPrompt?: string;
 }
+export type AplusAiWriteLlmInput = Pick<PlanLlmInput, "requestId" | "templateVersionId" | "templateBody"> & {
+  userPrompt: string;
+  visionImages: PlanVisionImage[];
+};
 export interface CategoryPromptLlmInput extends PlanLlmInput {
   categoryCode: string;
   requestedCount: number;
@@ -262,6 +270,7 @@ export interface LlmClient {
   channel?: ModelChannelSnapshot;
   provider: string; model: string; isFake: boolean;
   generatePlan(input: PlanLlmInput): Promise<unknown>;
+  generateAplusAiWrite?(input: AplusAiWriteLlmInput): Promise<unknown>;
   generateCategoryPrompt?(input: CategoryPromptLlmInput): Promise<unknown>;
   generateReplicaPrompts?(input: ReplicaPromptLlmInput): Promise<unknown>;
   generateProductOnboarding?(input: ProductOnboardingLlmInput): Promise<unknown>;
@@ -327,7 +336,7 @@ export interface PlanSnapshot {
 }
 
 export type SuitePipelineStatus = "running" | "waiting_base_refine_decision" | "waiting_human_input" | "completed" | "partial_failed" | "failed";
-export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "replica_analyzing" | "done";
+export type SuitePipelinePhase = "base_refining" | "structure_planning" | "category_prompting" | "image_generating" | "replica_analyzing" | "aplus_planning" | "awaiting_confirmation" | "done";
 export interface SuitePipelineRun {
   id: string;
   suiteId: string;
@@ -352,8 +361,9 @@ export interface PipelineRepository {
   getLatestRun(suiteId: string): Promise<SuitePipelineRun | null>;
   listRuns(suiteId: string): Promise<SuitePipelineRun[]>;
   resumeRun(previous: SuitePipelineRun, key: string, phase: SuitePipelinePhase, config: SuitePipelineRun["config"]): Promise<SuitePipelineRun | null>;
-  updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>): Promise<SuitePipelineRun | null>;
+  updateRun(id: string, patch: Partial<Pick<SuitePipelineRun, "status" | "currentPhase" | "resumeCount" | "lastResumeKey" | "structureSnapshotId" | "taskIds" | "config" | "errorCode" | "errorMessage" | "updatedAt" | "completedAt">>, expected?: PipelineRunVersion): Promise<SuitePipelineRun | null>;
 }
+export type PipelineRunVersion = Pick<SuitePipelineRun, "config" | "currentPhase" | "status" | "resumeCount">;
 export interface PlanAttempt {
   id: string; suiteId: string; idempotencyKey: string; status: PlanAttemptStatus; templateVersionId: string;
   dynamicInput: Record<string, unknown>; humanInput: Record<string, unknown>; selectedChunks: RagChunkRef[]; inputImageIds: string[]; baseVersionIds: string[];
@@ -423,7 +433,7 @@ export type TaskBatchKind = "batch" | "single" | "retry";
 export type TaskBatchStatus = "running" | "completed" | "partial" | "failed";
 export type TaskSlotStatus = "pending" | "generating" | "succeeded" | "failed";
 
-export interface SuiteTask {
+export interface SuiteTask extends AplusTaskMetadata {
   id: string; suiteId: string; planSnapshotId: string | null; planItemId: string | null; ordinal: number;
   imageType: TaskImageType; title: string; purpose: string; promptDraft: string;
   promptRevision: number; sourceInputImageId: string | null; generationParams: Record<string, unknown>;
@@ -433,7 +443,7 @@ export interface SuiteTask {
   factRefs?: string[];
   globalStyleCard?: Record<string, unknown>;
   promptSha256?: string;
-  originKind?: "suite_plan" | "reverse_import" | "replica";
+  originKind?: "suite_plan" | "reverse_import" | "replica" | "aplus";
   reversePlanId?: string | null;
   reverseReferenceId?: string | null;
   reversePromptVersionId?: string | null;
@@ -461,11 +471,23 @@ export interface TaskGenerationAttempt {
   errorCode: string | null; errorMessage: string | null; externalRequestId: string | null;
   startedAt: string; finishedAt: string | null;
 }
-export interface TaskImageVersion {
+export interface TaskImageVersion extends AplusImageVersionMetadata {
   id: string; taskId: string; slotId: string; attemptId: string; versionNumber: number; objectKey: string;
   processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string;
   promptSnapshot: Record<string, unknown>; contextSnapshot: Record<string, unknown>;
   isCurrent: boolean; isFinal: boolean; createdAt: string; previewUrl: string;
+}
+export interface CompleteTaskAttemptInput extends AplusImageVersionMetadata {
+  attemptId: string;
+  slotId: string;
+  taskId: string;
+  objectKey: string;
+  processObjectKeys: string[];
+  sha256: string;
+  width: number;
+  height: number;
+  mimeType: string;
+  completedAt: string;
 }
 export interface TaskPreviewVersion {
   taskId: string;
@@ -482,6 +504,8 @@ export interface CanvasLayoutNode { nodeId: string; x: number; y: number; width?
 export interface CanvasLayoutGroup { groupKey: string; x: number; y: number; width: number; height: number; collapsed?: boolean }
 export interface CanvasLayout { id: string; suiteId: string; layoutVersion: number; viewport: { x: number; y: number; zoom: number }; nodes: CanvasLayoutNode[]; groups: CanvasLayoutGroup[]; updatedAt: string }
 export interface TaskRepository {
+  createAplusTasks(tasks: SuiteTask[]): Promise<void>;
+  reorderAplusModules(suiteId: string, modules: AplusModuleCode[]): Promise<boolean>;
   createTasksFromSnapshot(suiteId: string, snapshot: PlanSnapshot, inputImages: InputImage[]): Promise<{ tasks: SuiteTask[]; created: SuiteTask[] }>;
   createCustomTask?(input: { suiteId: string; planSnapshotId: string | null; imageType: TaskImageType; title: string; purpose: string; promptDraft: string; sourceInputImageId: string | null; generationParams: Record<string, unknown>; idempotencyKey?: string }): Promise<{ task: SuiteTask; duplicate: boolean }>;
   createReverseTasks(input: { suiteId: string; reversePlanId: string; taskGroupId: string; mode: ReverseMode; idempotencyKey: string; items: Array<{ referenceId: string; ordinal: number; filename: string; promptVersionId: string; prompt: string }> }): Promise<{ tasks: SuiteTask[]; created: SuiteTask[]; duplicate: boolean }>;
@@ -501,13 +525,13 @@ export interface TaskRepository {
   getTask(taskId: string): Promise<SuiteTask | null>;
   listTasks(suiteId: string): Promise<SuiteTask[]>;
   updateTask(taskId: string, patch: Partial<Pick<SuiteTask, "title" | "purpose" | "promptDraft" | "sourceInputImageId" | "generationParams" | "status" | "sourceLibraryReferenceId" | "sourceResourceVersionId" | "sourceRevision">>): Promise<SuiteTask | null>;
-  beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }): Promise<{ batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[]; duplicate: boolean }>;
+  beginBatch(input: { batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[] }, singleTaskPrompt?: string): Promise<{ batch: TaskGenerationBatch; slots: TaskResultSlot[]; attempts: TaskGenerationAttempt[]; duplicate: boolean }>;
   getBatch(batchId: string): Promise<TaskGenerationBatch | null>;
   listBatches(suiteId: string): Promise<TaskGenerationBatch[]>;
   getSlot(slotId: string): Promise<TaskResultSlot | null>;
   listSlots(suiteId: string): Promise<TaskResultSlot[]>;
   getAttempt(attemptId: string): Promise<TaskGenerationAttempt | null>;
-  completeAttempt(input: { attemptId: string; slotId: string; taskId: string; objectKey: string; processObjectKeys: string[]; sha256: string; width: number; height: number; mimeType: string; completedAt: string }): Promise<{ attempt: TaskGenerationAttempt; version: TaskImageVersion }>;
+  completeAttempt(input: CompleteTaskAttemptInput): Promise<{ attempt: TaskGenerationAttempt; version: TaskImageVersion }>;
   failAttempt(attemptId: string, code: string, message: string, completedAt: string): Promise<TaskGenerationAttempt>;
   selectVersion(taskId: string, versionId: string, selection: "current" | "final"): Promise<TaskImageVersion | null>;
   clearFinalVersion?(taskId: string): Promise<void>;

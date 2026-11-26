@@ -1,18 +1,19 @@
 import { PostgresListingRepository } from "./repositories/postgres-listing-copy-repository.js";
 import http from "node:http";
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { Client as MinioClient } from "minio";
 import { Pool } from "pg";
-import { createSuiteStudioApp } from "./app.js";
+import { createSuiteStudioApp, hasValidTaskVersionIds } from "./app.js";
+import { fail } from "./api-errors.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { dispatchInputImageUpload } from "./multipart.js";
 import { readBoundedRequestBody } from "./request-body-limit.js";
 import { GptImageProvider } from "./providers/gpt-image-provider.js";
 import { ModelSettings, PostgresModelSettingsRepository } from "./model-settings.js";
-import { resolveImageSize } from "../shared/model-settings.js";
+import { defaultImageOptions } from "../shared/model-settings.js";
+import { requestImageEditorEdit, supportedImageEditorOutpaintRatios } from "./providers/image-editor-provider.js";
 import { PostgresPlanRepository } from "./repositories/postgres-plan-repository.js";
 import { PostgresCategoryPromptRepository } from "./repositories/postgres-category-prompt-repository.js";
 import { PostgresPlatformRepository } from "./repositories/postgres-platform-repository.js";
@@ -55,11 +56,12 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
   const selected = await modelSettings.resolve("image");
   if (!selected) return null;
   const imageProvider = new GptImageProvider(selected.baseUrl, selected.apiKey);
+  const imageOptions = selected.imageOptions ?? defaultImageOptions(selected.model);
   return {
     name: "openai-compatible-image",
     version: selected.model,
     channel: selected.source,
-    capabilitiesVersion: "v1",
+    capabilitiesVersion: "v2",
     capabilities: () => ({
       imageToImage: process.env.IMAGE_EDITOR_IMAGE_TO_IMAGE !== "false",
       addText: process.env.IMAGE_EDITOR_ADD_TEXT !== "false",
@@ -67,79 +69,36 @@ const resolveImageEditorProvider = async (): Promise<ImageEditProvider | null> =
       redraw: process.env.IMAGE_EDITOR_REDRAW !== "false",
       erase: process.env.IMAGE_EDITOR_ERASE !== "false",
       outpaint: process.env.IMAGE_EDITOR_OUTPAINT !== "false",
+      outpaintRatios: supportedImageEditorOutpaintRatios(imageOptions),
       currentVersionInput: process.env.IMAGE_EDITOR_CURRENT_VERSION !== "false",
     }),
-    edit: async (command, source) => {
-      const maskedOperations = command.operations.filter((operation) => operation.type === "redraw" || operation.type === "erase");
-      if (maskedOperations.length > 1) throw new Error("MULTIPLE_MASK_OPERATIONS_UNSUPPORTED");
-      const masked = maskedOperations[0];
-      let mask: Buffer | undefined;
-      if (masked) {
-        const metadata = masked.payload.mask;
-        if (!metadata || typeof metadata !== "object" || typeof (metadata as Record<string, unknown>).objectKey !== "string") throw new Error("MASK_SNAPSHOT_REQUIRED");
-        const stored = await storage.get((metadata as Record<string, string>).objectKey);
-        if (!stored || stored.contentType !== "image/png") throw new Error("MASK_OBJECT_NOT_FOUND");
-        mask = stored.bytes;
-      }
-      // 编辑子卡可继续派生；沿血缘找到源任务版本，优先复用该次出图冻结的最终尺寸。
-      const sourceSize = await pool.query<{ size: string | null; generationParams: Record<string, unknown>; imageType: string }>(
-        `WITH RECURSIVE lineage(version_id) AS (
-          SELECT $1::text
-          UNION
-          SELECT c.source_version_id FROM lineage l
-          JOIN suite_workbench.image_edit_versions ev ON ev.id::text=l.version_id
-          JOIN suite_workbench.image_edit_child_tasks c ON c.id=ev.child_task_id
-        )
-        SELECT a.request_summary_json->>'size' AS size, t.generation_params_json AS "generationParams", t.image_type AS "imageType"
-        FROM lineage l JOIN suite_workbench.task_image_versions v ON v.id::text=l.version_id
-        JOIN suite_workbench.suite_tasks t ON t.id=v.task_id
-        JOIN suite_workbench.task_generation_attempts a ON a.id=v.attempt_id LIMIT 1`,
-        [command.sourceVersionId],
-      );
-      const original = sourceSize.rows[0];
-      const params = original?.generationParams ?? {};
-      const size = original?.size || (original && selected.imageOptions
-        ? resolveImageSize(typeof params.size === "string" ? params.size : "1K", typeof params.ratio === "string" ? params.ratio : original.imageType === "main" ? "1:1" : "3:4", selected.imageOptions.sizeMode)
-        : "1K");
-      const result = await imageProvider.edit({ requestId: randomUUID(), flow: "image-editor", endpoint: "/v1/images/edits", image: source.bytes, imageMimeType: source.mimeType, imageFilename: "source.png", model: selected.model, prompt: command.prompt, size, quality: "medium", n: 1, responseFormat: "b64_json", mask, maskMimeType: mask ? "image/png" : undefined, maskFilename: mask ? "mask.png" : undefined });
-      const metadata = await sharp(result.bytes).metadata();
-      return { bytes: result.bytes, mimeType: result.mimeType, width: metadata.width ?? source.width, height: metadata.height ?? source.height };
-    },
+    edit: (command, source) => requestImageEditorEdit(
+      imageProvider, storage, selected.model, imageOptions, command, source,
+    ),
   };
 };
 const taskRepository = new PostgresTaskRepository(pool);
-const frozenPrompt = (snapshot: Record<string, unknown> | null | undefined) => {
-  const value = snapshot?.finalPrompt ?? snapshot?.prompt;
-  return typeof value === "string" ? value : "";
-};
+const promptRepository = new PostgresPromptRepository(pool);
+const imageEditorRepository = new PostgresImageEditorRepository(pool);
 const resolveImageSource = async (versionId: string): Promise<ImageSource | null> => {
-  const editVersion = await pool.query<{ objectKey: string; width: number; height: number; mimeType: string; generationPrompt: string }>(`SELECT v.object_key AS "objectKey", v.width, v.height, v.mime_type AS "mimeType", COALESCE(a.command_json->>'prompt','') AS "generationPrompt" FROM suite_workbench.image_edit_versions v JOIN suite_workbench.image_edit_attempts a ON a.id=v.attempt_id WHERE v.id=$1`, [versionId]);
-  if (editVersion.rows[0]) {
-    const object = await storage.get(editVersion.rows[0].objectKey);
-    if (object) return { bytes: object.bytes, mimeType: editVersion.rows[0].mimeType, width: editVersion.rows[0].width, height: editVersion.rows[0].height, generationPrompt: editVersion.rows[0].generationPrompt };
-  }
-  for (const suite of await new PostgresSuiteRepository(pool).listSuites()) {
-    for (const task of await taskRepository.listTasks(suite.id)) {
-      const history = await taskRepository.listTaskVersions(task.id);
-      const version = history.versions.find((item) => item.id === versionId);
-      if (!version) continue;
-      const object = await storage.get(version.objectKey);
-      if (!object) return null;
-      return { bytes: object.bytes, mimeType: object.contentType, width: version.width, height: version.height, generationPrompt: frozenPrompt(version.promptSnapshot) };
-    }
-  }
-  return null;
+  const version = await imageEditorRepository.getSourceVersion(versionId);
+  if (!version) return null;
+  const object = await storage.get(version.objectKey);
+  if (!object) return null;
+  const { width, height } = await sharp(object.bytes).metadata();
+  return { ...version, bytes: object.bytes, width, height };
 };
-const validateImageEditSource = async (sourceCardId: string, sourceVersionId: string) => {
-  const result = await pool.query<{ valid: boolean }>(`SELECT EXISTS (SELECT 1 FROM suite_workbench.suite_tasks t JOIN suite_workbench.task_image_versions v ON v.task_id=t.id WHERE t.id=$1 AND v.id=$2) OR EXISTS (SELECT 1 FROM suite_workbench.image_edit_child_tasks c JOIN suite_workbench.image_edit_versions v ON v.child_task_id=c.id WHERE c.id=$1 AND v.id=$2) AS valid`, [sourceCardId, sourceVersionId]);
-  return Boolean(result.rows[0]?.valid);
-};
-const imageEditorApi = createImageEditorApi(new ImageEditorService(new PostgresImageEditorRepository(pool), resolveImageEditorProvider, storage, resolveImageSource, resolveOcrProvider, validateImageEditSource));
+const imageEditorApi = createImageEditorApi(new ImageEditorService(
+  imageEditorRepository, resolveImageEditorProvider, storage, resolveImageSource, resolveOcrProvider,
+  (sourceCardId, sourceVersionId) => imageEditorRepository.validateSource(sourceCardId, sourceVersionId),
+  promptRepository,
+  async (versionId) => (await imageEditorRepository.getSourceVersion(versionId))?.productInputs ?? null,
+));
 const app = createSuiteStudioApp({
   repository: new PostgresSuiteRepository(pool),
   storage,
   modelSettings,
-  promptRepository: new PostgresPromptRepository(pool),
+  promptRepository,
   platformRepository: new PostgresPlatformRepository(pool),
   planRepository: new PostgresPlanRepository(pool),
   categoryPromptRepository: new PostgresCategoryPromptRepository(pool),
@@ -196,8 +155,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   } else if (req.method === "GET" && path.includes("/preview")) {
     const inputMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/preview\/(original|thumbnail)$/);
     const baseMatch = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/base-versions\/([^/]+)\/preview$/);
-    const taskMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
-    const editTaskMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
+    const taskMatch = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview(\/delivery)?$/);
+    const editTaskMatch = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview(\/delivery)?$/);
     const libraryMatch = path.match(/^\/api\/library\/resources\/([^/]+)\/preview$/);
     const reverseMatch = path.match(/^\/api\/reverse-plans\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
     const replicaMatch = requestUrl.pathname.match(/^\/api\/replicas\/([^/]+)\/references\/([^/]+)\/preview(?:\/(original|thumbnail))?$/);
@@ -208,10 +167,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       ? await app.preview(inputMatch[1], inputMatch[2], inputMatch[3] as "original" | "thumbnail")
       : baseMatch
         ? await app.previewBaseVersion(baseMatch[1], baseMatch[2], baseMatch[3])
+      : editTaskMatch && !hasValidTaskVersionIds(editTaskMatch[1], editTaskMatch[2])
+        ? fail("INVALID_TASK_VERSION", 404)
+      : editTaskMatch?.[3]
+        ? await app.request("GET", requestUrl.pathname)
       : editTaskMatch
         ? await (async () => { const found = await pool.query<{ objectKey: string; mimeType: string }>("SELECT v.object_key AS \"objectKey\", v.mime_type AS \"mimeType\" FROM suite_workbench.image_edit_versions v WHERE v.child_task_id=$1 AND v.id=$2", [editTaskMatch[1], editTaskMatch[2]]); if (!found.rows[0]) return { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } }; const object = await storage.get(found.rows[0].objectKey); return object ? { status: 200, raw: object.bytes, headers: { "content-type": found.rows[0].mimeType } } : { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } }; })()
       : taskMatch
-        ? await app.previewTaskVersion(taskMatch[1], taskMatch[2])
+        ? await app.previewTaskVersion(taskMatch[1], taskMatch[2], Boolean(taskMatch[3]))
         : libraryMatch
           ? await app.previewLibraryResource(safeDecode(libraryMatch[1]) ?? libraryMatch[1])
         : reverseMatch

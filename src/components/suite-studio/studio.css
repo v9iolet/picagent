@@ -700,7 +700,7 @@
 }
 .ss-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(175px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(235px, 100%), 1fr));
   gap: 10px;
 }
 .ss-photo,
@@ -761,7 +761,8 @@
   width: 100%;
 }
 .ss-placeholder.is-loading,
-.ss-photo.is-pending {
+.ss-photo.is-pending,
+.aplus-card-image.is-pending {
   background: linear-gradient(
     110deg,
     var(--pa-bg) 25%,
@@ -822,7 +823,8 @@
   .ss-step[data-step-state="active"] .ss-step-badge,
   .ss-progress-fill::after,
   .ss-placeholder.is-loading,
-  .ss-photo.is-pending {
+  .ss-photo.is-pending,
+  .aplus-card-image.is-pending {
     animation: none;
   }
   .ss-progress-fill {
@@ -840,14 +842,24 @@
 }
 .ss-actions {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 5px 2px;
+  gap: 6px;
 }
-.ss-actions button,
-.ss-actions select {
-  font-size: 11px;
-  padding: 3px 6px;
+.ss-card .ss-actions {
+  padding: 6px;
+}
+.ss-actions button {
+  font-size: 12px;
+}
+.ss-card-action-form {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+.ss-card-action-form label {
+  display: grid;
+  gap: 5px;
 }
 .ss-dialog {
   max-width: min(90vw, 640px);
@@ -1136,9 +1148,6 @@
   .ss-results {
     padding: 14px;
   }
-  .ss-grid {
-    grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr));
-  }
 }
 @media (max-width: 680px) {
   .ss-layout {
@@ -1148,6 +1157,7 @@
   }
   .ss-tools {
     flex-direction: row;
+    flex-wrap: wrap;
     padding: 2px 8px;
   }
   .ss-tools a {

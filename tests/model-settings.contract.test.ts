@@ -4,11 +4,12 @@ import { MemoryPromptRepository } from "../server/repositories/memory-prompt-rep
 import { parsePromptMarkdown } from "../server/prompt-library.js";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { waitUntil } from "../server/suite-pipeline.js";
 import { createSuiteStudioApp } from "../server/app.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { ModelSettings, type ModelSettingsState } from "../server/model-settings.js";
-import { resolveImageSize } from "../shared/model-settings.js";
+import { resolveImageSize, type ModelChannelInput } from "../shared/model-settings.js";
 
 const path = "/api/model-settings";
 const channel = {
@@ -17,10 +18,9 @@ const channel = {
   baseUrl: "http://127.0.0.1:9999/v1",
   apiKey: "test-secret",
   models: [{ id: "shared-model", capabilities: ["image"] }],
-};
+} satisfies ModelChannelInput;
 
-function setup() {
-  let state: ModelSettingsState = { channels: [], preferences: { image: null, vision: null } };
+function setup(state: ModelSettingsState = { channels: [], preferences: { image: null, vision: null, video: null } }) {
   const settings = new ModelSettings({
     read: async () => structuredClone(state),
     update: async (change) => { state = change(structuredClone(state)); return structuredClone(state); },
@@ -123,20 +123,20 @@ test("base refinement uses the selected channel, retains its source, and switche
   assert.equal((await api.request("DELETE", path + "/channels/" + first)).status, 409);
   assert.equal((await submit("first")).status, 202);
   assert.equal((await select(second)).status, 200);
+  const historyWithVersions = (count: number) => waitUntil(
+    async () => (await api.request("GET", imagePath + "/base-versions")).body.data,
+    (data) => data.versions.length === count, 5000,
+  );
+  await historyWithVersions(1);
   assert.equal((await submit("second")).status, 202);
-  let history;
-  for (let index = 0; index < 100; index += 1) {
-    history = (await api.request("GET", imagePath + "/base-versions")).body.data;
-    if (history.versions.length === 2) break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  const history = await historyWithVersions(2);
   assert.equal(history.versions.length, 2);
   assert.deepEqual(history.attempts.map((attempt) => attempt.channel.channelId).sort(), [first, second].sort());
   assert.deepEqual(calls.map(({ url, key }) => [url, key]).sort(), [["/first/v1/images/edits", "Bearer old-token"], ["/second/v1/images/edits", "Bearer replacement-token"]]);
   assert.ok(calls.every(({ multipart }) => multipart.includes("shared-model") && multipart.includes('name="image"')));
 });
 
-test("updates the two default preferences independently and protects their channel models", async () => {
+test("updates image and vision default preferences independently and protects their channel models", async () => {
   const { api } = setup();
   const first = await api.request("POST", path + "/channels", { body: channel });
   const second = await api.request("POST", path + "/channels", { body: {
@@ -147,7 +147,7 @@ test("updates the two default preferences independently and protects their chann
   const preferences = (body: unknown) => api.request("PATCH", path + "/preferences", { body });
   assert.equal((await preferences({ image: vision })).status, 400);
   assert.equal((await preferences({ image })).status, 200);
-  assert.deepEqual((await preferences({ vision })).body.data.preferences, { image, vision });
+  assert.deepEqual((await preferences({ vision })).body.data.preferences, { image, vision, video: null });
 
   const imageChannelPath = path + "/channels/" + image.channelId;
   const removeAbility = await api.request("PUT", imageChannelPath, {
@@ -158,13 +158,56 @@ test("updates the two default preferences independently and protects their chann
   assert.equal((await api.request("PUT", imageChannelPath, { body: { ...channel, models: [] } })).status, 409);
   assert.equal((await api.request("DELETE", imageChannelPath)).status, 409);
 
-  assert.deepEqual((await preferences({ image: null })).body.data.preferences, { image: null, vision });
+  assert.deepEqual((await preferences({ image: null })).body.data.preferences, { image: null, vision, video: null });
   assert.equal((await api.request("DELETE", imageChannelPath)).status, 200);
+});
+
+test("sets, resolves and clears a video default, and protects it when editing channels", async () => {
+  const { api, settings } = setup();
+  const models = [...channel.models, { id: "movie", capabilities: ["video"] }];
+  const created = await api.request("POST", path + "/channels", { body: { ...channel, models } });
+  assert.equal(created.status, 201);
+  const channelId = created.body.data.channels[0].id;
+  const endpoint = path + "/channels/" + channelId;
+  const select = (video: unknown) => api.request("PATCH", path + "/preferences", { body: { video } });
+  const ref = { channelId, modelId: "movie" };
+  const invalid = await select({ channelId, modelId: "shared-model" });
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.body.error.code, "INVALID_DEFAULT_MODEL");
+  assert.deepEqual((await select(ref)).body.data.preferences, { image: null, vision: null, video: ref });
+  assert.equal((await settings.resolve("video"))?.apiKey, channel.apiKey);
+  assert.equal((await settings.resolve("video"))?.model, ref.modelId);
+  const edited = await api.request("PUT", endpoint, { body: { ...channel, models: [{ id: "movie", capabilities: ["vision", "video"] }] } });
+  assert.equal(edited.status, 200);
+  for (const response of [
+    await api.request("PUT", endpoint, { body: { ...channel, models: [{ id: "movie", capabilities: ["vision"] }] } }),
+    await api.request("DELETE", endpoint),
+  ]) {
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error.code, "INVALID_DEFAULT_MODEL");
+    assert.equal(response.body.error.message, "请先在偏好设置中切换或清除默认视频模型");
+  }
+  assert.deepEqual((await select(null)).body.data.preferences, { image: null, vision: null, video: null });
+  assert.equal(await settings.resolve("video"), null);
+  assert.equal((await api.request("DELETE", endpoint)).status, 200);
+});
+
+test("reads stored preferences from before video was introduced", async () => {
+  const image = { channelId: "legacy", modelId: "shared-model" };
+  const legacy: ModelSettingsState = {
+    channels: [{ ...channel, id: image.channelId }],
+    preferences: { image, vision: null, video: null },
+  };
+  Reflect.deleteProperty(legacy.preferences, "video");
+  const { api, settings } = setup(legacy);
+  assert.deepEqual((await api.request("GET", path)).body.data.preferences, { image, vision: null, video: null });
+  assert.equal((await settings.resolve("image"))?.model, image.modelId);
+  assert.equal(await settings.resolve("video"), null);
 });
 
 test("image options round-trip through channels and resolve with legacy model defaults", async () => {
   const { api, settings } = setup();
-  const imageOptions = { sizes: ["1K", "2K"], aspectRatios: ["1:1", "2:3"], sizeMode: "pixels" };
+  const imageOptions = { sizes: ["1K", "2K"], aspectRatios: ["1:1", "2:3"], sizeMode: "pixels", quality: "medium" };
   const created = await api.request("POST", path + "/channels", { body: {
     ...channel, models: [{ id: "gpt-image-2.5-flare-special", capabilities: ["image"], imageOptions }],
   } });
@@ -194,6 +237,7 @@ test("invalid image options are rejected without losing the saved capability con
     { sizes: ["8K"], aspectRatios: ["1:1"], sizeMode: "pixels" },
     { sizes: ["1K"], aspectRatios: ["0:3"], sizeMode: "pixels" },
     { sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "unknown" },
+    { sizes: ["1K"], aspectRatios: ["1:1"], sizeMode: "pixels", quality: "ultra" },
   ]) {
     assert.equal((await api.request("POST", path + "/channels", { body: { ...channel, models: [{ ...channel.models[0], imageOptions }] } })).status, 400);
   }

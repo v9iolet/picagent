@@ -19,7 +19,10 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 - `/create/suite`（及 `/create/suite/:suiteId`）：AI 商品套图一键生成、多阶段进度追踪、原地图片精修与批次历史
 - `/create/canvas`（及 `/create/canvas/:suiteId`）：三泳道生图画布、全局风格覆盖、AI 局部图片编辑与多平台成品交付视图（`?view=gallery`，支持打包导出图片、`listing-copy.md` 与 `manifest.json`）
-- `/reverse`（及 `/reverse/:planId`）：爆品参考图逐张视觉结构与提示词反推，一键导入共享生图画布
+- `/create/aplus`（及 `/create/aplus/:suiteId`）：A+详情策划、按模块出图、详情长图与 ZIP 导出
+- `/create/replica`（及 `/create/replica/:suiteId`）：爆品图复刻、结果精修与批次历史
+- `/reverse`（及 `/reverse/:planId`）：旧版爆品图反推记录
+- `/products`：商品信息卡管理与创作入口
 - `/assets`、`/templates`：图片资产库与提示词模板库（支持草稿编辑、版本发布与在线回溯）
 - `/settings`、`/settings/preferences`：模型渠道与全局默认模型偏好设置
 
@@ -35,7 +38,7 @@ npm run test:pg
 ## 文档索引
 
 - [领域词汇与当前共识](CONTEXT.md)
-- [架构决策记录 (ADR 0001–0008)](docs/adr/)
+- [架构决策记录 (ADR 0001–0012)](docs/adr/)
 - [Agent 协作规范](AGENTS.md)
-- [生图网关接口与规格实测记录](docs/gpt-image-2.md)
+- [生图模型渠道与能力实测记录](docs/image-models.md)
 - [平台规范维护参考](docs/平台维护表-海外优先.md)

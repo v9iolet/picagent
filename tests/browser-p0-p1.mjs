@@ -64,7 +64,7 @@ async function startTestServer() {
     updatedAt: now,
   });
 
-  let settingsState = { channels: [], preferences: { image: null, vision: null } };
+  let settingsState = { channels: [], preferences: { image: null, vision: null, video: null } };
   const modelSettings = new ModelSettings({
     read: async () => structuredClone(settingsState),
     update: async (change) => { settingsState = change(structuredClone(settingsState)); return structuredClone(settingsState); },

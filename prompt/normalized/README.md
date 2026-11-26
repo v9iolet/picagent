@@ -26,6 +26,19 @@
 | `general.repair.factuality` | 信息真实性返修 | `repair` | `task_image` | `信息虚构返修` |
 | `general.repair.design` | 商业设计完成度返修 | `repair` | `task_image` | `设计普通返修` |
 
+## A+详情
+
+| 文件 | Code | Stage | 用途 |
+|---|---|---|---|
+| `aplus-plan.md` | `aplus.plan` | `aplus_plan` | 根据视觉风格和商品事实输出 `aplus-plan-v1`，为每个模块及尺寸独立规划画面 |
+| `aplus-module-<code>.md` | `aplus.module.<code>` | `aplus_module_rule` | 按 `applicability.moduleCode` 读取，仅将所选规则拼入规划 |
+| `aplus-image.md` | `aplus.image` | `aplus_image` | 将本模块画面要求、文案和尺寸包装成单图指令，保护中心安全区，背景满幅出血 |
+| `aplus-ai-write.md` | `aplus.ai-write` | `aplus_ai_write` | 根据所选商品卡和上传的原图补写本批卖点与画面建议 |
+
+16 个模块代码来自 [`APLUS_MODULES`](../../shared/aplus.ts)。方案在高级 A+ 两端共用文案，各自规划构图，`language=none` 时文案要求为空。视觉模型请求按提示词中列出的图片 ID 顺序附上原图缩略图，生图请求附上全部商品原图。
+
+迁移 `043` 发布这 19 份模板的首版。`050` 根据实测调整规划、单图包装和 11 个模块规则，`051` 将 AI 帮写收敛为选卡后的补充建议，`052` 升级规划、单图包装和全部 16 个模块规则。`053` 将 AI 帮写收紧为 300 字以内的 3–4 条 A+ 详情图建议。修改 Markdown 后可用 `npm run import-prompts -- --publish prompt/normalized/aplus-*.md` 导入并发布新版本。迁移与导入使用相同的 Markdown 全文 SHA-256。迁移重跑会保留后续发布或退役状态。
+
 ## 清洗说明
 
 - 一个运行时模板对应一个文件。

@@ -122,7 +122,7 @@ async function offlineBrowser(t, { pendingCopy, legacyEtsy = false } = {}) {
             const preview = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/preview\/(original|thumbnail)$/);
             const version = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
             const response = upload || (path === "/api/model-settings"
-              ? { status: 200, body: { data: { channels: [], preferences: { image: null, vision: null } } } }
+              ? { status: 200, body: { data: { channels: [], preferences: { image: null, vision: null, video: null } } } }
               : preview ? await app.preview(preview[1], preview[2], preview[3])
               : version ? await app.previewTaskVersion(version[1], version[2]) : await app.request(req.method, path, {
               headers: req.headers,
@@ -176,13 +176,13 @@ async function createBatch(page, url, platform, generateCopy) {
   return { suiteId, openDrawer };
 }
 
-test("创作栏仅显示三个入口，两个旧文案路由都重定向到商品套图", async (t) => {
+test("创作栏显示四个入口，两个旧文案路由都重定向到商品套图", async (t) => {
   const { page, url } = await offlineBrowser(t);
   for (const path of ["create/listing-copy", "create/listing-copy/00000000-0000-4000-8000-000000000001"]) {
     await page.goto(url + path);
     await page.waitForURL(url + "create/suite");
     const tools = page.getByRole("navigation", { name: "创作功能" });
-    assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图复刻"]);
+    assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图复刻", "A+详情"]);
   }
 });
 

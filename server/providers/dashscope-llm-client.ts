@@ -1,7 +1,7 @@
 import { parseProviderJson } from "./provider-json.js";
 import type { ModelChannelSnapshot } from "../../shared/model-settings.js";
 import { randomUUID } from "node:crypto";
-import type { CategoryPromptLlmInput, LlmClient, PlanLlmInput, ProductOnboardingLlmInput, ReplicaPromptLlmInput } from "../types.js";
+import type { AplusAiWriteLlmInput, CategoryPromptLlmInput, LlmClient, PlanLlmInput, ProductOnboardingLlmInput, ReplicaPromptLlmInput } from "../types.js";
 import { failModelArchive, finishModelArchive, startModelArchive } from "../prompt-archive.js";
 import { failObservation, finishObservation, logObservation, recordModelFailure, recordModelSuccess, startGeneration } from "../observability.js";
 
@@ -103,7 +103,7 @@ export function buildPlanUserContent(input: PlanLlmInput): VisionContent[] {
     baseImages: input.baseVersionIds,
     visualReferences: (input.visionImages ?? []).map((image) => ({ id: image.id, sourceKind: image.sourceKind, sourceVersionId: image.sourceVersionId, mimeType: image.mimeType })),
   };
-  const renderedUserPrompt = (input.userPromptTemplate?.trim() || "{{dynamic_input}}\n{{selected_chunks}}\n{{input_images}}\n{{base_images}}\n{{visual_references}}")
+  const renderedUserPrompt = input.userPrompt ?? (input.userPromptTemplate?.trim() || "{{dynamic_input}}\n{{selected_chunks}}\n{{input_images}}\n{{base_images}}\n{{visual_references}}")
     .replaceAll("{{dynamic_input}}", JSON.stringify(input.dynamicInput))
     .replaceAll("{{human_input}}", JSON.stringify(input.humanInput))
     .replaceAll("{{selected_chunks}}", JSON.stringify(user.selectedChunks))
@@ -132,20 +132,38 @@ export class DashScopeLlmClient implements LlmClient {
   constructor(private readonly baseUrl: string, private readonly apiKey: string, readonly model: string, private readonly timeoutMs = 600_000, readonly channel?: ModelChannelSnapshot) {
     this.provider = channel ? "openai-compatible" : "dashscope";
   }
-  async generatePlan(input: PlanLlmInput): Promise<unknown> {
+  generatePlan(input: PlanLlmInput): Promise<unknown> {
+    return this.completeVision(input, input.flow ?? "plan", "json");
+  }
+
+  generateAplusAiWrite(input: AplusAiWriteLlmInput): Promise<unknown> {
+    return this.completeVision({
+      ...input,
+      inputImageIds: input.visionImages.map(({ id }) => id),
+      baseVersionIds: [], chunks: [], dynamicInput: {}, humanInput: {},
+    }, "aplus-ai-write", "text");
+  }
+
+  private async completeVision(input: PlanLlmInput, flow: NonNullable<PlanLlmInput["flow"]> | "aplus-ai-write", format: "json" | "text"): Promise<unknown> {
     const startedAt = Date.now();
-    const flow = input.flow ?? "plan";
     const requestId = input.requestId ?? randomUUID();
+    const userContent = buildPlanUserContent(input);
     const observation = startGeneration(`llm.${flow}`, {
       system: input.templateBody,
-      user: buildPlanUserContent(input).filter((item) => item.type === "text"),
+      user: userContent.filter((item) => item.type === "text"),
     }, { flow, provider: this.provider, model: this.model, template_version_id: input.templateVersionId, request_id: requestId });
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const system = input.templateBody;
-    const userContent = buildPlanUserContent(input);
     const userPrompt = userContent[0].type === "text" ? userContent[0].text : "";
+    const requestOptions = {
+      model: this.model,
+      temperature: 0,
+      ...(format === "json" ? { response_format: { type: "json_object" } } : {}),
+    };
     const archive = await startModelArchive({
-      type: flow === "listing-copy" ? "multimodal-listing-copy" : input.flow === "category-prompt" ? "multimodal-category-prompt" : "multimodal-plan",
+      type: flow === "aplus-ai-write" ? "multimodal-aplus-ai-write"
+        : flow === "listing-copy" ? "multimodal-listing-copy"
+        : flow === "category-prompt" ? "multimodal-category-prompt" : "multimodal-plan",
       flow,
       requestId,
       provider: this.provider,
@@ -153,7 +171,7 @@ export class DashScopeLlmClient implements LlmClient {
       request: {
         endpoint: new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`).toString(),
         templateVersionId: input.templateVersionId,
-        body: { model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [
+        body: { ...requestOptions, messages: [
           { role: "system", content: system },
           { role: "user", content: [{ type: "text", text: userPrompt }, ...(input.visionImages ?? []).map((image, index) => ({ type: "image_url", image_url: { url: `[archive-input-${index + 1}:${image.id}:${image.sourceKind}]` } }))] },
         ] },
@@ -165,7 +183,7 @@ export class DashScopeLlmClient implements LlmClient {
       const response = await fetch(new URL("chat/completions", this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`), {
         method: "POST", redirect: "error", signal: controller.signal,
         headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
-        body: JSON.stringify({ model: this.model, temperature: 0, response_format: { type: "json_object" }, messages: [
+        body: JSON.stringify({ ...requestOptions, messages: [
           { role: "system", content: system },
           { role: "user", content: userContent },
         ] }),
@@ -185,19 +203,21 @@ export class DashScopeLlmClient implements LlmClient {
         throw error;
       }
       const content = payload.choices?.[0]?.message?.content;
-      if (!content) {
+      if (typeof content !== "string" || (format === "json" && !content)) {
         const error = new Error("LLM_EMPTY_RESPONSE");
         await failModelArchive(archive, error, { httpStatus: response.status, payload });
         archived = true;
         throw error;
       }
-      let parsed: unknown;
-      try { parsed = parseProviderJson(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""), this.apiKey, "LLM_INVALID_JSON_RESPONSE"); }
-      catch {
-        const error = new Error("LLM_INVALID_JSON_RESPONSE");
-        await failModelArchive(archive, error, { httpStatus: response.status });
-        archived = true;
-        throw error;
+      let parsed: unknown = content;
+      if (format === "json") {
+        try { parsed = parseProviderJson(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""), this.apiKey, "LLM_INVALID_JSON_RESPONSE"); }
+        catch {
+          const error = new Error("LLM_INVALID_JSON_RESPONSE");
+          await failModelArchive(archive, error, { httpStatus: response.status });
+          archived = true;
+          throw error;
+        }
       }
       await finishModelArchive(archive, { httpStatus: response.status, payload, content, parsed });
       const usage = payload.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;

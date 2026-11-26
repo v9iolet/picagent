@@ -8,6 +8,7 @@ import { resolveDeliverySlots, type DeliveryEditChildLike } from "../shared/work
 import { errorMessages, fail } from "./api-errors.js";
 import { ok, asRecord, dataOf, now, type AppResponse } from "./api-response.js";
 import type { ListingRepository } from "./listing-copy.js";
+import { aplusPlanningView, publicAplusRun, readAplusRunConfig } from "./aplus/aplus-plan.js";
 import { resolvePublishedProductCardSnapshot } from "./product-cards-api.js";
 import { buildReplicaReferencePreviewUrl } from "./replica/replica-pipeline.js";
 import type {
@@ -22,6 +23,7 @@ import type {
   StorageAdapter,
   StructurePlanV2,
   SuitePipelineRun,
+  SuiteOrigin,
   SuiteRepository,
   SuiteTask,
   TaskRepository,
@@ -79,6 +81,22 @@ export const waitUntil = async <T>(
   }
   throw new Error("PIPELINE_TIMEOUT");
 };
+
+export async function pendingImageGeneration(repository: TaskRepository, tasks: SuiteTask[]) {
+  const pendingTasks: SuiteTask[] = [];
+  const activeAttemptIds: string[] = [];
+  for (const task of tasks) {
+    const { versions, attempts } = await repository.listTaskVersions(task.id);
+    if (versions.some((version) => version.isCurrent)) continue;
+    const running = attempts.filter((attempt) => attempt.status === "running");
+    if (running.length) activeAttemptIds.push(...running.map((attempt) => attempt.id));
+    else pendingTasks.push(task);
+  }
+  // A manual redraw may already own a missing card. Observe its result without resubmitting it.
+  const waitForActive = () => Promise.all(activeAttemptIds.map((id) =>
+    waitUntil(() => repository.getAttempt(id), (attempt) => attempt?.status !== "running", 600_000)));
+  return { pendingTasks, waitForActive };
+}
 
 class PipelineError extends Error {
   constructor(readonly code: string, message?: string) {
@@ -422,11 +440,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       let batchId: string | undefined;
       if (resumePhase !== "done") {
         await pipelineRepository.updateRun(run.id, { currentPhase: "image_generating", updatedAt: now() });
-        const pendingTasks: SuiteTask[] = [];
-        for (const task of taskRows) {
-          const history = await deps.taskRepository.listTaskVersions(task.id);
-          if (!history.versions.some((version) => version.isCurrent)) pendingTasks.push(task);
-        }
+        const { pendingTasks, waitForActive } = await pendingImageGeneration(taskRepository, taskRows);
         if (pendingTasks.length) {
           const generationResponse = await request("POST", `/api/suites/${suiteId}/generation`, {
             headers: { "idempotency-key": `${executionKey}:images` },
@@ -444,6 +458,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
             600_000,
           );
         }
+        await waitForActive();
       }
       const histories = await Promise.all(taskRows.map((task) => taskRepository.listTaskVersions(task.id)));
       const missing = histories.filter((history) => !history.versions.some((version) => version.isCurrent));
@@ -538,6 +553,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       return latest?.status === "running" ? fail("PIPELINE_ALREADY_RUNNING", 409) : fail("INVALID_PIPELINE_START");
     }
     const isClone = typeof body.cloneFrom === "string" || Boolean(cloneSpec);
+    if (suite?.origin === "aplus" && !isClone) return fail("INVALID_SUITE_ORIGIN", 400);
     if (suite && !isClone) {
       const existing = (await pipelineRepository.listRuns(suite.id)).find(
         (item) => item.idempotencyKey === idempotencyKey,
@@ -619,6 +635,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     if (!idempotencyKey?.trim()) return fail("MISSING_IDEMPOTENCY_KEY");
     const suite = await deps.repository.getSuite(suiteId);
     if (!suite) return fail("INVALID_SUITE_ID", 404);
+    if (suite.origin === "aplus") return fail("INVALID_SUITE_ORIGIN", 400);
     const current = await pipelineRepository.getLatestRun(suite.id);
     if (!current) return fail("PIPELINE_NOT_FOUND", 404);
     const body = asRecord(payload, { allowArrays: true });
@@ -685,18 +702,21 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     return ok({ suiteId: suite.id, pipeline: updated }, 202);
   }
 
-  async function getStudioState(suiteId: string) {
-    if (!deps.taskRepository) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
+  async function getStudioState(suiteId: string, expectedOrigin?: SuiteOrigin) {
     const suite = await deps.repository.getSuite(suiteId);
     if (!suite) return fail("INVALID_SUITE_ID", 404);
+    if (expectedOrigin && suite.origin !== expectedOrigin) return fail("INVALID_SUITE_ORIGIN", 400);
+    const isAplus = suite.origin === "aplus";
+    if (!deps.taskRepository && !isAplus) return fail("TASK_REPOSITORY_NOT_CONFIGURED", 503);
     const [inputImages, latestPipeline, snapshot, tasks, batches, slots] = await Promise.all([
       deps.repository.getInputImages(suite.id),
       pipelineRepository.getLatestRun(suite.id),
       deps.planRepository?.getLatestSnapshot(suite.id) ?? Promise.resolve(null),
-      deps.taskRepository.listTasks(suite.id),
-      deps.taskRepository.listBatches(suite.id),
-      deps.taskRepository.listSlots(suite.id),
+      deps.taskRepository?.listTasks(suite.id) ?? [],
+      deps.taskRepository?.listBatches(suite.id) ?? [],
+      deps.taskRepository?.listSlots(suite.id) ?? [],
     ]);
+    const aplusLanguage = isAplus && latestPipeline ? readAplusRunConfig(latestPipeline)?.inputSnapshot.language : undefined;
     const activeTasks = tasks.filter((task) => task.status !== "archived");
     const taskAggregates = await Promise.all(
       activeTasks.map(async (task) => {
@@ -713,7 +733,8 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     const imageEditChildren = await loadSuiteImageEditChildren(activeTasks);
     const resolvedCards = resolveDeliverySlots(taskAggregates, imageEditChildren, {
       defaultTemplateVersionId: snapshot?.templateVersionId ?? null,
-      preferLatestByTime: isReplica,
+      preferLatestByTime: isReplica || isAplus,
+      currentVersionsOnly: isAplus,
     });
     const [replicaReferences, replicaProducts] = isReplica && deps.replicaRepository
       ? await Promise.all([
@@ -765,7 +786,22 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
             ...(styleSketch ? { styleSketch: true as const } : { styleSketch: false as const }),
           };
         })
-      : resolvedCards;
+      : isAplus
+        ? resolvedCards.map((card) => {
+            const task = taskAggregateById.get(card.parentTaskId)!;
+            const latestAttempt = task.attempts.at(-1);
+            return {
+              ...card,
+              actions: aplusLanguage && aplusLanguage !== "none" && card.previewUrl ? ["change_text"] : [],
+              moduleCode: task.moduleCode,
+              sizePreset: task.sizePreset,
+              sortOrder: task.sortOrder,
+              taskStatus: task.status,
+              errorCode: latestAttempt?.status === "failed" ? latestAttempt.errorCode : null,
+              errorMessage: latestAttempt?.status === "failed" ? latestAttempt.errorMessage : null,
+            };
+          }).sort((a, b) => (a.sortOrder ?? a.slotIndex) - (b.sortOrder ?? b.slotIndex))
+        : resolvedCards.map((card) => ({ ...card, taskStatus: taskAggregateById.get(card.parentTaskId)!.status }));
     let pipeline = latestPipeline;
     if (
       pipeline &&
@@ -825,13 +861,14 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       ?? await listingRepository.findLatestBySuiteId(suite.id);
     return ok({
       suite,
-      pipeline,
+      pipeline: isAplus ? publicAplusRun(pipeline) : pipeline,
       listingCopy,
       inputImages,
       planning,
       cards,
       progress: { total, completed: done, percent: total ? Math.round((done / total) * 100) : 0 },
       batches,
+      ...(isAplus ? aplusPlanningView(pipeline) : {}),
       ...(isReplica
         ? {
             styleSketch,
@@ -857,7 +894,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
     const offset = Math.max(0, Number.isFinite(parsedOffset) ? parsedOffset : 0);
     const rawOrigin = query.get("origin")?.trim();
     const originFilter = rawOrigin || "suite_studio";
-    if (originFilter !== "suite_studio" && originFilter !== "canvas" && originFilter !== "replica") {
+    if (originFilter !== "suite_studio" && originFilter !== "canvas" && originFilter !== "replica" && originFilter !== "aplus") {
       return fail("INVALID_SUITE_ORIGIN", 400);
     }
     const keyword = (query.get("keyword") ?? "").trim().toLowerCase();
@@ -892,7 +929,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
       pipeline,
       activeTasks,
       totalTasks,
-      ordered: [...activeTasks].sort((a, b) => a.ordinal - b.ordinal),
+      ordered: [...activeTasks].sort((a, b) => (a.sortOrder ?? a.ordinal) - (b.sortOrder ?? b.ordinal)),
     }));
     const candidateTaskIds: string[] = [];
     for (const entry of page) {
@@ -931,7 +968,7 @@ export function createSuitePipeline(deps: SuitePipelineDependencies) {
           : 0;
       return {
         suite,
-        pipeline,
+        pipeline: suite.origin === "aplus" ? publicAplusRun(pipeline) : pipeline,
         card,
         thumbnails,
         taskCount: activeTasks.length || fallbackReplicaCount,

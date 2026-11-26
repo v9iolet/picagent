@@ -1,173 +1,19 @@
 // Run with npx tsx --test tests/browser-canvas.mjs. All application data and generation are local.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { setTimeout } from "node:timers/promises";
-import { chromium } from "playwright";
-import { createServer } from "vite";
-import { createSuiteStudioApp } from "../server/app.js";
-import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
-import { createImageEditorApi } from "../server/image-editor-api.js";
-import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
-import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
-import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
-import { MemoryStorage } from "../server/storage/memory-storage.js";
+import { offlineCanvas, seedGeneratedCanvas, cardDescription, longStyle } from "./offline-canvas-fixture.mjs";
 
-async function offlineCanvas(t, sizes = ["1K", "2K"]) {
-  const sample = await readFile("public/assets/gan65-product.jpg");
-  const libraryRepository = new MemoryLibraryRepository();
-  const storage = new MemoryStorage();
-  const taskRepository = new MemoryTaskRepository();
-  const editorRepository = new MemoryImageEditorRepository();
-  const calls = [];
-  const editorService = new ImageEditorService(
-    editorRepository,
-    {
-      name: "offline-editor",
-      version: "gpt-image-2",
-      capabilitiesVersion: "1",
-      capabilities: () => ({ imageToImage: true, addText: true, changeText: true, redraw: true, erase: true, outpaint: true, currentVersionInput: true }),
-      edit: async () => ({ bytes: sample, mimeType: "image/jpeg", width: 64, height: 64 }),
-    },
-    storage,
-    async (versionId) => ({ bytes: sample, mimeType: "image/jpeg", width: 64, height: 64, generationPrompt: `source:${versionId}` }),
-  );
-  const api = createSuiteStudioApp({
-    repository: new MemorySuiteRepository(),
-    taskRepository,
-    libraryRepository,
-    storage,
-    imageEditorApi: createImageEditorApi(editorService),
-    provider: {
-      async edit(request) {
-        calls.push(request);
-        await setTimeout(200);
-        return { bytes: sample, mimeType: "image/jpeg" };
-      },
-    },
-  });
-  const settings = {
-    channels: [{
-      id: "offline", name: "离线测试", models: [{
-        id: "gpt-image-2", capabilities: ["image"],
-        imageOptions: { sizes, aspectRatios: ["1:1", "3:2"], sizeMode: "pixels" },
-      }],
-    }],
-    preferences: { image: { channelId: "offline", modelId: "gpt-image-2" }, vision: null },
-  };
-  const vite = await createServer({
-    cacheDir: "node_modules/.vite-browser-canvas",
-    configFile: false,
-    server: { host: "127.0.0.1", port: 0 },
-    esbuild: { jsx: "automatic" },
-    plugins: [{
-      name: "offline-canvas-api",
-      configureServer(server) {
-        server.middlewares.use(async (req, res, next) => {
-          const method = req.method;
-          const path = req.url ?? "/";
-          if (!path.startsWith("/api/")) return next();
-          try {
-            const data = [];
-            for await (const chunk of req) data.push(chunk);
-            const payload = Buffer.concat(data);
-            const upload = path.match(/^\/api\/suites\/([^/]+)\/input-images$/);
-            const input = path.match(/^\/api\/suites\/([^/]+)\/input-images\/([^/]+)\/preview\/(original|thumbnail)$/);
-            const version = path.match(/^\/api\/suite-tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
-            const edited = path.match(/^\/api\/image-editor\/tasks\/([^/]+)\/versions\/([^/]+)\/preview$/);
-            let result;
-            if (upload && method === "POST") {
-              const form = await new Response(payload, { headers: { "content-type": req.headers["content-type"] } }).formData();
-              const file = form.get("file");
-              result = await api.upload(upload[1], {
-                filename: file.name, mimeType: file.type, bytes: Buffer.from(await file.arrayBuffer()),
-                idempotencyKey: req.headers["idempotency-key"],
-              });
-              const image = result.body?.data;
-              // Seed both an input_image (must stay hidden from picker) and a published base_image (must appear in picker).
-              if (image) {
-                libraryRepository.addResource({
-                  id: `input:${image.id}`, resourceType: "input_image", title: image.originalFilename, summary: "", mimeType: image.mimeType,
-                  previewUrl: image.thumbnailPreviewUrl, suiteId: image.suiteId, taskId: null, imageVersionId: null, baseVersionId: null,
-                  templateVersionId: null, resourceVersionId: image.id, stage: null, source: { objectKey: image.originalObjectKey },
-                  status: "published", createdAt: image.createdAt, updatedAt: image.createdAt,
-                });
-                libraryRepository.addResource({
-                  id: `base:${image.id}`, resourceType: "base_image", title: `白底底图 · ${image.originalFilename}`, summary: "", mimeType: image.mimeType,
-                  previewUrl: image.thumbnailPreviewUrl, suiteId: image.suiteId, taskId: null, imageVersionId: null, baseVersionId: image.id,
-                  templateVersionId: null, resourceVersionId: image.id, stage: null, source: { objectKey: image.originalObjectKey },
-                  status: "published", createdAt: image.createdAt, updatedAt: image.createdAt,
-                });
-              }
-            } else if (input) result = await api.preview(input[1], input[2], input[3]);
-            else if (version) result = await api.previewTaskVersion(version[1], version[2]);
-            else if (edited) {
-              const found = (await editorRepository.listVersions(edited[1])).find((v) => v.id === edited[2]);
-              const obj = found ? await storage.get(found.objectKey) : null;
-              result = obj ? { status: 200, raw: obj.bytes, headers: { "content-type": obj.contentType } } : { status: 404, body: { error: { code: "NOT_FOUND", message: "not found" } } };
-            } else if (path === "/api/model-settings") result = { status: 200, body: { data: settings } };
-            else result = await api.request(method, path, { headers: req.headers, body: payload.length ? JSON.parse(payload.toString()) : undefined });
-            res.writeHead(result.status, result.raw ? result.headers : { "Content-Type": "application/json" });
-            res.end(result.raw ?? JSON.stringify(result.body));
-          } catch (error) {
-            res.writeHead(500);
-            res.end(String(error));
-          }
-        });
-      },
-    }],
-  });
-  await vite.listen();
-  const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
-  t.after(async () => { await browser.close(); await vite.close(); });
-  const url = vite.resolvedUrls.local[0];
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-  page.setDefaultTimeout(8000);
-  await page.route("**/*", (route) => new URL(route.request().url()).origin === new URL(url).origin ? route.continue() : route.abort());
-  return { api, calls, url, page };
-}
-
-const cardDescription = "用柔和侧光照亮商品，保留右侧留白。";
-const longStyle = "保留商品轮廓与材质，以柔和侧光展示真实质感。".repeat(110);
-
-async function seedGeneratedCanvas(api, taskCount) {
-  const created = await api.request("POST", "/api/suites", { body: { name: "桌面交付测试", origin: "canvas" } });
-  assert.equal(created.status, 201);
-  const suiteId = created.body.data.id;
-  const upload = await api.upload(suiteId, { filename: "产品.jpg", mimeType: "image/jpeg", bytes: await readFile("public/assets/gan65-product.jpg") });
-  assert.equal(upload.status, 201);
-  const inputId = upload.body.data.id;
-  const tasks = [];
-  for (let index = 0; index < taskCount; index++) {
-    const result = await api.request("POST", `/api/suites/${suiteId}/tasks/custom`, {
-      body: {
-        imageType: index === 0 ? "main" : "detail",
-        title: `商品视图 ${index + 1}`,
-        sourceInputImageId: inputId,
-        promptDraft: `系统安全约束：保持商品真实。\n当前类别提示词：${cardDescription}\n单卡人工补充：无`,
-      },
-    });
-    assert.equal(result.status, 201);
-    tasks.push(result.body.data.id);
-  }
-  const generation = await api.request("POST", `/api/suites/${suiteId}/generation`, { headers: { "idempotency-key": "fixture-generation" } });
-  assert.equal(generation.status, 202);
-  const batchId = generation.body.data.batchId;
-  let status;
-  for (let attempt = 0; attempt < 150; attempt++) {
-    const result = await api.request("GET", `/api/generation-batches/${batchId}`);
-    assert.equal(result.status, 200);
-    status = result.body.data.batch.status;
-    if (status === "completed") break;
-    assert.equal(status, "running");
-    await setTimeout(25);
-  }
-  assert.equal(status, "completed");
-  const style = await api.request("PATCH", `/api/suites/${suiteId}/style-override`, {
-    headers: { "idempotency-key": "fixture-style" }, body: { styleOverride: longStyle },
-  });
-  assert.equal(style.status, 200);
-  return { suiteId, inputId, tasks };
+async function addManualTextEdit(page, dialog, originalText, newText) {
+  await dialog.getByRole("button", { name: "框选补充" }).click();
+  const canvas = dialog.locator(".konvajs-content");
+  await canvas.waitFor();
+  const { x, y, width, height } = await canvas.boundingBox();
+  await page.mouse.move(x + width * 0.2, y + height * 0.2);
+  await page.mouse.down();
+  await page.mouse.move(x + width * 0.5, y + height * 0.35, { steps: 5 });
+  await page.mouse.up();
+  await dialog.getByLabel("原文字", { exact: true }).fill(originalText);
+  await dialog.getByLabel(`新文字：${originalText}`, { exact: true }).fill(newText);
 }
 
 function assertDisjoint(boxes, group) {
@@ -407,7 +253,7 @@ test("默认生图模型：套图配置、新建任务与检查器可选七种�
   const modelId = "gpt-image-2.5-flare-special";
   await page.route("**/api/model-settings", route => route.fulfill({ json: { data: {
     channels: [{ id: "offline", models: [{ id: modelId, capabilities: ["image"] }] }],
-    preferences: { image: { channelId: "offline", modelId }, vision: null },
+    preferences: { image: { channelId: "offline", modelId }, vision: null, video: null },
   } } }));
   const ratios = ["1:1", "2:3", "3:2", "3:4", "4:3", "16:9", "9:16"];
   async function assertRatioOptions(select, initial) {
@@ -446,7 +292,78 @@ test("默认生图模型：套图配置、新建任务与检查器可选七种�
   await card.getByText("9:16", { exact: true }).waitFor();
 });
 
-test("创作画布：移除卖点排版入口，未配 OCR 时可手工框选改文字并一键开始生成编辑子卡", async (t) => {
+test("创作画布：AI 改图支持空输入重绘和按指令修改", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId, tasks: [taskId] } = await seedGeneratedCanvas(api, 1);
+  const history = await api.request("GET", `/api/suite-tasks/${taskId}/versions`);
+  assert.equal(history.status, 200);
+  const { finalPrompt: sourcePrompt } = history.body.data.versions[0].promptSnapshot;
+  assert.ok(sourcePrompt.includes(cardDescription));
+  await page.goto(url + `create/canvas/${suiteId}`);
+
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  const area = dialog.getByLabel("调整要求");
+  const sourceBody = dialog.locator(".wb-editor-source-prompt p");
+  const editButton = page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit");
+  const instruction = "商品向左移动一点，换成浅灰色背景";
+  for (const [index, input] of ["", instruction].entries()) {
+    await editButton.click();
+    await dialog.locator(".wb-editor-tools").getByRole("button", { name: /^AI 改图/ }).waitFor();
+    assert.equal(await area.inputValue(), "");
+    assert.equal(await area.getAttribute("placeholder"), "输入调整要求（选填，空着将按原提示词重绘）。如：商品向左移动一点，换成浅灰色背景…");
+    assert.equal(await sourceBody.isVisible(), false);
+    await dialog.getByText("原提示词", { exact: true }).click();
+    assert.equal(await sourceBody.innerText(), sourcePrompt);
+    if (input) await area.fill(input);
+
+    const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));
+    await dialog.getByRole("button", { name: "生成", exact: true }).click();
+    const response = await submitted;
+    assert.equal(response.status(), 202);
+    const { snapshot, attempt } = (await response.json()).data;
+    assert.equal(snapshot.tool, "re_edit");
+    assert.equal(snapshot.sourcePrompt, sourcePrompt);
+    assert.equal(snapshot.operations[0].payload.prompt, input);
+    if (input) {
+      assert.match(attempt.command.prompt, /\n只执行以下修改：商品向左移动一点，换成浅灰色背景$/);
+      assert.ok(!attempt.command.prompt.includes(sourcePrompt));
+    } else {
+      assert.equal(attempt.command.prompt, sourcePrompt);
+    }
+    await dialog.waitFor({ state: "hidden" });
+    await page.locator(".wb-edit-child-card .wb-card-state").filter({ hasText: /^已生成$/ }).nth(index).waitFor();
+  }
+});
+
+test("创作画布：扩图仅可选择渠道支持的比例，无可用比例时禁用并提示", async (t) => {
+  const aspectRatios = ["16:9", "3:2", "3:4"];
+  const { api, url, page } = await offlineCanvas(t, ["1K"], aspectRatios);
+  const { suiteId } = await seedGeneratedCanvas(api, 1);
+  await page.goto(url + `create/canvas/${suiteId}`);
+  const edit = page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit");
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  const expand = dialog.getByRole("button", { name: /^扩图/ });
+  await edit.click();
+  await expand.click();
+  const ratio = dialog.getByLabel("目标比例");
+  assert.deepEqual(await ratio.locator("option").allTextContents(), ["3:4", "16:9"]);
+  assert.equal(await ratio.inputValue(), "3:4");
+  await ratio.selectOption("16:9");
+  const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
+  const response = await submitted;
+  assert.equal(response.status(), 202);
+  assert.equal((await response.json()).data.snapshot.operations[0].payload.targetRatio, "16:9");
+  await dialog.waitFor({ state: "hidden" });
+
+  aspectRatios.splice(0, aspectRatios.length, "3:2");
+  await edit.click();
+  await dialog.getByText("当前生图渠道没有可用的扩图比例。", { exact: true }).waitFor();
+  assert.equal(await expand.isDisabled(), true);
+  assert.equal(await ratio.count(), 0);
+});
+
+test("创作画布：未配 OCR 时可手工编辑文字，切换工具保留草稿，提交只使用当前工具", async (t) => {
   const { api, url, page } = await offlineCanvas(t);
   const { suiteId } = await seedGeneratedCanvas(api, 2);
   await page.goto(url + `create/canvas/${suiteId}`);
@@ -455,24 +372,134 @@ test("创作画布：移除卖点排版入口，未配 OCR 时可手工框选改
   assert.equal(await page.getByRole("button", { name: "卖点排版" }).count(), 0);
   assert.equal(await page.locator(".wb-card-vector-overlay").count(), 0);
 
+  const capabilitiesGate = Promise.withResolvers();
+  await page.route("**/api/image-editor/capabilities", async (route) => {
+    await capabilitiesGate.promise;
+    await route.continue();
+  });
+  t.after(() => capabilitiesGate.resolve());
+  const ocrRequests = [];
+  page.on("request", (request) => {
+    if (request.url().endsWith("/ocr")) ocrRequests.push(request.url());
+  });
   await page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit").first().click();
   const dialog = page.getByRole("dialog", { name: "图片编辑器" });
   await dialog.waitFor();
+  await dialog.getByLabel("调整要求").fill("保留在 AI 改图里的草稿");
+  await dialog.getByRole("button", { name: "添加到对话" }).click();
+  await dialog.getByRole("button", { name: "更新对话操作" }).waitFor();
 
-  const changeTextTool = dialog.locator(".wb-editor-tools button", { hasText: "改文字" });
-  assert.equal(await changeTextTool.isDisabled(), false);
+  const changeTextTool = dialog.locator(".wb-editor-tools button", { hasText: "编辑文字" });
   await changeTextTool.click();
+  try {
+    await dialog.getByRole("status").filter({ hasText: "正在检查文字识别能力" }).waitFor();
+    assert.deepEqual(ocrRequests, []);
+  } finally {
+    capabilitiesGate.resolve();
+  }
 
   await dialog.getByText(/当前未配置多模态识字模型/).waitFor();
+  await dialog.getByRole("status").filter({ hasText: "切换前的草稿会保留" }).waitFor();
+  await dialog.getByText("已修改 0 条", { exact: true }).waitFor();
+  assert.deepEqual(ocrRequests, []);
   assert.doesNotMatch(await dialog.innerText(), /fetch failed/);
 
-  await dialog.getByLabel("原文字").fill("旧卖点标题");
-  await dialog.getByLabel("新文字").fill("65W 便携快充");
+  await addManualTextEdit(page, dialog, "旧卖点标题", "65W 便携快充");
+  const reEditTool = dialog.locator(".wb-editor-tools").getByRole("button", { name: /^AI 改图/ });
+  await reEditTool.click();
+  assert.equal(await dialog.getByLabel("调整要求").inputValue(), "保留在 AI 改图里的草稿");
+  await changeTextTool.click();
+  assert.equal(await dialog.getByLabel("新文字：旧卖点标题").inputValue(), "65W 便携快充");
+  const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));
   await dialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
+  const response = await submitted;
+  assert.equal(response.status(), 202);
+  const selection = response.request().postDataJSON();
+  assert.equal(selection.tool, "change_text");
+  assert.equal(selection.operationIds.length, 1);
+  const draft = await api.request("GET", `/api/image-editor/sessions/${selection.sourceCardId}`);
+  assert.deepEqual(draft.body.data.operations.map((item) => item.type), ["re_edit"]);
+  const { originalText, newText, region } = (await response.json()).data.snapshot.operations[0].payload;
+  assert.equal(originalText, "旧卖点标题");
+  assert.equal(newText, "65W 便携快充");
+  assert.equal(region.rotation, 0);
+  for (const [key, value] of Object.entries({ x: 0.2, y: 0.2, width: 0.3, height: 0.15 })) {
+    assert.ok(Math.abs(region[key] - value) < 0.02, `Unexpected manual region ${key}: ${region[key]}`);
+  }
   await dialog.waitFor({ state: "hidden" });
 
   await page.locator(".wb-edit-child-card").first().waitFor();
   await page.locator(".wb-edit-child-card").first().locator(".wb-card-state").filter({ hasText: /^已生成$/ }).waitFor();
+  assert.deepEqual(ocrRequests, []);
+});
+
+test("创作画布：将新文字手工改回原文会清理已存草稿", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId, tasks: [taskId] } = await seedGeneratedCanvas(api, 1);
+  const workbench = await api.request("GET", `/api/suites/${suiteId}/workbench`);
+  const versionId = workbench.body.data.tasks.find((task) => task.id === taskId).versions[0].id;
+  const sessionPath = `/api/image-editor/sessions/${taskId}`;
+  const savedDraft = await api.request("POST", sessionPath + "/operations", {
+    body: { operation: {
+      operationId: "saved-change-text",
+      type: "change_text",
+      summary: "编辑旧标题",
+      sourceCardId: taskId,
+      sourceVersionId: versionId,
+      parentVersionId: versionId,
+      payload: { originalText: "旧标题", newText: "草稿标题", region: { x: 0.2, y: 0.2, width: 0.3, height: 0.15, rotation: 0 } },
+    } },
+  });
+  assert.equal(savedDraft.status, 200);
+
+  await page.goto(url + `create/canvas/${suiteId}`);
+  const edit = page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit");
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  const textTool = dialog.locator(".wb-editor-tools button", { hasText: "编辑文字" });
+  await edit.click();
+  await textTool.click();
+  const replacement = dialog.getByLabel("新文字：旧标题", { exact: true });
+  assert.equal(await replacement.inputValue(), "草稿标题");
+  assert.equal(await replacement.getAttribute("maxlength"), "500");
+  assert.equal(await dialog.getByLabel("原文字", { exact: true }).getAttribute("maxlength"), "500");
+
+  const removed = page.waitForResponse((response) => response.request().method() === "DELETE"
+    && response.url().endsWith(sessionPath + "/operations/saved-change-text"));
+  await replacement.fill("旧标题");
+  assert.equal((await removed).status(), 200);
+  const draft = await api.request("GET", sessionPath);
+  assert.deepEqual(draft.body.data.operations, []);
+  await dialog.getByRole("button", { name: "关闭图片编辑器" }).click();
+  await edit.click();
+  await textTool.click();
+  await dialog.getByText("已修改 0 条", { exact: true }).waitFor();
+  assert.equal(await replacement.count(), 0);
+});
+
+test("创作画布：没有商品原图时上传依据图并完成商品还原", async (t) => {
+  const { api, url, page } = await offlineCanvas(t);
+  const { suiteId } = await seedGeneratedCanvas(api, 1);
+  await page.goto(url + `create/canvas/${suiteId}`);
+  await page.locator(".wb-task-card .wb-card-edit").first().click();
+  const dialog = page.getByRole("dialog", { name: "图片编辑器" });
+  await dialog.getByRole("button", { name: /^商品还原/ }).click();
+  await dialog.getByText("当前图片没有商品原图，请上传一张依据图。").waitFor();
+  const restore = dialog.getByRole("button", { name: "还原商品", exact: true });
+  assert.equal(await restore.isDisabled(), true);
+  await dialog.getByLabel("上传", { exact: true }).setInputFiles("public/assets/gan65-product.jpg");
+  const preview = dialog.getByRole("img", { name: "已上传的商品外观依据图" });
+  await preview.waitFor();
+  await preview.evaluate((image) => image.decode());
+  const submitted = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await restore.click();
+  const response = await submitted;
+  assert.equal(response.status(), 202);
+  const { snapshot } = (await response.json()).data;
+  assert.equal(snapshot.tool, "restore_product");
+  assert.equal(snapshot.attachedInputs.length, 1);
+  assert.match(snapshot.attachedInputs[0].objectKey, /\/restore-inputs\//);
+  await dialog.waitFor({ state: "hidden" });
+  await page.locator(".wb-edit-child-card .wb-card-state").filter({ hasText: /^已生成$/ }).waitFor();
 });
 
 test("图片资源库联动：画布单卡归档后 /assets 隐藏且预览仍 200；编辑器派生图进入 /assets 标注编辑生成并可软删除", async (t) => {
@@ -511,9 +538,8 @@ test("图片资源库联动：画布单卡归档后 /assets 隐藏且预览仍 2
   await page.locator(".wb-task-card:not(.wb-edit-child-card) .wb-card-edit").first().click();
   const editorDialog = page.getByRole("dialog", { name: "图片编辑器" });
   await editorDialog.waitFor();
-  await editorDialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
-  await editorDialog.getByLabel("原文字").fill("旧标题");
-  await editorDialog.getByLabel("新文字").fill("新品主图");
+  await editorDialog.locator(".wb-editor-tools button", { hasText: "编辑文字" }).click();
+  await addManualTextEdit(page, editorDialog, "旧标题", "新品主图");
   await editorDialog.getByRole("button", { name: "开始生成（新建编辑子卡）" }).click();
   await editorDialog.waitFor({ state: "hidden" });
   await page.locator(".wb-edit-child-card").first().locator(".wb-card-state").filter({ hasText: /^已生成$/ }).waitFor();

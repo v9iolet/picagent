@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
+import { APLUS_MODULES } from "../shared/aplus.js";
 
-export const PROMPT_STAGES = ["base_refine", "plan", "structure_plan", "category_prompt", "task_image", "reverse_prompt", "listing_copy", "replica_prompt", "product_onboarding"] as const;
+export const PROMPT_STAGES = [
+  "base_refine", "plan", "structure_plan", "category_prompt", "task_image",
+  "reverse_prompt", "listing_copy", "replica_prompt", "product_onboarding",
+  "aplus_plan", "aplus_module_rule", "aplus_image", "aplus_ai_write",
+] as const;
 export type PromptStage = (typeof PROMPT_STAGES)[number];
 export type PromptVersionStatus = "draft" | "published" | "retired";
 
@@ -18,14 +23,18 @@ export const IN_USE_PROMPT_STAGES: readonly PromptStage[] = [
   "base_refine",
   "structure_plan",
   "category_prompt",
+  "task_image",
   "listing_copy",
   "replica_prompt",
   "product_onboarding",
+  "aplus_plan",
+  "aplus_module_rule",
+  "aplus_image",
+  "aplus_ai_write",
 ];
 
 export const UNUSED_PROMPT_STAGES: readonly PromptStage[] = [
   "plan",
-  "task_image",
   "reverse_prompt",
 ];
 
@@ -35,6 +44,7 @@ export function resolvePromptTemplateUsedBy(template: {
   applicability?: Record<string, unknown> | null;
 }): string[] {
   const code = typeof template.code === "string" ? template.code.trim() : "";
+  if (template.stage === "task_image" && code.startsWith("image-editor.")) return ["图片编辑"];
   if (code && code in PROMPT_TEMPLATE_USAGE_BY_CODE) {
     return [...PROMPT_TEMPLATE_USAGE_BY_CODE[code as keyof typeof PROMPT_TEMPLATE_USAGE_BY_CODE]];
   }
@@ -55,6 +65,14 @@ export function resolvePromptTemplateUsedBy(template: {
     }
     case "product_onboarding":
       return ["首页·商品信息建档"];
+    case "aplus_plan":
+      return ["A+详情·方案规划"];
+    case "aplus_module_rule":
+      return ["A+详情·模块规则"];
+    case "aplus_image":
+      return ["A+详情·出图"];
+    case "aplus_ai_write":
+      return ["A+详情·AI 帮写"];
     default:
       return [];
   }
@@ -164,6 +182,23 @@ export function validatePromptTemplateContract(
     if (!record.body.includes("replica-prompt-v1")) throw new Error(`Replica template ${record.code} body must declare replica-prompt-v1`);
     const cloneLevel = record.applicability?.cloneLevel;
     if (cloneLevel !== "compose" && cloneLevel !== "high") throw new Error(`Replica template ${record.code} applicability.cloneLevel must be compose or high`);
+    return;
+  }
+  if (record.stage === "aplus_plan" || record.stage === "aplus_module_rule" || record.stage === "aplus_image" || record.stage === "aplus_ai_write") {
+    const [kind, target] = record.stage === "aplus_image" ? ["direct_generation", "image_model"] : ["planner", "llm"];
+    if (record.kind !== kind || record.executionTarget !== target) throw new Error(`A+ template ${record.code} must be a ${target} ${kind}`);
+    if (record.stage === "aplus_module_rule") {
+      const moduleCode = record.applicability?.moduleCode;
+      if (!APLUS_MODULES.some(({ code }) => code === moduleCode) || record.code !== `aplus.module.${moduleCode}`) {
+        throw new Error(`A+ module rule ${record.code} must use a valid applicability.moduleCode matching its code`);
+      }
+    }
+    if (record.stage === "aplus_plan") {
+      const schemaVersion = (record.outputSchema.properties as Record<string, unknown> | undefined)?.schemaVersion as Record<string, unknown> | undefined;
+      if (schemaVersion?.const !== "aplus-plan-v1" || !record.body.includes("aplus-plan-v1")) {
+        throw new Error(`A+ plan template ${record.code} must declare aplus-plan-v1 in its schema and body`);
+      }
+    }
     return;
   }
   if (record.stage !== "structure_plan" && record.stage !== "category_prompt" && record.stage !== "listing_copy") return;

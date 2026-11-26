@@ -27,7 +27,8 @@ export function parseMultipartFile(body: Buffer, contentType: string): { filenam
 
 // Kept outside index.ts so the actual HTTP dispatcher can run without PostgreSQL or MinIO.
 export async function dispatchInputImageUpload(app: SuiteStudioApp, path: string, body: Buffer, headers: Record<string, string | undefined>): Promise<AppResponse | null> {
-  if (/^\/api\/listing-copies\/[^/]+\/input-images$/.test(path)) {
+  if (/^\/api\/listing-copies\/[^/]+\/input-images$/.test(path) ||
+      /^\/api\/image-editor\/sessions\/[^/]+\/versions\/[^/]+\/restore-inputs$/.test(path)) {
     const file = parseMultipartFile(body, headers["content-type"] ?? "");
     if (!file) return { status: 400, body: { error: { code: "INVALID_MULTIPART", message: "未找到图片文件" }, requestId: "" } };
     return app.request("POST", path, { body: file });

@@ -70,19 +70,24 @@ export class PostgresSuiteRepository implements SuiteRepository {
 
   async createSuite(name: string, idempotencyKey?: string, origin: SuiteOrigin = "suite_studio") {
     const client = await this.pool.connect();
+    const scope = origin === "aplus" ? "aplus.create" : "suite.create";
     try {
       await client.query("BEGIN");
       if (idempotencyKey) {
-        const existing = await client.query<{ resource_id: string }>("SELECT resource_id FROM suite_workbench.idempotency_keys WHERE scope = $1 AND key = $2", ["suite.create", idempotencyKey]);
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${scope}:${idempotencyKey}`]);
+        const existing = await client.query<{ resource_id: string }>("SELECT resource_id FROM suite_workbench.idempotency_keys WHERE scope = $1 AND key = $2", [scope, idempotencyKey]);
         if (existing.rowCount) {
           const suite = await this.getSuite(existing.rows[0].resource_id, client);
-          await client.query("COMMIT");
-          return suite!;
+          if (suite) {
+            await client.query("COMMIT");
+            return suite;
+          }
+          await client.query("DELETE FROM suite_workbench.idempotency_keys WHERE scope = $1 AND key = $2", [scope, idempotencyKey]);
         }
       }
       const result = await client.query<Suite>("INSERT INTO suite_workbench.suites (id, name, status, origin, created_at, updated_at) VALUES (gen_random_uuid(), $1, 'draft', $2, now(), now()) RETURNING id, name, status, origin, created_at AS \"createdAt\", updated_at AS \"updatedAt\"", [name, origin]);
       const suite = normalizeSuite(result.rows[0]);
-      if (idempotencyKey) await client.query("INSERT INTO suite_workbench.idempotency_keys (scope, key, resource_id) VALUES ($1, $2, $3)", ["suite.create", idempotencyKey, suite.id]);
+      if (idempotencyKey) await client.query("INSERT INTO suite_workbench.idempotency_keys (scope, key, resource_id) VALUES ($1, $2, $3)", [scope, idempotencyKey, suite.id]);
       await client.query("COMMIT");
       return suite;
     } catch (error) {
@@ -101,6 +106,14 @@ export class PostgresSuiteRepository implements SuiteRepository {
   async getSuite(id: string, client: Pool | PoolClient = this.pool) {
     const result = await client.query<Suite>("SELECT id, name, status, origin, style_override AS \"styleOverride\", style_override_updated_at AS \"styleOverrideUpdatedAt\", created_at AS \"createdAt\", updated_at AS \"updatedAt\" FROM suite_workbench.suites WHERE id = $1 AND deleted_at IS NULL", [id]);
     return result.rows[0] ? normalizeSuite(result.rows[0]) : null;
+  }
+
+  async findAplusSuiteByIdempotencyKey(key: string) {
+    const result = await this.pool.query<{ resource_id: string }>(
+      "SELECT resource_id FROM suite_workbench.idempotency_keys WHERE scope = 'aplus.create' AND key = $1",
+      [key],
+    );
+    return result.rows[0] ? this.getSuite(result.rows[0].resource_id) : null;
   }
 
   async renameSuite(suiteId: string, name: string) {
@@ -207,6 +220,8 @@ export class PostgresSuiteRepository implements SuiteRepository {
         await client.query("COMMIT");
         return { attempt: normalizeAttempt(existing.rows[0]), existingVersion: version.rows[0] ? normalizeBaseVersion(version.rows[0]) : null, duplicate: true };
       }
+      const running = await client.query("SELECT 1 FROM suite_workbench.generation_attempts WHERE input_image_id=$1 AND status='running' LIMIT 1", [input.inputImageId]);
+      if (running.rowCount) throw new Error("BASE_GENERATION_IN_PROGRESS");
       const next = await client.query<{ version_number: number }>("SELECT COALESCE(MAX(version_number), 0) + 1 AS version_number FROM suite_workbench.generation_attempts WHERE input_image_id = $1 AND status IN ('running', 'succeeded')", [input.inputImageId]);
       const result = await client.query<GenerationAttempt>(`INSERT INTO suite_workbench.generation_attempts
         (id, suite_id, input_image_id, base_version_id, version_number, idempotency_key, status, model, endpoint, prompt,

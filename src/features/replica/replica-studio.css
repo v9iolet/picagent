@@ -734,10 +734,6 @@
   line-height: 1.35;
 }
 
-.rp-card-actions {
-  align-items: center;
-}
-
 .rp-card-menu {
   margin-left: auto;
 }
@@ -745,10 +741,6 @@
 .rp-card-menu-list {
   min-width: 150px;
   z-index: 12;
-}
-
-.ss-layout .rp-danger-menuitem {
-  color: var(--pa-danger);
 }
 
 .rp-batch-empty {

@@ -1,0 +1,350 @@
+.aplus-section-heading,
+.aplus-batch-title,
+.aplus-title-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aplus-section-heading {
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.aplus-section-heading h2 {
+  margin: 0;
+}
+
+.aplus-size-options {
+  border: 0;
+  padding: 0;
+  margin: 12px 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.aplus-size-options .aplus-pixel-size,
+.aplus-size-options > small {
+  grid-column: 1 / -1;
+}
+
+.aplus-size-options legend {
+  margin-bottom: 5px;
+}
+
+.aplus-size-options label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.aplus-size-options input,
+.aplus-module-options input {
+  margin: 0;
+  accent-color: var(--pa-accent);
+}
+
+.aplus-resolution summary,
+.aplus-global-plan summary {
+  cursor: pointer;
+}
+
+.aplus-resolution .ss-fields {
+  margin: 8px 0 4px;
+}
+
+.aplus-ai-write {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.aplus-ai-write,
+.aplus-plan-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.aplus-ai-write svg,
+.aplus-drag-handle svg,
+.aplus-plan-actions svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+}
+
+.aplus-product-info-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aplus-char-count {
+  margin-left: auto;
+}
+
+.aplus-module-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.aplus-module-options label {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  cursor: pointer;
+  padding: 8px;
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-md, 8px);
+}
+
+.aplus-module-options label:hover {
+  border-color: var(--pa-border-strong);
+}
+
+.aplus-module-options label.is-selected {
+  border-color: color-mix(in srgb, var(--pa-accent) 45%, var(--pa-border));
+  background: var(--pa-accent-soft);
+}
+
+.aplus-module-options input {
+  margin-top: 4px;
+}
+
+.aplus-module-options strong,
+.aplus-module-options small {
+  display: block;
+}
+
+.aplus-layout .aplus-submit-reason {
+  margin-bottom: 7px;
+  color: var(--pa-muted);
+  font-size: 12px;
+}
+
+.aplus-batch-title {
+  flex-wrap: wrap;
+}
+
+.aplus-title-form input {
+  min-width: 0;
+  width: min(36vw, 270px);
+}
+
+.aplus-showcase {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: clamp(24px, 4vw, 58px);
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-lg, 12px);
+  background: var(--pa-surface);
+}
+
+.aplus-showcase header {
+  margin-bottom: 22px;
+}
+
+.aplus-showcase h3 {
+  font-size: 22px;
+}
+
+.aplus-showcase p {
+  margin-top: 6px;
+  color: var(--pa-muted);
+}
+
+.aplus-showcase-grid,
+.aplus-result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(175px, 100%), 1fr));
+  gap: 12px;
+}
+
+.aplus-showcase figure,
+.aplus-result-card,
+.aplus-plan-list li,
+.aplus-global-plan {
+  overflow: hidden;
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-md, 8px);
+  background: var(--pa-surface);
+}
+
+.aplus-showcase img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+}
+
+.aplus-showcase figcaption,
+.aplus-card-body {
+  padding: 10px 12px;
+}
+
+.aplus-review {
+  max-width: 860px;
+}
+
+.aplus-global-plan,
+.aplus-plan-list li {
+  padding: 12px 14px;
+}
+
+.aplus-global-plan p {
+  margin-top: 7px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.aplus-plan-list {
+  display: grid;
+  gap: 9px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.aplus-plan-list .is-dragging {
+  opacity: 0.55;
+}
+
+.aplus-plan-list textarea {
+  display: block;
+  margin-top: 5px;
+}
+
+.aplus-plan-module-name,
+.aplus-plan-actions,
+.aplus-review-actions,
+.aplus-review-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.aplus-drag-handle[draggable="true"] {
+  cursor: grab;
+}
+
+.aplus-review-toolbar {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.aplus-review-actions {
+  gap: 8px;
+}
+
+.aplus-review-actions .ss-primary {
+  width: auto;
+}
+
+.aplus-results-group {
+  margin-top: 20px;
+}
+
+.aplus-results-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+
+.aplus-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.aplus-result-card .aplus-section-heading,
+.aplus-result-card .aplus-plan-module-name {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.aplus-result-card .aplus-drag-handle {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.aplus-result-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aplus-result-card .aplus-section-heading small {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.aplus-result-card[draggable="true"] {
+  cursor: grab;
+}
+
+.aplus-result-card.is-dragging {
+  opacity: 0.55;
+}
+
+.aplus-result-card.is-drag-over {
+  border-color: var(--pa-accent);
+  outline: 1px solid var(--pa-accent);
+}
+
+.aplus-long-image img {
+  display: block;
+  width: 100%;
+}
+
+.aplus-result-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(235px, 100%), 1fr));
+}
+
+.aplus-card-image {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--pa-surface-soft);
+  color: var(--pa-muted);
+}
+
+.aplus-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.ss-layout .aplus-card-image-btn {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.aplus-card-image-btn img {
+  display: block;
+}
+
+.aplus-card-body .ss-actions {
+  margin-top: 10px;
+}
+
+.aplus-action-form {
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}

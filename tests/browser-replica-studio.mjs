@@ -32,7 +32,9 @@ async function offlineReplicaStudio(t, gates = {}) {
   const libraryRepository = new MemoryLibraryRepository();
   const editorRepository = new MemoryImageEditorRepository();
 
-  const editorSource = { bytes: sampleResult, mimeType: "image/jpeg", width: 64, height: 64 };
+  const productInputs = ["test/replica-product-front.jpg", "test/replica-product-side.jpg"].map((objectKey) => ({ objectKey, role: "product" }));
+  for (const { objectKey } of productInputs) await storage.put({ key: objectKey, bytes: sampleProduct, contentType: "image/jpeg" });
+  const editorSource = { bytes: sampleResult, mimeType: "image/jpeg", width: 64, height: 64, productInputs };
   const editorService = new ImageEditorService(
     editorRepository,
     {
@@ -178,6 +180,7 @@ async function offlineReplicaStudio(t, gates = {}) {
     preferences: {
       image: { channelId: "offline", modelId: "gpt-image-2" },
       vision: { channelId: "offline", modelId: "gpt-image-2" },
+      video: null,
     },
   };
 
@@ -265,7 +268,7 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await page.goto(url + "reverse");
   await page.waitForURL("**/create/replica");
   const tools = page.getByRole("navigation", { name: "创作功能" });
-  assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图复刻"]);
+  assert.deepEqual(await tools.getByRole("link").allTextContents(), ["商品套图", "生图画布", "爆品图复刻", "A+详情"]);
   assert.equal(await tools.getByRole("link", { name: "爆品图复刻", exact: true }).getAttribute("aria-current"), "page");
 
   await page.getByRole("heading", { name: "爆品图复刻", level: 2, exact: true }).waitFor();
@@ -467,14 +470,15 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
 
   // 9. Card 1: in-place Image Editor -> verify edited state + readonly analysis snapshot -> edit prompt & regenerate -> must show v2 (not swallowed by edit child)
   const firstCard = cards.first();
-  await firstCard.getByRole("button", { name: "编辑图片", exact: true }).click();
+  await firstCard.getByRole("button", { name: "图片编辑", exact: true }).click();
   const editorDialog = page.getByRole("dialog", { name: "图片编辑器" });
   await editorDialog.waitFor();
   assert.equal(new URL(page.url()).pathname, "/create/replica");
   assert.equal(new URL(page.url()).searchParams.get("suite"), suiteId);
-  await editorDialog.locator(".wb-editor-tools button", { hasText: "改文字" }).click();
+  await editorDialog.getByRole("button", { name: "关闭图片编辑器" }).click();
+  await firstCard.getByRole("button", { name: "AI 改字", exact: true }).click();
   await editorDialog.getByRole("button", { name: /快充随行/ }).waitFor();
-  await editorDialog.getByLabel("新文字").fill("极速快充");
+  await editorDialog.getByLabel("新文字：快充随行").fill("极速快充");
   const editSubmitReq = page.waitForResponse(
     (res) => res.url().includes("/api/image-editor/sessions/") && res.url().endsWith("/submit"),
   );
@@ -485,7 +489,8 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   await firstCard.getByText("已编辑 · v1", { exact: true }).waitFor();
 
   // Open prompt dialog on edited card -> verify readonly analysis snapshot (sharedStyle/copy/visualStructure) is still intact, then edit prompt & regenerate
-  await firstCard.getByRole("button", { name: "提示词", exact: true }).click();
+  await firstCard.getByRole("button", { name: /更多操作/ }).click();
+  await firstCard.getByRole("menuitem", { name: "查看/编辑提示词", exact: true }).click();
   const promptDialog = page.getByRole("dialog", { name: /提示词/ });
   await promptDialog.waitFor();
   await promptDialog.getByText("提示词修订 v1", { exact: true }).waitFor();
@@ -509,12 +514,24 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   assert.equal(regenPromptCall?.body?.promptDraft, editedPromptText);
 
   // Reopen prompt dialog and verify promptRevision updated to v2 with edited prompt
-  await firstCard.getByRole("button", { name: "提示词", exact: true }).click();
+  await firstCard.getByRole("button", { name: /更多操作/ }).click();
+  await firstCard.getByRole("menuitem", { name: "查看/编辑提示词", exact: true }).click();
   await promptDialog.waitFor();
   await promptDialog.getByText("提示词修订 v2", { exact: true }).waitFor();
   assert.equal(await promptDialog.getByLabel("复刻提示词", { exact: true }).inputValue(), editedPromptText);
   await promptDialog.getByRole("button", { name: "取消", exact: true }).click();
   await promptDialog.waitFor({ state: "hidden" });
+
+  await firstCard.getByRole("button", { name: "商品还原", exact: true }).click();
+  await editorDialog.getByRole("radio", { name: "使用全部商品原图", checked: true }).waitFor();
+  await editorDialog.getByRole("radio", { name: "原图 2", exact: true }).check();
+  const restoreRequest = page.waitForResponse((response) => response.url().endsWith("/submit"));
+  await editorDialog.getByRole("button", { name: "还原商品", exact: true }).click();
+  const restored = await restoreRequest;
+  assert.equal(restored.status(), 202);
+  assert.deepEqual((await restored.json()).data.snapshot.attachedInputs, [{ objectKey: "test/replica-product-side.jpg", role: "product" }]);
+  await editorDialog.waitFor({ state: "hidden" });
+  await firstCard.getByText("已编辑 · v1", { exact: true }).waitFor();
 
   // 10. Single-card download & batch ZIP download
   const singleDownload = page.waitForEvent("download");
@@ -539,8 +556,11 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   const origRegenReq = page.waitForResponse(
     (res) => res.request().method() === "POST" && res.url().includes("/api/suite-tasks/") && res.url().endsWith("/generation"),
   );
-  await secondCard.getByRole("button", { name: "重新生成", exact: true }).click();
-  await origRegenReq;
+  await secondCard.getByRole("button", { name: "重绘", exact: true }).click();
+  const redrawDialog = page.getByRole("dialog", { name: "重绘图片" });
+  await redrawDialog.getByLabel("附加提示词（选填）").fill("增强金属反光");
+  await redrawDialog.getByRole("button", { name: "确认重绘" }).click();
+  assert.deepEqual((await origRegenReq).request().postDataJSON(), { additionalPrompt: "增强金属反光" });
   await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
   await secondCard.getByText("v2", { exact: true }).waitFor();
 
@@ -553,9 +573,8 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   assert.equal(saveReverseRes.status(), 201);
   await batch.getByText(/已存为爆品图反推资产/).waitFor();
 
-  await secondCard.getByRole("button", { name: /更多操作/ }).click();
-  await secondCard.getByRole("menuitem", { name: "删除", exact: true }).click();
-  const deleteCardDialog = page.getByRole("dialog", { name: "删除复刻卡片" });
+  await secondCard.getByRole("button", { name: "删除", exact: true }).click();
+  const deleteCardDialog = page.getByRole("dialog", { name: "删除结果卡" });
   await deleteCardDialog.waitFor();
   await deleteCardDialog.getByRole("button", { name: "确认删除", exact: true }).click();
   await deleteCardDialog.waitFor({ state: "hidden" });
@@ -615,8 +634,7 @@ test("爆品图复刻：路由重定向、配置栏交互、结果区单卡与�
   // 15. Template library includes replica_prompt stage filter & label
   await page.goto(url + "templates");
   await page.getByRole("radio", { name: "爆品图复刻", exact: true }).check();
-  await page.locator(".template-card").first().waitFor();
-  assert.equal(await page.locator(".template-card .badge", { hasText: "爆品图复刻" }).count() >= 2, true);
+  await page.locator(".template-card .badge", { hasText: "爆品图复刻" }).nth(1).waitFor();
 });
 
 test("爆品图复刻：失败单卡展示错误原因并支持单卡重新生成恢复", async (t) => {
@@ -638,7 +656,11 @@ test("爆品图复刻：失败单卡展示错误原因并支持单卡重新生�
 
   // Recover via single-card regenerate button
   failFirstRun = false;
-  await card.getByRole("button", { name: "重新生成", exact: true }).click();
+  for (const name of ["下载", "图片编辑", "商品还原", "AI 改字"]) {
+    assert.equal(await card.getByRole("button", { name, exact: true }).isDisabled(), true);
+  }
+  await card.getByRole("button", { name: "重绘", exact: true }).click();
+  await page.getByRole("dialog", { name: "重绘图片" }).getByRole("button", { name: "确认重绘" }).click();
   await batch.getByText("图片已更新", { exact: true }).waitFor({ timeout: 10000 });
   await batch.locator('[data-status="completed"]').waitFor({ timeout: 10000 });
   await card.locator("img").first().waitFor();
