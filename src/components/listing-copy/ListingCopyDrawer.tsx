@@ -80,7 +80,7 @@ export function ListingCopyDrawer({ state, profiles, close }: {
   }
 
   return (
-    <StudioDialog title="商品上架文案" className="lc-drawer" close={() => { if (!busy) close(); }}>
+    <StudioDialog title="商品上架文案" className="lc-drawer" close={close} dismissDisabled={busy}>
       <p className="lc-batch-name">{state.suite.name}</p>
       {id ? <DrawerJob key={id} id={id} initial={discovered?.id === id ? discovered.job : undefined} profiles={profiles} setBusy={setBusy} />
         : readError ? <p role="alert" className="lc-error">{readError} <button onClick={() => { setReadError(""); setChecking(true); }}>重试读取</button></p>

@@ -9,13 +9,14 @@ interface DrawerProps {
   closeLabel?: string;
   onClose: () => void;
   dismissDisabled?: boolean;
+  closeOnBackdrop?: boolean;
   className?: string;
   backdropClassName?: string;
   children: ReactNode;
 }
 
 export function Drawer({
-  title, titleId, eyebrow, closeLabel = "关闭", onClose, dismissDisabled,
+  title, titleId, eyebrow, closeLabel = "关闭", onClose, dismissDisabled, closeOnBackdrop,
   className = "", backdropClassName = "", children,
 }: DrawerProps) {
   const id = useId();
@@ -25,6 +26,7 @@ export function Drawer({
       aria-labelledby={titleId ?? id}
       onClose={onClose}
       dismissDisabled={dismissDisabled}
+      closeOnBackdrop={closeOnBackdrop}
       backdropClassName={`pa-drawer-backdrop ${backdropClassName}`}
       className={`pa-drawer ${className}`}
     >

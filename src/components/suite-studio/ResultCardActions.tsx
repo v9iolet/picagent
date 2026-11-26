@@ -78,7 +78,7 @@ export function ResultCardActions({
         {children}
       </div>
       {dialog && (
-        <StudioDialog title={dialog === "redraw" ? "重绘图片" : "删除结果卡"} close={() => { if (!submitting) setDialog(null); }}>
+        <StudioDialog title={dialog === "redraw" ? "重绘图片" : "删除结果卡"} close={() => setDialog(null)} dismissDisabled={submitting}>
           <form className="ss-card-action-form" onSubmit={(event) => { event.preventDefault(); void confirm(); }}>
             {dialog === "redraw" ? (
               <>

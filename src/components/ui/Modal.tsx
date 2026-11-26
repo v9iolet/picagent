@@ -19,10 +19,15 @@ export function Modal({
   "aria-label": label, "aria-labelledby": labelledBy, children, ...panelProps
 }: ModalProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const closingRef = useRef(false);
   useLayoutEffect(() => {
     const dialog = dialogRef.current!;
+    closingRef.current = false;
     dialog.showModal();
-    return () => dialog.close();
+    return () => {
+      closingRef.current = true;
+      dialog.close();
+    };
   }, []);
 
   return createPortal(
@@ -33,9 +38,21 @@ export function Modal({
       aria-label={label}
       aria-labelledby={labelledBy}
       className={`pa-modal-backdrop ${backdropClassName}`.trim()}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && dismissDisabled && event.target instanceof Node && event.currentTarget.contains(event.target)) {
+          event.preventDefault();
+        }
+      }}
       onCancel={(event) => {
         event.preventDefault();
         if (!dismissDisabled && event.target === event.currentTarget) onClose();
+      }}
+      onClose={(event) => {
+        const dialog = dialogRef.current;
+        // Native close requests can be non-cancelable while React still renders the modal.
+        if (!closingRef.current && event.target === event.currentTarget && dialog && !dialog.open) {
+          dialog.showModal();
+        }
       }}
       onMouseDown={(event) => {
         if (closeOnBackdrop && !dismissDisabled && event.target === event.currentTarget) onClose();

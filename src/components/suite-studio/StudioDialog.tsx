@@ -5,12 +5,14 @@ export function StudioDialog({
   title,
   close,
   children,
+  dismissDisabled,
   wide = false,
   className = "",
 }: {
   title: string;
   close: () => void;
   children: ReactNode;
+  dismissDisabled?: boolean;
   wide?: boolean;
   className?: string;
 }) {
@@ -21,11 +23,12 @@ export function StudioDialog({
       className={`ss-dialog${wide ? " wide" : ""} ${className}`.trim()}
       backdropClassName="ss-dialog-backdrop"
       closeOnBackdrop={false}
+      dismissDisabled={dismissDisabled}
       onClose={close}
     >
       <header>
         <h2>{title}</h2>
-        <button onClick={close} aria-label="关闭">
+        <button onClick={close} aria-label="关闭" disabled={dismissDisabled}>
           ×
         </button>
       </header>
