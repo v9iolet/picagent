@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import dns from "node:dns";
+import { createServer } from "node:http";
+import net from "node:net";
 import sharp from "sharp";
 import { randomUUID } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import test, { type TestContext } from "node:test";
 import { GptImageProvider } from "../server/providers/gpt-image-provider.js";
+import { createImageUrlDispatcher, downloadImageUrl } from "../server/providers/download-image-url.js";
 import type { ImageEditRequest } from "../server/types.js";
 
 const request = (requestId: string): ImageEditRequest => ({ requestId, endpoint: "/v1/images/edits", image: Buffer.from("source"), imageMimeType: "image/png", imageFilename: "source.png", model: "gpt-image-2", prompt: "保留商品", size: "2048x3072", quality: "medium", n: 1, responseFormat: "b64_json" });
@@ -128,6 +131,102 @@ test("checks every DNS answer in the actual download connection", async (t) => {
     init.method === "POST" ? Response.json({ data: [{ url: signedUrl }] }) : fetch(url, init));
   await assert.rejects(provider().edit(request(randomUUID())), { message: "INVALID_PROVIDER_RESPONSE" });
   assert.equal(lookup.mock.callCount(), 1);
+});
+
+test("the download socket accepts public DNS and a detected TUN pool, excluding local endpoints and IP literals", async (t) => {
+  const bytes = await sharp({ create: { width: 2, height: 2, channels: 3, background: "navy" } }).png().toBuffer();
+  let requests = 0;
+  const server = createServer((_req, res) => {
+    requests++;
+    res.writeHead(200, { "content-type": "image/png" }).end(bytes);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const { port } = server.address() as net.AddressInfo;
+  // Simulate only the TUN's routing: let the real Agent and socket run their lookup,
+  // then deliver accepted connections to our local HTTP server instead of the network.
+  const connect = net.connect;
+  const accepted: string[] = [];
+  t.mock.method(net, "connect", (options) => {
+    assert.equal(options.host, "images.example.test");
+    return connect({
+      ...options,
+      lookup(hostname, flags, callback) {
+        options.lookup(hostname, flags, (error, result) => {
+          if (error) return callback(error);
+          accepted.push(...(flags.all ? result.map((entry: dns.LookupAddress) => entry.address) : [result]));
+          if (flags.all) callback(null, [{ address: "127.0.0.1", family: 4 }]);
+          else callback(null, "127.0.0.1", 4);
+        });
+      },
+    });
+  });
+
+  const tun = { address: "198.18.0.1", family: "IPv4" as const, internal: false, cidr: "198.18.0.1/15", mac: "", netmask: "255.254.0.0" };
+  async function check(address: string, dnsServers: string[], hasTun: boolean, allowed: boolean, literal = false) {
+    let lookups = 0;
+    const before = requests;
+    const dispatcher = createImageUrlDispatcher({
+      dnsLookup(hostname, callback) {
+        assert.equal(hostname, "images.example.test");
+        lookups++;
+        callback(null, [{ address, family: net.isIP(address) }]);
+      },
+      getDnsServers: () => dnsServers,
+      getNetworkInterfaces: () => hasTun ? { utun6: [tun] } : {},
+    });
+    try {
+      const download = downloadImageUrl(`http://${literal ? address : "images.example.test"}:${port}/img.png`, AbortSignal.timeout(3000), dispatcher);
+      if (allowed) {
+        assert.deepEqual(await download, { bytes, mimeType: "image/png" });
+        assert.equal(accepted.pop(), address);
+      } else {
+        await assert.rejects(download, { message: "INVALID_PROVIDER_RESPONSE" }, address);
+      }
+      assert.equal(lookups, literal ? 0 : 1);
+      assert.equal(requests, before + Number(allowed));
+    } finally {
+      await dispatcher.close();
+    }
+  }
+  const publicDns = ["8.8.8.8"];
+  const tunDns = ["198.18.0.2:53"];
+  await check("8.8.4.4", publicDns, false, true);
+  await check("198.18.0.125", publicDns, false, false);
+  await check("198.18.0.125", tunDns, false, true);
+  await check("198.18.0.125", tunDns, true, true);
+  await check("198.19.0.125", publicDns, true, true);
+  for (const address of ["198.18.0.1", "198.18.0.2", "198.18.0.0", "198.19.255.255",
+    "10.0.0.1", "127.0.0.1", "172.16.0.1", "192.168.0.1", "169.254.1.1", "100.64.0.1", "::1", "fe80::1", "fc00::1"]) {
+    await check(address, tunDns, true, false);
+  }
+  await check("198.18.0.125", tunDns, true, false, true);
+});
+
+test("a temporary CDN failure retries only the same image GET", async (t) => {
+  const bytes = await sharp({ create: { width: 2, height: 2, channels: 3, background: "red" } }).png().toBuffer();
+  let posts = 0;
+  let gets = 0;
+  t.mock.method(globalThis, "fetch", async (url, init: RequestInit) => {
+    if (init.method === "POST") {
+      posts++;
+      return Response.json({ data: [{ url: signedUrl }] });
+    }
+    assert.equal(String(url), signedUrl);
+    assert.equal(init.method ?? "GET", "GET");
+    return ++gets === 1 ? new Response(null, { status: 503 }) : new Response(bytes);
+  });
+  assert.deepEqual(await provider().edit(request(randomUUID())), { bytes, mimeType: "image/png" });
+  assert.deepEqual([posts, gets], [1, 2]);
+});
+
+test("the provider deadline cancels the delay before a second GET", async (t) => {
+  const fetcher = t.mock.method(globalThis, "fetch", async (_url, init: RequestInit) =>
+    init.method === "POST" ? Response.json({ data: [{ url: signedUrl }] }) : new Response(null, { status: 503 }));
+  await assert.rejects(new GptImageProvider("https://example.test/v1", "channel-key", 25).edit(request(randomUUID())), {
+    message: "IMAGE_PROVIDER_TIMEOUT",
+  });
+  assert.equal(fetcher.mock.callCount(), 2);
 });
 
 test("a download that stalls is cancelled by the provider deadline and archived without the signed URL", async (t) => {

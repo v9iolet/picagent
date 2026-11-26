@@ -26,7 +26,7 @@ import { makeAplusEditorSourceResolver } from "./aplus-editor-fixture.js";
 
 const ocrBounds = { x: 0.16, y: 0.12, width: 0.25, height: 0.1 };
 
-async function startOfflineAplus(t) {
+async function startOfflineAplus(t, { planningGate, imageGate } = {}) {
   const prompts = new MemoryPromptRepository();
   const names = ["aplus-plan", "aplus-image", "aplus-ai-write", ...APLUS_MODULES.map(({ code }) => `aplus-module-${code}`)];
   const versions = await prompts.importRecords(await Promise.all(names.map(async (name) => {
@@ -97,6 +97,7 @@ async function startOfflineAplus(t) {
       supportsMultipleImages: true,
       async edit(request) {
         imageCalls.push(request);
+        if (imageCalls.length > 1) await imageGate;
         return { bytes: request.prompt.includes('"moduleCode": "usage_scene"') ? usage : hero, mimeType: "image/png" };
       },
     },
@@ -106,6 +107,7 @@ async function startOfflineAplus(t) {
         return "用侧光呈现磨砂杯身。\n" + "画面说明".repeat(250);
       },
       async generatePlan() {
+        await planningGate;
         const { modules, sizePresets, language } = planningInput;
         return {
           schemaVersion: "aplus-plan-v1", taskName: `随行杯方案 ${++nextPlan}`, globalPlan: "米白背景与柔和侧光",
@@ -164,7 +166,12 @@ async function firstPixel(bytes) {
 }
 
 test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可切换批次", async (t) => {
-  const { baseUrl, card, confirmations, imageCalls, editorCalls, ocrCalls } = await startOfflineAplus(t);
+  const planningGate = Promise.withResolvers();
+  const imageGate = Promise.withResolvers();
+  t.after(() => { planningGate.resolve(); imageGate.resolve(); });
+  const { baseUrl, card, confirmations, imageCalls, editorCalls, ocrCalls } = await startOfflineAplus(t, {
+    planningGate: planningGate.promise, imageGate: imageGate.promise,
+  });
   const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
@@ -197,7 +204,17 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
   await config.getByRole("checkbox", { name: /高级 A\+（Web 端）/ }).check();
   await config.getByRole("checkbox", { name: /高级 A\+（移动端）/ }).check();
   await button("生成策划方案").click();
+  const progress = page.getByRole("progressbar", { name: "A+详情生成进度" });
+  const steps = page.getByRole("list", { name: "A+详情阶段进度" }).getByRole("listitem");
+  const stepStates = () => steps.evaluateAll((items) => items.map((item) => item.dataset.stepState));
+  await page.locator(".ss-status").filter({ hasText: "策划中…" }).waitFor();
+  assert.equal(await progress.getAttribute("aria-valuenow"), "25");
+  assert.match(await progress.getAttribute("aria-valuetext"), /正在分析商品原图与卖点/);
+  assert.deepEqual(await steps.allTextContents(), ["1策划方案", "2确认方案", "3生成图片 (0/6)"]);
+  assert.deepEqual(await stepStates(), ["active", "pending", "pending"]);
+  planningGate.resolve();
   await button("确认出图").waitFor();
+  await page.locator(".ss-status").filter({ hasText: "等待确认" }).waitFor();
   const firstUrl = page.url();
 
   const style = config.getByLabel("视觉风格");
@@ -242,6 +259,13 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
   await button("保存方案").waitFor({ state: "detached" });
 
   await button("确认出图").click();
+  await page.locator(".ss-status").filter({ hasText: "生成中 1/4" }).waitFor();
+  assert.equal(await progress.getAttribute("aria-valuenow"), "53");
+  assert.match(await progress.getAttribute("aria-valuetext"), /已完成 1\/4 张/);
+  assert.deepEqual(await stepStates(), ["done", "done", "active"]);
+  assert.match(await steps.last().textContent(), /生成图片 \(1\/4\)/);
+  await page.locator(".aplus-card-image.is-pending").first().waitFor();
+  imageGate.resolve();
   await page.getByText("已完成 · 4 张", { exact: true }).waitFor();
   const groups = page.locator(".aplus-results-group");
   assert.equal(await groups.count(), 2);

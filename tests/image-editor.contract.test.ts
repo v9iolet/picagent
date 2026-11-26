@@ -117,10 +117,14 @@ test("submission leaves a draft intact if it changed while the request was being
 });
 
 test("failure retains child task, creates no version, and retry reuses snapshot", async () => {
-  let calls = 0; const repository = new MemoryImageEditorRepository(); const service = new ImageEditorService(repository, provider({ edit: async () => { calls += 1; if (calls === 1) throw new Error("MODEL_FAILED"); return { bytes: Buffer.from("ok"), mimeType: "image/png", width: 100, height: 100 }; } }), new MemoryStorage(), async () => source);
+  let calls = 0; const repository = new MemoryImageEditorRepository(); const service = new ImageEditorService(repository, provider({ edit: async () => { calls += 1; if (calls === 1) throw new Error("INVALID_PROVIDER_RESPONSE"); return { bytes: Buffer.from("ok"), mimeType: "image/png", width: 100, height: 100 }; } }), new MemoryStorage(), async () => source);
   await service.upsertOperation({ sessionId: "session", operation: operation() }); const submitted = await service.submit({ sessionId: "session", idempotencyKey: "submit", sourceCardId: "parent", sourceVersionId: "version-1" }); await settle();
   assert.deepEqual((await repository.getDraft("session"))?.operations, []);
-  assert.equal((await repository.getChildTask(submitted.childTask.id))?.status, "failed"); assert.equal((await repository.listVersions(submitted.childTask.id)).length, 0);
+  const child = await repository.getChildTask(submitted.childTask.id);
+  assert.equal(child?.status, "failed");
+  assert.equal(child.errorCode, "INVALID_PROVIDER_RESPONSE");
+  assert.equal(child.errorMessage, "图像生成服务返回了无效图片");
+  assert.equal((await repository.listVersions(submitted.childTask.id)).length, 0);
   const retried = await service.retry(submitted.attempt.id, "retry"); assert.equal(retried.childTask.id, submitted.childTask.id); assert.equal(retried.snapshot.id, submitted.snapshot.id); await settle(); assert.equal((await repository.listVersions(submitted.childTask.id)).length, 1); assert.equal((await repository.listAttempts(submitted.childTask.id)).length, 2);
 });
 

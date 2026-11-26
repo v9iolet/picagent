@@ -4,6 +4,7 @@ import { suiteApi } from "../../api/client";
 import { SelectedProductCardBar } from "../../components/product-card-picker/SelectedProductCardBar";
 import { download, message, studioApi } from "../../components/suite-studio/studio";
 import { StudioDialog } from "../../components/suite-studio/StudioDialog";
+import { StudioProgressBar } from "../../components/suite-studio/StudioProgressBar";
 import {
   JOB_SUCCESS_STATUSES,
   readImageEditJobStatus,
@@ -419,35 +420,16 @@ export function ReplicaBatchPreview({
       )}
 
       {progress && (
-        <div className="ss-progress">
-          <div className="ss-progress-head">
-            <strong>{progress.headline}</strong>
-            <span className="ss-progress-pct">{progress.percent}%</span>
-          </div>
-          <div
-            className="ss-progress-track"
-            role="progressbar"
-            aria-label="复刻生成进度"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={progress.percent}
-            aria-valuetext={`${progress.percent}% · ${progress.headline}`}
-          >
-            <div className="ss-progress-fill" style={{ width: `${progress.percent}%` }} />
-          </div>
-          <ol className="ss-progress-steps" aria-label="复刻阶段进度">
-            <li className="ss-step" data-step-state={progress.analyzeState}>
-              <span className="ss-step-badge" aria-hidden="true">
-                {progress.analyzeState === "done" ? "✓" : "1"}
-              </span>
-              <span>分析参考图</span>
-            </li>
-            <li className="ss-step" data-step-state={progress.generateState}>
-              <span className="ss-step-badge" aria-hidden="true">2</span>
-              <span>{total > 0 ? `生成复刻图 (${completed}/${total})` : "生成复刻图"}</span>
-            </li>
-          </ol>
-        </div>
+        <StudioProgressBar
+          headline={progress.headline}
+          percent={progress.percent}
+          progressLabel="复刻生成进度"
+          stepsLabel="复刻阶段进度"
+          steps={[
+            { key: "replica_analyzing", index: "1", label: "分析参考图", state: progress.analyzeState },
+            { key: "image_generating", index: "2", label: total > 0 ? `生成复刻图 (${completed}/${total})` : "生成复刻图", state: progress.generateState },
+          ]}
+        />
       )}
 
       {canResume && (

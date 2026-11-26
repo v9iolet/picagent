@@ -11,6 +11,7 @@ import { createImageEditorApi } from "../server/image-editor-api.js";
 import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { requestImageEditorEdit } from "../server/providers/image-editor-provider.js";
+import { GptImageProvider } from "../server/providers/gpt-image-provider.js";
 import { MemoryLibraryRepository } from "../server/repositories/memory-library-repository.js";
 import { MemoryPipelineRepository } from "../server/repositories/memory-pipeline-repository.js";
 import { MemoryPlatformRepository } from "../server/repositories/memory-platform-repository.js";
@@ -40,7 +41,7 @@ function checkError(response: AppResponse, status: number, code: string) {
   assert.equal(response.body.error.code, code);
 }
 
-async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?: (call: number) => Promise<Buffer | void>, language = "en") {
+async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?: (call: number, request: ImageEditRequest) => Promise<Buffer | void>, language = "en") {
   const repository = new MemorySuiteRepository();
   const pipelines = new MemoryPipelineRepository();
   const tasks = new MemoryTaskRepository();
@@ -73,7 +74,7 @@ async function fixture(sizePresets: readonly AplusSizePresetKey[], beforeImage?:
       supportsMultipleImages: true,
       async edit(request) {
         calls.push(request);
-        const bytes = await beforeImage?.(calls.length);
+        const bytes = await beforeImage?.(calls.length, request);
         return { bytes: bytes ?? generated, mimeType: "image/png" };
       },
     },
@@ -475,6 +476,53 @@ test("通用比例沿用生成图，续跑跳过当前版本及原样保留请�
   } finally {
     releaseInterruptedCall();
   }
+});
+
+test("无效图片按卡记录中文错误，每卡仅请求一次，手动续跑后整批可完成", async () => {
+  let repaired = false;
+  const f = await fixture(["aplus_standard"], async () => {
+    if (!repaired) throw new Error("INVALID_PROVIDER_RESPONSE");
+  });
+  data(await f.confirm(), 202);
+  const run = await f.waitForRun();
+  assert.equal(run?.status, "failed");
+  assert.equal(run.errorCode, "INVALID_GENERATED_IMAGE");
+  assert.equal(f.calls.length, modules.length);
+  const studio = data<{ pipeline: { errorMessage: string }; cards: Array<{ parentTaskId: string; errorMessage: string }> }>(
+    await f.app.request("GET", `${f.path}/studio-state`),
+  );
+  assert.equal(studio.pipeline.errorMessage, "图像生成服务返回了无效图片");
+  assert.equal(studio.cards.length, modules.length);
+  for (const card of studio.cards) {
+    const { attempts } = await f.tasks.listTaskVersions(card.parentTaskId);
+    assert.deepEqual(attempts.map(({ errorCode }) => errorCode), ["INVALID_GENERATED_IMAGE"]);
+    assert.equal(card.errorMessage, studio.pipeline.errorMessage);
+  }
+  repaired = true;
+  data(await f.app.request("POST", `${f.path}/resume`, { headers: { "idempotency-key": "resume" } }), 202);
+  assert.equal((await f.waitForRun())?.status, "completed");
+  assert.equal(f.calls.length, 2 * modules.length);
+});
+
+test("图片 URL 连续返回 503 时每张只重试下载，批次不再请求付费生图", async (t) => {
+  const provider = new GptImageProvider("https://provider.example.test/v1", "fake");
+  let posts = 0;
+  let gets = 0;
+  t.mock.method(globalThis, "fetch", async (_url, init: RequestInit) => {
+    if (init.method === "POST") {
+      posts++;
+      return Response.json({ data: [{ url: "https://cdn.example.test/result" }] });
+    }
+    gets++;
+    return new Response(null, { status: 503 });
+  });
+  const f = await fixture(["aplus_standard"], async (_call, request) => (await provider.edit(request)).bytes);
+  data(await f.confirm(), 202);
+  const run = await f.waitForRun();
+  assert.equal(run?.status, "failed");
+  assert.equal(run.errorCode, "TASK_IMAGE_PROVIDER_FAILED");
+  assert.equal(posts, modules.length);
+  assert.equal(gets, 2 * modules.length);
 });
 
 test("确认缺参或类型错误返回 400，配置已变则返回 409 且不建卡", async () => {
