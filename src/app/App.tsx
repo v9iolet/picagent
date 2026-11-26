@@ -29,6 +29,18 @@ export function App() {
     if (!options?.replace) window.scrollTo({ top: 0 });
   }, []);
 
+  return (
+    <Suspense fallback={<main role="status">正在加载页面…</main>}>
+      <RoutePage path={path} search={search} navigate={navigate} />
+    </Suspense>
+  );
+}
+
+function RoutePage({ path, search, navigate }: {
+  path: string;
+  search: string;
+  navigate: (to: string, options?: { replace?: boolean }) => void;
+}) {
   const legacy = path.match(/^\/suites\/([^/]+)\/?$/);
   const legacyBoard = path.match(/^\/suites\/([^/]+)\/board\/?$/);
   const legacyListing = /^\/create\/listing-copy(?:\/[^/]+)?\/?$/.test(path);
@@ -39,23 +51,9 @@ export function App() {
     : legacy || legacyListing ? "/create/suite" : path;
   useEffect(() => {
     if (path === canonical) return;
-    window.history.replaceState({}, "", canonical + search + window.location.hash);
-    setLocation(readLocation());
-  }, [path, canonical, search]);
+    navigate(canonical + search + window.location.hash, { replace: true });
+  }, [path, canonical, search, navigate]);
 
-  return (
-    <Suspense fallback={<main role="status">正在加载页面…</main>}>
-      <RoutePage path={path} search={search} canonical={canonical} navigate={navigate} />
-    </Suspense>
-  );
-}
-
-function RoutePage({ path, search, canonical, navigate }: {
-  path: string;
-  search: string;
-  canonical: string;
-  navigate: (to: string, options?: { replace?: boolean }) => void;
-}) {
   const reverseId = path.match(/^\/reverse\/([^/]+)/)?.[1];
   if (path === "/") {
     const sessionId = new URLSearchParams(search).get("session")?.trim() || undefined;
