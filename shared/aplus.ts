@@ -1,3 +1,4 @@
+import type { VISUAL_STYLES } from "./selling-point-layouts.js";
 import { SUPPORTED_OUTPUT_LANGUAGES } from "./workbench-delivery.js";
 
 export const APLUS_MODULES = [
@@ -109,6 +110,7 @@ export interface AplusPlanInputSummary {
   platform: string;
   targetMarket: string;
   language: string;
+  visualStyle?: (typeof VISUAL_STYLES)[number]["id"];
   sizePresets: AplusSizePresetKey[];
   modules: AplusModuleCode[];
 }
@@ -126,6 +128,7 @@ export function isAplusPlanStale(snapshot: AplusPlanInputSummary, current: Aplus
     snapshot.platform !== current.platform ||
     normalizeAplusTargetMarket(snapshot.targetMarket) !== normalizeAplusTargetMarket(current.targetMarket) ||
     normalizeAplusLanguage(snapshot.language) !== normalizeAplusLanguage(current.language) ||
+    (snapshot.visualStyle ?? "auto") !== (current.visualStyle ?? "auto") ||
     !sameSet(snapshot.sizePresets, current.sizePresets) ||
     !sameSet(snapshot.modules, current.modules);
 }

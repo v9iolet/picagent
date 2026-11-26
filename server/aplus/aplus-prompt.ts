@@ -19,14 +19,17 @@ const APLUS_PROMPT_CODES: Record<AplusPromptStage, string> = {
 type PromptText = Pick<PromptTemplateRuntime, "body" | "userPromptTemplate">;
 type ModuleRuleTemplate = PromptText & Pick<PromptTemplateRuntime, "applicability">;
 
-interface AplusPromptInput {
+interface VisionInput {
   /** 图片 ID 按视觉模型请求所附图片的顺序传入。 */
   inputImageIds: readonly string[];
   productInfo?: string | null;
-  productCardSnapshot?: ProductCardFields | null;
   platform: string;
   targetMarket: string;
   language: string;
+}
+
+interface AplusPlanPromptInput extends VisionInput {
+  productCardSnapshot?: ProductCardFields | null;
   selectedModules: readonly AplusModuleCode[];
   moduleRuleTemplates: readonly ModuleRuleTemplate[];
 }
@@ -51,7 +54,7 @@ function render(template: string, values: Record<string, string>): string {
   });
 }
 
-function renderSelectedModuleRules(input: AplusPromptInput): string {
+function renderSelectedModuleRules(input: AplusPlanPromptInput): string {
   const templatesByCode = new Map(input.moduleRuleTemplates.map((template) => [template.applicability.moduleCode, template]));
   return input.selectedModules.map((moduleCode) => {
     const template = templatesByCode.get(moduleCode);
@@ -61,39 +64,39 @@ function renderSelectedModuleRules(input: AplusPromptInput): string {
   }).join("\n\n");
 }
 
-function renderVisionPrompt(template: PromptText, input: AplusPromptInput, fields: Record<string, string>) {
+function visionFields(input: VisionInput, productCardFacts: string) {
   return {
-    systemPrompt: render(template.body, { moduleRules: renderSelectedModuleRules(input) }),
-    userPrompt: render(template.userPromptTemplate, {
-      inputImageIds: JSON.stringify(input.inputImageIds),
-      productInfo: input.productInfo?.trim() || "无",
-      productCardFacts: input.productCardSnapshot ? formatProductCardFacts(input.productCardSnapshot) || "无" : "无",
-      platform: input.platform,
-      targetMarket: input.targetMarket,
-      language: input.language,
-      selectedModules: JSON.stringify(input.selectedModules),
-      ...fields,
-    }),
+    inputImageIds: JSON.stringify(input.inputImageIds),
+    productInfo: input.productInfo?.trim() || "无",
+    productCardFacts,
+    platform: input.platform,
+    targetMarket: input.targetMarket,
+    language: input.language,
   };
 }
 
-export function renderAplusPlanPrompt(template: PromptText, input: AplusPromptInput & {
+export function renderAplusPlanPrompt(template: PromptText, input: AplusPlanPromptInput & {
   sizePresets: readonly AplusSizePresetKey[];
   listingCopyRules?: ListingRules | null;
 }) {
   const dualPremium = input.sizePresets.includes("aplus_premium_web") && input.sizePresets.includes("aplus_premium_mobile");
-  return renderVisionPrompt(template, input, {
-    listingCopyRules: input.listingCopyRules ? JSON.stringify(input.listingCopyRules) : "无",
-    sizePresets: JSON.stringify(input.sizePresets.map((key) => APLUS_SIZE_PRESETS[key])),
-    copyMode: input.language === "none" ? '不加文字，copyRequirements 必须是空字符串 ""' : "按指定语言编写画面文案",
-    layoutMode: dualPremium ? "高级 A+ 两端分别规划构图，共用一份文案" : "按所选尺寸规划构图",
-  });
+  const facts = input.productCardSnapshot && formatProductCardFacts(input.productCardSnapshot);
+  return {
+    systemPrompt: render(template.body, { moduleRules: renderSelectedModuleRules(input) }),
+    userPrompt: render(template.userPromptTemplate, {
+      ...visionFields(input, facts || "无"),
+      selectedModules: JSON.stringify(input.selectedModules),
+      listingCopyRules: input.listingCopyRules ? JSON.stringify(input.listingCopyRules) : "无",
+      sizePresets: JSON.stringify(input.sizePresets.map((key) => APLUS_SIZE_PRESETS[key])),
+      copyMode: input.language === "none" ? '不加文字，copyRequirements 必须是空字符串 ""' : "按指定语言编写画面文案",
+      layoutMode: dualPremium ? "高级 A+ 两端分别规划构图，共用一份文案" : "按所选尺寸规划构图",
+    }),
+  };
 }
 
-export function renderAplusAiWritePrompt(template: PromptText, input: AplusPromptInput) {
-  return renderVisionPrompt(template, input, {
-    cardMode: input.productCardSnapshot ? "已选商品卡，只写补充说明" : "未选商品卡，写五段基本信息并补充模块所需信息",
-  });
+export function renderAplusAiWritePrompt(template: PromptText, input: VisionInput & { productCardFacts: string }) {
+  const fields = visionFields(input, input.productCardFacts);
+  return { systemPrompt: render(template.body, fields), userPrompt: render(template.userPromptTemplate, fields) };
 }
 
 export function renderAplusImagePrompt(template: PromptText, input: {

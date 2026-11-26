@@ -103,7 +103,7 @@ async function startOfflineAplus(t) {
     llmClient: {
       provider: "fake", model: "fake-vision", isFake: true,
       async generateAplusAiWrite() {
-        return "1. 产品名称：随行杯\n2. 核心卖点：磨砂杯身\n3. 适用人群：通勤者\n4. 期望场景：日常外出\n5. 具体参数：【待补充：容量】\n" + "文案".repeat(500);
+        return "用侧光呈现磨砂杯身。\n" + "画面说明".repeat(250);
       },
       async generatePlan() {
         const { modules, sizePresets, language } = planningInput;
@@ -199,6 +199,13 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
   await button("生成策划方案").click();
   await button("确认出图").waitFor();
   const firstUrl = page.url();
+
+  const style = config.getByLabel("视觉风格");
+  assert.equal(await style.inputValue(), "auto");
+  await style.selectOption("dark_tech");
+  await button("方案已失效，重新规划").waitFor();
+  await style.selectOption("auto");
+  await button("确认出图").waitFor();
 
   const platform = config.getByLabel("平台", { exact: true });
   await platform.selectOption("taobao");
@@ -352,7 +359,7 @@ test("A+ 选卡出图后可改字并更新交付图和长图，生成记录可�
 
   await button("＋ 新建").click();
   await config.getByLabel("上传商品原图").setInputFiles("public/assets/gan65-product.jpg");
-  await config.getByLabel("商品卖点&生成要求").fill("磨砂杯身");
+  await config.getByLabel("商品卖点与生成要求").fill("磨砂杯身");
   await config.getByLabel("平台", { exact: true }).selectOption("taobao");
   await config.getByLabel("输出语言").selectOption("none");
   await button("生成策划方案").click();
@@ -414,7 +421,7 @@ test("A+ 有缓存草稿时仍更新 URL 预选卡，375px 创作栏可完整显
   const tools = page.getByRole("navigation", { name: "创作功能" });
   assert.ok(await tools.evaluate((nav) => nav.scrollWidth <= nav.clientWidth), "创作栏不能横向溢出");
 
-  const sellingPoints = config.getByLabel("商品卖点&生成要求");
+  const sellingPoints = config.getByLabel("商品卖点与生成要求");
   await sellingPoints.fill("保留本地生成要求");
   const cardPath = `/api/product-cards/${card.id}`;
   const revisedName = "更新后的磨砂随行杯";
@@ -434,17 +441,24 @@ test("A+ 有缓存草稿时仍更新 URL 预选卡，375px 创作栏可完整显
   assert.equal(await sellingPoints.inputValue(), "保留本地生成要求");
 });
 
-test("A+ 无商品卡时帮写卖点，可撤销并可带待补充占位继续规划", async (t) => {
-  const { baseUrl } = await startOfflineAplus(t);
+test("A+ 卖点输入随选卡切换，帮写支持编辑与撤销，移除商品卡后清除撤销记录", async (t) => {
+  const { baseUrl, card } = await startOfflineAplus(t);
   const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1440, height: 1050 } });
   const config = page.getByRole("complementary", { name: "A+详情配置" });
   const aiWrite = config.getByRole("button", { name: "AI 帮写", exact: true });
   const undo = config.getByRole("button", { name: "撤销帮写", exact: true });
-  const info = config.getByLabel("商品卖点&生成要求");
+  const info = config.getByLabel("商品卖点与生成要求");
   const plan = config.getByRole("button", { name: "生成策划方案", exact: true });
-  const warning = page.getByRole("dialog", { name: "还有待补充的商品信息" });
+  const picker = config.getByRole("button", { name: "选择商品信息卡（选填）", exact: true });
+  const heading = (name) => config.getByRole("heading", { name, exact: true });
+  async function selectCard() {
+    await picker.click();
+    const dialog = page.getByRole("dialog", { name: "选择商品信息卡" });
+    await dialog.locator(`[data-picker-card-id="${card.id}"]`).click();
+    await dialog.getByRole("button", { name: "确认选择" }).click();
+  }
   let releaseWrite;
   const waiting = new Promise((resolve) => { releaseWrite = resolve; });
   await page.route("**/api/aplus/ai-write", async (route) => {
@@ -455,6 +469,23 @@ test("A+ 无商品卡时帮写卖点，可撤销并可带待补充占位继续�
 
   const startUrl = new URL("/create/aplus", baseUrl).href;
   await page.goto(startUrl);
+  await heading("商品卖点 & 生成要求").waitFor();
+  assert.equal(await aiWrite.count(), 0);
+  assert.match(await info.getAttribute("placeholder"), /1. 产品名称[\s\S]*5. 具体参数/);
+  assert.ok(await picker.evaluate((button) => {
+    const textarea = button.closest("section")?.querySelector("textarea");
+    return textarea && Boolean(button.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }));
+  const tip = config.getByRole("button", { name: "商品卖点填写说明" });
+  await tip.click();
+  await page.getByRole("tooltip").getByText(/请填写已确认的商品事实/).waitFor();
+  await page.keyboard.press("Escape");
+  await selectCard();
+  await tip.click();
+  await page.getByRole("tooltip").getByText(/客观商品事实已由所选商品信息卡自动注入/).waitFor();
+  await page.keyboard.press("Escape");
+  await heading("补充卖点 & 本次生成要求（选填）").waitFor();
+  assert.match(await info.getAttribute("placeholder"), /所选商品信息卡自动注入/);
   assert.equal(await aiWrite.isDisabled(), true);
   await config.getByText("请先上传商品原图，再使用 AI 帮写。").waitFor();
   await config.getByLabel("上传商品原图").setInputFiles("public/assets/gan65-product.jpg");
@@ -467,23 +498,23 @@ test("A+ 无商品卡时帮写卖点，可撤销并可带待补充占位继续�
   assert.equal(await pending.getAttribute("aria-busy"), "true");
   releaseWrite();
   await config.getByText("AI 帮写结果超过 1000 字，已截断。").waitFor();
-  assert.match(await info.inputValue(), /【待补充：容量】/);
+  assert.match(await info.inputValue(), /用侧光呈现磨砂杯身/);
   assert.equal(Array.from(await info.inputValue()).length, 1000);
+  await info.fill("手动调整构图");
+  await config.getByText("AI 帮写结果超过 1000 字，已截断。").waitFor({ state: "detached" });
   await undo.click();
   assert.equal(await info.inputValue(), "原有卖点：磨砂杯身");
   await undo.waitFor({ state: "detached" });
 
   await aiWrite.click();
   await undo.waitFor();
+  await config.getByRole("button", { name: "移除", exact: true }).click();
+  await heading("商品卖点 & 生成要求").waitFor();
+  assert.equal(await aiWrite.count(), 0);
+  assert.equal(await undo.count(), 0);
+  await selectCard();
+  assert.equal(await undo.count(), 0);
   await plan.click();
-  await warning.getByRole("button", { name: "去补充", exact: true }).click();
-  await warning.waitFor({ state: "detached" });
-  await info.evaluate((textarea) => new Promise((resolve) => requestAnimationFrame(resolve)));
-  assert.equal(await info.evaluate((textarea) => textarea === document.activeElement), true);
-  assert.equal(page.url(), startUrl);
-
-  await plan.click();
-  await warning.getByRole("button", { name: "继续", exact: true }).click();
   await page.getByRole("button", { name: "确认出图", exact: true }).waitFor();
   assert.notEqual(page.url(), startUrl);
 });

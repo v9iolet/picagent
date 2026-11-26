@@ -41,8 +41,8 @@ test("planning messages carry the platform background tier and its main-image co
   }
 });
 
-test("A+ AI 帮写向视觉模型请求纯文本，并接受有卡时的空结果", async (t) => {
-  const output = "卖点：【待补充：尺寸】";
+test("A+ AI 帮写向视觉模型请求纯文本，原样返回内容供接口校验", async (t) => {
+  const output = "用侧光突出磨砂杯身。";
   const requests: unknown[] = [];
   const contents = [output, ""];
   t.mock.method(globalThis, "fetch", async (url: URL, options: RequestInit) => {
