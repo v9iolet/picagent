@@ -1,0 +1,19 @@
+body:has(.pa-route-state) { min-width: 0; overflow: auto; }
+.pa-route-state {
+  min-height: 100dvh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 16px;
+  padding: 24px;
+  background: #fafafa;
+  color: #52525b;
+  text-align: center;
+}
+.pa-route-state button {
+  padding: 8px 18px;
+  border: 1px solid #d4d4d8;
+  border-radius: 8px;
+  background: white;
+  cursor: pointer;
+}

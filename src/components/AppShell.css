@@ -186,6 +186,29 @@ body:has(.pa-shell-full) {
   background: var(--pa-success);
 }
 
+.pa-topbar-account, .pa-admin-pill { display: inline-flex; align-items: center; white-space: nowrap; }
+.pa-topbar-account { gap: 8px; padding-left: 10px; border-left: 1px solid var(--pa-border); }
+.pa-admin-pill {
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 20px;
+  background: #efeff6;
+  color: #45455c;
+  font-size: 12px;
+}
+.pa-admin-pill svg { width: 13px; height: 13px; }
+.pa-topbar-account button {
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--pa-ink-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.pa-topbar-account button:hover { background: var(--pa-surface-hover); color: var(--pa-ink); }
+.pa-topbar-account button:disabled { opacity: .6; cursor: default; }
+
 .pa-status-pill.is-running {
   border-color: var(--pa-warn-border);
   background: var(--pa-warn-soft);

@@ -25,8 +25,21 @@ export class ApiHttpError extends Error {
   }
 }
 
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
+}
+
+// A late response from an old session must not sign out a newly logged-in user.
+function checkUnauthorized(path: string, status: number, handler: typeof unauthorizedHandler) {
+  if (status === 401 && handler === unauthorizedHandler && !path.startsWith("/api/auth/")) handler?.();
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { ...init, cache: "no-store" });
+  const handler = unauthorizedHandler;
+  const response = await fetch(path, { ...init, cache: "no-store", credentials: "same-origin" });
+  checkUnauthorized(path, response.status, handler);
   const payload = await response.json().catch(() => null) as { data?: T; error?: { code?: string; message?: string } } | null;
   if (!response.ok) throw new ApiHttpError(payload?.error?.message ?? "请求失败", response.status, payload?.error?.code);
   return payload?.data as T;
@@ -87,6 +100,7 @@ export function uploadWithProgress<T>(path: string, form: FormData, options: {
   onProgress?: (percent: number) => void;
 } = {}): Promise<T> {
   return new Promise((resolve, reject) => {
+    const handler = unauthorizedHandler;
     const xhr = new XMLHttpRequest();
     xhr.open("POST", path);
     if (options.idempotent) xhr.setRequestHeader("idempotency-key", createIdempotencyKey());
@@ -95,6 +109,7 @@ export function uploadWithProgress<T>(path: string, form: FormData, options: {
     };
     xhr.onerror = () => reject(new Error("上传失败，请检查网络连接"));
     xhr.onload = () => {
+      checkUnauthorized(path, xhr.status, handler);
       try {
         const payload = JSON.parse(xhr.responseText);
         if (xhr.status >= 200 && xhr.status < 300 && payload?.data != null) resolve(payload.data);

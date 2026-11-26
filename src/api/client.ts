@@ -1,5 +1,6 @@
 export * from "./types.js";
 export * from "./http.js";
+export * from "./auth.js";
 export * from "./suites.js";
 export * from "./listing-copy.js";
 export * from "./model-settings.js";
