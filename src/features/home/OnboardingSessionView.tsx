@@ -11,6 +11,7 @@ import {
   type ApiProductOnboardingSession,
 } from "../../api/client";
 import { AppShell } from "../../components/AppShell";
+import { BrandLogo } from "../../components/BrandLogo";
 import { Icon, ModelSettingsMessage } from "../../pages/shared";
 import {
   ProductCardEditorForm,
@@ -690,7 +691,7 @@ export function OnboardingSessionView({
                         data-message-role="assistant"
                       >
                         <span className="home-assistant-avatar" aria-hidden="true">
-                          <img src="/logo.png" alt="" />
+                          <BrandLogo size={24} />
                         </span>
                         <div className="home-msg-assistant-body">
                           {msg.content && renderAssistantBody(msg.content)}
@@ -706,7 +707,7 @@ export function OnboardingSessionView({
                   {sendingMessage && (
                     <article className="home-msg is-assistant is-loading" role="status">
                       <span className="home-assistant-avatar" aria-hidden="true">
-                        <img src="/logo.png" alt="" />
+                        <BrandLogo size={24} />
                       </span>
                       <div className="home-msg-assistant-body">
                         <span className="home-msg-loading-pill">
