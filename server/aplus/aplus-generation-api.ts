@@ -119,7 +119,7 @@ export function createAplusGenerationApi(deps: AplusGenerationDependencies) {
         const pictureRequirement = module.imagePrompts[sizePreset]!;
         const promptDraft = renderAplusImagePrompt(template, {
           moduleCode, copyRequirements, language, sizePreset, generatedSize, generatedRatio: ratio,
-          pictureRequirement: `整体风格：${planSnapshot.globalPlan}\n模块画面：${pictureRequirement}`,
+          pictureRequirement,
         });
         const ordinal = moduleIndex * sizePresets.length + presetIndex + 1;
         return {

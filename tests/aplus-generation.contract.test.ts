@@ -167,8 +167,14 @@ test("确认按编辑后的模块与高级 A+ 预设建卡，冻结提示词、�
     assert.equal(version.promptSnapshot.templateVersionId, f.promptVersionIds["aplus-image"]);
     assert.equal(version.promptSnapshot.planTemplateVersionId, f.promptVersionIds["aplus-plan"]);
     assert.equal((version.promptSnapshot.moduleRuleVersionIds as Record<string, string>)[task.moduleCode!], f.promptVersionIds[`aplus-module-${task.moduleCode}`]);
-    assert.match(f.calls[index].prompt, /中心安全区/);
-    assert.ok(f.calls[index].prompt.includes(`构图：${task.moduleCode}/${task.sizePreset}`));
+    const pictureRequirement = `构图：${task.moduleCode}/${task.sizePreset}`;
+    assert.ok(task.promptDraft.includes(`"画面要求": "${pictureRequirement}"`));
+    assert.match(task.promptDraft, /100% 满幅出血.*中心安全区/);
+    assert.doesNotMatch(task.promptDraft, /整体风格：|深蓝背景/);
+    const snapshot = task.generationParams.aplusPromptSnapshot as Record<string, unknown>;
+    assert.equal(snapshot.globalPlan, "深蓝背景");
+    assert.equal(snapshot.pictureRequirement, pictureRequirement);
+    assert.ok(f.calls[index].prompt.includes(task.promptDraft));
     assert.match(f.calls[index].prompt, task.moduleCode === "usage_scene" ? /带去露营/ : /出门随行/);
     assert.deepEqual(f.calls[index].images?.map((image) => [image.role, image.bytes]), f.originals.map((bytes) => ["product", bytes]));
     assert.deepEqual(version.contextSnapshot.inputImages, inputs.map((object, imageIndex) => ({
