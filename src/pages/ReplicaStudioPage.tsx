@@ -1,7 +1,8 @@
 import { usePolling } from "../hooks/usePolling";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { defaultImageOptions } from "../../shared/model-settings";
-import { modelSettingsApi, productCardsApi } from "../api/client";
+import { productCardsApi } from "../api/client";
+import { useModelSettings } from "../context/AppConfigContext";
 import { AppShell } from "../components/AppShell";
 import {
   GenerationHistoryDrawer,
@@ -49,7 +50,8 @@ export function ReplicaStudioPage({
   const draft = useSyncExternalStore(replicaDraftStore.subscribe, replicaDraftStore.getSnapshot);
   const { references, products, config, refNotice, productNotice } = draft;
 
-  const [imageOptions, setImageOptions] = useState(() => defaultImageOptions(""));
+  const { modelSettings, error: settingsError } = useModelSettings();
+  const imageOptions = modelSettings ? currentImageOptions(modelSettings) : defaultImageOptions("");
   const [submitting, setSubmitting] = useState(false);
   const [pageNotice, setPageNotice] = useState("");
 
@@ -82,19 +84,8 @@ export function ReplicaStudioPage({
   }, []);
 
   useEffect(() => {
-    let live = true;
-    modelSettingsApi
-      .get()
-      .then((settings) => {
-        if (live) setImageOptions(currentImageOptions(settings));
-      })
-      .catch((error) => {
-        if (live) setPageNotice(message(error));
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
+    if (settingsError) setPageNotice(message(settingsError));
+  }, [settingsError]);
 
   const sizes = allowedReplicaSizes(imageOptions);
   const effectiveConfig: ReplicaConfigDraft = {

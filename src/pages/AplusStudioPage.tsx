@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   APLUS_SIZE_PRESETS, isAplusPlanStale, normalizeAplusLanguage, validateAplusSizePresets,
 } from "../../shared/aplus";
-import { ApiHttpError, createIdempotencyKey, productCardsApi, suiteApi, type ApiImage, type ApiPlatformProfile } from "../api/client";
+import { ApiHttpError, createIdempotencyKey, productCardsApi, suiteApi, type ApiImage } from "../api/client";
+import { usePlatforms } from "../context/AppConfigContext";
 import { AppShell } from "../components/AppShell";
 import { GenerationHistoryDrawer } from "../components/generation-history/GenerationHistoryDrawer";
 import { formatHistoryTime } from "../components/generation-history/history-model";
@@ -87,7 +88,7 @@ function AplusWorkspace({
   const [state, setState] = useState(() => readAplusBatch(suiteId));
   const [draft, setDraft] = useState(() => savedDraft ?? (state ? draftFromBatch(state) : newAplusDraft()));
   const draftRef = useRef(draft);
-  const [profiles, setProfiles] = useState<ApiPlatformProfile[]>([]);
+  const { platforms: profiles, error: platformsError } = usePlatforms();
   const [loading, setLoading] = useState(Boolean(suiteId && !state));
   const [batchError, setBatchError] = useState("");
   const [loadingCard, setLoadingCard] = useState(Boolean(initialProductCardId));
@@ -138,14 +139,8 @@ function AplusWorkspace({
   }, [commitDraft, initialProductCardId, savedDraft, suiteId]);
 
   useEffect(() => {
-    let active = true;
-    suiteApi.listPlatforms().then((loaded) => {
-      if (active) setProfiles(loaded);
-    }).catch((error) => {
-      if (active) setNotice(message(error));
-    });
-    return () => { active = false; };
-  }, []);
+    if (platformsError) setNotice(message(platformsError));
+  }, [platformsError]);
 
   useEffect(() => {
     setLoadingCard(Boolean(initialProductCardId));

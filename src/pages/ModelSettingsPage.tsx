@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { MODEL_CAPABILITIES, capabilityLabels, defaultImageOptions, type ImageOptions, type ModelCapability, type ModelChannel, type ModelChannelInput, type ModelPreferences, type ModelReference, type ModelSettingsView } from "../../shared/model-settings";
 import { modelSettingsApi } from "../api/client";
+import { useModelSettings } from "../context/AppConfigContext";
 import { Icon } from "./shared";
 import { AppShell } from "../components/AppShell";
 import { InfoTip } from "../components/ui/InfoTip";
@@ -283,24 +284,19 @@ function Preferences({ settings, onSave }: { settings: ModelSettingsView; onSave
 }
 
 export function ModelSettingsPage({ preferences, navigate }: { preferences: boolean; navigate: (path: string) => void }) {
-  const [settings, setSettings] = useState<ModelSettingsView | null>(null);
+  const { modelSettings: settings, error: loadError, refreshModelSettings } = useModelSettings();
   const [drawer, setDrawer] = useState<ModelChannel | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [saveError, setError] = useState("");
+  const error = saveError || loadError?.message;
   const [notice, setNotice] = useState("");
-  const load = async () => {
-    setError("");
-    try { setSettings(await modelSettingsApi.get()); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "加载配置失败"); }
-  };
-  useEffect(() => { void load(); }, []);
 
   const remove = async (channel: ModelChannel) => {
     if (!window.confirm(`删除渠道「${channel.name}」？`)) return;
     setBusy(true);
     setError("");
     setNotice("");
-    try { setSettings(await modelSettingsApi.removeChannel(channel.id)); setNotice("渠道已删除"); }
+    try { await refreshModelSettings(await modelSettingsApi.removeChannel(channel.id)); setNotice("渠道已删除"); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "删除渠道失败"); }
     finally { setBusy(false); }
   };
@@ -308,7 +304,7 @@ export function ModelSettingsPage({ preferences, navigate }: { preferences: bool
   const savePreferences = async (patch: Partial<ModelPreferences>) => {
     setError("");
     setNotice("");
-    try { setSettings(await modelSettingsApi.savePreferences(patch)); setNotice("偏好设置已保存"); }
+    try { await refreshModelSettings(await modelSettingsApi.savePreferences(patch)); setNotice("偏好设置已保存"); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "保存偏好失败"); }
   };
 
@@ -335,7 +331,7 @@ export function ModelSettingsPage({ preferences, navigate }: { preferences: bool
       </nav>
       {error && <p className="settings-error" role="alert">{error}</p>}
       {notice && <p className="settings-notice" role="status">{notice}</p>}
-      {!settings ? error ? <button className="settings-button" onClick={() => void load()}>重试</button> : <p role="status">正在读取配置…</p>
+      {!settings ? error ? <button className="settings-button" onClick={() => void refreshModelSettings()}>重试</button> : <p role="status">正在读取配置…</p>
         : preferences ? <Preferences key={JSON.stringify(settings.preferences)} settings={settings} onSave={savePreferences} />
         : <section aria-labelledby="channels-title">
           <header className="settings-section-head">
@@ -365,7 +361,7 @@ export function ModelSettingsPage({ preferences, navigate }: { preferences: bool
         </section>}
     </main>
     {drawer !== undefined && <ChannelDrawer channel={drawer} onClose={() => setDrawer(undefined)} onSave={async (input) => {
-      setSettings(await modelSettingsApi.saveChannel(input, drawer?.id));
+      await refreshModelSettings(await modelSettingsApi.saveChannel(input, drawer?.id));
       setDrawer(undefined);
       setError("");
       setNotice("渠道已保存");

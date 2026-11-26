@@ -1,13 +1,12 @@
 import { usePolling } from "../hooks/usePolling";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  modelSettingsApi,
   productCardsApi,
   suiteApi,
   type ApiImage,
-  type ApiPlatformProfile,
 } from "../api/client";
 import { defaultImageOptions } from "../../shared/model-settings";
+import { useModelSettings, usePlatforms } from "../context/AppConfigContext";
 import { productNameFor } from "../../shared/product-name";
 import { AppShell } from "../components/AppShell";
 import {
@@ -131,9 +130,10 @@ export function SuiteStudioPage({
 }) {
   const boot = useRef(readInitialWorkspace(suiteId, initialProductCardId));
   const [config, setConfig] = useState<Config>(() => boot.current.config),
-    [configDirty, setConfigDirty] = useState<boolean>(() => boot.current.configDirty),
-    [profiles, setProfiles] = useState<ApiPlatformProfile[]>([]),
-    [options, setOptions] = useState(defaultImageOptions(""));
+    [configDirty, setConfigDirty] = useState<boolean>(() => boot.current.configDirty);
+  const { platforms: profiles, error: platformsError } = usePlatforms();
+  const { modelSettings, error: settingsError } = useModelSettings();
+  const options = modelSettings ? currentImageOptions(modelSettings) : defaultImageOptions("");
   const [images, setImages] = useState<ApiImage[]>(() => boot.current.images),
     [clone, setClone] = useState<boolean>(() => boot.current.clone),
     [busy, setBusy] = useState(false),
@@ -204,21 +204,8 @@ export function SuiteStudioPage({
   );
 
   useEffect(() => {
-    let live = true;
-    Promise.all([suiteApi.listPlatforms(), modelSettingsApi.get()])
-      .then(([p, m]) => {
-        if (live) {
-          setProfiles(p);
-          setOptions(currentImageOptions(m));
-        }
-      })
-      .catch((e) => {
-        if (live) setNotice(message(e));
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
+    if (platformsError || settingsError) setNotice(message(platformsError ?? settingsError));
+  }, [platformsError, settingsError]);
 
   const currentSuiteId = suiteId ?? active;
 
