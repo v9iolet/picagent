@@ -17,11 +17,11 @@ const editorUpload = "/api/image-editor/sessions/parent/versions/source/restore-
 const credentials = { username: "admin", password: "fixture password", captchaCode: "AB2Z" };
 const anonymous = { authEnabled: true, authenticated: false, user: null };
 
-function studio(authService?: AuthService) {
+function studio(authService?: AuthService, repository = new MemorySuiteRepository()) {
   const storage = new MemoryStorage();
   const editor = new ImageEditorService(new MemoryImageEditorRepository(), async () => null, storage, async () => null);
   return createSuiteStudioApp({
-    repository: new MemorySuiteRepository(), storage, imageEditorApi: createImageEditorApi(editor), authService, trustProxy: "auto",
+    repository, storage, imageEditorApi: createImageEditorApi(editor), authService, trustProxy: "auto",
   });
 }
 
@@ -38,14 +38,14 @@ function data<T>(response: AppResponse, status = 200) {
   return response.body.data as T;
 }
 
-async function fixture() {
+async function fixture(repository?: MemorySuiteRepository) {
   let time = Date.UTC(2026, 0, 1);
   const service = new AuthService(new MemoryAuthRepository(), {
     ...loadAuthServiceOptionsFromEnv({}), adminPassword: credentials.password, maxLoginFailures: 1,
     now: () => new Date(time), generateCaptchaCode: () => credentials.captchaCode,
   });
   await service.ensureDefaultAdmin();
-  const app = studio(service);
+  const app = studio(service, repository);
   async function captcha() {
     const response = await app.request("GET", "/api/auth/captcha?refresh=1");
     assert.equal(response.headers?.["cache-control"], "no-store");
@@ -93,6 +93,53 @@ test("only exact public auth routes are open, including before multipart parsing
     app.previewBaseVersion("s", "i", "v"), app.previewTaskVersion("t", "v", true), app.previewLibraryResource("r"),
     app.previewReverseReference("p", "r"), app.previewReplicaReference("s", "r"),
   ])) assertError(response, 401, "UNAUTHORIZED");
+});
+
+test("the API guard covers mixed-case namespaces before any suite access", async (t) => {
+  const repository = new MemorySuiteRepository();
+  const get = t.mock.method(repository, "getSuite");
+  const list = t.mock.method(repository, "listSuites");
+  const { app, captcha, login } = await fixture(repository);
+  const suiteId = "ABCDE123-4567-489A-8BCD-0123456789AB";
+  const cases = [
+    ["POST", `/API/aplus/${suiteId}/confirm`],
+    ["GET", `/API/aplus/${suiteId}/studio-state`],
+    ["PATCH", `/ApI/aplus/${suiteId}/plan`],
+    ["GET", "/API/suites"],
+    ["GET", "/API/auth/session"],
+    ["GET", "/api?probe=1"],
+  ];
+  for (const [method, path] of cases) {
+    assertError(await app.request(method, path), 401, "UNAUTHORIZED");
+  }
+  for (const path of ["/apiary", "/login"]) {
+    assert.equal((await app.request("GET", path)).status, 404);
+  }
+  const result = await login({ captchaId: await captcha() });
+  const headers = { cookie: result.headers!["set-cookie"].split(";")[0] };
+  for (const [method, path] of cases) {
+    const response = await app.request(method, path, { headers });
+    assert.equal(response.status, 404);
+    assert.equal("error" in response.body && response.body.error.code, "NOT_FOUND");
+  }
+  assert.equal(get.mock.callCount(), 0);
+  assert.equal(list.mock.callCount(), 0);
+
+  // Uppercase hexadecimal digits still identify a suite on the canonical A+ route.
+  await app.request("GET", `/api/aplus/${suiteId}/studio-state`, { headers });
+  assert.deepEqual(get.mock.calls.map((call) => call.arguments), [[suiteId]]);
+});
+
+test("unknown auth paths and method mismatches disable caching even after login", async () => {
+  const { app, captcha, login } = await fixture();
+  const result = await login({ captchaId: await captcha() });
+  const headers = { cookie: result.headers!["set-cookie"].split(";")[0] };
+  for (const [method, path] of [
+    ["GET", "/api/auth?probe=1"], ["GET", "/api/auth/missing"], ["POST", "/api/auth/session"],
+  ]) {
+    assertError(await app.request(method, path), 401, "UNAUTHORIZED");
+    assertError(await app.request(method, path, { headers }), 404, "NOT_FOUND");
+  }
 });
 
 test("login rejects invalid, replayed and expired challenges, then limits password failures by direct peer", async () => {

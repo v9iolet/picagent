@@ -48,6 +48,10 @@ const publicRoutes = new Map<string, AuthHandler>([
   ["POST /api/auth/logout", logout],
 ]);
 
+export function isAuthPathname(pathname: string): boolean {
+  return /^\/api\/auth(?:\/|$)/i.test(pathname);
+}
+
 export function publicAuthRoute(method: string, pathname: string) {
   return publicRoutes.get(`${method.toUpperCase()} ${pathname}`);
 }

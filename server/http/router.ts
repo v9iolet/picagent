@@ -18,6 +18,10 @@ export interface RouteContext {
 type Handler = (context: RouteContext) => AppResponse | Promise<AppResponse>;
 type Pattern = string | RegExp;
 
+export function isApiPathname(pathname: string): boolean {
+  return /^\/api(?:\/|$)/i.test(pathname);
+}
+
 export function requireIdempotencyKey(handler: (context: RouteContext & { idempotencyKey: string }) => ReturnType<Handler>): Handler {
   return (context) => {
     const key = nonEmptyString(context.idempotencyKey);

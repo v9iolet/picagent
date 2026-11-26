@@ -3,9 +3,9 @@ import { fail } from "./api-errors.js";
 import type { AppResponse } from "./api-response.js";
 import type { UploadFile } from "./types.js";
 import type { StudioDependencies } from "./app-dependencies.js";
-import { createRouter } from "./http/router.js";
+import { createRouter, isApiPathname } from "./http/router.js";
 import { trustProxyFromEnv, type ConnectionMeta, type RequestHeaders } from "./auth/request-meta.js";
-import { publicAuthRoute } from "./routes/auth-routes.js";
+import { isAuthPathname, publicAuthRoute } from "./routes/auth-routes.js";
 import { createStudioServices } from "./services/studio-services.js";
 import { registerSuiteRoutes } from "./routes/suite-routes.js";
 import { registerReverseRoutes } from "./routes/reverse-routes.js";
@@ -65,14 +65,16 @@ export function createSuiteStudioApp(deps: StudioDependencies): SuiteStudioApp {
   }
 
   function request(method: string, path: string, options: RequestOptions = {}): Promise<AppResponse> {
-    if (!path.startsWith("/api/")) return dispatchBusinessRequest(method, path, options);
-    const route = publicAuthRoute(method, path.split("?", 1)[0]);
-    if (route) {
-      return route(deps.authService, options, trustProxy).then((response) => ({
-        ...response, headers: { ...response.headers, "cache-control": "no-store" },
-      }));
-    }
-    return guarded(options.headers, () => dispatchBusinessRequest(method, path, options));
+    const pathname = path.split("?", 1)[0];
+    if (!isApiPathname(pathname)) return Promise.resolve(fail("NOT_FOUND", 404));
+    const route = publicAuthRoute(method, pathname);
+    const response = route
+      ? route(deps.authService, options, trustProxy)
+      : guarded(options.headers, () => dispatchBusinessRequest(method, path, options));
+    if (!isAuthPathname(pathname)) return response;
+    return response.then((result) => ({
+      ...result, headers: { ...result.headers, "cache-control": "no-store" },
+    }));
   }
 
   async function dispatchBusinessRequest(method: string, path: string, options: RequestOptions = {}): Promise<AppResponse> {

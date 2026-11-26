@@ -27,6 +27,7 @@ steps:
       - npm run typecheck
       - npm run test:ticket02
       - npm run test:ticket05
+      - npx tsx --test tests/auth-service.unit.test.ts tests/auth-routes.contract.test.ts
       - npx tsx --test tests/image-editor.contract.test.ts tests/ticket06.task-contract.test.ts tests/workbench-ui.ticket08.test.ts
       - npm run build
 

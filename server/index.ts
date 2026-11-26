@@ -6,7 +6,8 @@ import { Pool } from "pg";
 import { createSuiteStudioApp, type AppResponse } from "./app.js";
 import { AuthService } from "./auth/auth-service.js";
 import { PostgresAuthRepository } from "./repositories/postgres-auth-repository.js";
-import { publicAuthRoute } from "./routes/auth-routes.js";
+import { isAuthPathname, publicAuthRoute } from "./routes/auth-routes.js";
+import { isApiPathname } from "./http/router.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { dispatchInputImageUpload } from "./multipart.js";
@@ -124,9 +125,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
   const method = req.method ?? "GET";
   const headers = req.headers as Record<string, string>;
-  if (publicAuthRoute(method, requestUrl.pathname)) {
-    res.setHeader("cache-control", "no-store");
-  } else if (requestUrl.pathname.startsWith("/api/")) {
+  const apiRequest = isApiPathname(requestUrl.pathname);
+  if (isAuthPathname(requestUrl.pathname)) res.setHeader("cache-control", "no-store");
+  if (apiRequest && !publicAuthRoute(method, requestUrl.pathname)) {
     const denied = await app.authorize(headers);
     if (denied) {
       req.resume();
@@ -140,7 +141,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   const upload = req.method === "POST" ? await dispatchInputImageUpload(app, requestUrl.pathname, body, headers) : null;
   if (upload) {
     response = upload;
-  } else if (req.method === "GET" && !requestUrl.pathname.startsWith("/api/")) {
+  } else if (method === "GET" && !apiRequest) {
     const asset = await serveStatic(req.url ?? "/");
     if (asset) {
       res.statusCode = 200;
