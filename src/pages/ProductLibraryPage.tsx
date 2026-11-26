@@ -1,3 +1,5 @@
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { Modal } from "../components/ui/Modal";
 import { useToast } from "../components/ui/ToastProvider";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -203,21 +205,6 @@ export function ProductLibraryPage({
       active = false;
     };
   }, [selectedId]);
-
-  // Keyboard Escape for modals
-  useEffect(() => {
-    if (!createOpen && !deleteTarget) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (deleteTarget && !deleting) {
-        setDeleteTarget(null);
-      } else if (createOpen && !creating) {
-        setCreateOpen(false);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [createOpen, creating, deleteTarget, deleting]);
 
   const handleStatusFilterChange = (next: ProductStatusFilter) => {
     setStatusFilter(next);
@@ -749,113 +736,70 @@ export function ProductLibraryPage({
 
       {/* Manual Create Modal */}
       {createOpen && (
-        <div
-          className="style-library-modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !creating) setCreateOpen(false);
-          }}
+        <Modal
+          backdropClassName="style-library-modal-backdrop"
+          className="product-create-modal"
+          dismissDisabled={creating}
+          onClose={() => setCreateOpen(false)}
+          aria-labelledby="product-create-modal-title"
         >
-          <section
-            className="product-create-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="product-create-modal-title"
-          >
-            <header>
-              <h2 id="product-create-modal-title">新建商品信息卡</h2>
-              <button
-                className="icon-btn"
-                type="button"
-                aria-label="关闭新建弹窗"
-                disabled={creating}
-                onClick={() => setCreateOpen(false)}
-              >
-                <Icon name="x" />
-              </button>
-            </header>
-            <div className="product-create-modal-body">
-              {createError && (
-                <div className="product-inline-error" role="alert">
-                  {createError}
-                </div>
-              )}
-              <ProductCardEditorForm
-                idPrefix="create-product-card"
-                fields={createFields}
-                supplierImages={createImages}
-                onFieldsChange={setCreateFields}
-                onSupplierImagesChange={setCreateImages}
-                onSubmit={handleCreateSubmit}
-                submitLabel="保存到商品库"
-                submitting={creating}
-                layout="panel"
-                footerExtra={
-                  <button
-                    className="btn"
-                    type="button"
-                    disabled={creating}
-                    onClick={() => setCreateOpen(false)}
-                  >
-                    取消
-                  </button>
-                }
-              />
-            </div>
-          </section>
-        </div>
+          <header>
+            <h2 id="product-create-modal-title">新建商品信息卡</h2>
+            <button
+              className="icon-btn"
+              type="button"
+              aria-label="关闭新建弹窗"
+              disabled={creating}
+              onClick={() => setCreateOpen(false)}
+            >
+              <Icon name="x" />
+            </button>
+          </header>
+          <div className="product-create-modal-body">
+            {createError && (
+              <div className="product-inline-error" role="alert">
+                {createError}
+              </div>
+            )}
+            <ProductCardEditorForm
+              idPrefix="create-product-card"
+              fields={createFields}
+              supplierImages={createImages}
+              onFieldsChange={setCreateFields}
+              onSupplierImagesChange={setCreateImages}
+              onSubmit={handleCreateSubmit}
+              submitLabel="保存到商品库"
+              submitting={creating}
+              layout="panel"
+              footerExtra={
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={creating}
+                  onClick={() => setCreateOpen(false)}
+                >
+                  取消
+                </button>
+              }
+            />
+          </div>
+        </Modal>
       )}
 
       {/* Delete Confirmation Modal */}
       {deleteTarget && (
-        <div
-          className="style-library-modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !deleting) setDeleteTarget(null);
-          }}
+        <ConfirmDialog
+          titleId="product-delete-confirm-title"
+          title={`确认删除「${deleteTarget.name}」？`}
+          danger
+          loading={deleting}
+          closeLabel="关闭删除确认"
+          confirmLabel={deleting ? "删除中…" : "确认删除"}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={handleConfirmDelete}
         >
-          <section
-            className="style-delete-confirm-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="product-delete-confirm-title"
-          >
-            <header>
-              <h2 id="product-delete-confirm-title">确认删除「{deleteTarget.name}」？</h2>
-              <button
-                className="icon-btn"
-                type="button"
-                aria-label="关闭删除确认"
-                disabled={deleting}
-                onClick={() => setDeleteTarget(null)}
-              >
-                <Icon name="x" />
-              </button>
-            </header>
-            <p className="style-delete-confirm-desc">
-              删除后将永久移除该商品信息卡及其供应商参考图，且不可恢复；已生成的商品套图与爆品图复刻批次所冻结的历史商品卡快照不受影响。
-            </p>
-            <div className="style-delete-confirm-actions">
-              <button
-                className="btn"
-                type="button"
-                disabled={deleting}
-                onClick={() => setDeleteTarget(null)}
-              >
-                取消
-              </button>
-              <button
-                className="btn btn-danger"
-                type="button"
-                disabled={deleting}
-                onClick={() => void handleConfirmDelete()}
-              >
-                {deleting ? "删除中…" : "确认删除"}
-              </button>
-            </div>
-          </section>
-        </div>
+          删除后将永久移除该商品信息卡及其供应商参考图，且不可恢复；已生成的商品套图与爆品图复刻批次所冻结的历史商品卡快照不受影响。
+        </ConfirmDialog>
       )}
 
       {error && (

@@ -359,10 +359,6 @@ function AplusWorkspace({
   function upload(files: File[]) {
     if (busy || !files.length) return;
     void act("upload", async () => {
-      if (files.length + images.length > 6) throw new Error("每个批次最多上传 6 张商品原图。");
-      if (files.some((file) => !["image/png", "image/jpeg", "image/webp"].includes(file.type))) {
-        throw new Error("请上传 PNG、JPEG 或 WebP 格式的图片。");
-      }
       let uploadSuiteId = draft.uploadSuiteId;
       if (!uploadSuiteId) {
         const created = await suiteApi.create(config.productCard?.name || "A+详情原图");
@@ -460,6 +456,7 @@ function AplusWorkspace({
           awaitingConfirmation={awaiting}
           onChange={updateConfig}
           onUpload={upload}
+          onUploadError={setNotice}
           onRemove={remove}
           onAiWrite={aiWrite}
           onUndoAiWrite={undoAiWrite}

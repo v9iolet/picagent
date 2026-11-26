@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import type { ReactNode } from "react";
+import { Modal } from "../ui/Modal";
 
 export function StudioDialog({
   title,
@@ -13,21 +14,14 @@ export function StudioDialog({
   wide?: boolean;
   className?: string;
 }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const d = ref.current!;
-    d.showModal();
-    return () => d.close();
-  }, []);
   return (
-    <dialog
-      ref={ref}
-      className={`ss-dialog${wide ? " wide" : ""} ${className}`.trim()}
+    <Modal
       aria-label={title}
-      onCancel={(e) => {
-        e.preventDefault();
-        close();
-      }}
+      size={wide ? "xl" : "md"}
+      className={`ss-dialog${wide ? " wide" : ""} ${className}`.trim()}
+      backdropClassName="ss-dialog-backdrop"
+      closeOnBackdrop={false}
+      onClose={close}
     >
       <header>
         <h2>{title}</h2>
@@ -36,6 +30,6 @@ export function StudioDialog({
         </button>
       </header>
       {children}
-    </dialog>
+    </Modal>
   );
 }

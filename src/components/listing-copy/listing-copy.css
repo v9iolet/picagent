@@ -43,7 +43,7 @@
   margin-bottom: 14px;
 }
 .ss-dialog.lc-drawer {
-  inset: 0 0 0 auto;
+  justify-self: end;
   margin: 0;
   width: min(100%, 570px);
   min-width: 0;
