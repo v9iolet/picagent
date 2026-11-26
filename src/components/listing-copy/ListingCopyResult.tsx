@@ -1,4 +1,5 @@
-import { useEffect, useId, useState } from "react";
+import { usePolling } from "../../hooks/usePolling";
+import { useId, useState } from "react";
 import { listingFieldCounts, listingFieldEnabled, type ListingCount, type ListingRules } from "../../../shared/listing-config";
 import { listingCopyApi, type ApiListingContent, type ApiListingJob, type ApiListingSummary } from "../../api/client";
 import { Icon } from "../../pages/shared";
@@ -34,28 +35,19 @@ export function listingMessage(error: unknown) {
 export function useListingCopyJob(id: string, initial?: ApiListingJob) {
   const [job, setJob] = useState(initial);
   const [readError, setReadError] = useState("");
-  const [revision, setRevision] = useState(0);
   const needsRead = !job || job.status === "running";
-  useEffect(() => {
-    if (!needsRead) return;
-    let active = true;
-    let timer: ReturnType<typeof setTimeout>;
-    async function poll() {
-      try {
-        const next = await listingCopyApi.get(id);
-        if (!active) return;
-        setJob(next);
-        if (next.status === "running") timer = setTimeout(poll, 1000);
-      } catch (error) {
-        if (active) setReadError(listingMessage(error));
-      }
-    }
-    void poll();
-    return () => { active = false; clearTimeout(timer); };
-  }, [id, needsRead, revision]);
+  usePolling(async signal => {
+    const next = await listingCopyApi.get(id, signal);
+    if (!signal.aborted) setJob(next);
+  }, {
+    enabled: needsRead && !readError,
+    initialDelayMs: 0,
+    intervalMs: 1000,
+    onError: error => setReadError(listingMessage(error)),
+  }, [id]);
   return {
     job, setJob, readError,
-    retry: () => { setReadError(""); setRevision((n) => n + 1); },
+    retry: () => setReadError(""),
   };
 }
 

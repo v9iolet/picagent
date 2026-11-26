@@ -1,3 +1,4 @@
+import { createTextStorageStore, createWebStorageStore, type StorageLike } from "../../lib/draft-storage";
 import { sanitizeSelectedProductCardSummary } from "../../components/product-card-picker/types";
 import {
   replicaDraftBlobStorage,
@@ -35,11 +36,7 @@ export interface ReplicaDraftSnapshot {
   productNotice: string;
 }
 
-export interface StorageLike {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-  removeItem(key: string): void;
-}
+export type { StorageLike } from "../../lib/draft-storage";
 
 interface PersistedReplicaReferenceMeta {
   localId: string;
@@ -66,32 +63,18 @@ interface PersistedReplicaDraft {
   products: PersistedReplicaProductMeta[];
 }
 
+const lastSuite = createTextStorageStore({ storage: "sessionStorage", key: REPLICA_LAST_SUITE_STORAGE_KEY });
+
 export function readLastReplicaSuiteId(): string | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const value = window.sessionStorage.getItem(REPLICA_LAST_SUITE_STORAGE_KEY)?.trim();
-    return value || null;
-  } catch {
-    return null;
-  }
+  return lastSuite.read()?.trim() || null;
 }
 
 export function saveLastReplicaSuiteId(id: string): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.sessionStorage.setItem(REPLICA_LAST_SUITE_STORAGE_KEY, id);
-  } catch {
-    // Ignore storage quota or privacy-mode errors.
-  }
+  lastSuite.write(id);
 }
 
 export function clearLastReplicaSuiteId(): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.sessionStorage.removeItem(REPLICA_LAST_SUITE_STORAGE_KEY);
-  } catch {
-    // Ignore storage errors.
-  }
+  lastSuite.remove();
 }
 
 const VALID_LANGUAGES = new Set<string>(REPLICA_LANGUAGE_OPTIONS.map((item) => item.value));
@@ -226,65 +209,16 @@ function sanitizePersistedProducts(raw: unknown): PersistedReplicaProductMeta[] 
   return items;
 }
 
-function readPersistedDraft(
-  storage: StorageLike | null,
-  legacySessionStorage: StorageLike | null,
-): PersistedReplicaDraft | null {
-  if (storage) {
-    try {
-      const raw = storage.getItem(REPLICA_DRAFT_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          return {
-            version: 1,
-            config: sanitizeConfigDraft(parsed.config),
-            references: sanitizePersistedReferences(parsed.references),
-            products: sanitizePersistedProducts(parsed.products),
-          };
-        }
-      }
-    } catch {
-      // Ignore storage or JSON parse errors.
-    }
-  }
-  if (legacySessionStorage) {
-    try {
-      const raw = legacySessionStorage.getItem(REPLICA_DRAFT_CONFIG_STORAGE_KEY);
-      if (raw) {
-        return {
-          version: 1,
-          config: sanitizeConfigDraft(JSON.parse(raw)),
-          references: [],
-          products: [],
-        };
-      }
-    } catch {
-      // Ignore storage errors.
-    }
-  }
-  return null;
-}
-
-function readLiveStorageBlobKeys(storage: StorageLike | null): Set<string> | null {
-  if (!storage) return new Set<string>();
-  try {
-    const raw = storage.getItem(REPLICA_DRAFT_STORAGE_KEY);
-    if (!raw) return new Set<string>();
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const keys = new Set<string>();
-    for (const ref of sanitizePersistedReferences(parsed.references)) {
-      keys.add(ref.blobKey);
-    }
-    for (const product of sanitizePersistedProducts(parsed.products)) {
-      if (product.sourceKind === "upload") keys.add(product.blobKey);
-    }
-    return keys;
-  } catch {
-    // Prefer skipping orphan deletion over deleting active blobs if storage cannot be read safely.
-    return null;
-  }
+function decodePersistedDraft(raw: unknown): PersistedReplicaDraft | null {
+  // The original reader accepts all object versions and normalizes known fields.
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const data = raw as Record<string, unknown>;
+  return {
+    version: 1,
+    config: sanitizeConfigDraft(data.config),
+    references: sanitizePersistedReferences(data.references),
+    products: sanitizePersistedProducts(data.products),
+  };
 }
 
 function reorderList<T>(items: readonly T[], fromIndex: number, toIndex: number): T[] {
@@ -301,24 +235,6 @@ function reorderList<T>(items: readonly T[], fromIndex: number, toIndex: number)
   const [moved] = next.splice(fromIndex, 1);
   next.splice(toIndex, 0, moved);
   return next;
-}
-
-function getDefaultLocalStorage(): StorageLike | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
-function getDefaultSessionStorage(): StorageLike | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.sessionStorage;
-  } catch {
-    return null;
-  }
 }
 
 export interface ReplicaDraftStoreDeps {
@@ -345,11 +261,16 @@ export interface ReplicaDraftStore {
 }
 
 export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): ReplicaDraftStore {
-  const storage = deps.storage !== undefined ? deps.storage : getDefaultLocalStorage();
-  const legacySessionStorage =
-    deps.legacySessionStorage !== undefined
-      ? deps.legacySessionStorage
-      : getDefaultSessionStorage();
+  const metadata = createWebStorageStore({
+    storage: deps.storage === undefined ? "localStorage" : deps.storage,
+    key: REPLICA_DRAFT_STORAGE_KEY,
+    decode: decodePersistedDraft,
+  });
+  const legacyConfig = createWebStorageStore({
+    storage: deps.legacySessionStorage === undefined ? "sessionStorage" : deps.legacySessionStorage,
+    key: REPLICA_DRAFT_CONFIG_STORAGE_KEY,
+    decode: sanitizeConfigDraft,
+  });
   const blobStorage = deps.blobStorage !== undefined ? deps.blobStorage : replicaDraftBlobStorage;
   const createUrl = deps.createObjectUrl ?? ((blob: Blob) => URL.createObjectURL(blob));
   const revokeUrl = deps.revokeObjectUrl ?? ((url: string) => URL.revokeObjectURL(url));
@@ -370,7 +291,7 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
   const hydratingProductBlobKeys = new Map<string, string>();
   const inFlightBlobKeys = new Set<string>();
 
-  const initialPersisted = readPersistedDraft(storage, legacySessionStorage);
+  const initialPersisted = metadata.read();
   const initialReferences: ReplicaReferenceDraft[] = [];
   const initialProducts: ReplicaProductDraft[] = [];
 
@@ -408,7 +329,7 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
   let snapshot: ReplicaDraftSnapshot = {
     references: initialReferences,
     products: initialProducts,
-    config: initialPersisted ? initialPersisted.config : { ...INITIAL_REPLICA_CONFIG },
+    config: initialPersisted?.config ?? legacyConfig.read() ?? { ...INITIAL_REPLICA_CONFIG },
     refNotice: "",
     productNotice: "",
   };
@@ -442,18 +363,7 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
     objectUrls.clear();
   }
 
-  function clearLegacySessionConfig(): void {
-    if (!legacySessionStorage) return;
-    try {
-      legacySessionStorage.removeItem(REPLICA_DRAFT_CONFIG_STORAGE_KEY);
-    } catch {
-      // Ignore storage errors.
-    }
-  }
-
   function persistDraftMetadata(): void {
-    clearLegacySessionConfig();
-    if (!storage) return;
     const references: PersistedReplicaReferenceMeta[] = [];
     for (const item of snapshot.references) {
       const blobKey = persistedBlobKeys.get(item.localId);
@@ -484,38 +394,23 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
       });
     }
 
-    try {
-      if (references.length === 0 && products.length === 0 && isDefaultConfig(snapshot.config)) {
-        storage.removeItem(REPLICA_DRAFT_STORAGE_KEY);
-      } else {
-        const payload: PersistedReplicaDraft = {
-          version: 1,
-          config: snapshot.config,
-          references,
-          products,
-        };
-        storage.setItem(REPLICA_DRAFT_STORAGE_KEY, JSON.stringify(payload));
-      }
-    } catch {
-      // Ignore storage quota or privacy-mode errors.
+    if (references.length === 0 && products.length === 0 && isDefaultConfig(snapshot.config)) {
+      metadata.remove();
+      legacyConfig.remove();
+    } else if (metadata.write({ version: 1, config: snapshot.config, references, products })) {
+      legacyConfig.remove();
     }
-  }
-
-  function clearPersistedDraftMetadata(): void {
-    if (storage) {
-      try {
-        storage.removeItem(REPLICA_DRAFT_STORAGE_KEY);
-      } catch {
-        // Ignore storage errors.
-      }
-    }
-    clearLegacySessionConfig();
   }
 
   function collectActiveBlobKeys(): Set<string> | null {
-    const liveStorageKeys = readLiveStorageBlobKeys(storage);
-    if (!liveStorageKeys) return null;
-    const keys = new Set<string>(liveStorageKeys);
+    const live = metadata.readResult();
+    // Only prune when we know which blobs other tabs still reference.
+    if (live.status === "unreadable") return null;
+    const keys = new Set<string>();
+    if (live.value) {
+      for (const ref of live.value.references) keys.add(ref.blobKey);
+      for (const product of live.value.products) keys.add(product.blobKey);
+    }
     for (const key of persistedBlobKeys.values()) keys.add(key);
     for (const key of inFlightBlobKeys) keys.add(key);
     return keys;
@@ -1138,7 +1033,8 @@ export function createReplicaDraftStore(deps: ReplicaDraftStoreDeps = {}): Repli
       hydratingProductBlobKeys.clear();
       persistedBlobKeys.clear();
       revokeAllObjectUrls();
-      clearPersistedDraftMetadata();
+      metadata.remove();
+      legacyConfig.remove();
       if (blobStorage) {
         void blobStorage.clearBlobs();
       }

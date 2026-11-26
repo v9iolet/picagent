@@ -114,7 +114,7 @@ type AplusRun = { suiteId: string; runId: string };
 type AplusPayload = ReturnType<typeof makeAplusPayload>;
 
 export const aplusApi = {
-  state: (id: string) => request<AplusStudioState>(`${path(id)}/studio-state`),
+  state: (id: string, signal?: AbortSignal) => request<AplusStudioState>(`${path(id)}/studio-state`, { signal }),
   aiWrite: (body: ReturnType<typeof makeAplusAiWritePayload>) =>
     write<{ productInfo: string; truncated: boolean }>("/api/aplus/ai-write", body),
   start: (id: string | undefined, body: AplusPayload, key: string) =>

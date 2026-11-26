@@ -6,6 +6,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { waitUntil } from "../server/suite-pipeline.js";
 import { createSuiteStudioApp } from "../server/app.js";
+import { dispatchJsonRequest } from "../server/http/json-request.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { ModelSettings, type ModelSettingsState } from "../server/model-settings.js";
@@ -28,6 +29,21 @@ function setup(state: ModelSettingsState = { channels: [], preferences: { image:
   const createApp = () => createSuiteStudioApp({ repository: new MemorySuiteRepository(), storage: new MemoryStorage(), modelSettings: settings });
   return { api: createApp(), settings, createApp };
 }
+
+test("HTTP settings writes require JSON and disable caching for both errors and success", async () => {
+  const { api } = setup();
+  const url = new URL(path + "/channels", "http://localhost");
+  const body = Buffer.from(JSON.stringify(channel));
+  for (const headers of [{}, { "content-type": "text/plain" }]) {
+    const result = await dispatchJsonRequest(api.request, "POST", url, headers, body);
+    assert.equal(result.status, 415);
+    assert.equal(result.body.error.code, "UNSUPPORTED_MEDIA_TYPE");
+    assert.equal(result.headers?.["cache-control"], "no-store");
+  }
+  const result = await dispatchJsonRequest(api.request, "POST", url, { "content-type": "application/json; charset=utf-8" }, body);
+  assert.equal(result.status, 201);
+  assert.equal(result.headers?.["cache-control"], "no-store");
+});
 
 test("maintains shared channels and keeps saved credentials out of responses", async () => {
   const { api, createApp } = setup();

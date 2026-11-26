@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { AplusStudioPage } from "../pages/AplusStudioPage";
-import { HomePage } from "../pages/HomePage";
-import { ModelSettingsPage } from "../pages/ModelSettingsPage";
-import { SuiteStudioPage } from "../pages/SuiteStudioPage";
-import { BoardPage } from "../pages/BoardPage";
-import { CanvasListPage } from "../pages/CanvasListPage";
-import { ImageAssetsPage } from "../pages/ImageAssetsPage";
-import { ProductLibraryPage } from "../pages/ProductLibraryPage";
-import { PromptTemplatesPage } from "../pages/PromptTemplatesPage";
-import { ReplicaStudioPage } from "../pages/ReplicaStudioPage";
-import { ReversePage } from "../pages/ReversePage";
+import { ToastProvider } from "../components/ui/ToastProvider";
+import { AppConfigProvider } from "../context/AppConfigContext";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+
+const AplusStudioPage = lazy(() => import("../pages/AplusStudioPage").then(module => ({ default: module.AplusStudioPage })));
+const HomePage = lazy(() => import("../pages/HomePage").then(module => ({ default: module.HomePage })));
+const ModelSettingsPage = lazy(() => import("../pages/ModelSettingsPage").then(module => ({ default: module.ModelSettingsPage })));
+const SuiteStudioPage = lazy(() => import("../pages/SuiteStudioPage").then(module => ({ default: module.SuiteStudioPage })));
+const BoardPage = lazy(() => import("../pages/BoardPage").then(module => ({ default: module.BoardPage })));
+const CanvasListPage = lazy(() => import("../pages/CanvasListPage").then(module => ({ default: module.CanvasListPage })));
+const ImageAssetsPage = lazy(() => import("../pages/ImageAssetsPage").then(module => ({ default: module.ImageAssetsPage })));
+const ProductLibraryPage = lazy(() => import("../pages/ProductLibraryPage").then(module => ({ default: module.ProductLibraryPage })));
+const PromptTemplatesPage = lazy(() => import("../pages/PromptTemplatesPage").then(module => ({ default: module.PromptTemplatesPage })));
+const ReplicaStudioPage = lazy(() => import("../pages/ReplicaStudioPage").then(module => ({ default: module.ReplicaStudioPage })));
+const ReversePage = lazy(() => import("../pages/ReversePage").then(module => ({ default: module.ReversePage })));
 
 const readLocation = () => ({ path: window.location.pathname, search: window.location.search });
 
@@ -22,13 +25,28 @@ export function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
-  const reverseId = useMemo(() => path.match(/^\/reverse\/([^/]+)/)?.[1], [path]);
   const navigate = useCallback((to: string, options?: { replace?: boolean }) => {
     window.history[options?.replace ? "replaceState" : "pushState"]({}, "", to);
     setLocation(readLocation());
     if (!options?.replace) window.scrollTo({ top: 0 });
   }, []);
 
+  return (
+    <AppConfigProvider>
+      <ToastProvider>
+        <Suspense fallback={<main role="status">正在加载页面…</main>}>
+          <RoutePage path={path} search={search} navigate={navigate} />
+        </Suspense>
+      </ToastProvider>
+    </AppConfigProvider>
+  );
+}
+
+function RoutePage({ path, search, navigate }: {
+  path: string;
+  search: string;
+  navigate: (to: string, options?: { replace?: boolean }) => void;
+}) {
   const legacy = path.match(/^\/suites\/([^/]+)\/?$/);
   const legacyBoard = path.match(/^\/suites\/([^/]+)\/board\/?$/);
   const legacyListing = /^\/create\/listing-copy(?:\/[^/]+)?\/?$/.test(path);
@@ -39,10 +57,10 @@ export function App() {
     : legacy || legacyListing ? "/create/suite" : path;
   useEffect(() => {
     if (path === canonical) return;
-    window.history.replaceState({}, "", canonical + search + window.location.hash);
-    setLocation(readLocation());
-  }, [path, canonical, search]);
+    navigate(canonical + search + window.location.hash, { replace: true });
+  }, [path, canonical, search, navigate]);
 
+  const reverseId = path.match(/^\/reverse\/([^/]+)/)?.[1];
   if (path === "/") {
     const sessionId = new URLSearchParams(search).get("session")?.trim() || undefined;
     return <HomePage sessionId={sessionId} navigate={navigate} />;

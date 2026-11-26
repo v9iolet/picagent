@@ -1,6 +1,8 @@
+import { usePolling } from "../hooks/usePolling";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { defaultImageOptions } from "../../shared/model-settings";
-import { modelSettingsApi, productCardsApi } from "../api/client";
+import { productCardsApi } from "../api/client";
+import { useModelSettings } from "../context/AppConfigContext";
 import { AppShell } from "../components/AppShell";
 import {
   GenerationHistoryDrawer,
@@ -48,7 +50,8 @@ export function ReplicaStudioPage({
   const draft = useSyncExternalStore(replicaDraftStore.subscribe, replicaDraftStore.getSnapshot);
   const { references, products, config, refNotice, productNotice } = draft;
 
-  const [imageOptions, setImageOptions] = useState(() => defaultImageOptions(""));
+  const { modelSettings, error: settingsError } = useModelSettings();
+  const imageOptions = modelSettings ? currentImageOptions(modelSettings) : defaultImageOptions("");
   const [submitting, setSubmitting] = useState(false);
   const [pageNotice, setPageNotice] = useState("");
 
@@ -81,19 +84,8 @@ export function ReplicaStudioPage({
   }, []);
 
   useEffect(() => {
-    let live = true;
-    modelSettingsApi
-      .get()
-      .then((settings) => {
-        if (live) setImageOptions(currentImageOptions(settings));
-      })
-      .catch((error) => {
-        if (live) setPageNotice(message(error));
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
+    if (settingsError) setPageNotice(message(settingsError));
+  }, [settingsError]);
 
   const sizes = allowedReplicaSizes(imageOptions);
   const effectiveConfig: ReplicaConfigDraft = {
@@ -268,33 +260,19 @@ export function ReplicaStudioPage({
       ? currentState.suite.id
       : undefined;
 
-  useEffect(() => {
+  usePolling(async signal => {
     if (!pollingSuiteId) return;
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    async function poll() {
-      const seq = ++requestSeqRef.current;
-      try {
-        const next = await replicaApi.state(pollingSuiteId!);
-        if (!live || currentSuiteIdRef.current !== pollingSuiteId) return;
-        applyState(next, seq);
-        if (next.pipeline?.status === "running") {
-          timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-        }
-      } catch (error) {
-        if (!live || currentSuiteIdRef.current !== pollingSuiteId) return;
-        setPageNotice(message(error));
-        timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-      }
-    }
-
-    timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-    return () => {
-      live = false;
-      if (timer !== undefined) clearTimeout(timer);
-    };
-  }, [pollingSuiteId, applyState]);
+    const seq = ++requestSeqRef.current;
+    const next = await replicaApi.state(pollingSuiteId, signal);
+    if (signal.aborted || currentSuiteIdRef.current !== pollingSuiteId) return;
+    applyState(next, seq);
+  }, {
+    enabled: Boolean(pollingSuiteId),
+    intervalMs: POLL_INTERVAL_MS,
+    onError: error => {
+      if (currentSuiteIdRef.current === pollingSuiteId) setPageNotice(message(error));
+    },
+  }, [pollingSuiteId]);
 
   const handleAddReferences = useCallback((files: File[]) => {
     replicaDraftStore.addReferences(files);
@@ -332,9 +310,10 @@ export function ReplicaStudioPage({
   }, []);
 
   const refresh = useCallback(
-    async (id: string) => {
+    async (id: string, signal?: AbortSignal) => {
       const seq = ++requestSeqRef.current;
-      const next = await replicaApi.state(id);
+      const next = await replicaApi.state(id, signal);
+      if (signal?.aborted) return;
       if (currentSuiteIdRef.current && currentSuiteIdRef.current !== id) return;
       applyState(next, seq);
     },

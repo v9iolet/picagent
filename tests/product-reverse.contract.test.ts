@@ -157,6 +157,12 @@ test("legacy reverse plans remain readable with previews and asset archiving", a
   const original = await api.previewReverseReference(seeded.planId, seeded.refId, "original");
   assert.equal(original.status, 200);
   assert.deepEqual(original.raw, pngBytes);
+  const previewPath = `/api/reverse-plans/${seeded.planId}/references/${seeded.refId}/preview`;
+  for (const [suffix, expected] of [["", thumb], ["/thumbnail", thumb], ["/original", original]] as const) {
+    const routed = await api.request("GET", previewPath + suffix);
+    assert.deepEqual(routed.raw, expected.raw);
+    assert.equal(routed.headers?.["content-type"], expected.headers?.["content-type"]);
+  }
 
   const archived = await api.request("POST", `/api/reverse-plans/${seeded.planId}/references/${seeded.refId}/asset`, {
     headers: { "idempotency-key": "archive-legacy-ref" },
@@ -242,8 +248,6 @@ test("ReversePage is read-only with upgrade banner and WorkbenchBoardPage skips 
   assert.doesNotMatch(reversePage, /api<Plan>\("\/api\/reverse-plans"/);
 
   const workbenchPage = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
-  assert.match(
-    workbenchPage,
-    /useEffect\(\(\) => \{\s*if \(workbench\?\.suite\.origin === "replica" \|\| workbench\?\.suite\.origin === "aplus"\) return;\s*const ordinaryTaskRunning/,
-  );
+  assert.match(workbenchPage, /const studioManaged = workbench\?\.suite\.origin === "replica" \|\| workbench\?\.suite\.origin === "aplus"/);
+  assert.match(workbenchPage, /usePolling\(reload, \{\s*enabled: !studioManaged && Boolean\(ordinaryTaskRunning \|\| editChildRunning\)/);
 });

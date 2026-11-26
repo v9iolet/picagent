@@ -1,8 +1,10 @@
+import { usePolling } from "../hooks/usePolling";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   APLUS_SIZE_PRESETS, isAplusPlanStale, normalizeAplusLanguage, validateAplusSizePresets,
 } from "../../shared/aplus";
-import { ApiHttpError, createIdempotencyKey, productCardsApi, suiteApi, type ApiImage, type ApiPlatformProfile } from "../api/client";
+import { ApiHttpError, createIdempotencyKey, productCardsApi, suiteApi, type ApiImage } from "../api/client";
+import { usePlatforms } from "../context/AppConfigContext";
 import { AppShell } from "../components/AppShell";
 import { GenerationHistoryDrawer } from "../components/generation-history/GenerationHistoryDrawer";
 import { formatHistoryTime } from "../components/generation-history/history-model";
@@ -86,7 +88,7 @@ function AplusWorkspace({
   const [state, setState] = useState(() => readAplusBatch(suiteId));
   const [draft, setDraft] = useState(() => savedDraft ?? (state ? draftFromBatch(state) : newAplusDraft()));
   const draftRef = useRef(draft);
-  const [profiles, setProfiles] = useState<ApiPlatformProfile[]>([]);
+  const { platforms: profiles, error: platformsError } = usePlatforms();
   const [loading, setLoading] = useState(Boolean(suiteId && !state));
   const [batchError, setBatchError] = useState("");
   const [loadingCard, setLoadingCard] = useState(Boolean(initialProductCardId));
@@ -137,14 +139,8 @@ function AplusWorkspace({
   }, [commitDraft, initialProductCardId, savedDraft, suiteId]);
 
   useEffect(() => {
-    let active = true;
-    suiteApi.listPlatforms().then((loaded) => {
-      if (active) setProfiles(loaded);
-    }).catch((error) => {
-      if (active) setNotice(message(error));
-    });
-    return () => { active = false; };
-  }, []);
+    if (platformsError) setNotice(message(platformsError));
+  }, [platformsError]);
 
   useEffect(() => {
     setLoadingCard(Boolean(initialProductCardId));
@@ -177,11 +173,11 @@ function AplusWorkspace({
     return () => { active = false; };
   }, [updateConfig, initialProductCardId]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (signal?: AbortSignal) => {
     if (!suiteId) return;
     const sequence = ++refreshSequence.current;
-    const next = await aplusApi.state(suiteId);
-    if (!mounted.current || sequence < appliedRefresh.current) return;
+    const next = await aplusApi.state(suiteId, signal);
+    if (signal?.aborted || !mounted.current || sequence < appliedRefresh.current) return;
     appliedRefresh.current = sequence;
     if (readAplusWorkspace()?.routeKey !== routeKey) commitDraft(draftFromBatch(next));
     saveAplusBatch(next);
@@ -202,21 +198,11 @@ function AplusWorkspace({
   useEffect(() => { if (suiteId) void load(); }, [suiteId, load]);
 
   const running = state?.pipeline?.status === "running";
-  useEffect(() => {
-    if (!running) return;
-    let active = true;
-    let timer: ReturnType<typeof setTimeout>;
-    async function poll() {
-      try {
-        await refresh();
-      } catch (error) {
-        if (active) setBatchError(message(error));
-      }
-      if (active) timer = setTimeout(poll, 2000);
-    }
-    timer = setTimeout(poll, 2000);
-    return () => { active = false; clearTimeout(timer); };
-  }, [running, refresh]);
+  usePolling(refresh, {
+    enabled: running,
+    intervalMs: 2000,
+    onError: error => setBatchError(message(error)),
+  }, [refresh]);
 
   const { images } = draft;
   const fallbackProfile = profiles.find(({ code }) => code === "amazon") ?? profiles[0];
@@ -368,10 +354,6 @@ function AplusWorkspace({
   function upload(files: File[]) {
     if (busy || !files.length) return;
     void act("upload", async () => {
-      if (files.length + images.length > 6) throw new Error("每个批次最多上传 6 张商品原图。");
-      if (files.some((file) => !["image/png", "image/jpeg", "image/webp"].includes(file.type))) {
-        throw new Error("请上传 PNG、JPEG 或 WebP 格式的图片。");
-      }
       let uploadSuiteId = draft.uploadSuiteId;
       if (!uploadSuiteId) {
         const created = await suiteApi.create(config.productCard?.name || "A+详情原图");
@@ -469,6 +451,7 @@ function AplusWorkspace({
           awaitingConfirmation={awaiting}
           onChange={updateConfig}
           onUpload={upload}
+          onUploadError={setNotice}
           onRemove={remove}
           onAiWrite={aiWrite}
           onUndoAiWrite={undoAiWrite}

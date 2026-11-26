@@ -1,74 +1,43 @@
-import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { usePolling } from "../../hooks/usePolling";
+import { useState, type ComponentProps } from "react";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
 import { createGenerationActions, suiteApi } from "../../api/client";
-import { ImageEditorModal } from "../../pages/WorkbenchBoardPage";
+import { LazyImageEditorModal } from "../../features/image-editor/LazyImageEditorModal";
 import { message } from "./studio";
 
 export const JOB_SUCCESS_STATUSES = ["completed", "succeeded"] as const;
 
-export const readRetryJobStatus = async (job: string) =>
-  (await suiteApi.getBatch(job)).batch.status;
+export const readRetryJobStatus = async (job: string, signal?: AbortSignal) =>
+  (await suiteApi.getBatch(job, signal)).batch.status;
 
-export const readImageEditJobStatus = async (job: string) =>
-  ((await suiteApi.getImageEditTask(job)).task as { status: string }).status;
+export const readImageEditJobStatus = async (job: string, signal?: AbortSignal) =>
+  ((await suiteApi.getImageEditTask(job, signal)).task as { status: string }).status;
 
 export function useResultJob(
   job: string,
-  readStatus: (job: string) => Promise<string>,
+  readStatus: (job: string, signal?: AbortSignal) => Promise<string>,
   success: readonly string[],
   suiteId: string,
-  refresh: (id: string) => Promise<void>,
+  refresh: (id: string, signal?: AbortSignal) => Promise<void>,
   setJob: (id: string) => void,
   notify: (text: string) => void,
   failureMessage = "图片生成失败，请重试。",
 ) {
-  const handlersRef = useRef({
-    readStatus,
-    success,
-    refresh,
-    setJob,
-    notify,
-    failureMessage,
-  });
-  handlersRef.current = {
-    readStatus,
-    success,
-    refresh,
-    setJob,
-    notify,
-    failureMessage,
-  };
-
-  useEffect(() => {
-    if (!job) return;
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    async function poll() {
-      try {
-        const status = await handlersRef.current.readStatus(job);
-        if (!live) return;
-        if (status === "running" || status === "generating") {
-          timer = setTimeout(poll, 3000);
-          return;
-        }
-        await handlersRef.current.refresh(suiteId);
-        if (live) {
-          handlersRef.current.notify(
-            handlersRef.current.success.includes(status)
-              ? "图片已更新"
-              : handlersRef.current.failureMessage,
-          );
-        }
-      } catch (error) {
-        if (live) handlersRef.current.notify(message(error));
-      }
-      if (live) handlersRef.current.setJob("");
-    }
-    timer = setTimeout(poll, 1000);
-    return () => {
-      live = false;
-      if (timer !== undefined) clearTimeout(timer);
-    };
+  usePolling(async signal => {
+    const status = await readStatus(job, signal);
+    if (signal.aborted || status === "running" || status === "generating") return;
+    await refresh(suiteId, signal);
+    if (signal.aborted) return;
+    notify(success.includes(status) ? "图片已更新" : failureMessage);
+    setJob("");
+  }, {
+    enabled: Boolean(job),
+    initialDelayMs: 1000,
+    intervalMs: 3000,
+    onError: error => {
+      notify(message(error));
+      setJob("");
+    },
   }, [job, suiteId]);
 }
 
@@ -81,7 +50,7 @@ export function StudioImageEditorHost({
   onNotify,
 }: {
   card: ResolvedDeliverySlot | null;
-  initialTool?: ComponentProps<typeof ImageEditorModal>["initialTool"];
+  initialTool?: ComponentProps<typeof LazyImageEditorModal>["initialTool"];
   onClose: () => void;
   onEditJobStarted: (childTaskId: string, parentTaskId: string) => void;
   onRetryJobStarted: (batchId: string, parentTaskId: string) => void;
@@ -92,7 +61,7 @@ export function StudioImageEditorHost({
   const targetTaskId = card.editChildTaskId ?? card.parentTaskId;
   const parentTaskId = card.parentTaskId;
   return (
-    <ImageEditorModal
+    <LazyImageEditorModal
       key={card.versionId}
       initialTool={initialTool}
       task={{ id: targetTaskId, title: card.title, promptDraft: card.promptText }}

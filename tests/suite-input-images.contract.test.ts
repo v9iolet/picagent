@@ -48,6 +48,12 @@ test("persists image metadata, hash and suite-scoped object keys", async () => {
   assert.notEqual(result.body.data.originalObjectKey, result.body.data.thumbnailObjectKey);
   assert.equal(storage.keys().length, 3);
   assert.ok(storage.keys().some((key) => key.endsWith("/generation-input.jpg")));
+  const original = await api.request("GET", result.body.data.originalPreviewUrl);
+  assert.deepEqual(original.raw, png1x1);
+  assert.equal(original.headers?.["content-type"], "image/png");
+  const thumbnail = await api.request("GET", result.body.data.thumbnailPreviewUrl);
+  assert.deepEqual(thumbnail.raw, (await storage.get(result.body.data.thumbnailObjectKey))?.bytes);
+  assert.equal(thumbnail.headers?.["content-type"], "image/jpeg");
 });
 
 test("enforces 1-6 ordinals and idempotent image upload", async () => {

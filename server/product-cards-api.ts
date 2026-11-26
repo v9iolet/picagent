@@ -11,6 +11,8 @@ import {
   type ProductCardStatus,
   type ProductCardSupplierImage,
 } from "../shared/product-card.js";
+import { isPlainObject, normalizeUuid, parsePagination } from "./http/validators.js";
+import { previewStorageObject } from "./http/binary-response.js";
 import { fail } from "./api-errors.js";
 import { now, ok, type AppResponse } from "./api-response.js";
 import { processImage, type ProcessedImage } from "./image.js";
@@ -21,7 +23,6 @@ import type {
 } from "./types.js";
 
 const ROOT = "/api/product-cards";
-const UUID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const DATA_URL_RE = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,(.*)$/i;
 
 type RetainedProcessedImage = Omit<ProcessedImage, "generationInput">;
@@ -39,11 +40,6 @@ interface PreparedExistingImage {
 }
 
 type PreparedImageEntry = PreparedNewUpload | PreparedExistingImage;
-
-function normalizeUuid(value: string): string | null {
-  const trimmed = value.trim();
-  return UUID_RE.test(trimmed) ? trimmed.toLowerCase() : null;
-}
 
 export async function resolvePublishedProductCardSnapshot(
   rawProductCardId: unknown,
@@ -78,19 +74,6 @@ export async function resolvePublishedProductCardSnapshot(
     ok: true,
     snapshot: createProductCardSnapshot(card, snapshotAt),
   };
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
-
-function parseNonNegativeInt(raw: string | null, fallback: number): number | null {
-  if (raw === null || raw.trim() === "") return fallback;
-  if (!/^\d+$/.test(raw.trim())) return null;
-  const parsed = Number(raw.trim());
-  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function parseBase64Payload(entry: Record<string, unknown>): {
@@ -231,18 +214,14 @@ export function createProductCardsApi(deps: {
       return fail("PRODUCT_CARD_INVALID_STATUS", 400);
     }
 
-    const limit = parseNonNegativeInt(url.searchParams.get("limit"), 24);
-    const offset = parseNonNegativeInt(url.searchParams.get("offset"), 0);
-    if (limit === null || limit < 1 || limit > 100 || offset === null || offset < 0) {
-      return fail("INVALID_PAGINATION", 400);
-    }
+    const pagination = parsePagination(url.searchParams, { mode: "offset", defaultLimit: 24 });
+    if (!pagination) return fail("INVALID_PAGINATION", 400);
 
     const keyword = (url.searchParams.get("keyword") ?? "").trim();
     const result = await deps.productCards.list({
       status: rawStatus as ProductCardStatus | "all",
       keyword,
-      limit,
-      offset,
+      ...pagination,
     });
     return ok(result);
   }
@@ -463,24 +442,9 @@ export function createProductCardsApi(deps: {
     if (!image) return fail("PRODUCT_CARD_IMAGE_NOT_FOUND", 404);
 
     const key = variant === "original" ? image.originalObjectKey : image.thumbnailObjectKey;
-    try {
-      const object = await deps.storage.get(key);
-      if (!object) return fail("INPUT_OBJECT_NOT_FOUND", 404);
-      return {
-        ...ok(null),
-        raw: object.bytes,
-        headers: {
-          "content-type": object.contentType,
-          "cache-control": "private, max-age=60",
-        },
-      };
-    } catch (error) {
-      const isNotFound = error instanceof Error && error.message === "OBJECT_NOT_FOUND";
-      return fail(
-        isNotFound ? "INPUT_OBJECT_NOT_FOUND" : "INPUT_OBJECT_READ_FAILED",
-        isNotFound ? 404 : 502,
-      );
-    }
+    return previewStorageObject(deps.storage, key, {
+      data: null, missingCode: "INPUT_OBJECT_NOT_FOUND", readFailureCode: "INPUT_OBJECT_READ_FAILED",
+    });
   }
 
   async function request(method: string, path: string, body?: unknown): Promise<AppResponse> {

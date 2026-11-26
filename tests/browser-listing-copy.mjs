@@ -276,6 +276,37 @@ test("未开启直出的淘宝批次在抽屉按需补生成，保存、复制�
   }
 });
 
+test("上架文案提交中连续按 Escape 仍保持打开，失败后可关闭并重开", async (t) => {
+  const { page, url } = await offlineBrowser(t);
+  const { openDrawer } = await createBatch(page, url, "taobao", false);
+  const request = Promise.withResolvers();
+  await page.route("**/api/listing-copies", (route) => request.resolve(route));
+  const drawer = await openDrawer();
+  const close = drawer.getByRole("button", { name: "关闭", exact: true });
+  const generate = drawer.getByRole("button", { name: "一键生成上架文案", exact: true });
+  await generate.click();
+  const route = await request.promise;
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press("Escape");
+    assert.ok(await drawer.isVisible(), `第 ${i + 1} 次 Escape 后抽屉应保持打开`);
+  }
+  assert.ok(await close.isDisabled());
+
+  // Exercise native closure separately from the keyboard guard.
+  await drawer.evaluate((dialog) => dialog.close());
+  await drawer.waitFor();
+  assert.ok(await drawer.evaluate((dialog) => dialog.matches(":modal")));
+  await route.fulfill({ status: 503, json: { error: { message: "上架文案提交失败" } } });
+  await drawer.getByRole("alert").filter({ hasText: "上架文案提交失败" }).waitFor();
+  assert.ok(await close.isEnabled());
+  await page.keyboard.press("Escape");
+  await page.locator("dialog").waitFor({ state: "detached" });
+  await openDrawer();
+  await generate.waitFor();
+  await close.click();
+  await page.locator("dialog").waitFor({ state: "detached" });
+});
+
 test("Etsy 规则升级后仍可查看与复制旧版本的后台搜索词", async (t) => {
   const { page, url, migrateEtsy } = await offlineBrowser(t, { legacyEtsy: true });
   const { openDrawer } = await createBatch(page, url, "etsy", true);

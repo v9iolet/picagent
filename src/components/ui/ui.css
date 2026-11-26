@@ -1,0 +1,55 @@
+/* Low specificity lets existing panel and backdrop styles keep their sizing. */
+:where(.pa-modal-backdrop) {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 16px;
+  border: 0;
+  place-items: center;
+  background: rgb(24 24 27 / 48%);
+  color: var(--pa-ink);
+  font: inherit;
+}
+:where(.pa-modal-backdrop[open]) { display: grid; }
+.pa-modal-backdrop:not([open]) { display: none; }
+.pa-modal-backdrop::backdrop { background: transparent; }
+
+:where(.pa-modal) {
+  box-sizing: border-box;
+  width: min(100%, var(--pa-modal-width));
+  max-height: 100%;
+  overflow: auto;
+  background: var(--pa-surface);
+  border-radius: var(--pa-radius-xl);
+  box-shadow: var(--pa-shadow-md);
+}
+.pa-modal-sm { --pa-modal-width: 440px; }
+.pa-modal-md { --pa-modal-width: 640px; }
+.pa-modal-lg { --pa-modal-width: 960px; }
+.pa-modal-xl { --pa-modal-width: 1250px; }
+
+:where(.pa-drawer-backdrop) { padding: 0; justify-items: end; }
+:where(.pa-drawer) {
+  display: flex;
+  flex-direction: column;
+  width: min(460px, 100%);
+  height: 100%;
+  padding: 0;
+  border-radius: 0;
+}
+:where(.pa-drawer > header) {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--pa-border);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pa-drawer { animation: pa-drawer-enter 150ms ease-out; }
+  @keyframes pa-drawer-enter { from { transform: translateX(100%); } }
+}

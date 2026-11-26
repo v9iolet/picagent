@@ -1,12 +1,12 @@
+import { usePolling } from "../hooks/usePolling";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  modelSettingsApi,
   productCardsApi,
   suiteApi,
   type ApiImage,
-  type ApiPlatformProfile,
 } from "../api/client";
 import { defaultImageOptions } from "../../shared/model-settings";
+import { useModelSettings, usePlatforms } from "../context/AppConfigContext";
 import { productNameFor } from "../../shared/product-name";
 import { AppShell } from "../components/AppShell";
 import {
@@ -130,9 +130,10 @@ export function SuiteStudioPage({
 }) {
   const boot = useRef(readInitialWorkspace(suiteId, initialProductCardId));
   const [config, setConfig] = useState<Config>(() => boot.current.config),
-    [configDirty, setConfigDirty] = useState<boolean>(() => boot.current.configDirty),
-    [profiles, setProfiles] = useState<ApiPlatformProfile[]>([]),
-    [options, setOptions] = useState(defaultImageOptions(""));
+    [configDirty, setConfigDirty] = useState<boolean>(() => boot.current.configDirty);
+  const { platforms: profiles, error: platformsError } = usePlatforms();
+  const { modelSettings, error: settingsError } = useModelSettings();
+  const options = modelSettings ? currentImageOptions(modelSettings) : defaultImageOptions("");
   const [images, setImages] = useState<ApiImage[]>(() => boot.current.images),
     [clone, setClone] = useState<boolean>(() => boot.current.clone),
     [busy, setBusy] = useState(false),
@@ -186,9 +187,10 @@ export function SuiteStudioPage({
   }, []);
 
   const refresh = useCallback(
-    async (id: string) => {
+    async (id: string, signal?: AbortSignal) => {
       const seq = ++requestSeq.current;
-      const next = await studioApi.state(id);
+      const next = await studioApi.state(id, signal);
+      if (signal?.aborted) return;
       suiteWorkspaceStore.setMemoryCache({
         suiteId: next.suite.id,
         state: next,
@@ -202,21 +204,8 @@ export function SuiteStudioPage({
   );
 
   useEffect(() => {
-    let live = true;
-    Promise.all([suiteApi.listPlatforms(), modelSettingsApi.get()])
-      .then(([p, m]) => {
-        if (live) {
-          setProfiles(p);
-          setOptions(currentImageOptions(m));
-        }
-      })
-      .catch((e) => {
-        if (live) setNotice(message(e));
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
+    if (platformsError || settingsError) setNotice(message(platformsError ?? settingsError));
+  }, [platformsError, settingsError]);
 
   const currentSuiteId = suiteId ?? active;
 
@@ -610,36 +599,20 @@ export function SuiteStudioPage({
   const currentBatch = currentState && (currentState.cards.length || currentState.pipeline) ? currentState : null;
   const pollingSuiteId = currentBatch && isBatchPolling(currentBatch) ? currentBatch.suite.id : undefined;
 
-  useEffect(() => {
+  usePolling(async signal => {
     if (!pollingSuiteId) return;
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    async function poll() {
-      const seq = ++requestSeq.current;
-      try {
-        const next = await studioApi.state(pollingSuiteId!);
-        suiteWorkspaceStore.setMemoryCache({
-          suiteId: next.suite.id,
-          state: next,
-          images: next.inputImages,
-        });
-        if (!live || currentBatchIdRef.current !== pollingSuiteId) return;
-        applyState(next, seq);
-        if (isBatchPolling(next)) {
-          timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-        }
-      } catch (e) {
-        if (!live || currentBatchIdRef.current !== pollingSuiteId) return;
-        setNotice(message(e));
-        timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-      }
-    }
-    timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
-    return () => {
-      live = false;
-      if (timer !== undefined) clearTimeout(timer);
-    };
-  }, [pollingSuiteId, applyState]);
+    const seq = ++requestSeq.current;
+    const next = await studioApi.state(pollingSuiteId, signal);
+    if (signal.aborted || currentBatchIdRef.current !== pollingSuiteId) return;
+    suiteWorkspaceStore.setMemoryCache({ suiteId: next.suite.id, state: next, images: next.inputImages });
+    applyState(next, seq);
+  }, {
+    enabled: Boolean(pollingSuiteId),
+    intervalMs: POLL_INTERVAL_MS,
+    onError: error => {
+      if (currentBatchIdRef.current === pollingSuiteId) setNotice(message(error));
+    },
+  }, [pollingSuiteId]);
 
   const route = (id: string) => {
     hydrated.current = id;
@@ -685,9 +658,6 @@ export function SuiteStudioPage({
     setBusy(true);
     setNotice("");
     try {
-      if (files.length + images.length > 6) throw Error("每个批次最多上传 6 张商品原图。");
-      if (files.some((f) => !["image/png", "image/jpeg", "image/webp"].includes(f.type)))
-        throw Error("请上传 PNG、JPEG 或 WebP 格式的图片。");
       let id = currentSuiteId;
       let nextImages = [...images];
       if (!id) {
@@ -814,6 +784,7 @@ export function SuiteStudioPage({
           busy={busy}
           canUpload={!clone}
           upload={(files) => void upload(files)}
+          onUploadError={setNotice}
           generate={() => void generate()}
           remove={async (im) => {
             if (!currentSuiteId) return;

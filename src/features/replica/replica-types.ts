@@ -393,8 +393,8 @@ export const replicaApi = {
   create(payload: ReplicaCreatePayload) {
     return submitGeneration("create", payload, (key) => postGeneration<{ suiteId: string; runId: string }>("/api/replicas", payload, key));
   },
-  state(suiteId: string) {
-    return fetchJson<ReplicaStudioState>(`/api/suites/${encodeURIComponent(suiteId)}/studio-state`);
+  state(suiteId: string, signal?: AbortSignal) {
+    return fetchJson<ReplicaStudioState>(`/api/suites/${encodeURIComponent(suiteId)}/studio-state`, { signal });
   },
   resume(suiteId: string) {
     return submitGeneration(suiteId, "resume", (key) =>

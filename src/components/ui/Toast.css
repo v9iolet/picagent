@@ -1,0 +1,3 @@
+.suite-toast[data-tone="success"] { background: #226548; }
+.suite-toast[data-tone="error"] { background: #913832; }
+.suite-toast a { pointer-events: auto; color: inherit; text-decoration: underline; }

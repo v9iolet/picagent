@@ -33,7 +33,7 @@ export function AplusResultCards({
   disabled: boolean;
   job: Job;
   onJob: (job: Job) => void;
-  refresh: () => Promise<void>;
+  refresh: (signal?: AbortSignal) => Promise<void>;
   onNotice: (notice: string) => void;
 }) {
   const [submitGeneration] = useState(createGenerationActions);
@@ -57,7 +57,7 @@ export function AplusResultCards({
 
   useResultJob(
     job?.id ?? "", job?.kind === "edit" ? readImageEditJobStatus : readRetryJobStatus,
-    JOB_SUCCESS_STATUSES, suiteId, refresh, () => onJob(null), onNotice,
+    JOB_SUCCESS_STATUSES, suiteId, (_id, signal) => refresh(signal), () => onJob(null), onNotice,
   );
 
   async function act(action: () => Promise<void>) {

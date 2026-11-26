@@ -13,6 +13,7 @@ import { MemoryPromptRepository } from "../server/repositories/memory-prompt-rep
 import { MemoryStorage } from "../server/storage/memory-storage.js";
 import { parseNormalizedPromptMarkdown } from "../server/prompt-library.js";
 import { DETAIL_CATEGORIES } from "../shared/suite-categories.js";
+import { defaultDetailSizePresets } from "../shared/aplus.js";
 import { ImageEditorService, MemoryImageEditorRepository } from "../server/image-editor.js";
 import { createImageEditorApi } from "../server/image-editor-api.js";
 import { readZipEntries } from "../server/zip.js";
@@ -39,6 +40,7 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
     name,
     mainImageBackground,
     marketScope: code === "taobao" ? "domestic" : "overseas",
+    detailSizePresets: defaultDetailSizePresets(code, code === "taobao" ? "domestic" : "overseas"),
     mainImageStrategy: "",
     galleryStrategy: "",
     textStrategy: "",
@@ -231,6 +233,9 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
               } else {
                 const body = buf.length ? JSON.parse(buf.toString()) : undefined;
                 calls.push({ path, method: req.method, body });
+                if (path === "/api/model-settings/preferences" && req.method === "PATCH") {
+                  Object.assign(settings.preferences, body);
+                }
                 r = path.startsWith("/api/model-settings")
                   ? { status: 200, body: { data: settings } }
                   : await app.request(req.method, path, { headers: req.headers, body });
@@ -249,6 +254,39 @@ async function offlineStudio(structureTemplate = "general-structure-plan-groups.
   await vite.listen();
   return { url: vite.resolvedUrls.local[0], calls, close: () => vite.close() };
 }
+
+test("配置读取失败可重试，创作页切换复用平台与模型设置，保存偏好后立即生效", async (t) => {
+  const fixture = await offlineStudio();
+  t.after(fixture.close);
+  const browser = await chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  page.setDefaultTimeout(8000);
+  await page.route("**/api/model-settings", route => route.fulfill({
+    status: 503, json: { error: { message: "配置暂不可用" } },
+  }), { times: 1 });
+  await page.goto(fixture.url + "settings/preferences");
+  await page.getByRole("button", { name: "重试" }).click();
+  await page.getByLabel("默认生图模型", { exact: true }).waitFor();
+  await page.getByRole("link", { name: "创建", exact: true }).click();
+  const resolution = page.getByLabel("分辨率", { exact: true });
+  await resolution.locator("option", { hasText: "4K" }).waitFor({ state: "attached" });
+  await page.getByRole("link", { name: "A+详情", exact: true }).click();
+  await page.getByLabel("平台", { exact: true }).locator('option[value="amazon"]').waitFor({ state: "attached" });
+  await page.getByRole("link", { name: "爆品图复刻", exact: true }).click();
+  await page.getByLabel("比例", { exact: true }).locator('option[value="3:2"]').waitFor({ state: "attached" });
+  await page.getByRole("link", { name: "配置", exact: true }).click();
+  await page.getByRole("link", { name: "偏好设置", exact: true }).click();
+  await page.getByLabel("默认生图模型", { exact: true }).selectOption("");
+  await page.getByRole("button", { name: "保存偏好" }).click();
+  await page.getByText("偏好设置已保存", { exact: true }).first().waitFor();
+  await page.getByRole("link", { name: "创建", exact: true }).click();
+  await resolution.waitFor({ state: "attached" });
+  assert.deepEqual(await resolution.locator("option").allTextContents(), ["1K"]);
+  for (const path of ["/api/platforms", "/api/model-settings"]) {
+    assert.equal(fixture.calls.filter(call => call.method === "GET" && call.path === path).length, 1, path);
+  }
+});
 
 test("商品套图：空态、静默草稿、平台联动、七张实图、选中 ZIP 与全屏交付入口", async (t) => {
   const fixture = await offlineStudio();

@@ -1,0 +1,235 @@
+@import "../../components/QuickChips.css";
+
+.wb-restore-inputs {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.wb-restore-inputs legend {
+  padding: 0;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.wb-restore-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.wb-restore-inputs .wb-restore-choice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.wb-restore-choice input[type="radio"] {
+  width: auto;
+  margin: 0;
+}
+
+.wb-restore-grid img,
+.wb-restore-uploaded img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+  background: #f3f4f6;
+  border-radius: 6px;
+}
+
+.wb-restore-uploaded {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.wb-restore-uploaded img {
+  width: 60px;
+}
+
+/* 编辑器缩放、扩图可视预览、电商快捷指令、一键翻译 */
+.wb-editor-canvas-scroll {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.wb-editor-canvas-scroll > .wb-editor-canvas {
+  flex: 0 0 auto;
+  min-width: 100%;
+  min-height: 100%;
+}
+
+.wb-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--pa-border);
+  border-radius: 7px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.wb-zoom-controls button {
+  height: 24px;
+  min-width: 26px;
+  padding: 0 6px;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.wb-outpaint-frame {
+  position: relative;
+  width: min(76%, 340px);
+  max-height: 76%;
+  border: 2px dashed #3b82f6;
+  border-radius: 8px;
+  background: repeating-linear-gradient(45deg, rgba(59, 130, 246, 0.08), rgba(59, 130, 246, 0.08) 8px, rgba(255, 255, 255, 0.72) 8px, rgba(255, 255, 255, 0.72) 16px);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+}
+
+.wb-outpaint-origin {
+  position: absolute;
+  border: 2px solid #0f172a;
+  overflow: hidden;
+  background: #fff;
+}
+
+.wb-outpaint-origin img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.wb-outpaint-caption {
+  margin-top: 10px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.84);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.wb-text-edit-canvas-scroll {
+  align-items: safe center;
+  justify-content: safe center;
+}
+
+.wb-text-edit-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--pa-muted);
+  font-size: 12px;
+}
+
+.wb-text-edit-status:empty {
+  display: none;
+}
+
+.wb-translate-controls {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.wb-translate-controls select,
+.wb-translate-controls button {
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--pa-border);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.wb-translate-controls button {
+  background: var(--pa-accent);
+  border-color: var(--pa-accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.wb-translate-controls button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.wb-text-edit-list {
+  display: grid;
+  gap: 8px;
+}
+
+.wb-text-edit-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--pa-border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.wb-text-edit-row.is-active {
+  border-color: var(--pa-accent);
+  background: var(--pa-accent-soft);
+}
+
+.wb-text-edit-locate {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--pa-ink);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.wb-text-edit-row label > textarea {
+  min-height: 42px;
+  font-size: 12px;
+}
+
+.wb-text-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.wb-text-edit-actions button,
+.wb-text-edit-status button {
+  min-height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--pa-border);
+  padding: 0 6px;
+  background: #fff;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.wb-text-edit-actions button:disabled,
+.wb-text-edit-status button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

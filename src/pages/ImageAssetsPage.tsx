@@ -1,3 +1,6 @@
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { Modal } from "../components/ui/Modal";
+import { useToast } from "../components/ui/ToastProvider";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { suiteApi, type ApiLibraryResource, type ApiLibraryResourceType } from "../api/client";
 import { AppShell } from "../components/AppShell";
@@ -48,7 +51,7 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
   const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [toast, setToast] = useState("");
+  const { showToast: notify } = useToast();
   const [promptModal, setPromptModal] = useState<ApiLibraryResource | null>(null);
   const loadSequence = useRef(0);
   const selectAllRef = useRef<HTMLInputElement | null>(null);
@@ -58,8 +61,6 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
     document.title = "图片库 · PicAgent";
     return () => { document.title = previous; };
   }, []);
-
-  const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2400); };
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -111,17 +112,6 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
       active = false;
     };
   }, [statusFilter, resourceFilter, submittedQuery, page, reloadTick]);
-
-  useEffect(() => {
-    if (!promptModal && !deleteConfirm) return;
-    const close = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (deleteConfirm && !deleting) setDeleteConfirm(null);
-      else if (promptModal) setPromptModal(null);
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [promptModal, deleteConfirm, deleting]);
 
   const visibleCheckedIds = useMemo(
     () => items.filter((item) => checkedIds.has(item.id)).map((item) => item.id),
@@ -503,66 +493,53 @@ export function ImageAssetsPage({ navigate }: { navigate: (to: string) => void }
         </aside>
       </main>
       {promptModal && (
-        <div className="style-library-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPromptModal(null); }}>
-          <section className="style-library-prompt-modal" role="dialog" aria-modal="true" aria-labelledby="image-assets-prompt-title">
-            <header>
-              <div>
-                <span className="style-library-modal-kicker">PROMPT SNAPSHOT</span>
-                <h2 id="image-assets-prompt-title">{promptModal.title}</h2>
-                <p>{resourceLabel(promptModal)} · {stageLabel(promptModal.stage)}</p>
-              </div>
-              <button className="icon-btn" type="button" aria-label="关闭提示词" onClick={() => setPromptModal(null)}><Icon name="x" /></button>
-            </header>
-            <div className="style-library-modal-body">
-              <div className="style-library-modal-image">{promptModal.previewUrl ? <img src={promptModal.previewUrl} alt={promptModal.title} /> : imagePreview(promptModal)}</div>
-              <div className="style-library-modal-content">
-                <div className="style-library-modal-meta">
-                  <span><b>比例</b>{ratioFor(promptModal)}</span>
-                  <span><b>尺寸</b>{dimensionsFor(promptModal)}</span>
-                  <span><b>清晰度</b>{promptSnapshotValue(promptModal, "quality")}</span>
-                  <span><b>模型</b>{promptSnapshotValue(promptModal, "model")}</span>
-                </div>
-                <div className="style-library-modal-prompt-head"><strong>提示词内容</strong><span>历史快照，只读</span></div>
-                <pre className="style-library-modal-prompt">{promptTextFor(promptModal)}</pre>
-              </div>
+        <Modal
+          backdropClassName="style-library-modal-backdrop"
+          className="style-library-prompt-modal"
+          onClose={() => setPromptModal(null)}
+          aria-labelledby="image-assets-prompt-title"
+        >
+          <header>
+            <div>
+              <span className="style-library-modal-kicker">PROMPT SNAPSHOT</span>
+              <h2 id="image-assets-prompt-title">{promptModal.title}</h2>
+              <p>{resourceLabel(promptModal)} · {stageLabel(promptModal.stage)}</p>
             </div>
-          </section>
-        </div>
+            <button className="icon-btn" type="button" aria-label="关闭提示词" onClick={() => setPromptModal(null)}><Icon name="x" /></button>
+          </header>
+          <div className="style-library-modal-body">
+            <div className="style-library-modal-image">{promptModal.previewUrl ? <img src={promptModal.previewUrl} alt={promptModal.title} /> : imagePreview(promptModal)}</div>
+            <div className="style-library-modal-content">
+              <div className="style-library-modal-meta">
+                <span><b>比例</b>{ratioFor(promptModal)}</span>
+                <span><b>尺寸</b>{dimensionsFor(promptModal)}</span>
+                <span><b>清晰度</b>{promptSnapshotValue(promptModal, "quality")}</span>
+                <span><b>模型</b>{promptSnapshotValue(promptModal, "model")}</span>
+              </div>
+              <div className="style-library-modal-prompt-head"><strong>提示词内容</strong><span>历史快照，只读</span></div>
+              <pre className="style-library-modal-prompt">{promptTextFor(promptModal)}</pre>
+            </div>
+          </div>
+        </Modal>
       )}
       {deleteConfirm && (
-        <div
-          className="style-library-modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeleteConfirm(null); }}
+        <ConfirmDialog
+          eyebrow="DELETE ASSETS"
+          titleId="image-assets-delete-title"
+          title={deleteConfirm.mode === "single"
+            ? `确认删除「${deleteConfirm.resource.title}」？`
+            : `确认删除已选的 ${deleteConfirm.ids.length} 张图片？`}
+          danger
+          loading={deleting}
+          closeLabel="关闭删除确认"
+          confirmLabel={deleting ? "删除中…" : "确认删除"}
+          onClose={() => setDeleteConfirm(null)}
+          onConfirm={executeDelete}
         >
-          <section className="style-delete-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="image-assets-delete-title">
-            <header>
-              <div>
-                <span className="style-library-modal-kicker">DELETE ASSETS</span>
-                <h2 id="image-assets-delete-title">
-                  {deleteConfirm.mode === "single"
-                    ? `确认删除「${deleteConfirm.resource.title}」？`
-                    : `确认删除已选的 ${deleteConfirm.ids.length} 张图片？`}
-                </h2>
-              </div>
-              <button className="icon-btn" type="button" aria-label="关闭删除确认" disabled={deleting} onClick={() => setDeleteConfirm(null)}>
-                <Icon name="x" />
-              </button>
-            </header>
-            <p className="style-delete-confirm-desc">
-              删除后将从图片资源库和资源选择弹窗中移除；删除后不会影响已生成的任务和历史记录。
-            </p>
-            <div className="style-delete-confirm-actions">
-              <button className="btn" type="button" disabled={deleting} onClick={() => setDeleteConfirm(null)}>取消</button>
-              <button className="btn btn-danger" type="button" disabled={deleting} onClick={() => void executeDelete()}>
-                {deleting ? "删除中…" : "确认删除"}
-              </button>
-            </div>
-          </section>
-        </div>
+          删除后将从图片资源库和资源选择弹窗中移除；删除后不会影响已生成的任务和历史记录。
+        </ConfirmDialog>
       )}
       {error && <div className="suite-toast show" role="alert">{error}</div>}
-      {toast && <div className="suite-toast show" role="status">{toast}</div>}
     </AppShell>
   );
 }

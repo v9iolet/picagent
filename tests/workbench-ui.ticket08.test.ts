@@ -86,7 +86,7 @@ test("layout saves are serialized and advance the server version between request
 });
 
 test("generated images open an editor with the image-edit tools", async () => {
-  const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
+  const source = await readFile("src/features/image-editor/ImageEditorModal.tsx", "utf8");
   const css = await readFile("public/assets/suite-workbench.css", "utf8");
   for (const label of ["添加文本", "编辑文字", "局部重绘", "消除笔", "扩图", "AI 改图", "再次生成", "商品还原"]) assert.match(source, new RegExp(label));
   assert.doesNotMatch(source, /画面微调/);
@@ -116,7 +116,7 @@ test("compose cards expose image editing and use one coherent version selector",
 });
 
 test("image editor uses the selected version prompt and operation-specific prompt fields", async () => {
-  const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
+  const source = await readFile("src/features/image-editor/ImageEditorModal.tsx", "utf8");
   assert.match(source, /versionGenerationPrompt/);
   assert.match(source, /version\.promptSnapshot/);
   assert.match(source, /添加文字要求/);
@@ -127,7 +127,7 @@ test("image editor uses the selected version prompt and operation-specific promp
 });
 
 test("mask-based tools show the limited-selection notice and outpaint uses supported target ratios", async () => {
-  const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
+  const source = await readFile("src/features/image-editor/ImageEditorModal.tsx", "utf8");
   assert.match(source, /\["inpaint", "erase", "expand"\]\.includes\(tool\) && <p role="status">当前模型对选区控制有限<\/p>/);
   assert.match(source, /目标比例\s*<select[\s\S]*?outpaintRatios\.map/);
   assert.doesNotMatch(source, /<option value="original">原比例<\/option>/);
@@ -135,7 +135,7 @@ test("mask-based tools show the limited-selection notice and outpaint uses suppo
 });
 
 test("text regions use a dashed Konva transformer and the overlay follows the rendered image frame", async () => {
-  const source = await readFile("src/pages/WorkbenchBoardPage.tsx", "utf8");
+  const source = await readFile("src/features/image-editor/ImageEditorModal.tsx", "utf8");
   assert.match(source, /Transformer/);
   assert.match(source, /borderDash/);
   assert.match(source, /textOperations\.map/);

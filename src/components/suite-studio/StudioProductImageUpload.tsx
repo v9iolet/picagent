@@ -1,17 +1,34 @@
 import { useState } from "react";
 import type { ApiImage } from "../../api/client";
+import { IMAGE_UPLOAD_ACCEPT, useImageUpload } from "../../hooks/useImageUpload";
 import { ProductImageGuideTip } from "../product-image-guide/ProductImageGuideTip";
+
+const maxProductImages = 6;
 
 interface Props {
   images: ApiImage[];
   busy: boolean;
   canUpload: boolean;
   upload: (files: File[]) => void;
+  onUploadError: (message: string) => void;
   remove: (image: ApiImage) => void;
 }
 
-export function StudioProductImageUpload({ images, busy, canUpload, upload, remove }: Props) {
+export function StudioProductImageUpload({ images, busy, canUpload, upload, onUploadError, remove }: Props) {
   const [drag, setDrag] = useState(false);
+  const { prepareFiles } = useImageUpload({
+    existingCount: images.length,
+    maxCount: maxProductImages,
+    countMessage: `每个批次最多上传 ${maxProductImages} 张商品原图。`,
+  });
+  function selectFiles(files: FileList | null) {
+    if (busy || !canUpload || !files?.length) return;
+    try {
+      upload(prepareFiles(Array.from(files)));
+    } catch (error) {
+      onUploadError(error instanceof Error ? error.message : "图片上传失败");
+    }
+  }
   return (
     <section>
       <div className="pig-heading-row">
@@ -19,7 +36,7 @@ export function StudioProductImageUpload({ images, busy, canUpload, upload, remo
           <h2>商品原图</h2>
           <ProductImageGuideTip label="商品原图上传说明" />
         </div>
-        <small>{images.length} / 6</small>
+        <small>{images.length} / {maxProductImages}</small>
       </div>
       <div
         className={"ss-upload" + (drag ? " dragging" : "")}
@@ -31,7 +48,7 @@ export function StudioProductImageUpload({ images, busy, canUpload, upload, remo
         onDrop={(e) => {
           e.preventDefault();
           setDrag(false);
-          if (canUpload && !busy) upload(Array.from(e.dataTransfer.files));
+          selectFiles(e.dataTransfer.files);
         }}
       >
         {images.map((im) => (
@@ -42,16 +59,16 @@ export function StudioProductImageUpload({ images, busy, canUpload, upload, remo
             </button>
           </div>
         ))}
-        {images.length < 6 && canUpload && (
+        {images.length < maxProductImages && canUpload && (
           <label className="ss-add">
             <b>＋</b>上传原图
             <input
               type="file"
-              accept="image/png,image/jpeg,image/webp"
+              accept={IMAGE_UPLOAD_ACCEPT}
               aria-label="上传商品原图"
               multiple
               onChange={(e) => {
-                upload(Array.from(e.target.files ?? []));
+                selectFiles(e.target.files);
                 e.target.value = "";
               }}
             />

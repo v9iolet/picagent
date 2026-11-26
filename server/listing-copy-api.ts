@@ -1,3 +1,4 @@
+import { isUuid } from "./http/validators.js";
 import { LISTING_CONFIG_FIELDS, type ListingConfigInput } from "../shared/listing-config.js";
 import {
   mergeProductCardFacts,
@@ -28,7 +29,6 @@ import type {
 
 type Params = Record<string, unknown>;
 const root = "/api/listing-copies";
-const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const conflict = () => new ListingError("LISTING_JOB_CHANGED", 409);
 function applyListingConfig(job: ListingJob, params: ListingConfigInput) {
   let invalid = false;
@@ -215,7 +215,7 @@ export function createListingCopyApi(deps: {
   }
   async function createListingJob(params: Params) {
     const source = params.sourceSuiteId;
-    if (source !== undefined && (typeof source !== "string" || !uuid.test(source) || !(await deps.suites.getSuite(source))))
+    if (source !== undefined && (!isUuid(source) || !(await deps.suites.getSuite(source))))
       throw new ListingError("INVALID_SUITE_ID", 404);
     const job = newListingDraft(source ?? null);
     const generateNow = params.generate === true;
@@ -299,7 +299,7 @@ export function createListingCopyApi(deps: {
     const segments = path.slice(root.length + 1).split("/");
     if (segments.includes("")) throw new ListingError("NOT_FOUND", 404);
     const [id, action, imageId, preview, kind, ...extra] = segments;
-    const job = uuid.test(id) && (await deps.jobs.get(id));
+    const job = isUuid(id) && (await deps.jobs.get(id));
     if (!job || extra.length) throw new ListingError("LISTING_JOB_NOT_FOUND", 404);
     if (action === "input-images") {
       if (!imageId && method === "POST") return uploadListingImage(job, params);
