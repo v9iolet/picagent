@@ -1,0 +1,15 @@
+export const commonErrorMessages = {
+  INVALID_ORDINAL: "上传序号必须是 1 到 6",
+  TOO_MANY_IMAGES: "一个方案最多上传 6 张原图",
+  DUPLICATE_ORDINAL: "该上传序号已经存在",
+  DUPLICATE_IMAGE: "同一方案内不能重复上传相同图片",
+  UNSUPPORTED_IMAGE_MIME: "仅支持 JPG、PNG 或 WebP 图片",
+  INVALID_IMAGE: "文件不是有效图片",
+  MIME_MISMATCH: "图片真实类型与声明类型不一致",
+  IMAGE_TOO_LARGE: "图片文件超过 12MB 限制",
+  PAYLOAD_TOO_LARGE: "请求体超过大小限制",
+  IMAGE_DIMENSIONS_TOO_LARGE: "图片尺寸超过限制",
+  MISSING_IDEMPOTENCY_KEY: "生成请求缺少幂等键",
+  LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
+  INVALID_PAGINATION: "分页参数无效",
+};
