@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { APLUS_ADDITIONAL_PROMPT_MAX_LENGTH, APLUS_MODULES, APLUS_SIZE_PRESETS, type AplusModuleCode, type AplusSizePresetKey } from "../../../shared/aplus";
 import { sanitizeDeliveryName } from "../../../shared/workbench-delivery";
 import { createGenerationActions, suiteApi } from "../../api/client";
@@ -38,6 +38,8 @@ export function AplusResultCards({
   const [submitGeneration] = useState(createGenerationActions);
   const [editor, setEditor] = useState<{ card: AplusResultCard; initialTool?: "restore_product" | "change_text" } | null>(null);
   const [dragged, setDragged] = useState<AplusModuleCode | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const pressedControl = useRef(false);
   const [preview, setPreview] = useState<AplusSizePresetKey | null>(null);
   const [previewError, setPreviewError] = useState(false);
   const [redraw, setRedraw] = useState<AplusResultCard | null>(null);
@@ -90,6 +92,11 @@ export function AplusResultCards({
     });
   }
 
+  function clearDrag() {
+    setDragged(null);
+    setDragOverId(null);
+  }
+
   function downloadLongImage(preset: AplusSizePresetKey) {
     void act(() => download(aplusApi.longImageUrl(suiteId, preset), `${filename}_${preset.replace(":", "x")}_详情长图.png`));
   }
@@ -118,47 +125,52 @@ export function AplusResultCards({
                 const pending = job?.taskId === card.parentTaskId || card.taskStatus === "generating";
                 const locked = disabled || working || Boolean(job) || pending;
                 const url = deliveryUrl(card);
-                const index = modules.indexOf(card.moduleCode);
+                const isDropTarget = canReorder && dragged !== null && dragged !== card.moduleCode;
                 return (
                   <article
-                    className={`aplus-result-card${dragged === card.moduleCode ? " is-dragging" : ""}`}
+                    className={`aplus-result-card${dragged === card.moduleCode ? " is-dragging" : ""}${dragOverId === card.parentTaskId ? " is-drag-over" : ""}`}
                     key={card.parentTaskId}
-                    onDragOver={(event) => { if (dragged && canReorder) event.preventDefault(); }}
+                    draggable={canReorder}
+                    onPointerDownCapture={(event) => {
+                      // Native dragstart targets the draggable article even when the press started on a button.
+                      pressedControl.current = event.target instanceof Element && Boolean(event.target.closest("button, a, input, select, textarea"));
+                    }}
+                    onDragStart={(event) => {
+                      if (!canReorder || pressedControl.current) {
+                        event.preventDefault();
+                        return;
+                      }
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", card.moduleCode);
+                      setDragged(card.moduleCode);
+                    }}
+                    onDragEnter={() => { if (isDropTarget) setDragOverId(card.parentTaskId); }}
+                    onDragOver={(event) => { if (isDropTarget) event.preventDefault(); }}
+                    onDragLeave={(event) => {
+                      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+                      setDragOverId((id) => id === card.parentTaskId ? null : id);
+                    }}
                     onDrop={(event) => {
-                      if (!dragged || !canReorder) return;
+                      if (!isDropTarget) return;
                       event.preventDefault();
                       moveModule(dragged, card.moduleCode);
-                      setDragged(null);
+                      clearDrag();
                     }}
+                    onDragEnd={clearDrag}
                   >
                     <div className={`aplus-card-image${pending && !url && !card.previewUrl ? " is-pending" : ""}`} style={{ aspectRatio: size.ratio.replace(":", " / ") }}>
                       {url || card.previewUrl
-                        ? <img src={url ?? card.previewUrl!} alt={title} loading="lazy" />
+                        ? <img src={url ?? card.previewUrl!} alt={title} loading="lazy" draggable={false} />
                         : <span>{pending ? "生成中…" : card.taskStatus === "failed" ? "生成失败" : "等待生成"}</span>}
                     </div>
                     <div className="aplus-card-body">
                       <div className="aplus-section-heading">
                         <strong className="aplus-plan-module-name">
-                          <span
-                            role="img"
-                            aria-label={`拖动排序 ${title}`}
-                            className="aplus-drag-handle"
-                            draggable={canReorder}
-                            onDragStart={(event) => {
-                              event.dataTransfer.effectAllowed = "move";
-                              event.dataTransfer.setData("text/plain", card.moduleCode);
-                              setDragged(card.moduleCode);
-                            }}
-                            onDragEnd={() => setDragged(null)}
-                          ><Icon name="move" /></span>
-                          {title}
+                          {modules.length > 1 && (
+                            <span role="img" aria-label={`拖动排序 ${title}`} className="aplus-drag-handle"><Icon name="move" /></span>
+                          )}
+                          <span className="aplus-result-title" title={title}>{title}</span>
                         </strong>
-                        {modules.length > 1 && (
-                          <div className="aplus-plan-actions">
-                            <button type="button" aria-label={`上移 ${title}`} disabled={!canReorder || index === 0} onClick={() => moveModule(card.moduleCode, modules[index - 1])}>↑</button>
-                            <button type="button" aria-label={`下移 ${title}`} disabled={!canReorder || index === modules.length - 1} onClick={() => moveModule(card.moduleCode, modules[index + 1])}>↓</button>
-                          </div>
-                        )}
                         {pending && card.previewUrl && <small>更新中…</small>}
                         {card.deliverySize && !pending && <small>{card.deliverySize.width}×{card.deliverySize.height}</small>}
                       </div>
