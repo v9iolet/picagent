@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { downloadImageUrl } from "./download-image-url.js";
+import { buildImageRequest, detectImageProtocol, imageEndpoint, readImageResult } from "./image-protocol.js";
 import type { ImageEditRequest, ImageProvider } from "../types.js";
 import { failModelArchive, finishModelArchive, startModelArchive } from "../prompt-archive.js";
 import { failObservation, finishObservation, logObservation, recordImageFailure, recordImageSuccess, startGeneration } from "../observability.js";
@@ -45,27 +46,38 @@ async function readErrorBody(response: Response, apiKey: string): Promise<string
 // The paid edit already succeeded. Repeating it cannot recover the original download.
 export class ImageUrlDownloadError extends Error {}
 
+const PROVIDER_NAMES = {
+  "openai-images-edits": "openai-compatible-image",
+  "dashscope-images": "dashscope-image",
+  "gemini-generate-content": "gemini-image",
+} as const;
+
 export class GptImageProvider implements ImageProvider {
   readonly supportsMultipleImages = true;
   constructor(private readonly baseUrl: string, private readonly apiKey: string, private readonly timeoutMs = 600_000) {}
 
   async edit(request: ImageEditRequest) {
-    const base = new URL(this.baseUrl);
-    if (base.pathname === "/") base.pathname = "/v1";
-    const endpoint = new URL("images/edits", base.href.replace(/\/?$/, "/"));
+    const protocol = detectImageProtocol(this.baseUrl, request.model);
+    const endpoint = imageEndpoint(protocol, new URL(this.baseUrl), request.model);
+    const provider = PROVIDER_NAMES[protocol];
+    const flow = request.flow ?? "image-edit";
+    const attributes = { flow, provider, model: request.model, endpoint: endpoint.href };
     const startedAt = Date.now();
+    const requestId = request.requestId ?? randomUUID();
+    const legacyImage = { bytes: request.image, mimeType: request.imageMimeType, filename: request.imageFilename, role: "product" };
+    // 非空的旧版单图仍作回退。新协议可用空的旧版 buffer 表示文生图。
+    const images = request.images?.length ? request.images
+      : protocol === "openai-images-edits" || request.image.length ? [legacyImage] : [];
     const observation = startGeneration("image.edit", {
       prompt: request.prompt,
-      images: (request.images?.length ? request.images : [{ bytes: request.image, mimeType: request.imageMimeType, filename: request.imageFilename, role: "product" }]).map((item) => ({ mimeType: item.mimeType, filename: item.filename, role: item.role, byteLength: item.bytes.length })),
+      images: images.map((item) => ({ mimeType: item.mimeType, filename: item.filename, role: item.role, byteLength: item.bytes.length })),
       mask: request.mask ? { mimeType: request.maskMimeType, byteLength: request.mask.length } : undefined,
-    }, { flow: request.flow ?? "image-edit", provider: "openai-compatible-image", model: request.model });
-    const requestId = request.requestId ?? randomUUID();
-    const images = request.images?.length ? request.images : [{ bytes: request.image, mimeType: request.imageMimeType, filename: request.imageFilename, role: "product" }];
+    }, attributes);
     const archive = await startModelArchive({
       type: "image-generation",
-      flow: request.flow ?? "image-edit",
+      flow,
       requestId,
-      provider: "openai-compatible-image",
+      provider,
       model: request.model,
       request: {
         endpoint: endpoint.href,
@@ -80,28 +92,20 @@ export class GptImageProvider implements ImageProvider {
       },
       inputFiles: images.map((item) => ({ label: item.role ?? "reference", filename: item.filename, mimeType: item.mimeType, bytes: item.bytes })),
     });
-    const form = new FormData();
-    form.append("model", request.model);
-    for (const item of images) form.append("image", new Blob([Uint8Array.from(item.bytes)], { type: item.mimeType }), item.filename);
-    if (request.mask) form.append("mask", new Blob([Uint8Array.from(request.mask)], { type: request.maskMimeType ?? "image/png" }), request.maskFilename ?? "mask.png");
-    form.append("prompt", request.prompt);
-    form.append("size", request.size);
-    form.append("quality", request.quality);
-    form.append("n", String(request.n));
-    form.append("response_format", request.responseFormat);
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     let responseSummary: unknown;
+    let httpStatus: number | undefined;
     let responseFormatUsed: "b64_json" | "url" | undefined;
     try {
+      const wireRequest = buildImageRequest(protocol, request, images, this.apiKey);
       const response = await fetch(endpoint, {
+        ...wireRequest,
         redirect: "error",
         method: "POST",
-        headers: { authorization: `Bearer ${this.apiKey}` },
-        body: form,
         signal: controller.signal,
       });
+      httpStatus = response.status;
       if (!response.ok) {
         const errorBody = await readErrorBody(response, this.apiKey);
         responseSummary = { httpStatus: response.status, errorBody };
@@ -109,44 +113,42 @@ export class GptImageProvider implements ImageProvider {
         const sizeUnsupported = response.status >= 400 && response.status < 500 && /\bsize\b|resolution|分辨率|尺寸/i.test(errorBody);
         throw new Error(sizeUnsupported ? "IMAGE_SIZE_UNSUPPORTED" : "IMAGE_PROVIDER_FAILED");
       }
-      const payload = await response.json().catch(() => null) as { data?: Array<{ b64_json?: unknown; url?: unknown }> } | null;
-      const item = payload?.data?.[0];
-      const encoded = item?.b64_json;
+      const payload = await response.json().catch(() => null);
+      const result = readImageResult(protocol, payload);
       let image;
-      if (typeof encoded === "string" && encoded.trim()) {
+      if ("base64" in result) {
         responseFormatUsed = "b64_json";
-        image = { bytes: Buffer.from(encoded, "base64"), mimeType: "image/png" };
-      } else if (typeof item?.url === "string" && item.url.trim()) {
+        image = { bytes: Buffer.from(result.base64, "base64"), mimeType: result.mimeType };
+      } else {
         responseFormatUsed = "url";
         responseSummary = { httpStatus: response.status, responseFormatUsed };
         try {
-          image = await downloadImageUrl(item.url, controller.signal);
+          image = await downloadImageUrl(result.url, controller.signal);
         } catch (error) {
           if (controller.signal.aborted || (error instanceof Error && error.message === "INVALID_PROVIDER_RESPONSE")) throw error;
           await delay(300, undefined, { signal: controller.signal });
-          image = await downloadImageUrl(item.url, controller.signal);
+          image = await downloadImageUrl(result.url, controller.signal);
         }
-      } else {
-        throw new Error("INVALID_PROVIDER_RESPONSE");
       }
       const { bytes, mimeType } = image;
       if (!bytes.length) throw new Error("INVALID_PROVIDER_RESPONSE");
-      responseSummary = { httpStatus: response.status, dataCount: payload?.data?.length, responseFormatUsed, mimeType, byteLength: bytes.length };
+      responseSummary = { httpStatus: response.status, dataCount: result.dataCount, responseFormatUsed, mimeType, byteLength: bytes.length };
       await finishModelArchive(archive, responseSummary, [{ label: "generated-image", mimeType, bytes }]);
       finishObservation(observation, { status: "succeeded", outputMimeType: mimeType, outputByteLength: bytes.length }, { http_status: response.status, output_type: "image", responseFormatUsed });
-      recordImageSuccess(request.flow ?? "image-edit", "openai-compatible-image", request.model, Date.now() - startedAt);
-      logObservation("image.completed", { request_id: requestId, flow: request.flow ?? "image-edit", provider: "openai-compatible-image", model: request.model, duration_ms: Date.now() - startedAt, status: "success", responseFormatUsed });
+      recordImageSuccess(flow, provider, request.model, Date.now() - startedAt);
+      logObservation("image.completed", { request_id: requestId, ...attributes, duration_ms: Date.now() - startedAt, status: "success", responseFormatUsed });
       return image;
     } catch (error) {
       const normalized = controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")
         ? new Error("IMAGE_PROVIDER_TIMEOUT")
-        : error instanceof Error && ["INVALID_PROVIDER_RESPONSE", "IMAGE_SIZE_UNSUPPORTED"].includes(error.message)
+        : error instanceof Error && ["INVALID_PROVIDER_RESPONSE", "IMAGE_SIZE_UNSUPPORTED", "IMAGE_MASK_UNSUPPORTED", "IMAGE_REFERENCE_LIMIT_EXCEEDED"].includes(error.message)
           ? error
           : new Error("IMAGE_PROVIDER_FAILED");
+      const responseAttributes = { ...(httpStatus !== undefined && { http_status: httpStatus }), ...(responseFormatUsed && { responseFormatUsed }) };
       await failModelArchive(archive, normalized, responseSummary);
-      failObservation(observation, normalized, responseFormatUsed ? { responseFormatUsed } : undefined);
-      recordImageFailure(request.flow ?? "image-edit", "openai-compatible-image", request.model, Date.now() - startedAt, normalized.message);
-      logObservation("image.failed", { request_id: requestId, flow: request.flow ?? "image-edit", provider: "openai-compatible-image", model: request.model, duration_ms: Date.now() - startedAt, status: "error", error_code: normalized.message, ...(responseFormatUsed && { responseFormatUsed }) });
+      failObservation(observation, normalized, responseAttributes);
+      recordImageFailure(flow, provider, request.model, Date.now() - startedAt, normalized.message);
+      logObservation("image.failed", { request_id: requestId, ...attributes, duration_ms: Date.now() - startedAt, status: "error", error_code: normalized.message, ...responseAttributes });
       throw responseFormatUsed === "url" ? new ImageUrlDownloadError(normalized.message) : normalized;
     } finally {
       clearTimeout(timeout);

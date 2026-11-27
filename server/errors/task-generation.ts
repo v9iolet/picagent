@@ -6,6 +6,8 @@ export const taskGenerationErrorMessages = {
   TRANSLATE_LLM_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认多模态模型",
   CUSTOM_TASK_FIELDS_REQUIRED: "请填写任务标题和生图提示词",
   IMAGE_SIZE_UNSUPPORTED: "当前账号分组不支持该分辨率",
+  IMAGE_MASK_UNSUPPORTED: "当前生图渠道不支持蒙版，请切换渠道后重试，或重新提交编辑",
+  IMAGE_REFERENCE_LIMIT_EXCEEDED: "当前生图渠道每次最多接受 10 张参考图",
   OUTPAINT_RATIO_UNSUPPORTED: "当前生图渠道不支持该扩图比例，请选择可用比例。",
   IMAGE_PROVIDER_NOT_CONFIGURED: "请前往配置 → 偏好设置，选择默认生图模型",
   IMAGE_PROVIDER_FAILED: "图像生成服务调用失败",

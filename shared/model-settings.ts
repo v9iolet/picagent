@@ -10,7 +10,23 @@ export interface ImageOptions {
   quality?: ImageQuality;
 }
 
+export const GEMINI_IMAGE_ASPECT_RATIOS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"] as const;
+
+export function isGeminiImageModel(modelId: string): boolean {
+  return /gemini-[\w.-]*image|nano-?banana/i.test(modelId);
+}
+
+export function isQwenImageModel(modelId: string): boolean {
+  return /\bqwen-image/i.test(modelId);
+}
+
 export function defaultImageOptions(modelId: string): ImageOptions {
+  if (isGeminiImageModel(modelId)) {
+    return { sizes: ["1K", "2K", "4K"], aspectRatios: [...GEMINI_IMAGE_ASPECT_RATIOS], sizeMode: "pixels" };
+  }
+  if (isQwenImageModel(modelId)) {
+    return { sizes: ["1K", "2K"], aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "16:9", "9:16"], sizeMode: "pixels" };
+  }
   // omyai 的 flare-special 验证记录见 docs/image-models.md；系列默认值可由渠道显式覆盖。
   return /^gpt-image-2(?:[.-]|$)/i.test(modelId)
     ? { sizes: ["1K", "2K", "4K"], aspectRatios: ["1:1", "2:3", "3:2", "3:4", "4:3", "16:9", "9:16"], sizeMode: "pixels" }

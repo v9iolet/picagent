@@ -478,3 +478,23 @@ npx tsx scripts/probe-gpt-image-size.ts --case-set high-res --dry-run
 淘宝 3:4 的四个服饰模块均请求 2048×2736，均实出 2052×2736，比例为 3:4。通用比例直接交付实出像素。
 
 原图、预检出图、裁切样图及逐次记录位于主检出目录的 `.scratch/a-plus-detail/tuning-assets/` 和 `.scratch/a-plus-detail/tuning-2026-11-25/`。
+
+## 百炼 qwen-image（OpenAI 兼容模式）
+
+线上默认生图渠道使用 `https://ws-xxxx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` 和 `qwen-image-2.1-pro`，保存的能力为 1K 档位、1:1。改造前线上有 6 次 `image.failed`，错误码均为 `IMAGE_PROVIDER_FAILED`，耗时 120–170 ms。
+
+| 直连实测请求 | 上游结果 |
+| --- | --- |
+| `POST /images/edits`，multipart，`size=1K` 或 `1024x1024` | HTTP 404，空响应体 |
+| `POST /images/generations`，JSON，含 `model`、`prompt`、`size:"1024x1024"`、`n:1` | HTTP 200，`data[0].url` 返回图片地址，`usage` 给出 1024×1024 和 1 张 |
+| 同一 generations 接口，另带两张 PNG 的 `image:["data:image/png;base64,...", "data:image/png;base64,..."]` 和 `response_format:"b64_json"` | HTTP 200，仍通过 `data[0].url` 返回图片 |
+
+应用对百炼统一发送 generations JSON。参考图按顺序转为 data URI 数组，超过 10 张会在请求前报错。1K 转为 `1024x1024`，2K 和 4K 均转为 `2048x2048`。像素尺寸超过 2048×2048 的总像素数时，应用按比例缩小后将两条边向下对齐到 16 像素。应用兼容 `b64_json` 和 `url` 响应。百炼资料给出的参考范围为总像素约 512×512 至 2048×2048、宽高比 1:8 至 8:1、参考图 1–10 张，各边界组合还没有逐项实测。
+
+生图请求按以下顺序自动选择协议：
+
+1. Gemini 图像、nano banana 模型名，或 `generativelanguage.googleapis.com`，使用渠道 origin 下的 `/v1beta/models/{model}:generateContent`。档位尺寸默认 1:1，像素尺寸匹配到最近的支持比例和档位。
+2. `dashscope*.aliyuncs.com` 或 `*.maas.aliyuncs.com`，或 `qwen-image`、`wan2.x`、`wanx` 系列模型名，使用渠道基址下的 `/images/generations`。
+3. 其他模型沿用 `/images/edits` multipart。失败日志通过 `http_status` 记录收到的上游状态码。
+
+编辑器的局部重绘和消除继续走上文的区域描述路径，快照记录 `maskApplied=false`。实际仍携带蒙版的请求（例如重放旧快照）遇到百炼或 Gemini 时，会在发请求前返回 `IMAGE_MASK_UNSUPPORTED`，提示切换渠道或重新提交编辑。
