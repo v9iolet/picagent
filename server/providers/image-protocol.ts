@@ -3,12 +3,16 @@ import type { ImageEditRequest } from "../types.js";
 
 export type ImageProtocol = "gemini-generate-content" | "dashscope-images" | "openai-images-edits";
 
+export function isGoogleAiStudioHost(hostname: string): boolean {
+  return hostname.toLowerCase().replace(/\.$/, "") === "generativelanguage.googleapis.com";
+}
+
 export function detectImageProtocol(baseUrl: string, modelId: string): ImageProtocol {
-  const host = URL.parse(baseUrl)?.hostname.replace(/\.$/, "");
+  const host = URL.parse(baseUrl)?.hostname ?? "";
   // Gemini 的原生协议优先，避免转发多个厂商模型的渠道把 Gemini 发到兼容接口。
-  if (isGeminiImageModel(modelId) || host === "generativelanguage.googleapis.com") return "gemini-generate-content";
+  if (isGeminiImageModel(modelId) || isGoogleAiStudioHost(host)) return "gemini-generate-content";
   // 百炼既可通过官方域名识别，也可在中转域名上按阿里系模型名识别。
-  if ((host && /^(?:dashscope[a-z0-9.-]*|.+\.maas)\.aliyuncs\.com$/.test(host))
+  if (/^(?:dashscope[a-z0-9.-]*|.+\.maas)\.aliyuncs\.com$/.test(host.replace(/\.$/, ""))
     || isQwenImageModel(modelId) || /\bwan(?:x|2(?=[.-]|$))/i.test(modelId)) return "dashscope-images";
   // 其余模型沿用 OpenAI 兼容的 multipart edits。
   return "openai-images-edits";
@@ -88,7 +92,7 @@ function geminiImageConfig(size: string) {
   return { aspectRatio, imageSize };
 }
 
-export function buildImageRequest(protocol: ImageProtocol, request: ImageEditRequest, images: InputImages, apiKey: string) {
+export function buildImageRequest(protocol: ImageProtocol, endpoint: URL, request: ImageEditRequest, images: InputImages, apiKey: string) {
   const authorization = `Bearer ${apiKey}`;
   if (protocol === "openai-images-edits") {
     const form = new FormData();
@@ -104,7 +108,7 @@ export function buildImageRequest(protocol: ImageProtocol, request: ImageEditReq
   }
 
   if (request.mask) throw new Error("IMAGE_MASK_UNSUPPORTED");
-  const headers = { authorization, "content-type": "application/json" };
+  const contentType = { "content-type": "application/json" };
   if (protocol === "dashscope-images") {
     if (images.length > 10) throw new Error("IMAGE_REFERENCE_LIMIT_EXCEEDED");
     const body = JSON.stringify({
@@ -114,7 +118,7 @@ export function buildImageRequest(protocol: ImageProtocol, request: ImageEditReq
       size: dashScopeSize(request.size),
       ...(images.length && { image: images.map(({ bytes, mimeType }) => `data:${mimeType};base64,${bytes.toString("base64")}`) }),
     });
-    return { headers, body };
+    return { headers: { ...contentType, authorization }, body };
   }
   const body = JSON.stringify({
     contents: [{
@@ -126,7 +130,8 @@ export function buildImageRequest(protocol: ImageProtocol, request: ImageEditReq
     }],
     generationConfig: { responseModalities: ["IMAGE"], imageConfig: geminiImageConfig(request.size) },
   });
-  return { headers: { ...headers, "x-goog-api-key": apiKey }, body };
+  const headers = { ...contentType, "x-goog-api-key": apiKey, ...(!isGoogleAiStudioHost(endpoint.hostname) && { authorization }) };
+  return { headers, body };
 }
 
 type GeminiInlineData = { data?: string; mime_type?: string; mimeType?: string };

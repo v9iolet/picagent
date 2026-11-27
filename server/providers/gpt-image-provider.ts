@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { downloadImageUrl } from "./download-image-url.js";
-import { buildImageRequest, detectImageProtocol, imageEndpoint, readImageResult } from "./image-protocol.js";
+import { buildImageRequest, detectImageProtocol, imageEndpoint, isGoogleAiStudioHost, readImageResult, type ImageProtocol } from "./image-protocol.js";
 import type { ImageEditRequest, ImageProvider } from "../types.js";
 import { failModelArchive, finishModelArchive, startModelArchive } from "../prompt-archive.js";
 import { failObservation, finishObservation, logObservation, recordImageFailure, recordImageSuccess, startGeneration } from "../observability.js";
@@ -52,6 +52,7 @@ const PROVIDER_NAMES = {
   "dashscope-images": "dashscope-image",
   "gemini-generate-content": "gemini-image",
 } as const;
+const GEMINI_404_FALLBACK = { fallbackFromProvider: PROVIDER_NAMES["gemini-generate-content"], fallbackFromHttpStatus: 404 } as const;
 
 export class GptImageProvider implements ImageProvider {
   readonly supportsMultipleImages = true;
@@ -95,18 +96,33 @@ export class GptImageProvider implements ImageProvider {
     });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    let responseSummary: unknown;
+    const post = (protocol: ImageProtocol, endpoint: URL) => fetch(endpoint, {
+      ...buildImageRequest(protocol, endpoint, request, images, this.apiKey),
+      redirect: "error",
+      method: "POST",
+      signal: controller.signal,
+    });
+    let fallbackEndpoint: URL | undefined;
+    const fallbackMetadata = () => fallbackEndpoint && {
+      ...GEMINI_404_FALLBACK,
+      provider: PROVIDER_NAMES["openai-images-edits"],
+      endpoint: fallbackEndpoint.href,
+    };
+    let responseSummary: Record<string, unknown> | undefined;
     let httpStatus: number | undefined;
     let responseFormatUsed: "b64_json" | "url" | undefined;
     try {
-      const wireRequest = buildImageRequest(protocol, request, images, this.apiKey);
-      const response = await fetch(endpoint, {
-        ...wireRequest,
-        redirect: "error",
-        method: "POST",
-        signal: controller.signal,
-      });
+      let response = await post(protocol, endpoint);
       httpStatus = response.status;
+      if (response.status === 404 && protocol === "gemini-generate-content" && !isGoogleAiStudioHost(endpoint.hostname)) {
+        // 只在中转渠道明确返回 404 时尝试另一条路径，且不等待被丢弃的响应体。
+        void response.body?.cancel().catch(() => undefined);
+        controller.signal.throwIfAborted();
+        fallbackEndpoint = imageEndpoint("openai-images-edits", new URL(this.baseUrl), request.model);
+        httpStatus = undefined;
+        response = await post("openai-images-edits", fallbackEndpoint);
+        httpStatus = response.status;
+      }
       if (!response.ok) {
         const errorBody = await readErrorBody(response, this.apiKey);
         responseSummary = { httpStatus: response.status, errorBody };
@@ -115,7 +131,7 @@ export class GptImageProvider implements ImageProvider {
         throw new Error(sizeUnsupported ? "IMAGE_SIZE_UNSUPPORTED" : "IMAGE_PROVIDER_FAILED");
       }
       const payload = await response.json().catch(() => null);
-      const result = readImageResult(protocol, payload);
+      const result = readImageResult(fallbackEndpoint ? "openai-images-edits" : protocol, payload);
       let image;
       if ("base64" in result) {
         responseFormatUsed = "b64_json";
@@ -134,10 +150,12 @@ export class GptImageProvider implements ImageProvider {
       const { bytes, mimeType } = image;
       if (!bytes.length) throw new Error("INVALID_PROVIDER_RESPONSE");
       responseSummary = { httpStatus: response.status, dataCount: result.dataCount, responseFormatUsed, mimeType, byteLength: bytes.length };
-      await finishModelArchive(archive, responseSummary, [{ label: "generated-image", mimeType, bytes }]);
-      finishObservation(observation, { status: "succeeded", outputMimeType: mimeType, outputByteLength: bytes.length }, { http_status: response.status, output_type: "image", responseFormatUsed });
-      recordImageSuccess(flow, provider, request.model, Date.now() - startedAt);
-      logObservation("image.completed", { request_id: requestId, ...attributes, duration_ms: Date.now() - startedAt, status: "success", responseFormatUsed });
+      const fallback = fallbackMetadata();
+      const responseAttributes = { http_status: response.status, responseFormatUsed };
+      await finishModelArchive(archive, { ...fallback, ...responseSummary }, [{ label: "generated-image", mimeType, bytes }]);
+      finishObservation(observation, { status: "succeeded", outputMimeType: mimeType, outputByteLength: bytes.length }, { output_type: "image", ...responseAttributes, ...fallback });
+      recordImageSuccess(flow, fallback?.provider ?? provider, request.model, Date.now() - startedAt, fallback && { ...GEMINI_404_FALLBACK, ...responseAttributes });
+      logObservation("image.completed", { request_id: requestId, ...attributes, ...fallback, duration_ms: Date.now() - startedAt, status: "success", responseFormatUsed, ...(fallback && { http_status: response.status }) });
       return image;
     } catch (error) {
       const normalized = controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")
@@ -146,10 +164,11 @@ export class GptImageProvider implements ImageProvider {
           ? error
           : new Error("IMAGE_PROVIDER_FAILED");
       const responseAttributes = { ...(httpStatus !== undefined && { http_status: httpStatus }), ...(responseFormatUsed && { responseFormatUsed }) };
-      await failModelArchive(archive, normalized, responseSummary);
-      failObservation(observation, normalized, responseAttributes);
-      recordImageFailure(flow, provider, request.model, Date.now() - startedAt, normalized.message);
-      logObservation("image.failed", { request_id: requestId, ...attributes, duration_ms: Date.now() - startedAt, status: "error", error_code: normalized.message, ...responseAttributes });
+      const fallback = fallbackMetadata();
+      await failModelArchive(archive, normalized, fallback ? { ...fallback, httpStatus, ...responseSummary } : responseSummary);
+      failObservation(observation, normalized, { ...responseAttributes, ...fallback });
+      recordImageFailure(flow, fallback?.provider ?? provider, request.model, Date.now() - startedAt, normalized.message, fallback && { ...GEMINI_404_FALLBACK, ...responseAttributes });
+      logObservation("image.failed", { request_id: requestId, ...attributes, ...fallback, duration_ms: Date.now() - startedAt, status: "error", error_code: normalized.message, ...responseAttributes });
       throw responseFormatUsed === "url" ? new ImageUrlDownloadError(normalized.message) : normalized;
     } finally {
       clearTimeout(timeout);

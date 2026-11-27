@@ -82,6 +82,8 @@ curl https://img.yunfei.best/v1/images/edits \
 
 使用 Gemini 原生 generateContent 接口，模型名填写在请求网址中，不属于 JSON 请求体。
 
+直连 Google AI Studio（`generativelanguage.googleapis.com`）时，应用只发送 `x-goog-api-key` 和 JSON 内容类型。云飞等中转渠道同时收到 `x-goog-api-key` 和 `Authorization: Bearer`。
+
 网址中的模型
 外号	模型名	取向
 香蕉 Pro	gemini-3-pro-image-preview	画质档，适合成品
@@ -493,7 +495,7 @@ npx tsx scripts/probe-gpt-image-size.ts --case-set high-res --dry-run
 
 生图请求按以下顺序自动选择协议：
 
-1. Gemini 图像、nano banana 模型名，或 `generativelanguage.googleapis.com`，使用 `/v1beta/models/{model}:generateContent`。保留渠道地址的网关子路径，剥离末尾的版本路径和模型名开头的 `models/`。档位尺寸只传 `imageSize`，文生图由上游使用默认比例，图生图跟随参考图比例。像素尺寸匹配到最近的支持比例和档位。
+1. Gemini 图像、nano banana 模型名，或 `generativelanguage.googleapis.com`，先使用 `/v1beta/models/{model}:generateContent`。保留渠道地址的网关子路径，剥离末尾的版本路径和模型名开头的 `models/`。档位尺寸只传 `imageSize`，文生图由上游使用默认比例，图生图跟随参考图比例。像素尺寸匹配到最近的支持比例和档位。只有中转渠道返回 HTTP 404 时，才会在同一个超时内改走原渠道基址下的 `/images/edits` multipart。Google 官方 404、其他 HTTP 错误、网络故障和超时均直接报错。触发回退时，日志和存档会记录原协议的 404 及最终请求的协议、地址和状态。
 2. `dashscope*.aliyuncs.com` 或 `*.maas.aliyuncs.com`，或 `qwen-image`、`wan2.x`、`wanx` 系列模型名，使用渠道基址下的 `/images/generations`。
 3. 其他模型沿用 `/images/edits` multipart。失败日志通过 `http_status` 记录收到的上游状态码。
 

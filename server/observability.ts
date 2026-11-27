@@ -115,15 +115,17 @@ export function recordModelFailure(flow: string, provider: string, model: string
   metrics?.duration.record(durationMs, { flow, provider, model });
 }
 
-export function recordImageSuccess(flow: string, provider: string, model: string, durationMs: number): void {
-  metrics?.imageRequests.add(1, { flow, provider, model, status: "success" });
-  metrics?.imageDuration.record(durationMs, { flow, provider, model });
+export function recordImageSuccess(flow: string, provider: string, model: string, durationMs: number, fallback?: Attributes): void {
+  const attrs = { flow, provider, model, ...fallback };
+  metrics?.imageRequests.add(1, { ...attrs, status: "success" });
+  metrics?.imageDuration.record(durationMs, attrs);
 }
 
-export function recordImageFailure(flow: string, provider: string, model: string, durationMs: number, errorCode: string): void {
-  metrics?.imageRequests.add(1, { flow, provider, model, status: "error" });
-  metrics?.errors.add(1, { flow, provider, model, error_code: errorCode });
-  metrics?.imageDuration.record(durationMs, { flow, provider, model });
+export function recordImageFailure(flow: string, provider: string, model: string, durationMs: number, errorCode: string, fallback?: Attributes): void {
+  const attrs = { flow, provider, model, ...fallback };
+  metrics?.imageRequests.add(1, { ...attrs, status: "error" });
+  metrics?.errors.add(1, { ...attrs, error_code: errorCode });
+  metrics?.imageDuration.record(durationMs, attrs);
 }
 
 export function logObservation(event: string, fields: Attributes = {}): void {

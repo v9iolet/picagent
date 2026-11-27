@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { after, before } from "node:test";
+import test, { after, before, type TestContext } from "node:test";
 import sharp from "sharp";
 import { errorMessages } from "../server/api-errors.js";
 import { GptImageProvider, ImageUrlDownloadError } from "../server/providers/gpt-image-provider.js";
@@ -12,6 +12,7 @@ import { defaultImageOptions, resolveImageSize } from "../shared/model-settings.
 
 const workspace = "https://ws-8odv4ivlr01vkob5.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
 const proxy = "https://relay.example.test";
+const yunfei = "https://img.yunfei.best";
 const key = "channel-key";
 const qwen = "qwen-image-2.1-pro";
 const gemini = "gemini-3.1-flash-image-preview";
@@ -42,6 +43,35 @@ function jsonBody(init: RequestInit) {
   assert.equal(new Headers(init.headers).get("authorization"), `Bearer ${key}`);
   assert.equal(typeof init.body, "string");
   return JSON.parse(init.body as string);
+}
+
+function captureImageLog(t: TestContext) {
+  const stdout = t.mock.method(process.stdout, "write");
+  return (requestId: string) => {
+    const line = stdout.mock.calls.map(({ arguments: [chunk] }) => String(chunk))
+      .find((chunk) => chunk.includes(`"request_id":"${requestId}"`));
+    assert.ok(line, requestId);
+    return JSON.parse(line);
+  };
+}
+
+async function captureImageArchive(t: TestContext) {
+  const directory = await mkdtemp(join(tmpdir(), "image-protocol-test-"));
+  const originalDirectory = process.env.MODEL_ARCHIVE_DIR;
+  process.env.MODEL_ARCHIVE_DIR = directory;
+  process.env.MODEL_ARCHIVE_MODE = "metadata";
+  t.after(async () => {
+    process.env.MODEL_ARCHIVE_MODE = "off";
+    if (originalDirectory === undefined) delete process.env.MODEL_ARCHIVE_DIR;
+    else process.env.MODEL_ARCHIVE_DIR = originalDirectory;
+    await rm(directory, { recursive: true, force: true });
+  });
+  return async (requestId: string, phase: "request" | "response") => {
+    const files = await readdir(directory, { recursive: true });
+    const file = files.find((entry) => entry.endsWith(`_${requestId}_${phase}.json`));
+    assert.ok(file, `${requestId} ${phase}`);
+    return JSON.parse(await readFile(join(directory, file), "utf8"));
+  };
 }
 
 const references = [
@@ -138,34 +168,22 @@ test("DashScope caps tiers and pixel area, rounds resized edges down to multiple
 });
 
 test("a DashScope 404 archives the empty response and logs http_status without an error body", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "image-protocol-test-"));
-  const originalDirectory = process.env.MODEL_ARCHIVE_DIR;
-  process.env.MODEL_ARCHIVE_DIR = directory;
-  process.env.MODEL_ARCHIVE_MODE = "metadata";
-  t.after(async () => {
-    process.env.MODEL_ARCHIVE_MODE = "off";
-    if (originalDirectory === undefined) delete process.env.MODEL_ARCHIVE_DIR;
-    else process.env.MODEL_ARCHIVE_DIR = originalDirectory;
-    await rm(directory, { recursive: true, force: true });
-  });
-  const stdout = t.mock.method(process.stdout, "write");
+  const archive = await captureImageArchive(t);
+  const log = captureImageLog(t);
   t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 404 }));
   const requestId = "dashscope-404";
   await assert.rejects(new GptImageProvider(workspace, key).edit(request({ requestId })), { message: "IMAGE_PROVIDER_FAILED" });
-  const logs = stdout.mock.calls.map(({ arguments: [line] }) => String(line));
-  const event = JSON.parse(logs.find((line) => line.includes(`"request_id":"${requestId}"`))!);
+  const event = log(requestId);
   assert.equal(event.event, "image.failed");
   assert.equal(event.http_status, 404);
   assert.equal(event.provider, "dashscope-image");
   assert.equal(event.endpoint, workspace + "/images/generations");
   assert.equal(event.error_code, "IMAGE_PROVIDER_FAILED");
   assert.equal(Object.hasOwn(event, "errorBody"), false);
-  const files = await readdir(directory, { recursive: true });
-  const archive = async (suffix: string) => JSON.parse(await readFile(join(directory, files.find((file) => file.endsWith(suffix))!), "utf8"));
-  const storedRequest = await archive("_request.json");
+  const storedRequest = await archive(requestId, "request");
   assert.equal(storedRequest.provider, "dashscope-image");
   assert.equal(storedRequest.request.endpoint, workspace + "/images/generations");
-  assert.deepEqual((await archive("_response.json")).response, { httpStatus: 404, errorBody: "" });
+  assert.deepEqual((await archive(requestId, "response")).response, { httpStatus: 404, errorBody: "" });
 });
 
 test("Gemini uses the channel origin, sends text before images, and reads either inline casing", async (t) => {
@@ -205,6 +223,149 @@ test("Gemini strips only the final version path and removes the leading models/ 
   const base = new URL(proxy + "/v1beta/openai");
   const endpoint = imageEndpoint("gemini-generate-content", base, "Models/vendor/" + gemini);
   assert.equal(endpoint.href, `${proxy}/v1beta/models/vendor%2F${gemini}:generateContent`);
+});
+
+test("official Gemini uses only the API key header and never falls back from a 404", async (t) => {
+  const log = captureImageLog(t);
+  const url = "https://GENERATIVELANGUAGE.GOOGLEAPIS.COM./v1beta";
+  const requestId = "official-gemini-404";
+  const fetcher = t.mock.method(globalThis, "fetch", async (_url: URL, init: RequestInit) => {
+    assert.equal(String(_url), `https://generativelanguage.googleapis.com./v1beta/models/${gemini}:generateContent`);
+    assert.deepEqual(Object.fromEntries(new Headers(init.headers)), { "content-type": "application/json", "x-goog-api-key": key });
+    return new Response(null, { status: 404 });
+  });
+  await assert.rejects(new GptImageProvider(url, key).edit(request({ model: gemini, requestId })), { message: "IMAGE_PROVIDER_FAILED" });
+  assert.equal(fetcher.mock.callCount(), 1);
+  const event = log(requestId);
+  assert.equal(event.http_status, 404);
+  assert.equal(event.provider, "gemini-image");
+  assert.equal(Object.hasOwn(event, "fallbackFromHttpStatus"), false);
+});
+
+test("Gemini relay falls back on 404 to multipart edits and reports the actual provider and status", async (t) => {
+  const archive = await captureImageArchive(t);
+  const log = captureImageLog(t);
+  const model = "gemini-3-pro-image-preview";
+  const requestId = "gemini-relay-fallback-success";
+  const editsEndpoint = yunfei + "/v1/images/edits";
+  let signal: AbortSignal | null | undefined;
+  let firstBodyCancelled = false;
+  const fetcher = t.mock.method(globalThis, "fetch", async (url, init: RequestInit) => {
+    if (String(url) === `${yunfei}/v1beta/models/${model}:generateContent`) {
+      assert.equal(new Headers(init.headers).get("x-goog-api-key"), key);
+      assert.equal(jsonBody(init).contents[0].role, "user");
+      signal = init.signal;
+      return new Response(new ReadableStream({ cancel() { firstBodyCancelled = true; } }), { status: 404 });
+    }
+    assert.equal(String(url), editsEndpoint);
+    assert.equal(init.method, "POST");
+    assert.equal(init.redirect, "error");
+    assert.deepEqual(init.headers, { authorization: `Bearer ${key}` });
+    assert.ok(signal);
+    assert.equal(init.signal, signal);
+    const form = init.body as FormData;
+    assert.deepEqual([...form.keys()], ["model", "image", "image", "prompt", "size", "quality", "n", "response_format"]);
+    assert.deepEqual(form.getAll("image").map((image) => (image as File).name), ["first.jpg", "second.webp"]);
+    for (const [name, value] of Object.entries({ model, prompt: "保留商品", size: "1024x1824", quality: "medium", n: "1", response_format: "b64_json" })) {
+      assert.equal(form.get(name), value);
+    }
+    return Response.json({ data: [{ b64_json: b64 }] }, { status: 201 });
+  });
+  const provider = new GptImageProvider(yunfei + "/v1", key);
+  assert.deepEqual(await provider.edit(request({ model, requestId, size: "1024x1824", images: references })), { bytes: generated, mimeType: "image/png" });
+  assert.equal(fetcher.mock.callCount(), 2);
+  assert.equal(firstBodyCancelled, true);
+  const event = log(requestId);
+  assert.equal(event.event, "image.completed");
+  assert.equal(event.provider, "openai-compatible-image");
+  assert.equal(event.endpoint, editsEndpoint);
+  assert.equal(event.fallbackFromProvider, "gemini-image");
+  assert.equal(event.fallbackFromHttpStatus, 404);
+  assert.equal(event.http_status, 201);
+  assert.equal(event.responseFormatUsed, "b64_json");
+  assert.equal((await archive(requestId, "request")).provider, "gemini-image");
+  assert.deepEqual((await archive(requestId, "response")).response, {
+    provider: "openai-compatible-image", endpoint: editsEndpoint, fallbackFromProvider: "gemini-image", fallbackFromHttpStatus: 404,
+    httpStatus: 201, dataCount: 1, responseFormatUsed: "b64_json", mimeType: "image/png", byteLength: generated.length,
+  });
+});
+
+test("Gemini relay errors other than 404 keep their status and never fall back", async (t) => {
+  const log = captureImageLog(t);
+  const statuses = [400, 401, 403, 429, 500];
+  let index = 0;
+  const fetcher = t.mock.method(globalThis, "fetch", async (url: URL) => {
+    assert.equal(String(url), `${yunfei}/v1beta/models/${gemini}:generateContent`);
+    return new Response(null, { status: statuses[index++] });
+  });
+  const provider = new GptImageProvider(yunfei + "/v1", key);
+  for (const [i, status] of statuses.entries()) {
+    const requestId = `gemini-relay-${status}`;
+    await assert.rejects(provider.edit(request({ model: gemini, requestId })), { message: "IMAGE_PROVIDER_FAILED" });
+    assert.equal(fetcher.mock.callCount(), i + 1);
+    const event = log(requestId);
+    assert.equal(event.event, "image.failed");
+    assert.equal(event.http_status, status);
+    assert.equal(event.provider, "gemini-image");
+    assert.equal(Object.hasOwn(event, "fallbackFromHttpStatus"), false);
+  }
+});
+
+test("Gemini relay archives and logs the final failure after falling back", async (t) => {
+  const archive = await captureImageArchive(t);
+  const log = captureImageLog(t);
+  const requestId = "gemini-relay-fallback-failure";
+  const editsEndpoint = yunfei + "/v1/images/edits";
+  const fetcher = t.mock.method(globalThis, "fetch", async (url: URL) =>
+    String(url) === editsEndpoint ? new Response(`unsupported size for ${key}`, { status: 400 }) : new Response("discarded first response", { status: 404 }));
+  const provider = new GptImageProvider(yunfei + "/v1", key);
+  await assert.rejects(provider.edit(request({ model: gemini, requestId })), { message: "IMAGE_SIZE_UNSUPPORTED" });
+  assert.equal(fetcher.mock.callCount(), 2);
+  const event = log(requestId);
+  assert.equal(event.event, "image.failed");
+  assert.equal(event.http_status, 400);
+  assert.equal(event.provider, "openai-compatible-image");
+  assert.equal(event.endpoint, editsEndpoint);
+  assert.equal(event.fallbackFromHttpStatus, 404);
+  assert.equal(event.error_code, "IMAGE_SIZE_UNSUPPORTED");
+  assert.equal(Object.hasOwn(event, "errorBody"), false);
+  assert.deepEqual((await archive(requestId, "response")).response, {
+    provider: "openai-compatible-image", endpoint: editsEndpoint, fallbackFromProvider: "gemini-image", fallbackFromHttpStatus: 404,
+    httpStatus: 400, errorBody: "unsupported size for [REDACTED]",
+  });
+});
+
+test("Gemini relay does not fall back from a network error or timeout", async (t) => {
+  const failedFetch = t.mock.method(globalThis, "fetch", async () => { throw new TypeError("network error"); });
+  const provider = new GptImageProvider(yunfei + "/v1", key, 25);
+  await assert.rejects(provider.edit(request({ model: gemini })), { message: "IMAGE_PROVIDER_FAILED" });
+  assert.equal(failedFetch.mock.callCount(), 1);
+  failedFetch.mock.restore();
+  const timedOutFetch = t.mock.method(globalThis, "fetch", async (_url, init: RequestInit) => {
+    const signal = init.signal!;
+    signal.throwIfAborted();
+    return new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  });
+  await assert.rejects(provider.edit(request({ model: gemini })), { message: "IMAGE_PROVIDER_TIMEOUT" });
+  assert.equal(timedOutFetch.mock.callCount(), 1);
+});
+
+test("a failed URL download after Gemini fallback preserves ImageUrlDownloadError", async (t) => {
+  const log = captureImageLog(t);
+  const requestId = "gemini-relay-fallback-download";
+  const fetcher = t.mock.method(globalThis, "fetch", async (url: URL) =>
+    String(url).endsWith("/images/edits")
+      ? Response.json({ data: [{ url: "file:///private/output.png" }] })
+      : new Response(null, { status: 404 }));
+  const provider = new GptImageProvider(yunfei + "/v1", key);
+  await assert.rejects(provider.edit(request({ model: gemini, requestId })), (error: unknown) =>
+    error instanceof ImageUrlDownloadError && error.message === "INVALID_PROVIDER_RESPONSE");
+  assert.equal(fetcher.mock.callCount(), 2);
+  const event = log(requestId);
+  assert.equal(event.provider, "openai-compatible-image");
+  assert.equal(event.http_status, 200);
+  assert.equal(event.fallbackFromHttpStatus, 404);
+  assert.equal(event.responseFormatUsed, "url");
 });
 
 test("Gemini maps tiers and the nearest aspect ratio for native and workbench pixel sizes", async (t) => {
