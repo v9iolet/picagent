@@ -4,6 +4,10 @@ import { resolve } from "node:path";
 import { Client as MinioClient } from "minio";
 import { Pool } from "pg";
 import { createSuiteStudioApp, type AppResponse } from "./app.js";
+import { AuthService } from "./auth/auth-service.js";
+import { PostgresAuthRepository } from "./repositories/postgres-auth-repository.js";
+import { isAuthPathname, publicAuthRoute } from "./routes/auth-routes.js";
+import { isApiPathname } from "./http/router.js";
 import { loadServerConfig } from "./config.js";
 import { runMigrations } from "./migrations.js";
 import { dispatchInputImageUpload } from "./multipart.js";
@@ -40,6 +44,8 @@ initializeObservability();
 const pool = new Pool({ ...config.postgres, max: Math.max(6, Number(process.env.PG_POOL_MAX) || 16), connectionTimeoutMillis: 30_000, idleTimeoutMillis: 60_000 });
 const minio = new MinioClient(config.minio);
 await runMigrations(pool, { recoverStaleAttempts: true });
+const authService = new AuthService(new PostgresAuthRepository(pool));
+await authService.ensureDefaultAdmin();
 try {
   if (!(await minio.bucketExists(config.minio.bucket))) await minio.makeBucket(config.minio.bucket, config.minio.region);
 } catch {
@@ -94,6 +100,7 @@ const imageEditorApi = createImageEditorApi(new ImageEditorService(
   async (versionId) => (await imageEditorRepository.getSourceVersion(versionId))?.productInputs ?? null,
 ));
 const app = createSuiteStudioApp({
+  authService,
   repository: new PostgresSuiteRepository(pool),
   storage,
   modelSettings,
@@ -116,14 +123,25 @@ const serveStatic = createStaticAssetHandler(resolve(process.cwd(), "dist"));
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
   const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+  const method = req.method ?? "GET";
+  const headers = req.headers as Record<string, string>;
+  const apiRequest = isApiPathname(requestUrl.pathname);
+  if (isAuthPathname(requestUrl.pathname)) res.setHeader("cache-control", "no-store");
+  if (apiRequest && !publicAuthRoute(method, requestUrl.pathname)) {
+    const denied = await app.authorize(headers);
+    if (denied) {
+      req.resume();
+      writeResponse(res, denied);
+      return;
+    }
+  }
   const body = await readBoundedRequestBody(req, res, requestUrl.pathname);
   if (body === null) return;
-  const headers = req.headers as Record<string, string>;
   let response: AppResponse;
   const upload = req.method === "POST" ? await dispatchInputImageUpload(app, requestUrl.pathname, body, headers) : null;
   if (upload) {
     response = upload;
-  } else if (req.method === "GET" && !requestUrl.pathname.startsWith("/api/")) {
+  } else if (method === "GET" && !apiRequest) {
     const asset = await serveStatic(req.url ?? "/");
     if (asset) {
       res.statusCode = 200;
@@ -134,8 +152,15 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     }
     response = { status: 404, body: { error: { code: "NOT_FOUND", message: "请求不存在" }, requestId: "" } };
   } else {
-    response = await dispatchJsonRequest(app.request, req.method ?? "GET", requestUrl, headers, body);
+    response = await dispatchJsonRequest(app.request, method, requestUrl, headers, body, {
+      remoteAddress: req.socket.remoteAddress,
+      encrypted: Boolean((req.socket as { encrypted?: boolean }).encrypted),
+    });
   }
+  writeResponse(res, response);
+}
+
+function writeResponse(res: http.ServerResponse, response: AppResponse) {
   res.statusCode = response.status;
   for (const [name, value] of Object.entries(response.headers ?? {})) res.setHeader(name, value);
   if (response.headers?.location) {

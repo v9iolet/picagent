@@ -1,6 +1,8 @@
 import { ToastProvider } from "../components/ui/ToastProvider";
 import { AppConfigProvider } from "../context/AppConfigContext";
+import { AuthProvider, sanitizeNextPath, useAuth } from "../context/AuthContext";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import "./App.css";
 
 const AplusStudioPage = lazy(() => import("../pages/AplusStudioPage").then(module => ({ default: module.AplusStudioPage })));
 const HomePage = lazy(() => import("../pages/HomePage").then(module => ({ default: module.HomePage })));
@@ -14,15 +16,25 @@ const PromptTemplatesPage = lazy(() => import("../pages/PromptTemplatesPage").th
 const ReplicaStudioPage = lazy(() => import("../pages/ReplicaStudioPage").then(module => ({ default: module.ReplicaStudioPage })));
 const ReversePage = lazy(() => import("../pages/ReversePage").then(module => ({ default: module.ReversePage })));
 
-const readLocation = () => ({ path: window.location.pathname, search: window.location.search });
+const LoginPage = lazy(() => import("../pages/LoginPage").then(module => ({ default: module.LoginPage })));
+const readLocation = () => ({ path: window.location.pathname, search: window.location.search, hash: window.location.hash });
 
 export function App() {
-  const [{ path, search }, setLocation] = useState(readLocation);
+  return <AuthProvider><ToastProvider><GuardedApp /></ToastProvider></AuthProvider>;
+}
+
+function GuardedApp() {
+  const auth = useAuth();
+  const [{ path, search, hash }, setLocation] = useState(readLocation);
 
   useEffect(() => {
     const onPopState = () => setLocation(readLocation());
     window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
+    window.addEventListener("hashchange", onPopState);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+      window.removeEventListener("hashchange", onPopState);
+    };
   }, []);
 
   const navigate = useCallback((to: string, options?: { replace?: boolean }) => {
@@ -31,15 +43,33 @@ export function App() {
     if (!options?.replace) window.scrollTo({ top: 0 });
   }, []);
 
-  return (
-    <AppConfigProvider>
-      <ToastProvider>
-        <Suspense fallback={<main role="status">正在加载页面…</main>}>
-          <RoutePage path={path} search={search} navigate={navigate} />
-        </Suspense>
-      </ToastProvider>
-    </AppConfigProvider>
+  const onLogin = path === "/login";
+  const nextPath = sanitizeNextPath(onLogin ? new URLSearchParams(search).get("next") : path + search + hash);
+  useEffect(() => {
+    if (auth.status !== "ready" || !auth.authEnabled) return;
+    if (!auth.authenticated && !onLogin) {
+      navigate(nextPath === "/" ? "/login" : "/login?next=" + encodeURIComponent(nextPath), { replace: true });
+    } else if (auth.authenticated && onLogin) {
+      navigate(nextPath, { replace: true });
+    }
+  }, [auth.status, auth.authEnabled, auth.authenticated, onLogin, nextPath, navigate]);
+
+  if (auth.status === "loading") return <main className="pa-route-state" role="status">正在验证登录状态…</main>;
+  if (auth.status === "error") return (
+    <main className="pa-route-state">
+      <span role="alert">无法验证登录状态，请检查网络连接后重试。</span>
+      <button type="button" onClick={auth.retry}>重新验证</button>
+    </main>
   );
+  const loading = <main className="pa-route-state" role="status">正在加载页面…</main>;
+  if (auth.authEnabled && auth.authenticated && onLogin) return loading;
+  return <Suspense fallback={loading}>
+    {auth.authEnabled && !auth.authenticated
+      ? <LoginPage nextPath={nextPath} navigate={navigate} />
+      : <AppConfigProvider key={auth.user?.id ?? "offline"}>
+          <RoutePage path={path} search={search} navigate={navigate} />
+        </AppConfigProvider>}
+  </Suspense>;
 }
 
 function RoutePage({ path, search, navigate }: {

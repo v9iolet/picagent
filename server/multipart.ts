@@ -70,11 +70,15 @@ export async function dispatchInputImageUpload(app: SuiteStudioApp, path: string
   const suiteUpload = path.match(/^\/api\/suites\/([^/]+)\/input-images$/);
   if (!suiteUpload && !/^\/api\/listing-copies\/[^/]+\/input-images$/.test(path) &&
       !/^\/api\/image-editor\/sessions\/[^/]+\/versions\/[^/]+\/restore-inputs$/.test(path)) return null;
+  if (app.authorize) {
+    const denied = await app.authorize(headers);
+    if (denied) return denied;
+  }
   const form = parseMultipart(body, headers["content-type"] ?? "");
   if (!form?.file) {
     const message = suiteUpload && !form ? "上传请求格式无效" : "未找到图片文件";
     return { status: 400, body: { error: { code: "INVALID_MULTIPART", message }, requestId: "" } };
   }
-  if (!suiteUpload) return app.request("POST", path, { body: form.file });
-  return app.upload(suiteUpload[1], { ...form.file, ordinal: form.ordinal, idempotencyKey: headers["idempotency-key"] });
+  if (!suiteUpload) return app.request("POST", path, { headers, body: form.file });
+  return app.upload(suiteUpload[1], { ...form.file, ordinal: form.ordinal, idempotencyKey: headers["idempotency-key"] }, headers);
 }

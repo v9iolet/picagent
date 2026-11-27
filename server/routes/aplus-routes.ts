@@ -6,9 +6,8 @@ import type { StudioServices } from "../services/studio-services.js";
 
 export function registerAplusRoutes(router: Router, { pipeline, aplusGeneration, aplusPlanning, aplusResults }: StudioServices) {
   function suiteAction(method: string, action: string, handler: (context: RouteContext) => Promise<AppResponse>) {
-    const pattern = new RegExp("^/api/aplus/(?<suiteId>[^/]+)/(?<action>" + action + ")$", "i");
-    router.route(method, pattern, (context) =>
-      isUuid(context.params.suiteId) && context.params.action === action ? handler(context) : fail("NOT_FOUND", 404));
+    router.route(method, "/api/aplus/:suiteId/" + action, (context) =>
+      isUuid(context.params.suiteId) ? handler(context) : fail("NOT_FOUND", 404));
   }
 
   router.post("/api/aplus/ai-write", ({ body }) => aplusPlanning.aiWrite(body));

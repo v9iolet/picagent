@@ -1,7 +1,7 @@
 import type { ImageOptions } from "../../../shared/model-settings";
 import type { ProductCardSnapshot } from "../../../shared/product-card";
 import type { ResolvedDeliverySlot } from "../../../shared/workbench-delivery";
-import { createGenerationActions, createIdempotencyKey, postGeneration, type ApiImage, type ApiLibraryResource, type ApiSuite, type ApiTaskStatus } from "../../api/client";
+import { createGenerationActions, createIdempotencyKey, fetchApiResponse, postGeneration, type ApiImage, type ApiLibraryResource, type ApiSuite, type ApiTaskStatus } from "../../api/client";
 import type { SelectedProductCardSummary } from "../../components/product-card-picker/types";
 
 export type ReplicaSceneType =
@@ -376,7 +376,7 @@ export async function computeSha256Hex(buffer: ArrayBuffer): Promise<string> {
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, cache: "no-store" });
+  const response = await fetchApiResponse(url, init);
   const payload = (await response.json().catch(() => null)) as {
     data?: T;
     error?: { message?: string };

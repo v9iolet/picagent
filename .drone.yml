@@ -27,6 +27,7 @@ steps:
       - npm run typecheck
       - npm run test:ticket02
       - npm run test:ticket05
+      - npx tsx --test tests/auth-service.unit.test.ts tests/auth-routes.contract.test.ts
       - npx tsx --test tests/image-editor.contract.test.ts tests/ticket06.task-contract.test.ts tests/workbench-ui.ticket08.test.ts
       - npm run build
 
@@ -58,7 +59,7 @@ steps:
       - |
         set -eu
         for attempt in $(seq 1 30); do
-          if docker exec pic-agent node -e "fetch('http://127.0.0.1:3001/api/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"; then
+          if docker exec pic-agent node -e "fetch('http://127.0.0.1:3001/api/auth/session').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"; then
             break
           fi
           if [ "$attempt" = 30 ]; then

@@ -1,3 +1,5 @@
+import type { AuthService } from "./auth/auth-service.js";
+import type { RequestHeaders, TrustProxy } from "./auth/request-meta.js";
 import type { ListingRepository } from "./listing-copy.js";
 import type { ModelSettings } from "./model-settings.js";
 import type { ProductOnboardingRepository } from "./product-onboarding/index.js";
@@ -22,6 +24,8 @@ import type {
 } from "./types.js";
 
 export interface StudioDependencies {
+  authService?: AuthService;
+  trustProxy?: TrustProxy;
   listingRepository?: ListingRepository;
   repository: SuiteRepository;
   storage: StorageAdapter;
@@ -41,7 +45,7 @@ export interface StudioDependencies {
   libraryRepository?: LibraryRepository;
   reverseRepository?: ReverseRepository;
   imageEditorApi?: {
-    request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<ImageEditorApiResponse>;
+    request(method: string, path: string, options?: { headers?: RequestHeaders; body?: unknown }): Promise<ImageEditorApiResponse>;
     clearFinalVersions?(childTaskIds: string[]): Promise<void>;
     setOnVersionCompleted?(listener: ImageEditVersionCompletedListener): void;
     getVersion?(taskId: string, versionId: string): Promise<ImageEditVersion | null>;

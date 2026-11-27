@@ -33,6 +33,8 @@ test("商品套图：选择视觉风格、管理九套版式、缩减张数并�
     const path = new URL(request.url()).pathname;
     const reply = (data, status = 200) => route.fulfill({ status, json: { data } });
     switch (`${request.method()} ${path}`) {
+      case "GET /api/auth/session":
+        return reply({ authEnabled: false, authenticated: true, user: null });
       case "GET /api/platforms":
         return reply([{ code: "taobao", name: "淘宝", marketScope: "domestic", mainImageBackground: "flexible" }]);
       case "GET /api/model-settings":
@@ -58,6 +60,7 @@ test("商品套图：选择视觉风格、管理九套版式、缩减张数并�
   await page.goto(new URL(`/create/suite/${suite.id}`, vite.resolvedUrls.local[0]).href);
   const style = page.getByRole("combobox", { name: "视觉风格", exact: true });
   await style.waitFor();
+  assert.equal(await page.getByRole("button", { name: "退出登录" }).count(), 0);
   assert.equal(await style.inputValue(), "auto");
   assert.deepEqual(await style.locator("option").allTextContents(), [
     "AI 智能匹配", "极简高级商业", "暗调科技光影", "自然生活氛围", "活力营销撞色",

@@ -15,6 +15,16 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 启动后，在左侧导航「配置 → 渠道」添加 OpenAI 兼容协议渠道、API Key 与模型 ID（勾选生图 / 多模态能力并按账号分组调整支持的分辨率与比例），随后在「偏好设置」选择默认生图模型与默认多模态视觉模型。
 
+## 管理员登录与鉴权
+
+服务启动时会在 PostgreSQL 中初始化单个管理员账号，默认用户名为 `admin`，初始密码为 `woshisheng_666`。生产环境请设置强密码 `AUTH_ADMIN_PASSWORD`。显式配置后，服务会在启动时同步该账号的密码。
+
+登录需要一次性图形验证码，验证码记录保存在 PostgreSQL，默认 3 分钟有效。登录成功后，服务签发默认有效期为 7 天的 HttpOnly 会话 Cookie。退出登录会立即撤销该会话。业务 API、上传、图片预览和下载均需有效会话。
+
+`AUTH_COOKIE_SECURE=auto` 会根据 HTTPS 状态决定是否给 Cookie 加上 `Secure`，也可设为 `true` 或 `false` 固定开启或关闭。默认仅信任来自本机回环地址的反向代理，通过 `X-Forwarded-For` 首个地址识别客户端，通过 `X-Forwarded-Proto` 识别 HTTPS。`AUTH_TRUST_PROXY=false` 始终使用直连地址与 TLS 状态。仅当服务只能经可信代理访问，且代理会覆盖客户端传入的这两个头时，才设置 `AUTH_TRUST_PROXY=true`。
+
+通过 Docker bridge 的宿主机网关反代时，容器看到的 `remoteAddress` 是网桥 IP。满足上述代理条件后，需要在 `.env` 中显式设置 `AUTH_TRUST_PROXY=true`，才能从转发头识别客户端 IP 和 HTTPS 状态。
+
 ## 核心入口与路由
 
 - `/create/suite`（及 `/create/suite/:suiteId`）：AI 商品套图一键生成、多阶段进度追踪、原地图片精修与批次历史
@@ -45,7 +55,7 @@ npm run build
 NODE_ENV=production npm start
 ```
 
-`npm run build` 将前端页面和静态资源写入 `dist/`，随后调用 `npm run build:server`，将服务端和共享模块编译到 `dist-server/`。单独更新服务端时可只运行 `npm run build:server`。`npm start` 执行 `node dist-server/server/index.js`，启动时读取 `db/migrations/` 执行迁移，并在同一端口提供 API 和前端页面。默认端口为 3001，健康检查路径为 `/api/health`。
+`npm run build` 将前端页面和静态资源写入 `dist/`，随后调用 `npm run build:server`，将服务端和共享模块编译到 `dist-server/`。单独更新服务端时可只运行 `npm run build:server`。`npm start` 执行 `node dist-server/server/index.js`，启动时读取 `db/migrations/` 执行迁移，并在同一端口提供 API 和前端页面。默认端口为 3001，健康检查路径 `/api/health` 需要有效会话。无需登录的 HTTP 存活探针可使用 `GET /api/auth/session`。
 
 也可以从项目根目录构建多阶段 Docker 镜像。第一阶段 `builder` 安装构建依赖并完成前后端编译，第二阶段 `runner` 通过 `npm ci --omit=dev` 安装生产依赖，复制两个产物目录和数据库迁移。容器默认以 `NODE_ENV=production` 启动。
 

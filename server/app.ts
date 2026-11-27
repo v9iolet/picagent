@@ -3,7 +3,9 @@ import { fail } from "./api-errors.js";
 import type { AppResponse } from "./api-response.js";
 import type { UploadFile } from "./types.js";
 import type { StudioDependencies } from "./app-dependencies.js";
-import { createRouter } from "./http/router.js";
+import { createRouter, isApiPathname } from "./http/router.js";
+import { trustProxyFromEnv, type ConnectionMeta, type RequestHeaders } from "./auth/request-meta.js";
+import { isAuthPathname, publicAuthRoute } from "./routes/auth-routes.js";
 import { createStudioServices } from "./services/studio-services.js";
 import { registerSuiteRoutes } from "./routes/suite-routes.js";
 import { registerReverseRoutes } from "./routes/reverse-routes.js";
@@ -18,15 +20,18 @@ import { registerAplusRoutes } from "./routes/aplus-routes.js";
 
 export type { AppResponse } from "./api-response.js";
 
+type RequestOptions = ConnectionMeta & { headers?: RequestHeaders; body?: unknown };
+
 export interface SuiteStudioApp {
-  request(method: string, path: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<AppResponse>;
-  upload(suiteId: string, file: UploadFile): Promise<AppResponse>;
-  preview(suiteId: string, imageId: string, kind: "original" | "thumbnail"): Promise<AppResponse>;
-  previewBaseVersion(suiteId: string, imageId: string, versionId: string): Promise<AppResponse>;
-  previewTaskVersion(taskId: string, versionId: string, delivery?: boolean): Promise<AppResponse>;
-  previewLibraryResource(resourceId: string): Promise<AppResponse>;
-  previewReverseReference(planId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
-  previewReplicaReference(suiteId: string, referenceId: string, kind?: "original" | "thumbnail"): Promise<AppResponse>;
+  request(method: string, path: string, options?: RequestOptions): Promise<AppResponse>;
+  authorize(headers?: RequestHeaders): Promise<AppResponse | null>;
+  upload(suiteId: string, file: UploadFile, headers?: RequestHeaders): Promise<AppResponse>;
+  preview(suiteId: string, imageId: string, kind: "original" | "thumbnail", headers?: RequestHeaders): Promise<AppResponse>;
+  previewBaseVersion(suiteId: string, imageId: string, versionId: string, headers?: RequestHeaders): Promise<AppResponse>;
+  previewTaskVersion(taskId: string, versionId: string, delivery?: boolean, headers?: RequestHeaders): Promise<AppResponse>;
+  previewLibraryResource(resourceId: string, headers?: RequestHeaders): Promise<AppResponse>;
+  previewReverseReference(planId: string, referenceId: string, kind?: "original" | "thumbnail", headers?: RequestHeaders): Promise<AppResponse>;
+  previewReplicaReference(suiteId: string, referenceId: string, kind?: "original" | "thumbnail", headers?: RequestHeaders): Promise<AppResponse>;
 }
 
 export function hasValidTaskVersionIds(taskId: string, versionId: string): boolean {
@@ -34,8 +39,10 @@ export function hasValidTaskVersionIds(taskId: string, versionId: string): boole
 }
 
 export function createSuiteStudioApp(deps: StudioDependencies): SuiteStudioApp {
+  const trustProxy = deps.trustProxy ?? trustProxyFromEnv();
   const router = createRouter({ decodeParams: false });
-  const services = createStudioServices(deps, request);
+  // Background pipelines call business routes after submission, without a browser session.
+  const services = createStudioServices(deps, dispatchBusinessRequest);
   const { upload, preview, previewBaseVersion } = registerSuiteRoutes(router, services);
   const { previewReverseReference } = registerReverseRoutes(router, services);
   const { previewLibraryResource } = registerLibraryRoutes(router, services);
@@ -47,7 +54,30 @@ export function createSuiteStudioApp(deps: StudioDependencies): SuiteStudioApp {
   registerImageEditorRoutes(router, services);
   registerAplusRoutes(router, services);
 
-  async function request(method: string, path: string, options: { headers?: Record<string, string>; body?: unknown } = {}): Promise<AppResponse> {
+  async function authorize(headers: RequestHeaders = {}): Promise<AppResponse | null> {
+    if (!deps.authService || (await deps.authService.authenticateHeaders(headers)).authenticated) return null;
+    return { ...fail("UNAUTHORIZED", 401), headers: { "cache-control": "no-store" } };
+  }
+
+  function guarded(headers: RequestHeaders | undefined, run: () => Promise<AppResponse>) {
+    if (!deps.authService) return run();
+    return authorize(headers).then((denied) => denied ?? run());
+  }
+
+  function request(method: string, path: string, options: RequestOptions = {}): Promise<AppResponse> {
+    const pathname = path.split("?", 1)[0];
+    if (!isApiPathname(pathname)) return Promise.resolve(fail("NOT_FOUND", 404));
+    const route = publicAuthRoute(method, pathname);
+    const response = route
+      ? route(deps.authService, options, trustProxy)
+      : guarded(options.headers, () => dispatchBusinessRequest(method, path, options));
+    if (!isAuthPathname(pathname)) return response;
+    return response.then((result) => ({
+      ...result, headers: { ...result.headers, "cache-control": "no-store" },
+    }));
+  }
+
+  async function dispatchBusinessRequest(method: string, path: string, options: RequestOptions = {}): Promise<AppResponse> {
     const routed = router.handle(method, path, options);
     if (routed) return routed;
     if (/^\/api\/listing-copies(?:[/?]|$)/.test(path)) return services.listing.request(method, path, options.body);
@@ -63,7 +93,13 @@ export function createSuiteStudioApp(deps: StudioDependencies): SuiteStudioApp {
   }
 
   return {
-    request, upload, preview, previewBaseVersion, previewTaskVersion, previewLibraryResource, previewReverseReference,
-    previewReplicaReference: services.replicaPipeline.previewReference,
+    request, authorize,
+    upload: (id, file, headers) => guarded(headers, () => upload(id, file)),
+    preview: (id, imageId, kind, headers) => guarded(headers, () => preview(id, imageId, kind)),
+    previewBaseVersion: (id, imageId, versionId, headers) => guarded(headers, () => previewBaseVersion(id, imageId, versionId)),
+    previewTaskVersion: (id, versionId, delivery, headers) => guarded(headers, () => previewTaskVersion(id, versionId, delivery)),
+    previewLibraryResource: (id, headers) => guarded(headers, () => previewLibraryResource(id)),
+    previewReverseReference: (id, ref, kind, headers) => guarded(headers, () => previewReverseReference(id, ref, kind)),
+    previewReplicaReference: (id, ref, kind, headers) => guarded(headers, () => services.replicaPipeline.previewReference(id, ref, kind)),
   };
 }
