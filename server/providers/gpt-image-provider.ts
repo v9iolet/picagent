@@ -32,7 +32,8 @@ async function readErrorBody(response: Response, apiKey: string): Promise<string
   const redacted = text.replace(/https?:\/\/[^\s"<>]+/gi, "[REDACTED URL]")
     .replace(/\bBearer\s+[^\s"<>]+/gi, "Bearer [REDACTED]")
     .replace(/\bsk-[\w-]+/g, "[REDACTED]")
-    .replace(/("(?:api[_-]?key|authorization|token|secret|password)"\s*:\s*")[^"]*/gi, "$1[REDACTED]");
+    .replace(/AIza[\w-]{30,}/g, "[REDACTED]")
+    .replace(/("(?:api[_-]?key|x-goog-api-key|authorization|token|secret|password)"\s*:\s*")(?:\\.|[^"\\])*/gi, "$1[REDACTED]");
   let result = "";
   let bytes = 0;
   for (const char of redacted) {

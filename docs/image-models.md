@@ -493,7 +493,7 @@ npx tsx scripts/probe-gpt-image-size.ts --case-set high-res --dry-run
 
 生图请求按以下顺序自动选择协议：
 
-1. Gemini 图像、nano banana 模型名，或 `generativelanguage.googleapis.com`，使用渠道 origin 下的 `/v1beta/models/{model}:generateContent`。档位尺寸默认 1:1，像素尺寸匹配到最近的支持比例和档位。
+1. Gemini 图像、nano banana 模型名，或 `generativelanguage.googleapis.com`，使用 `/v1beta/models/{model}:generateContent`。保留渠道地址的网关子路径，剥离末尾的版本路径和模型名开头的 `models/`。档位尺寸只传 `imageSize`，文生图由上游使用默认比例，图生图跟随参考图比例。像素尺寸匹配到最近的支持比例和档位。
 2. `dashscope*.aliyuncs.com` 或 `*.maas.aliyuncs.com`，或 `qwen-image`、`wan2.x`、`wanx` 系列模型名，使用渠道基址下的 `/images/generations`。
 3. 其他模型沿用 `/images/edits` multipart。失败日志通过 `http_status` 记录收到的上游状态码。
 

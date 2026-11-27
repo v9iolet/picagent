@@ -517,6 +517,8 @@ for (const [error, code, message] of [
   ["INVALID_PROVIDER_RESPONSE", "INVALID_GENERATED_IMAGE", "图像生成服务返回了无效图片"],
   ["IMAGE_PROVIDER_FAILED", "TASK_IMAGE_PROVIDER_FAILED", "套图图片生成失败"],
   ["IMAGE_PROVIDER_TIMEOUT", "TASK_IMAGE_PROVIDER_TIMEOUT", "图像生成服务响应超时"],
+  ["IMAGE_MASK_UNSUPPORTED", "IMAGE_MASK_UNSUPPORTED", "当前生图渠道不支持蒙版，请切换渠道后重试，或重新提交编辑"],
+  ["IMAGE_REFERENCE_LIMIT_EXCEEDED", "IMAGE_REFERENCE_LIMIT_EXCEEDED", "当前生图渠道每次最多接受 10 张参考图"],
 ]) {
   test(`A+ 遇到 ${error} 每卡只请求一次，手动续跑后完成`, async () => {
     let repaired = false;

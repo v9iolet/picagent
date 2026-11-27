@@ -49,6 +49,26 @@ test("unrelated client errors and server failures retain the generic provider er
   }
 });
 
+test("redacts reflected Google keys and x-goog-api-key header values", async (t) => {
+  const requestId = "google-key-error-" + randomUUID();
+  const reflectedKey = "AIza" + "Ab1-".repeat(9);
+  const logs = captureLogs(t);
+  const response = {
+    message: "Rejected upstream key " + reflectedKey,
+    "X-Goog-Api-Key": 'proxy-token"with-escaped-content',
+  };
+  t.mock.method(globalThis, "fetch", async () => Response.json(response, { status: 401 }));
+  const provider = new GptImageProvider("https://example.test/v1beta", "channel-key");
+  await assert.rejects(provider.edit({ ...request(requestId), model: "gemini-3-pro-image-preview", size: "1K" }), { message: "IMAGE_PROVIDER_FAILED" });
+  const file = (await readdir("var/model-archives", { recursive: true })).find((file) => file.includes(requestId) && file.endsWith("_response.json"))!;
+  const errorBody = JSON.parse(await readFile("var/model-archives/" + file, "utf8")).response.errorBody;
+  assert.deepEqual(JSON.parse(errorBody), {
+    message: "Rejected upstream key [REDACTED]",
+    "X-Goog-Api-Key": "[REDACTED]",
+  });
+  assert.doesNotMatch(logs(), /AIza|proxy-token|with-escaped-content/);
+});
+
 test("size errors beyond the 2KB read budget are ignored and truncated reflected keys are redacted", async (t) => {
   const apiKey = "boundary-api-key-private";
   const requestId = "bounded-error-" + randomUUID();

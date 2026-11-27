@@ -376,10 +376,18 @@ export function createTaskGeneration(deps: StudioDependencies, {
   };
 
   const classifyTaskImageError = (error: unknown) => {
-    if (error instanceof Error && (error.message === "INVALID_PROVIDER_RESPONSE" || error.message === "INVALID_GENERATED_IMAGE")) return "INVALID_GENERATED_IMAGE";
-    if (error instanceof Error && error.message === "IMAGE_SIZE_UNSUPPORTED") return "IMAGE_SIZE_UNSUPPORTED";
-    if (error instanceof Error && error.message.includes("TIMEOUT")) return "TASK_IMAGE_PROVIDER_TIMEOUT";
-    return "TASK_IMAGE_PROVIDER_FAILED";
+    if (!(error instanceof Error)) return "TASK_IMAGE_PROVIDER_FAILED";
+    switch (error.message) {
+      case "INVALID_PROVIDER_RESPONSE":
+      case "INVALID_GENERATED_IMAGE":
+        return "INVALID_GENERATED_IMAGE";
+      case "IMAGE_SIZE_UNSUPPORTED":
+      case "IMAGE_MASK_UNSUPPORTED":
+      case "IMAGE_REFERENCE_LIMIT_EXCEEDED":
+        return error.message;
+      default:
+        return error.message.includes("TIMEOUT") ? "TASK_IMAGE_PROVIDER_TIMEOUT" : "TASK_IMAGE_PROVIDER_FAILED";
+    }
   };
 
   const executeTaskAttempt = async (attempt: TaskGenerationAttempt, task: SuiteTask, slot: TaskResultSlot, provider: ImageProvider | undefined) => {

@@ -12,6 +12,7 @@ import { dispatchInputImageUpload } from "../server/multipart.js";
 import { MemorySuiteRepository } from "../server/repositories/memory-suite-repository.js";
 import { MemoryTaskRepository } from "../server/repositories/memory-task-repository.js";
 import { DashScopeOcrProvider } from "../server/providers/dashscope-ocr-provider.js";
+import { GptImageProvider } from "../server/providers/gpt-image-provider.js";
 import { requestImageEditorEdit, supportedImageEditorOutpaintRatios } from "../server/providers/image-editor-provider.js";
 import type { ImageEditRequest } from "../server/types.js";
 import { defaultImageOptions } from "../shared/model-settings.js";
@@ -594,6 +595,57 @@ test("regenerate reads a legacy re_edit snapshot and replays its original comman
   assert.equal(replay.childTask.id, task.id);
   assert.equal(replay.attempt.snapshotId, snapshot.id);
   assert.deepEqual(await requested.promise, { ...command, attachedInputs: undefined, maskApplied: undefined });
+});
+
+test("regenerating a saved masked edit on Gemini records an actionable failure without requesting an image", async (t) => {
+  const repository = new MemoryImageEditorRepository();
+  const storage = new MemoryStorage();
+  const objectKey = "legacy-mask.png";
+  await storage.put({ key: objectKey, bytes: Buffer.from("legacy mask"), contentType: "image/png" });
+  const redraw = operation("redraw");
+  redraw.payload.mask = { objectKey };
+  const originalProvider = { name: "openai-compatible-image", version: "gpt-image-2", capabilitiesVersion: "v2" };
+  const createdAt = new Date().toISOString();
+  const legacy = await repository.submit({
+    idempotencyKey: "legacy-mask-first",
+    snapshot: {
+      id: "legacy-mask-snapshot", sourceCardId: redraw.sourceCardId, sourceVersionId: redraw.sourceVersionId,
+      parentVersionId: redraw.parentVersionId, summary: redraw.summary, sourcePrompt: "", tool: "redraw",
+      operations: [redraw], maskApplied: true, provider: originalProvider, createdAt, schemaVersion: "image-edit-snapshot-v1",
+    },
+    childTask: {
+      id: "legacy-mask-child", sourceCardId: redraw.sourceCardId, sourceVersionId: redraw.sourceVersionId,
+      parentVersionId: redraw.parentVersionId, snapshotId: "legacy-mask-snapshot", summary: redraw.summary, status: "generating",
+      currentVersionId: null, finalVersionId: null, errorCode: null, errorMessage: null, createdAt, updatedAt: createdAt,
+    },
+    attempt: {
+      id: "legacy-mask-attempt", childTaskId: "legacy-mask-child", snapshotId: "legacy-mask-snapshot", attemptNo: 1,
+      command: { type: "redraw", sourceVersionId: redraw.sourceVersionId, prompt: "局部重绘", operations: [redraw], maskApplied: true },
+      status: "generating", provider: originalProvider, errorCode: null, errorMessage: null, createdAt, completedAt: null,
+    },
+  });
+  const previous = await repository.completeAttempt({
+    attemptId: legacy.attempt.id, objectKey: "legacy-result", sha256: "legacy-hash", width: 100, height: 100,
+    mimeType: "image/png", completedAt: createdAt,
+  });
+  const fetcher = t.mock.method(globalThis, "fetch", async () => { throw new Error("unexpected fetch"); });
+  const model = "gemini-3-pro-image-preview";
+  const upstream = new GptImageProvider("https://example.test/v1", "test-key");
+  const selected = provider({ edit: (command, input) => requestImageEditorEdit(upstream, storage, model, defaultImageOptions(model), command, input) });
+  const service = new ImageEditorService(repository, selected, storage, async () => source);
+  const replay = await service.regenerate({ childTaskId: legacy.childTask.id, idempotencyKey: "legacy-mask-replay" });
+  assert.equal(replay.attempt.command.maskApplied, true);
+  const saved = await waitUntil(() => service.getTask(legacy.childTask.id), (detail) => detail?.task.status === "failed", 5000);
+  assert.ok(saved);
+  const attempt = saved.attempts.find((item) => item.id === replay.attempt.id);
+  const message = "当前生图渠道不支持蒙版，请切换渠道后重试，或重新提交编辑";
+  for (const result of [saved.task, attempt]) {
+    assert.equal(result?.errorCode, "IMAGE_MASK_UNSUPPORTED");
+    assert.equal(result?.errorMessage, message);
+  }
+  assert.equal(saved.task.currentVersionId, previous.version.id);
+  assert.equal(saved.versions.length, 1);
+  assert.equal(fetcher.mock.callCount(), 0);
 });
 
 test("DashScopeOcrProvider downscales large images to <=1280px JPEG and maps network/timeout errors to readable Chinese", async (t) => {

@@ -18,13 +18,15 @@ type InputImages = NonNullable<ImageEditRequest["images"]>;
 
 export function imageEndpoint(protocol: ImageProtocol, base: URL, model: string): URL {
   if (protocol === "gemini-generate-content") {
-    return new URL(`/v1beta/models/${encodeURIComponent(model)}:generateContent`, base.origin);
-  }
-  if (protocol === "dashscope-images") {
-    return new URL("images/generations", base.href.replace(/\/?$/, "/"));
+    const prefix = base.pathname.replace(/\/+$/, "").replace(/\/(?:v1beta\/openai|v1beta|v1)$/, "");
+    const modelId = model.replace(/^models\//i, "");
+    const endpoint = new URL(base.origin);
+    endpoint.pathname = `${prefix}/v1beta/models/${encodeURIComponent(modelId)}:generateContent`;
+    return endpoint;
   }
   if (base.pathname === "/") base.pathname = "/v1";
-  return new URL("images/edits", base.href.replace(/\/?$/, "/"));
+  const path = protocol === "dashscope-images" ? "images/generations" : "images/edits";
+  return new URL(path, base.href.replace(/\/?$/, "/"));
 }
 
 const IMAGE_TIERS = ["1K", "2K", "4K"] as const;
@@ -66,7 +68,7 @@ const GEMINI_1K_PIXELS: Record<GeminiAspectRatio, [number, number]> = {
 };
 
 function geminiImageConfig(size: string) {
-  if (isImageTier(size)) return { aspectRatio: "1:1", imageSize: size };
+  if (isImageTier(size)) return { imageSize: size };
   const [width, height] = pixelDimensions(size);
   const aspectRatio = matchNearestAspectRatio(width, height, [...GEMINI_IMAGE_ASPECT_RATIOS]) as GeminiAspectRatio;
   const [nativeWidth, nativeHeight] = GEMINI_1K_PIXELS[aspectRatio];
@@ -116,6 +118,7 @@ export function buildImageRequest(protocol: ImageProtocol, request: ImageEditReq
   }
   const body = JSON.stringify({
     contents: [{
+      role: "user",
       parts: [
         { text: request.prompt },
         ...images.map(({ bytes, mimeType }) => ({ inline_data: { mime_type: mimeType, data: bytes.toString("base64") } })),

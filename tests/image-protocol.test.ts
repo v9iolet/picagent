@@ -6,7 +6,7 @@ import test, { after, before } from "node:test";
 import sharp from "sharp";
 import { errorMessages } from "../server/api-errors.js";
 import { GptImageProvider, ImageUrlDownloadError } from "../server/providers/gpt-image-provider.js";
-import { detectImageProtocol } from "../server/providers/image-protocol.js";
+import { detectImageProtocol, imageEndpoint } from "../server/providers/image-protocol.js";
 import type { ImageEditRequest } from "../server/types.js";
 import { defaultImageOptions, resolveImageSize } from "../shared/model-settings.js";
 
@@ -111,9 +111,8 @@ test("DashScope sends one legacy reference or all ordered references and accepts
     bodies.push(jsonBody(init));
     return Response.json({ data: [{ b64_json: b64 }] });
   });
-  const provider = new GptImageProvider(proxy + "/v1/", key);
-  for (const input of [request(), request({ images: references })]) {
-    assert.deepEqual(await provider.edit(input), { bytes: generated, mimeType: "image/png" });
+  for (const [baseUrl, input] of [[proxy, request()], [proxy + "/v1/", request({ images: references })]] as const) {
+    assert.deepEqual(await new GptImageProvider(baseUrl, key).edit(input), { bytes: generated, mimeType: "image/png" });
   }
   const fields = { model: qwen, prompt: "保留商品", n: 1, size: "1024x1024" };
   assert.deepEqual(bodies, [
@@ -182,11 +181,11 @@ test("Gemini uses the channel origin, sends text before images, and reads either
     assert.equal(String(url), `${proxy}/v1beta/models/${encodeURIComponent(model)}:generateContent`);
     assert.equal(new Headers(init.headers).get("x-goog-api-key"), key);
     assert.deepEqual(jsonBody(init), {
-      contents: [{ parts: [
+      contents: [{ role: "user", parts: [
         { text: "保留商品" },
         ...references.map(({ bytes, mimeType }) => ({ inline_data: { mime_type: mimeType, data: bytes.toString("base64") } })),
       ] }],
-      generationConfig: { responseModalities: ["IMAGE"], imageConfig: { aspectRatio: "1:1", imageSize: "1K" } },
+      generationConfig: { responseModalities: ["IMAGE"], imageConfig: { imageSize: "1K" } },
     });
     return Response.json({ candidates: [{ content: { parts: [{ text: "result" }, inlineParts[index++]] } }] });
   });
@@ -197,6 +196,17 @@ test("Gemini uses the channel origin, sends text before images, and reads either
   assert.equal(index, inlineParts.length);
 });
 
+test("Gemini strips only the final version path and removes the leading models/ prefix", () => {
+  for (const suffix of ["", "/", "/v1", "/v1beta/", "/v1beta/openai/"]) {
+    const base = new URL(proxy + "/v1/gemini" + suffix);
+    const endpoint = imageEndpoint("gemini-generate-content", base, "models/" + gemini);
+    assert.equal(endpoint.href, `${proxy}/v1/gemini/v1beta/models/${gemini}:generateContent`, base.href);
+  }
+  const base = new URL(proxy + "/v1beta/openai");
+  const endpoint = imageEndpoint("gemini-generate-content", base, "Models/vendor/" + gemini);
+  assert.equal(endpoint.href, `${proxy}/v1beta/models/vendor%2F${gemini}:generateContent`);
+});
+
 test("Gemini maps tiers and the nearest aspect ratio for native and workbench pixel sizes", async (t) => {
   const configs: unknown[] = [];
   t.mock.method(globalThis, "fetch", async (_url, init: RequestInit) => {
@@ -204,14 +214,14 @@ test("Gemini maps tiers and the nearest aspect ratio for native and workbench pi
     return Response.json({ candidates: [{ content: { parts: [{ inlineData: { data: b64 } }] } }] });
   });
   const provider = new GptImageProvider(proxy, key);
-  const cases = [
-    ["2K", "1:1", "2K"], ["4K", "1:1", "4K"], ["850x1250", "2:3", "1K"],
+  const cases: ReadonlyArray<readonly [size: string, aspectRatio: string | undefined, imageSize: string]> = [
+    ["1K", undefined, "1K"], ["2K", undefined, "2K"], ["4K", undefined, "4K"], ["850x1250", "2:3", "1K"],
     ["2752x1536", "16:9", "2K"], ["3168x1344", "21:9", "2K"], ["6336x2688", "21:9", "4K"],
     ...defaultImageOptions(gemini).aspectRatios.flatMap((ratio) =>
-      ["1K", "2K", "4K"].map((tier) => [resolveImageSize(tier, ratio, "pixels"), ratio, tier])),
+      ["1K", "2K", "4K"].map((tier) => [resolveImageSize(tier, ratio, "pixels"), ratio, tier] as const)),
   ];
   for (const [size] of cases) await provider.edit(request({ model: gemini, size }));
-  assert.deepEqual(configs, cases.map(([, aspectRatio, imageSize]) => ({ aspectRatio, imageSize })));
+  assert.deepEqual(configs, cases.map(([, aspectRatio, imageSize]) => ({ imageSize, ...(aspectRatio && { aspectRatio }) })));
 });
 
 test("Gemini downloads file_data and fileData and shares the URL retry and error handling", async (t) => {
