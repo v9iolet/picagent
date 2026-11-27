@@ -32,8 +32,7 @@ export function LoginPage({ nextPath, navigate }: {
   const [password, setPassword] = useState("");
   const [visible, setVisible] = useState(false);
   const [captchaCode, setCaptchaCode] = useState("");
-  const [challenge, setChallenge] = useState<(ApiCaptchaChallenge & { deadline: number }) | null>(null);
-  const [now, setNow] = useState(Date.now);
+  const [challenge, setChallenge] = useState<ApiCaptchaChallenge | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [captchaError, setCaptchaError] = useState("");
@@ -43,17 +42,12 @@ export function LoginPage({ nextPath, navigate }: {
 
   const refreshCaptcha = useCallback(async () => {
     const requestId = ++captchaRequest.current;
-    const requestedAt = Date.now();
     setChallenge(null);
     setCaptchaCode("");
     setCaptchaError("");
     try {
       const next = await authApi.getCaptcha();
-      if (requestId === captchaRequest.current) {
-        setNow(Date.now());
-        // Count down the issued TTL even if the browser and server clocks differ.
-        setChallenge({ ...next, deadline: requestedAt + next.ttlSeconds * 1000 });
-      }
+      if (requestId === captchaRequest.current) setChallenge(next);
     } catch {
       if (requestId === captchaRequest.current) setCaptchaError("验证码加载失败，请点击刷新重试。");
     }
@@ -69,17 +63,9 @@ export function LoginPage({ nextPath, navigate }: {
     };
   }, [refreshCaptcha]);
 
-  const seconds = challenge ? Math.max(0, Math.ceil((challenge.deadline - now) / 1000)) : 0;
-  const counting = seconds > 0;
-  useEffect(() => {
-    if (!counting) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [counting]);
-
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submittingRef.current || !challenge || !seconds) return;
+    if (submittingRef.current || !challenge) return;
     if (!username.trim() || !password || captchaCode.trim().length !== 4) {
       setError("请输入账号、密码和 4 位图形验证码。");
       return;
@@ -124,18 +110,17 @@ export function LoginPage({ nextPath, navigate }: {
           <label htmlFor="login-captcha">图形验证码</label>
           <div className="login-captcha">
             <input id="login-captcha" name="captchaCode" autoComplete="off" spellCheck={false} maxLength={4} required
-              aria-describedby="login-captcha-time" placeholder="4 位验证码" ref={captchaInput}
+              placeholder="4 位验证码" ref={captchaInput}
               value={captchaCode} onChange={event => setCaptchaCode(event.target.value)} />
             <button type="button" aria-label="点击图片刷新验证码" disabled={submitting || refreshing} onClick={refreshCaptcha}>
               {challenge ? <img src={challenge.imageDataUrl} alt="图形验证码" /> : refreshing ? "加载中…" : "点击重试"}
             </button>
           </div>
           <div className="login-captcha-meta">
-            <span id="login-captcha-time">{challenge && (seconds ? seconds + "s 后过期" : "验证码已过期，点击刷新")}</span>
             <button type="button" onClick={refreshCaptcha} disabled={submitting || refreshing}>刷新验证码</button>
           </div>
           {(error || captchaError) && <div className="login-error" role="alert">{[error, captchaError].filter(Boolean).join(" ")}</div>}
-          <button className="login-submit" type="submit" disabled={submitting || !challenge || !seconds}>
+          <button className="login-submit" type="submit" disabled={submitting || !challenge}>
             {submitting ? "登录中…" : "登录工作台"}<Icon name="arrow-right" />
           </button>
         </form>

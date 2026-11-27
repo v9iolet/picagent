@@ -113,16 +113,13 @@ test("管理员登录、一次性验证码、刷新保持会话、撤销和退�
   assert.equal(await page.title(), "管理员登录 · PicAgent");
   assert.ok(await page.locator('img[src="/logo.svg"]').evaluate(img => img.complete && img.naturalWidth > 0));
   assert.match(await image.getAttribute("src"), /^data:image\/svg\+xml/);
-  assert.doesNotMatch(await page.locator("body").innerText(), /注册|创建账号|忘记密码|找回密码/);
+  assert.doesNotMatch(await page.locator("body").innerText(), /注册|创建账号|忘记密码|找回密码|\d+\s*s\s*后过期/);
   assert.ok(calls.every(call => call.path.startsWith("/api/auth/")));
   assert.equal(await username.evaluate(input => input === document.activeElement), true);
   await page.setViewportSize({ width: 320, height: 640 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await page.setViewportSize({ width: 1440, height: 900 });
 
-  await page.clock.fastForward(181000);
-  await page.getByText("验证码已过期，点击刷新").waitFor();
-  assert.equal(await submit.isDisabled(), true);
   for (const name of ["点击图片刷新验证码", "刷新验证码"]) {
     const previous = await image.getAttribute("src");
     await page.getByRole("button", { name, exact: true }).click();
@@ -134,7 +131,9 @@ test("管理员登录、一次性验证码、刷新保持会话、撤销和退�
   assert.equal(await password.getAttribute("type"), "text");
   await page.getByRole("button", { name: "隐藏密码", pressed: true }).click();
   await failedLogin("XXXX", "验证码错误，请重新输入");
+  await page.clock.fastForward(181000);
   advance(181000);
+  assert.equal(await submit.isDisabled(), false);
   await failedLogin(code(), "验证码已过期，请刷新后重试");
   await password.fill("wrong");
   await failedLogin(code(), "账号或密码错误");
